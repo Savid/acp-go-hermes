@@ -8,8 +8,6 @@ import (
 	"os/exec"
 )
 
-var procReadFile = os.ReadFile
-
 func configureHermesProcess(*exec.Cmd) {}
 
 func terminateHermesProcess(cmd *exec.Cmd) error {

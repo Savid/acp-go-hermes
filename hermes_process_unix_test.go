@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -70,16 +71,30 @@ func TestReapLeaseLadderSignalBranches(t *testing.T) {
 
 // TestReapLeaseKillsSigtermIgnoringChild proves HW5: the lease reap ladder
 // escalates to SIGKILL, verifies the process is dead, and only then removes the
-// lease, against a real child that ignores SIGTERM.
+// lease, against a real child that ignores SIGTERM. The child re-execs this
+// test binary rather than /bin/sh: macOS strips the environment from
+// kern.procargs2 for SIP-protected platform binaries, so lease verification
+// only sees env vars of user-built processes like the real hermes server.
 func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
+	if os.Getenv("HERMES_TEST_LEASE_CHILD") == "1" {
+		signal.Ignore(syscall.SIGTERM)
+		_, _ = os.Stdout.WriteString("ready\n")
+		for {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 	root := t.TempDir()
 	xdg, err := createXDGDirs(root, "lease-child")
 	if err != nil {
 		t.Fatal(err)
 	}
 	const token = "child-token"
-	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; echo ready; while true; do sleep 0.05; done", "serve")
-	cmd.Env = append(os.Environ(), "HERMES_HOME="+xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN="+token)
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestReapLeaseKillsSigtermIgnoringChild$", "serve")
+	cmd.Env = append(os.Environ(),
+		"HERMES_TEST_LEASE_CHILD=1",
+		"HERMES_HOME="+xdg.Root,
+		"HERMES_DASHBOARD_SESSION_TOKEN="+token,
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -91,7 +106,7 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 	buf := make([]byte, 16)
-	_, _ = stdout.Read(buf) // wait until the TERM trap is installed
+	_, _ = stdout.Read(buf) // wait until SIGTERM is ignored
 
 	identity, err := inspectHermesProcess(cmd.Process.Pid)
 	if err != nil {
@@ -184,118 +199,6 @@ func TestDeleteCleanupKeepsSurvivingLeaseRecord(t *testing.T) {
 	if _, ok := agent.deleteCleanup["cleanup-survivor"]; !ok {
 		t.Fatal("cleanup record was forgotten")
 	}
-}
-
-func TestInspectHermesProcessReadBranches(t *testing.T) {
-	oldReadFile := procReadFile
-	t.Cleanup(func() { procReadFile = oldReadFile })
-
-	if _, err := inspectHermesProcess(0); err == nil {
-		t.Fatal("zero pid inspected successfully")
-	}
-	if _, err := procStartTime("1 (hermes"); err == nil {
-		t.Fatal("malformed proc stat accepted")
-	}
-	if _, err := procStartTime("1 (hermes) S 0"); err == nil {
-		t.Fatal("short proc stat accepted")
-	}
-
-	validStat := procStatWithStart("123")
-	for _, tt := range []struct {
-		name string
-		read func(string) ([]byte, error)
-		err  bool
-	}{
-		{
-			name: "stat read error",
-			read: func(path string) ([]byte, error) {
-				if strings.HasSuffix(path, "/stat") {
-					return nil, errors.New("stat failed")
-				}
-				return nil, nil
-			},
-			err: true,
-		},
-		{
-			name: "stat parse error",
-			read: func(path string) ([]byte, error) {
-				if strings.HasSuffix(path, "/stat") {
-					return []byte("malformed"), nil
-				}
-				return nil, nil
-			},
-			err: true,
-		},
-		{
-			name: "cmdline read error",
-			read: func(path string) ([]byte, error) {
-				switch {
-				case strings.HasSuffix(path, "/stat"):
-					return []byte(validStat), nil
-				case strings.HasSuffix(path, "/cmdline"):
-					return nil, errors.New("cmdline failed")
-				default:
-					return nil, nil
-				}
-			},
-			err: true,
-		},
-		{
-			name: "env read error",
-			read: func(path string) ([]byte, error) {
-				switch {
-				case strings.HasSuffix(path, "/stat"):
-					return []byte(validStat), nil
-				case strings.HasSuffix(path, "/cmdline"):
-					return []byte("hermes\x00serve\x00"), nil
-				case strings.HasSuffix(path, "/environ"):
-					return nil, errors.New("env failed")
-				default:
-					return nil, nil
-				}
-			},
-			err: true,
-		},
-		{
-			name: "success",
-			read: func(path string) ([]byte, error) {
-				switch {
-				case strings.HasSuffix(path, "/stat"):
-					return []byte(validStat), nil
-				case strings.HasSuffix(path, "/cmdline"):
-					return []byte("hermes\x00serve\x00"), nil
-				case strings.HasSuffix(path, "/environ"):
-					return []byte("HERMES_HOME=/tmp/home\x00"), nil
-				default:
-					return nil, nil
-				}
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			procReadFile = tt.read
-			identity, err := inspectHermesProcess(123)
-			if tt.err {
-				if err == nil {
-					t.Fatal("inspect succeeded unexpectedly")
-				}
-				return
-			}
-			if err != nil || identity.StartTime != "123" || len(identity.Cmdline) != 2 || identity.Env["HERMES_HOME"] != "/tmp/home" {
-				t.Fatalf("identity=%#v err=%v", identity, err)
-			}
-		})
-	}
-}
-
-func procStatWithStart(start string) string {
-	fields := make([]string, 20)
-	for i := range fields {
-		fields[i] = "0"
-	}
-	fields[0] = "S"
-	fields[19] = start
-	return "1 (hermes) " + strings.Join(fields, " ")
 }
 
 func TestHermesProcessSignalBranches(t *testing.T) {
