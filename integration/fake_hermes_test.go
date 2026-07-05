@@ -275,8 +275,8 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 	case "session.resume":
 		stored, _ := params["session_id"].(string)
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
-			"session_id":        "live-" + stored,
-			"stored_session_id": stored,
+			"session_id":  "live-" + stored,
+			"session_key": stored,
 		})
 	case "session.active_list":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{

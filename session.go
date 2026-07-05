@@ -83,7 +83,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 	if idmap.SessionID == "" {
 		idmap.SessionID = string(id)
 	}
-	if idmap.NativeSessionID == "" {
+	if native.ID != "" {
 		idmap.NativeSessionID = native.ID
 	}
 	if idmap.Format == "" {
@@ -470,7 +470,7 @@ func (s *session) markPart(part nativePart) bool {
 	return true
 }
 
-func (s *session) Close(ctx context.Context) error {
+func (s *session) Close(_ context.Context) error {
 	s.cancelTurn()
 	s.mu.Lock()
 	if s.closed {
@@ -486,7 +486,9 @@ func (s *session) Close(ctx context.Context) error {
 		abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		_ = client.Abort(abortCtx, nativeID)
 		cancel()
-		err = errors.Join(err, client.Close(ctx))
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, client.Close(closeCtx))
+		closeCancel()
 	}
 	return err
 }

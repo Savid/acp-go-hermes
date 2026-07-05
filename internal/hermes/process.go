@@ -231,7 +231,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 		if err := methodPresent("session.resume", err); err != nil {
 			return err
 		}
-	} else if resumed.SessionID == "" || resumed.StoredSessionID == "" {
+	} else if resumed.SessionID == "" || resumed.SessionKey == "" {
 		return fmt.Errorf("hermes startup probe session.resume schema drift")
 	}
 	if active, err := p.Client.ActiveList(ctx); err != nil {
@@ -293,22 +293,24 @@ func (p *Process) Close(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() { done <- waitFn(p.Cmd) }()
 	_ = terminateProcess(p.Cmd)
+	var err error
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		_ = killProcess(p.Cmd)
-		return ctx.Err()
+		err = ctx.Err()
 	case <-afterFn(5 * time.Second):
-		_ = killProcess(p.Cmd)
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-afterFn(time.Second):
-		}
-		return fmt.Errorf("hermes serve did not exit")
+		err = fmt.Errorf("hermes serve did not exit")
 	}
+	_ = killProcess(p.Cmd)
+	select {
+	case <-done:
+	case <-afterFn(time.Second):
+		if err == nil {
+			err = fmt.Errorf("hermes serve did not exit")
+		}
+	}
+	return err
 }
 
 // Redial opens a fresh WebSocket gateway connection to the still-running

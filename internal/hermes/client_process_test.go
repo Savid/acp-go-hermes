@@ -117,7 +117,7 @@ func resultForMethod(method string, params map[string]any) any {
 	case "session.branch":
 		return map[string]any{"session_id": "live-branch", "title": "Branch", "parent": "stored"}
 	case "session.resume":
-		return map[string]any{"session_id": "live-resume", "stored_session_id": params["session_id"]}
+		return map[string]any{"session_id": "live-resume", "session_key": params["session_id"]}
 	case "session.history":
 		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
 	case "session.active_list":
@@ -261,7 +261,7 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if out, err := client.CreateSession(ctx, map[string]any{"cwd": "/repo"}); err != nil || out.SessionID != "live" {
 		t.Fatalf("CreateSession = %#v err=%v", out, err)
 	}
-	if out, err := client.ResumeSession(ctx, "stored", nil); err != nil || out.StoredSessionID != "stored" {
+	if out, err := client.ResumeSession(ctx, "stored", nil); err != nil || out.SessionKey != "stored" {
 		t.Fatalf("ResumeSession nil params = %#v err=%v", out, err)
 	}
 	if out, err := client.History(ctx, "live"); err != nil || out.Count != 1 || len(out.Messages) != 1 {
@@ -690,8 +690,23 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	firstTimer := true
+	afterCalls := 0
+	after = func(time.Duration) <-chan time.Time {
+		afterCalls++
+		ch := make(chan time.Time, 1)
+		if firstTimer {
+			firstTimer = false
+			return ch
+		}
+		ch <- time.Now()
+		return ch
+	}
 	if err := (&Process{Cmd: fakeStartedCommand()}).Close(cancelled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("context Close error = %v", err)
+		t.Fatalf("cancelled Close error = %v", err)
+	}
+	if afterCalls != 2 {
+		t.Fatalf("cancelled Close after calls = %d, want post-kill wait", afterCalls)
 	}
 
 	restoreProcessSeams(t)
@@ -729,26 +744,6 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 	}
 	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
 		t.Fatalf("timeout Close error = %v", err)
-	}
-
-	restoreProcessSeams(t)
-	waitProcessCommand = func(*exec.Cmd) error {
-		select {}
-	}
-	innerCtx, innerCancel := context.WithCancel(context.Background())
-	calls := 0
-	after = func(time.Duration) <-chan time.Time {
-		calls++
-		ch := make(chan time.Time, 1)
-		if calls == 1 {
-			ch <- time.Now()
-			return ch
-		}
-		innerCancel()
-		return ch
-	}
-	if err := (&Process{Cmd: fakeStartedCommand()}).Close(innerCtx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("inner-cancel Close error = %v", err)
 	}
 }
 

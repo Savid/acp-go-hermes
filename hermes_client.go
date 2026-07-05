@@ -607,6 +607,7 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 }
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession, error) {
+	storedID := id
 	if s.liveSessionID(id) == "" {
 		active, err := s.gatewayClient().ActiveList(ctx)
 		if err == nil {
@@ -627,13 +628,14 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession
 		if err != nil {
 			return nativeSession{}, err
 		}
-		stored, err := s.storedSessionIDFromResume(ctx, id, result)
+		stored, err := s.storedSessionIDFromResume(result)
 		if err != nil {
 			return nativeSession{}, err
 		}
 		s.rememberGatewaySession(stored, result.SessionID)
+		storedID = stored
 	}
-	return s.nativeSessionFromGateway(id, ""), nil
+	return s.nativeSessionFromGateway(storedID, ""), nil
 }
 
 func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSession, error) {
@@ -729,7 +731,7 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	if err != nil {
 		return "", err
 	}
-	resolvedStored, err := s.storedSessionIDFromResume(ctx, stored, result)
+	resolvedStored, err := s.storedSessionIDFromResume(result)
 	if err != nil {
 		return "", err
 	}
@@ -737,21 +739,14 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	return result.SessionID, nil
 }
 
-func (s *hermesServer) storedSessionIDFromResume(ctx context.Context, requested string, result nativehermes.SessionResumeResult) (string, error) {
+func (s *hermesServer) storedSessionIDFromResume(result nativehermes.SessionResumeResult) (string, error) {
 	if result.SessionID == "" {
 		return "", fmt.Errorf("hermes session.resume response missing session_id")
 	}
-	if result.StoredSessionID != "" {
-		return result.StoredSessionID, nil
+	if result.SessionKey == "" {
+		return "", fmt.Errorf("hermes session.resume response missing session_key")
 	}
-	stored, err := s.lookupStoredSessionIDForLive(ctx, result.SessionID, "hermes session.resume")
-	if err != nil {
-		return "", fmt.Errorf("hermes session.resume response missing stored_session_id: %w", err)
-	}
-	if stored != requested {
-		return "", fmt.Errorf("hermes session.resume active_list session_key mismatch for live session %q: %q != %q", result.SessionID, stored, requested)
-	}
-	return stored, nil
+	return result.SessionKey, nil
 }
 
 func (s *hermesServer) nativeSessionFromGateway(stored string, title string) nativeSession {

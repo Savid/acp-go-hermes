@@ -257,11 +257,11 @@ type SessionCreateResult struct {
 }
 
 type SessionResumeResult struct {
-	SessionID       string          `json:"session_id"`
-	StoredSessionID string          `json:"stored_session_id"`
-	MessageCount    int             `json:"message_count"`
-	Messages        []Message       `json:"messages"`
-	Info            json.RawMessage `json:"info"`
+	SessionID    string          `json:"session_id"`
+	SessionKey   string          `json:"session_key"`
+	MessageCount int             `json:"message_count"`
+	Messages     []Message       `json:"messages"`
+	Info         json.RawMessage `json:"info"`
 }
 
 type SessionHistoryResult struct {

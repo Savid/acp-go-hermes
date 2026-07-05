@@ -609,7 +609,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	}
 
 	loadedClient := newFakeHermesClient()
-	loadedClient.getSession = testNativeSession("native-1")
+	loadedClient.getSession = testNativeSession("native-rotated")
 	loadedClient.providers = testProviders()
 	loadAgent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
@@ -623,6 +623,27 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	}
 	if _, err := loadAgent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err != nil {
 		t.Fatalf("ResumeSession: %v", err)
+	}
+	resumed := loadAgent.activeSession("session-1")
+	if resumed == nil {
+		t.Fatal("ResumeSession did not register active session")
+	}
+	if got := resumed.snapshot().idmap.NativeSessionID; got != "native-rotated" {
+		t.Fatalf("rotated active idmap native id = %q", got)
+	}
+	if err := resumed.snapshotToStore(ctx); err != nil {
+		t.Fatalf("snapshot rotated resume: %v", err)
+	}
+	rotatedEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: idmapSubpath})
+	if err != nil {
+		t.Fatalf("load rotated idmap: %v", err)
+	}
+	var rotatedIDMap idmapRecord
+	if err := json.Unmarshal(rotatedEntries[len(rotatedEntries)-1], &rotatedIDMap); err != nil {
+		t.Fatal(err)
+	}
+	if rotatedIDMap.NativeSessionID != "native-rotated" {
+		t.Fatalf("persisted rotated idmap native id = %q", rotatedIDMap.NativeSessionID)
 	}
 	// Active cwd mismatch (session now active) is rejected before reuse.
 	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err == nil {

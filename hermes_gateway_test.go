@@ -43,8 +43,8 @@ type fakeGatewayServer struct {
 	createNoLive     bool
 	createNoStored   bool
 	resumeNoLive     bool
-	resumeNoStored   bool
-	resumeActive     bool
+	resumeNoKey      bool
+	resumeKey        string
 	activeNoID       bool
 	activeNoKey      bool
 }
@@ -138,17 +138,21 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		stored, _ := params["session_id"].(string)
 		s.mu.Lock()
 		resumeNoLive := s.resumeNoLive
-		resumeNoStored := s.resumeNoStored
+		resumeNoKey := s.resumeNoKey
+		resumeKey := s.resumeKey
 		s.mu.Unlock()
+		if resumeKey == "" {
+			resumeKey = stored
+		}
 		result := map[string]any{
-			"session_id":        "live-" + stored,
-			"stored_session_id": stored,
+			"session_id":  "live-" + resumeKey,
+			"session_key": resumeKey,
 		}
 		if resumeNoLive {
 			delete(result, "session_id")
 		}
-		if resumeNoStored {
-			delete(result, "stored_session_id")
+		if resumeNoKey {
+			delete(result, "session_key")
 		}
 		s.writeResult(ctx, conn, id, result)
 	case "session.active_list":
@@ -156,7 +160,6 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		branchCreated := s.branchCreated
 		branchNoActive := s.branchNoActive
 		branchNoKey := s.branchNoKey
-		resumeActive := s.resumeActive
 		activeNoID := s.activeNoID
 		activeNoKey := s.activeNoKey
 		s.mu.Unlock()
@@ -174,14 +177,6 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			"title":       "Listed",
 			"cwd":         "/repo",
 		}}
-		if resumeActive {
-			sessions = append(sessions, map[string]any{
-				"id":          "live-stored",
-				"session_key": "stored",
-				"title":       "Resumed",
-				"cwd":         "/repo",
-			})
-		}
 		if branchCreated && !branchNoActive {
 			sessionKey := "stored-branch"
 			if branchNoKey {
@@ -388,15 +383,15 @@ func (s *fakeGatewayServer) setCreateNoLive() {
 	s.mu.Unlock()
 }
 
-func (s *fakeGatewayServer) setResumeNoStored() {
+func (s *fakeGatewayServer) setResumeNoKey() {
 	s.mu.Lock()
-	s.resumeNoStored = true
+	s.resumeNoKey = true
 	s.mu.Unlock()
 }
 
-func (s *fakeGatewayServer) setResumeActive() {
+func (s *fakeGatewayServer) setResumeKey(key string) {
 	s.mu.Lock()
-	s.resumeActive = true
+	s.resumeKey = key
 	s.mu.Unlock()
 }
 
@@ -726,10 +721,10 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 			},
 			{
-				name: "get missing resume stored",
-				want: "session.resume response missing stored_session_id",
+				name: "get missing resume key",
+				want: "session.resume response missing session_key",
 				setup: func(fake *fakeGatewayServer) {
-					fake.setResumeNoStored()
+					fake.setResumeNoKey()
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.GetSession(ctx, "stored")
@@ -748,10 +743,10 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 			},
 			{
-				name: "ensure missing resume stored",
-				want: "session.resume response missing stored_session_id",
+				name: "ensure missing resume key",
+				want: "session.resume response missing session_key",
 				setup: func(fake *fakeGatewayServer) {
-					fake.setResumeNoStored()
+					fake.setResumeNoKey()
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.Messages(ctx, "stored")
@@ -831,20 +826,18 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("resume missing stored requires active list proof", func(t *testing.T) {
+	t.Run("resume rotation uses returned session key", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
-		fake.setResumeNoStored()
-		fake.setResumeActive()
+		fake.setResumeKey("stored-rotated")
 		server := newGatewayBackedHermesServer(t, fake, "")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		session, err := server.GetSession(ctx, "stored")
-		if err != nil || session.ID != "stored" || server.liveSessionID("stored") != "live-stored" {
-			t.Fatalf("GetSession proven resume = %#v live=%q err=%v", session, server.liveSessionID("stored"), err)
+		if err != nil || session.ID != "stored-rotated" || server.liveSessionID("stored-rotated") != "live-stored-rotated" {
+			t.Fatalf("GetSession rotated resume = %#v live=%q err=%v", session, server.liveSessionID("stored-rotated"), err)
 		}
-		_, err = server.storedSessionIDFromResume(ctx, "other", nativehermes.SessionResumeResult{SessionID: "live-stored"})
-		if err == nil || !strings.Contains(err.Error(), "active_list session_key mismatch") {
-			t.Fatalf("resume mismatch error = %v", err)
+		if live := server.liveSessionID("stored"); live != "" {
+			t.Fatalf("old session key kept live mapping %q", live)
 		}
 	})
 
@@ -1577,7 +1570,7 @@ func gatewayProcessResult(method string, params map[string]any) any {
 		return map[string]any{"session_id": "live-fake", "stored_session_id": "stored-fake"}
 	case "session.resume":
 		stored, _ := params["session_id"].(string)
-		return map[string]any{"session_id": "live-" + stored, "stored_session_id": stored}
+		return map[string]any{"session_id": "live-" + stored, "session_key": stored}
 	case "session.active_list":
 		return map[string]any{"sessions": []any{}}
 	case "session.history":

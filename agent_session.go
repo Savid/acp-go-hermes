@@ -339,7 +339,9 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 	skipSnapshot := session.snapshotBlockedReason() != ""
-	closeErr := session.Close(ctx)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr := session.Close(closeCtx)
+	closeCancel()
 	var snapshotErr error
 	if !skipSnapshot {
 		snapshotErr = session.snapshotToStore(context.WithoutCancel(ctx))
