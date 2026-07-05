@@ -401,7 +401,7 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
 		t.Fatalf("tokens = %#v", message.Info.Tokens)
 	}
-	for _, want := range []string{"permission.v2.asked", "question.v2.asked", "message.part.updated"} {
+	for _, want := range []string{"approval.request", "clarify.request", "message.part.updated"} {
 		if !drainHermesEventType(server.events, want) {
 			t.Fatalf("missing forwarded event %q", want)
 		}
@@ -569,7 +569,7 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 }
 
 func TestHermesGatewayServerEdgeBranches(t *testing.T) {
-	t.Run("accessors and fallback replies", func(t *testing.T) {
+	t.Run("accessors and missing live mapping replies", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
 		server := newGatewayBackedHermesServer(t, fake, "")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -592,19 +592,19 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 		if list, err := server.ListSessions(ctx, "/other"); err != nil || len(list) != 0 {
 			t.Fatalf("ListSessions cwd mismatch = %#v err=%v", list, err)
 		}
-		if err := server.ReplyPermission(ctx, permissionRequest{SessionID: "unmapped"}, "once", "ignored"); err != nil {
-			t.Fatalf("ReplyPermission fallback: %v", err)
+		if err := server.ReplyPermission(ctx, permissionRequest{SessionID: "unmapped"}, "once", "ignored"); err == nil {
+			t.Fatal("ReplyPermission accepted missing live mapping")
 		}
-		if err := server.ReplyQuestion(ctx, questionRequest{SessionID: "unmapped"}, [][]string{{"a"}}); err != nil {
-			t.Fatalf("ReplyQuestion fallback: %v", err)
+		if err := server.ReplyQuestion(ctx, questionRequest{SessionID: "unmapped"}, [][]string{{"a"}}); err == nil {
+			t.Fatal("ReplyQuestion accepted missing live mapping")
 		}
-		if err := server.RejectQuestion(ctx, questionRequest{SessionID: "unmapped"}); err != nil {
-			t.Fatalf("RejectQuestion fallback: %v", err)
+		if err := server.RejectQuestion(ctx, questionRequest{SessionID: "unmapped"}); err == nil {
+			t.Fatal("RejectQuestion accepted missing live mapping")
 		}
 		for _, method := range []string{"approval.respond", "clarify.respond"} {
 			calls := fake.callsFor(method)
-			if len(calls) == 0 || calls[len(calls)-1].Params["session_id"] != "unmapped" {
-				t.Fatalf("%s fallback calls = %#v", method, calls)
+			if len(calls) != 0 {
+				t.Fatalf("%s calls with missing mapping = %#v", method, calls)
 			}
 		}
 	})

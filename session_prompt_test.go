@@ -211,7 +211,7 @@ func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
 	session := testSession(agent, client)
 
 	if err := session.handleEvent(ctx, hermesEvent{
-		Type:       "permission.v2.asked",
+		Type:       "approval.request",
 		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit"}`),
 	}); err != nil {
 		t.Fatalf("permission event: %v", err)
@@ -225,7 +225,7 @@ func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
 	}
 
 	if err := session.handleEvent(ctx, hermesEvent{
-		Type:       "question.asked",
+		Type:       "clarify.request",
 		Properties: json.RawMessage(`{"id":"question-dup","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
 	}); err != nil {
 		t.Fatalf("question event: %v", err)
@@ -701,7 +701,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 			name: "permission",
 			sendEvent: func(client *fakeHermesClient) {
 				client.events <- hermesEvent{
-					Type:       "permission.v2.asked",
+					Type:       "approval.request",
 					Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","action":"edit"}`),
 				}
 			},
@@ -726,7 +726,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 			},
 			sendEvent: func(client *fakeHermesClient) {
 				client.events <- hermesEvent{
-					Type:       "question.asked",
+					Type:       "clarify.request",
 					Properties: json.RawMessage(`{"id":"question","sessionID":"native-1","questions":[{"question":"Pick one","options":[{"label":"Yes"}]}]}`),
 				}
 			},
@@ -738,7 +738,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 				if client.questionRejectCount() != 1 {
 					t.Fatalf("question rejects = %#v", client.questionRejects)
 				}
-				if client.questionRejects[0].route != questionRouteSession {
+				if client.questionRejects[0].route != questionRouteAPI {
 					t.Fatalf("question reject route = %#v", client.questionRejects[0])
 				}
 			},
@@ -811,6 +811,35 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 	}
 }
 
+func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
+	ctx := context.Background()
+	client := newFakeHermesClient()
+	client.replyErr = missingLiveSessionMappingError{StoredSessionID: "native-1"}
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+
+	err := session.handleEvent(ctx, hermesEvent{
+		Type:       "approval.request",
+		Properties: json.RawMessage(`{"id":"perm-missing-live","sessionID":"native-1","action":"edit"}`),
+	})
+	if err == nil {
+		t.Fatal("missing live mapping did not fail permission handling")
+	}
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("missing live mapping error type = %T", err)
+	}
+	data, _ := reqErr.Data.(map[string]any)
+	if data["error"] != "hermes_missing_live_session_mapping" {
+		t.Fatalf("missing live mapping error data = %#v", data)
+	}
+	if err := session.ensureNotPoisoned(); err == nil {
+		t.Fatal("missing live mapping did not poison session")
+	}
+}
+
 func TestPromptBacklogCancelledBeforeTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
@@ -822,7 +851,7 @@ func TestPromptBacklogCancelledBeforeTurn(t *testing.T) {
 	session.cancelled = true
 	session.mu.Unlock()
 	client.events <- hermesEvent{
-		Type:       "permission.v2.asked",
+		Type:       "approval.request",
 		Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1"}`),
 	}
 	resp, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
@@ -835,7 +864,7 @@ func TestPromptBacklogErrorBeforeTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	session := testSession(NewAgent(), client)
 	client.events <- hermesEvent{
-		Type:       "permission.v2.asked",
+		Type:       "approval.request",
 		Properties: json.RawMessage(`{`),
 	}
 	if _, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
@@ -1341,14 +1370,12 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 		{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: "AA==", Uri: "file:///tmp/blob"},
 		}}},
-		{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}},
 	})
 	if err != nil {
 		t.Fatalf("promptToHermesParts: %v", err)
 	}
-	if len(parts) != 5 || parts[0]["text"] != "hello" || parts[1]["text"] != "file:///tmp/a" ||
-		parts[2]["text"] != "embedded" || parts[3]["text"] != "file:///tmp/blob" ||
-		parts[4]["type"] != "file" || parts[4]["mime"] != "image/png" || parts[4]["url"] != "data:image/png;base64,AA==" {
+	if len(parts) != 4 || parts[0]["text"] != "hello" || parts[1]["text"] != "file:///tmp/a" ||
+		parts[2]["text"] != "embedded" || parts[3]["text"] != "file:///tmp/blob" {
 		t.Fatalf("parts = %#v", parts)
 	}
 	if _, err := promptToHermesParts(nil); err == nil {
@@ -1357,18 +1384,8 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	if _, err := promptToHermesParts([]acp.ContentBlock{{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}}}); err == nil {
 		t.Fatal("audio prompt accepted")
 	}
-	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}}); err == nil {
-		t.Fatal("empty image prompt accepted")
-	}
-	invalidURI := "%"
-	parts, err = promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &invalidURI}}})
-	if err != nil || parts[0]["filename"] != nil || parts[0]["mime"] != "application/octet-stream" || parts[0]["url"] != invalidURI {
-		t.Fatalf("invalid uri image parts = %#v err=%v", parts, err)
-	}
-	rootURI := "https://example.com"
-	parts, err = promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &rootURI}}})
-	if err != nil || parts[0]["filename"] != nil || parts[0]["url"] != rootURI {
-		t.Fatalf("root uri image parts = %#v err=%v", parts, err)
+	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}}}); err == nil {
+		t.Fatal("image prompt accepted")
 	}
 	req, ids := questionElicitationRequest(questionRequest{ID: "q", SessionID: "s"})
 	if req.Form == nil || req.Form.Message != "Hermes needs input" || !reflect.DeepEqual(ids, []string{"question_1"}) {
@@ -1382,35 +1399,6 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	}, []string{"question_1", "question_2", "question_3", "question_4"})
 	if !reflect.DeepEqual(answers, [][]string{{}, {"a"}, {"b", "3"}, {"4"}}) {
 		t.Fatalf("answers = %#v", answers)
-	}
-}
-
-func TestPromptSendsNativeImageFileParts(t *testing.T) {
-	client := newFakeHermesClient()
-	agent := NewAgent()
-	session := testSession(agent, client)
-	imageURI := "file:///tmp/screenshot.png"
-	client.sendMessage = func(_ context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
-		want := []map[string]any{
-			{"type": "text", "text": "look"},
-			{"type": "file", "mime": "image/png", "url": "data:image/png;base64,AA=="},
-			{"type": "file", "mime": "image/jpeg", "url": "file:///tmp/screenshot.png", "filename": "screenshot.png"},
-		}
-		if !reflect.DeepEqual(req.Parts, want) {
-			t.Fatalf("native parts = %#v, want %#v", req.Parts, want)
-		}
-		return nativeMessage{Info: nativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-	}
-	_, err := session.Prompt(context.Background(), acp.PromptRequest{
-		SessionId: session.id,
-		Prompt: []acp.ContentBlock{
-			acp.TextBlock("look"),
-			{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}},
-			{Image: &acp.ContentBlockImage{Type: "image", Uri: &imageURI, MimeType: "image/jpeg"}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
 	}
 }
 
@@ -1898,12 +1886,12 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 		t.Fatal("elicitation error was ignored")
 	}
 	conn.elicitErr = nil
-	if err := session.handleEvent(ctx, hermesEvent{Type: "permission.v2.asked", Properties: json.RawMessage(`{`)}); err == nil {
+	if err := session.handleEvent(ctx, hermesEvent{Type: "approval.request", Properties: json.RawMessage(`{`)}); err == nil {
 		t.Fatal("malformed permission event succeeded")
 	}
 	conn.permission = acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("once")}
 	if err := session.handleEvent(ctx, hermesEvent{
-		Type: "permission.asked",
+		Type: "approval.request",
 		Properties: json.RawMessage(`{
 			"id":"p-session",
 			"sessionID":"native-1",
@@ -1913,35 +1901,35 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 			"tool":{"messageID":"m1","callID":"c1"}
 		}`),
 	}); err != nil {
-		t.Fatalf("permission.asked event: %v", err)
+		t.Fatalf("approval.request event: %v", err)
 	}
 	reply := client.permissionReply(client.permissionReplyCount() - 1)
-	if reply.route != permissionRouteSession || reply.requestID != "p-session" || reply.reply != "once" {
-		t.Fatalf("permission.asked reply = %#v", reply)
+	if reply.route != permissionRouteAPI || reply.requestID != "p-session" || reply.reply != "once" {
+		t.Fatalf("approval.request reply = %#v", reply)
 	}
 	permissionReq := conn.permissions[len(conn.permissions)-1]
 	if permissionReq.ToolCall.Title == nil || *permissionReq.ToolCall.Title != "edit" {
-		t.Fatalf("permission.asked ACP request = %#v", permissionReq)
+		t.Fatalf("approval.request ACP request = %#v", permissionReq)
 	}
 	rawInput, _ := permissionReq.ToolCall.RawInput.(map[string]any)
 	resources, _ := rawInput["resources"].([]string)
 	if len(resources) != 1 || resources[0] != "acp-permission-probe.txt" {
-		t.Fatalf("permission.asked resources = %#v", permissionReq.ToolCall.RawInput)
+		t.Fatalf("approval.request resources = %#v", permissionReq.ToolCall.RawInput)
 	}
 	if err := session.handleEvent(ctx, hermesEvent{
-		Type:       "question.v2.asked",
+		Type:       "clarify.request",
 		Properties: json.RawMessage(`{"id":"q-v2","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
 	}); err != nil {
-		t.Fatalf("question.v2.asked event: %v", err)
+		t.Fatalf("clarify.request event: %v", err)
 	}
 	questionReply := client.questionReply(client.questionReplyCount() - 1)
 	if questionReply.route != questionRouteAPI || questionReply.requestID != "q-v2" {
-		t.Fatalf("question.v2 reply = %#v", questionReply)
+		t.Fatalf("clarify.request reply = %#v", questionReply)
 	}
 	if err := session.handleEvent(ctx, hermesEvent{Type: "todo.updated", Properties: json.RawMessage(`{"sessionID":"other","todos":[{"content":"x"}]}`)}); err != nil {
 		t.Fatalf("foreign todo event: %v", err)
 	}
-	if err := session.handleEvent(ctx, hermesEvent{Type: "question.asked", Properties: json.RawMessage(`{"request":{"id":"q","sessionID":"other"}}`)}); err != nil {
+	if err := session.handleEvent(ctx, hermesEvent{Type: "clarify.request", Properties: json.RawMessage(`{"request":{"id":"q","sessionID":"other"}}`)}); err != nil {
 		t.Fatalf("foreign question event: %v", err)
 	}
 	if part, ok := eventPart(json.RawMessage(`{"part":{"type":"text","text":"x"}}`)); !ok || part.Text != "x" {
@@ -2080,7 +2068,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		session := testSession(agent, client)
 		conn.permErr = errors.New("permission failed")
 		if err := session.handleEvent(ctx, hermesEvent{
-			Type:       "permission.v2.asked",
+			Type:       "approval.request",
 			Properties: json.RawMessage(`{"id":"p","sessionID":"native-1"}`),
 		}); err == nil {
 			t.Fatal("permission event ignored client error")
@@ -2094,7 +2082,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		conn.elicitErr = errors.New("elicitation failed")
 		if err := session.handleEvent(ctx, hermesEvent{
-			Type:       "question.asked",
+			Type:       "clarify.request",
 			Properties: json.RawMessage(`{"id":"q","sessionID":"native-1"}`),
 		}); err == nil {
 			t.Fatal("question event ignored client error")

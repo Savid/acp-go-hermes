@@ -5,7 +5,7 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 
 REMOVED_PUBLIC_TERMS = hermes\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\x4e\x45\x53|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|HermesSessio\x6e
 
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check race test test-integration-cover test-integration-live test-integration-smoke test/cover tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test-integration-cover test-integration-live test-integration-smoke test/cover tidy vuln
 
 ## build: compile all packages
 build:
@@ -26,10 +26,6 @@ fmt:
 
 ## test: run unit tests with the race detector
 test:
-	go test -race ./...
-
-## race: run unit tests with the race detector
-race:
 	go test -race ./...
 
 ## coverage-check: require 100% statement coverage with race instrumentation

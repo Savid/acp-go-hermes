@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -174,11 +172,7 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 				parts = append(parts, map[string]any{"type": "text", "text": text})
 			}
 		case block.Image != nil:
-			part, err := imageHermesPart(block.Image)
-			if err != nil {
-				return nil, err
-			}
-			parts = append(parts, part)
+			return nil, acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": "prompt.image"})
 		default:
 			return nil, acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": "prompt"})
 		}
@@ -187,48 +181,6 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 		return nil, acp.NewInvalidParams(map[string]any{"field": "prompt"})
 	}
 	return parts, nil
-}
-
-func imageHermesPart(image *acp.ContentBlockImage) (map[string]any, error) {
-	mimeType := image.MimeType
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-	part := map[string]any{
-		"type": "file",
-		"mime": mimeType,
-	}
-	switch {
-	case image.Data != "":
-		part["url"] = "data:" + mimeType + ";base64," + image.Data
-	case image.Uri != nil && *image.Uri != "":
-		part["url"] = *image.Uri
-	default:
-		return nil, acp.NewInvalidParams(map[string]any{"field": "prompt.image", "error": "missing image data or uri"})
-	}
-	if filename := imageFilename(image); filename != "" {
-		part["filename"] = filename
-	}
-	return part, nil
-}
-
-func imageFilename(image *acp.ContentBlockImage) string {
-	if image.Uri == nil || *image.Uri == "" {
-		return ""
-	}
-	return filenameFromURI(*image.Uri)
-}
-
-func filenameFromURI(uri string) string {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return ""
-	}
-	name := filepath.Base(parsed.Path)
-	if name == "." || name == "/" {
-		return ""
-	}
-	return name
 }
 
 func embeddedResourceText(resource acp.EmbeddedResourceResource) string {
@@ -376,16 +328,12 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 		return err
 	}
 	switch event.Type {
-	case "permission.v2.asked", "permission.asked":
+	case "approval.request":
 		var req permissionRequest
 		if err := json.Unmarshal(event.Properties, &req); err != nil {
 			return err
 		}
-		if event.Type == "permission.v2.asked" {
-			req.ReplyRoute = permissionRouteAPI
-		} else {
-			req.ReplyRoute = permissionRouteSession
-		}
+		req.ReplyRoute = permissionRouteAPI
 		if req.SessionID == s.idmap.NativeSessionID {
 			return s.handlePermission(ctx, req)
 		}
@@ -407,14 +355,10 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 				}
 			}
 		}
-	case "question.v2.asked", "question.asked":
+	case "clarify.request":
 		req, ok := eventQuestion(event.Properties)
 		if ok && req.SessionID == s.idmap.NativeSessionID {
-			if event.Type == "question.v2.asked" {
-				req.ReplyRoute = questionRouteAPI
-			} else {
-				req.ReplyRoute = questionRouteSession
-			}
+			req.ReplyRoute = questionRouteAPI
 			return s.handleQuestion(ctx, req)
 		}
 	}
@@ -505,7 +449,7 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 			defer cancel()
 			replyCtx = backgroundCtx
 		}
-		return s.client.ReplyPermission(replyCtx, req, "reject", "client unavailable")
+		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "client unavailable"))
 	}
 	title := req.actionName()
 	if title == "" {
@@ -545,12 +489,12 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 		}
 		if cancelled || s.wasCancelled() || ctx.Err() != nil {
 			replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-			_ = s.client.ReplyPermission(replyCtx, req, "reject", "cancelled")
+			_ = s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "cancelled"))
 			cancel()
 			return errPromptCancelled
 		}
 		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		replyErr := s.client.ReplyPermission(replyCtx, req, "reject", "client permission request failed")
+		replyErr := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "client permission request failed"))
 		cancel()
 		if replyErr != nil {
 			return errors.Join(err, replyErr)
@@ -574,12 +518,12 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 	if cancelled || ctx.Err() != nil {
 		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
-		if err := s.client.ReplyPermission(replyCtx, req, "reject", "cancelled"); err != nil {
+		if err := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "cancelled")); err != nil {
 			return err
 		}
 		return errPromptCancelled
 	}
-	return s.client.ReplyPermission(ctx, req, reply, "")
+	return s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyPermission(ctx, req, reply, ""))
 }
 
 func (s *session) handleQuestion(ctx context.Context, req questionRequest) error {
@@ -600,7 +544,7 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 			defer cancel()
 			rejectCtx = backgroundCtx
 		}
-		return s.client.RejectQuestion(rejectCtx, req)
+		return s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
 	}
 	request, propertyIDs := questionElicitationRequest(req)
 	resp, err := conn.CreateElicitation(ctx, request, elicitationScope{
@@ -614,12 +558,12 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 		}
 		if cancelled || s.wasCancelled() || ctx.Err() != nil {
 			rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-			_ = s.client.RejectQuestion(rejectCtx, req)
+			_ = s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
 			cancel()
 			return errPromptCancelled
 		}
 		rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		rejectErr := s.client.RejectQuestion(rejectCtx, req)
+		rejectErr := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
 		cancel()
 		if rejectErr != nil {
 			return errors.Join(err, rejectErr)
@@ -637,7 +581,7 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 			defer cancel()
 			rejectCtx = backgroundCtx
 		}
-		if err := s.client.RejectQuestion(rejectCtx, req); err != nil {
+		if err := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req)); err != nil {
 			return err
 		}
 		if cancelled || ctx.Err() != nil {
@@ -653,12 +597,12 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 	if cancelled || ctx.Err() != nil {
 		rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
-		if err := s.client.RejectQuestion(rejectCtx, req); err != nil {
+		if err := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req)); err != nil {
 			return err
 		}
 		return errPromptCancelled
 	}
-	return s.client.ReplyQuestion(ctx, req, questionAnswersFromContent(resp.Accept.Content, propertyIDs))
+	return s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyQuestion(ctx, req, questionAnswersFromContent(resp.Accept.Content, propertyIDs)))
 }
 
 func (s *session) drainClientBacklog(ctx context.Context) error {

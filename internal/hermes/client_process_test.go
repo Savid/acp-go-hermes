@@ -112,14 +112,16 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 
 func resultForMethod(method string, params map[string]any) any {
 	switch method {
-	case "session.create", "session.branch":
+	case "session.create":
 		return map[string]any{"session_id": "live", "stored_session_id": "stored"}
+	case "session.branch":
+		return map[string]any{"session_id": "live-branch", "title": "Branch", "parent": "stored"}
 	case "session.resume":
 		return map[string]any{"session_id": "live-resume", "stored_session_id": params["session_id"]}
 	case "session.history":
 		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
 	case "session.active_list":
-		return map[string]any{"sessions": []map[string]any{{"session_id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
+		return map[string]any{"sessions": []map[string]any{{"id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
 	case "model.options":
 		return map[string]any{"providers": []map[string]any{
 			{"id": "array", "models": []map[string]any{{"id": "m1", "name": "M1"}}},
@@ -248,7 +250,7 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if err := client.CloseSession(ctx, "live"); err != nil {
 		t.Fatalf("CloseSession: %v", err)
 	}
-	if out, err := client.Branch(ctx, "live", "name"); err != nil || out.StoredSessionID != "stored" {
+	if out, err := client.Branch(ctx, "live", "name"); err != nil || out.SessionID != "live-branch" || out.Title != "Branch" || out.Parent != "stored" {
 		t.Fatalf("Branch = %#v err=%v", out, err)
 	}
 	if err := client.SubmitPrompt(ctx, "live", "hello"); err != nil {
@@ -371,15 +373,16 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 		t.Fatal("ModelOptionsResult accepted malformed JSON")
 	}
 	var active ActiveSession
-	if err := active.UnmarshalJSON([]byte(`{"id":"live-child","session_key":"stored-child","title":"Child","cwd":"/repo"}`)); err != nil ||
+	if err := json.Unmarshal([]byte(`{"id":"live-child","session_key":"stored-child","title":"Child","cwd":"/repo"}`), &active); err != nil ||
 		active.SessionID != "live-child" || active.SessionKey != "stored-child" {
 		t.Fatalf("ActiveSession real shape = %#v err=%v", active, err)
 	}
-	if err := active.UnmarshalJSON([]byte(`{"session_id":"live-old","session_key":"stored-old"}`)); err != nil ||
-		active.SessionID != "live-old" || active.SessionKey != "stored-old" {
-		t.Fatalf("ActiveSession legacy shape = %#v err=%v", active, err)
+	active = ActiveSession{}
+	if err := json.Unmarshal([]byte(`{"session_id":"live-old","session_key":"stored-old"}`), &active); err != nil ||
+		active.SessionID != "" || active.SessionKey != "stored-old" {
+		t.Fatalf("ActiveSession accepted wrong method shape = %#v err=%v", active, err)
 	}
-	if err := active.UnmarshalJSON([]byte("{")); err == nil {
+	if err := json.Unmarshal([]byte("{"), &active); err == nil {
 		t.Fatal("ActiveSession accepted malformed JSON")
 	}
 	var provider Provider

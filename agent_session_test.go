@@ -398,6 +398,13 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	cwd := t.TempDir()
+	additionalDir := t.TempDir()
+	httpMCP := HTTPMCPServer("http", "https://mcp.example.test", map[string]string{"X-Test": "1"})
+	startOptions := []SessionRequestOption{
+		WithSessionAdditionalDirectories(additionalDir),
+		WithSessionMCPServers(httpMCP),
+		WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}}),
+	}
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.createSession = testNativeSession("native-1")
@@ -421,7 +428,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
-	newResp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(cwd, append(startOptions, WithSessionRawEvents(true))...))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -431,11 +438,17 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	}
 	active := agent.activeSession(id)
 
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(false))...)); err != nil {
 		t.Fatalf("active LoadSession: %v", err)
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd)); err != nil {
+	if active.snapshot().rawMessages.Enabled() {
+		t.Fatal("active LoadSession did not apply rawEvent=false")
+	}
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(true))...)); err != nil {
 		t.Fatalf("active ResumeSession: %v", err)
+	}
+	if !active.snapshot().rawMessages.Enabled() {
+		t.Fatal("active ResumeSession did not apply rawEvent=true")
 	}
 	if factoryCalls != 1 {
 		t.Fatalf("active load/resume started a second native process: %d", factoryCalls)
@@ -463,9 +476,18 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMCPServers(sse))); err == nil {
 		t.Fatal("active resume accepted SSE MCP server")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, filepath.Join(cwd, "other"))); err == nil {
-		t.Fatal("active load accepted mismatched cwd")
-	}
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(id, filepath.Join(cwd, "other"), startOptions...))
+	requireLifecycleMismatch(t, err, jsonFieldCwd)
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}})))
+	requireLifecycleMismatch(t, err, "additionalDirectories")
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(HTTPMCPServer("other", "https://other.example.test", nil)), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}})))
+	requireLifecycleMismatch(t, err, "mcpServers")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "changed"}})))
+	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test"})))
+	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
+	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/other", Env: map[string]string{"A": "B"}})))
+	requireLifecycleMismatch(t, err, "_meta.hermes.options.model")
 	if factoryCalls != 1 {
 		t.Fatalf("invalid active load/resume started a native process: %d", factoryCalls)
 	}
@@ -475,6 +497,24 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	}
 	if !client.closed {
 		t.Fatal("Agent.Close did not close the single native client")
+	}
+}
+
+func requireLifecycleMismatch(t *testing.T, err error, field string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected lifecycle mismatch for %s", field)
+	}
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("mismatch error type = %T", err)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("mismatch error data = %#v", reqErr.Data)
+	}
+	if data["error"] != "mismatch" || data["field"] != field {
+		t.Fatalf("mismatch error data = %#v want field %q", data, field)
 	}
 }
 
@@ -713,7 +753,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	}
 
 	client := newFakeHermesClient()
-	defaultSession := newSession(NewAgent(), "wrapper", cwd, nil, nativeSession{ID: "native"}, client, sessionMeta{}, idmapRecord{})
+	defaultSession := newSession(NewAgent(), "wrapper", cwd, nil, nil, nativeSession{ID: "native"}, client, sessionMeta{}, idmapRecord{})
 	if defaultSession.title != "Hermes session" || defaultSession.idmap.SessionID != "wrapper" ||
 		defaultSession.idmap.NativeSessionID != "native" || defaultSession.idmap.Format != SessionStoreFormat {
 		t.Fatalf("default session fields = %#v", defaultSession)

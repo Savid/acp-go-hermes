@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,7 +52,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		NativeSessionID: native.ID,
 		Format:          SessionStoreFormat,
 	}
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, native, client, meta, idmap)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, params.McpServers, native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return acp.NewSessionResponse{}, err
@@ -152,8 +153,8 @@ func (a *Agent) loadOrResumeSession(
 	// session/load replays on the reused session (LoadSession calls
 	// replayMessages); session/resume returns without replay.
 	if existing := a.activeSession(id); existing != nil {
-		if existing.cwd != "" && existing.cwd != cwd {
-			return nil, acp.NewInvalidParams(map[string]any{"error": "cwd_mismatch", "field": jsonFieldCwd})
+		if err := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta); err != nil {
+			return nil, err
 		}
 		return existing, nil
 	}
@@ -186,13 +187,77 @@ func (a *Agent) loadOrResumeSession(
 	if meta.Model == "" {
 		meta.Model = joinModelValue(snapshot.Session.Model.ProviderID, snapshot.Session.Model.ModelID)
 	}
-	session := newSession(a, id, cwd, additionalDirectories, native, client, meta, idmap)
+	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return nil, err
 	}
 
 	return session, nil
+}
+
+func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, meta sessionMeta) error {
+	snapshot := existing.snapshot()
+	if snapshot.cwd != "" && snapshot.cwd != cwd {
+		return lifecycleMismatch(jsonFieldCwd)
+	}
+	if !stringSetEqual(snapshot.additionalDirectories, additionalDirectories) {
+		return lifecycleMismatch("additionalDirectories")
+	}
+	if !mcpServerSetEqual(snapshot.mcpServers, mcpServers) {
+		return lifecycleMismatch("mcpServers")
+	}
+	if !stringMapsEqual(snapshot.env, meta.Env) {
+		return lifecycleMismatch("_meta.hermes.options.env")
+	}
+	if meta.Model != "" && meta.Model != joinModelValue(snapshot.providerID, snapshot.modelID) {
+		return lifecycleMismatch("_meta.hermes.options.model")
+	}
+	existing.mu.Lock()
+	existing.rawMessages = meta.RawMessages
+	existing.mu.Unlock()
+	return nil
+}
+
+func lifecycleMismatch(field string) error {
+	return acp.NewInvalidParams(map[string]any{"error": "mismatch", "field": field})
+}
+
+func stringMapsEqual(left map[string]string, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if right[key] != leftValue {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSetEqual(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	slices.Sort(leftCopy)
+	slices.Sort(rightCopy)
+	return slices.Equal(leftCopy, rightCopy)
+}
+
+func mcpServerSetEqual(left []acp.McpServer, right []acp.McpServer) bool {
+	return slices.Equal(canonicalMCPServers(left), canonicalMCPServers(right))
+}
+
+func canonicalMCPServers(servers []acp.McpServer) []string {
+	out := make([]string, len(servers))
+	for index, server := range servers {
+		data, _ := json.Marshal(server)
+		out[index] = string(data)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
@@ -374,7 +439,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		NativeParentSessionID: parentSnapshot.idmap.NativeSessionID,
 		Format:                SessionStoreFormat,
 	}
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, native, client, meta, idmap)
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, stableMCPServersFromUnstable(params.McpServers), native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
 		_ = session.Close(context.Background())
 		return acp.UnstableForkSessionResponse{}, err

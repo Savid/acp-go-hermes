@@ -26,6 +26,14 @@ const (
 	leaseFileName = "server.lease"
 )
 
+type missingLiveSessionMappingError struct {
+	StoredSessionID string
+}
+
+func (e missingLiveSessionMappingError) Error() string {
+	return fmt.Sprintf("hermes live session id mapping missing for stored session %q", e.StoredSessionID)
+}
+
 type hermesClient interface {
 	Close(context.Context) error
 	CreateSession(context.Context, string) (nativeSession, error)
@@ -843,7 +851,7 @@ func (s *hermesServer) forwardGatewayPermission(stored string, live string, even
 	}
 	data, _ := json.Marshal(req)
 	select {
-	case s.events <- hermesEvent{Type: "permission.v2.asked", Properties: data, Raw: event.Raw}:
+	case s.events <- hermesEvent{Type: "approval.request", Properties: data, Raw: event.Raw}:
 	default:
 	}
 }
@@ -862,7 +870,7 @@ func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event 
 	}
 	data, _ := json.Marshal(req)
 	select {
-	case s.events <- hermesEvent{Type: "question.v2.asked", Properties: data, Raw: event.Raw}:
+	case s.events <- hermesEvent{Type: "clarify.request", Properties: data, Raw: event.Raw}:
 	default:
 	}
 	_ = live
@@ -1055,15 +1063,12 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (n
 	if result.SessionID == "" {
 		return nativeSession{}, fmt.Errorf("hermes branch response missing session_id")
 	}
-	stored := result.StoredSessionID
-	if stored == "" {
-		stored, err = s.storedSessionIDForLive(ctx, result.SessionID)
-		if err != nil {
-			return nativeSession{}, err
-		}
+	stored, err := s.storedSessionIDForLive(ctx, result.SessionID)
+	if err != nil {
+		return nativeSession{}, err
 	}
 	s.rememberGatewaySession(stored, result.SessionID)
-	return s.nativeSessionFromGateway(stored, "Hermes branch"), nil
+	return s.nativeSessionFromGateway(stored, firstNonEmpty(result.Title, "Hermes branch")), nil
 }
 
 func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
@@ -1111,7 +1116,7 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req permissionReques
 	}
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		live = req.SessionID
+		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 	return s.gatewayClient().ApprovalRespond(ctx, live, choice, reply == "always")
 }
@@ -1124,7 +1129,7 @@ func (s *hermesServer) PendingQuestions(ctx context.Context) ([]questionRequest,
 func (s *hermesServer) ReplyQuestion(ctx context.Context, req questionRequest, answers [][]string) error {
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		live = req.SessionID
+		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 	return s.gatewayClient().ClarifyRespond(ctx, live, answers)
 }
@@ -1132,7 +1137,7 @@ func (s *hermesServer) ReplyQuestion(ctx context.Context, req questionRequest, a
 func (s *hermesServer) RejectQuestion(ctx context.Context, req questionRequest) error {
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		live = req.SessionID
+		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 	return s.gatewayClient().ClarifyRespond(ctx, live, "")
 }

@@ -179,7 +179,6 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			},
 			PositionEncoding: &positionEncoding,
 			PromptCapabilities: acp.PromptCapabilities{
-				Image:           true,
 				EmbeddedContext: true,
 			},
 			SessionCapabilities: acp.SessionCapabilities{

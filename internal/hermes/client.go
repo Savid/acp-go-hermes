@@ -291,28 +291,10 @@ type ActiveListResult struct {
 }
 
 type ActiveSession struct {
-	SessionID  string `json:"session_id"`
+	SessionID  string `json:"id"`
 	SessionKey string `json:"session_key"`
 	Title      string `json:"title"`
 	Cwd        string `json:"cwd"`
-}
-
-func (s *ActiveSession) UnmarshalJSON(data []byte) error {
-	var object struct {
-		ID         string `json:"id"`
-		SessionID  string `json:"session_id"`
-		SessionKey string `json:"session_key"`
-		Title      string `json:"title"`
-		Cwd        string `json:"cwd"`
-	}
-	if err := json.Unmarshal(data, &object); err != nil {
-		return err
-	}
-	s.SessionID = firstNonEmpty(object.SessionID, object.ID)
-	s.SessionKey = object.SessionKey
-	s.Title = object.Title
-	s.Cwd = object.Cwd
-	return nil
 }
 
 type ModelOptionsResult struct {
@@ -407,6 +389,12 @@ func (m *ProviderModel) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type BranchResult struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	Parent    string `json:"parent"`
+}
+
 func (c *Client) CreateSession(ctx context.Context, params map[string]any) (SessionCreateResult, error) {
 	var out SessionCreateResult
 	err := c.Call(ctx, "session.create", params, &out)
@@ -443,12 +431,12 @@ func (c *Client) CloseSession(ctx context.Context, liveSessionID string) error {
 	return c.Call(ctx, "session.close", map[string]any{"session_id": liveSessionID}, nil)
 }
 
-func (c *Client) Branch(ctx context.Context, liveSessionID string, name string) (SessionCreateResult, error) {
+func (c *Client) Branch(ctx context.Context, liveSessionID string, name string) (BranchResult, error) {
 	params := map[string]any{"session_id": liveSessionID}
 	if name != "" {
 		params["name"] = name
 	}
-	var out SessionCreateResult
+	var out BranchResult
 	err := c.Call(ctx, "session.branch", params, &out)
 	return out, err
 }

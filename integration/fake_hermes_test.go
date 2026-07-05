@@ -279,18 +279,27 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			"stored_session_id": stored,
 		})
 	case "session.active_list":
-		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{
-			"session_id":  "live-fake",
-			"session_key": fakeStoredSessionKey,
-			"title":       "Fake",
-			"cwd":         params["cwd"],
-		}}})
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{
+			{
+				"id":          "live-fake",
+				"session_key": fakeStoredSessionKey,
+				"title":       "Fake",
+				"cwd":         params["cwd"],
+			},
+			{
+				"id":          "live-branch",
+				"session_key": "stored-branch",
+				"title":       "Branch",
+				"cwd":         params["cwd"],
+			},
+		}})
 	case "session.history":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": 0, "messages": []any{}})
 	case "session.branch":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
-			"session_id":        "live-branch",
-			"stored_session_id": "stored-branch",
+			"session_id": "live-branch",
+			"title":      "Branch",
+			"parent":     fakeStoredSessionKey,
 		})
 	case "model.options":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"providers": []map[string]any{{

@@ -5,6 +5,10 @@ consume gateway events until `message.complete`. `message.delta` events become
 ACP text chunks, `thinking.delta` events become reasoning chunks, and token
 data from completion payloads becomes `usage_update`.
 
+Hermes v0.18.0 does not expose a proven image payload on `prompt.submit`.
+This adapter advertises text and embedded-resource prompts only and rejects ACP
+image blocks with `invalid_params`.
+
 If the WebSocket stream fails during a turn, the adapter aborts the native turn
 and returns one terminal ACP error for that prompt. Idle disconnects are
 treated as a gateway lifecycle failure and future session operations reconnect

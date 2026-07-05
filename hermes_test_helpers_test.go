@@ -381,7 +381,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 			client.xdg, _ = createXDGDirs(root, "session-1")
 		}
 	}
-	return newSession(agent, "session-1", "/tmp/project", nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
+	return newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
 		SessionID:       "session-1",
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,

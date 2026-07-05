@@ -17,6 +17,7 @@ type session struct {
 	id                    acp.SessionId
 	cwd                   string
 	additionalDirectories []string
+	mcpServers            []acp.McpServer
 	idmap                 idmapRecord
 	title                 string
 	updatedAt             string
@@ -53,6 +54,7 @@ type sessionSnapshot struct {
 	id                    acp.SessionId
 	cwd                   string
 	additionalDirectories []string
+	mcpServers            []acp.McpServer
 	idmap                 idmapRecord
 	title                 string
 	updatedAt             string
@@ -64,7 +66,7 @@ type sessionSnapshot struct {
 	client                hermesClient
 }
 
-func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, native nativeSession, client hermesClient, meta sessionMeta, idmap idmapRecord) *session {
+func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativeSession, client hermesClient, meta sessionMeta, idmap idmapRecord) *session {
 	title := native.Title
 	if title == "" {
 		title = "Hermes session"
@@ -98,6 +100,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		id:                    id,
 		cwd:                   cwd,
 		additionalDirectories: append([]string(nil), additionalDirectories...),
+		mcpServers:            cloneMCPServers(mcpServers),
 		idmap:                 idmap,
 		title:                 title,
 		updatedAt:             updatedAt,
@@ -208,10 +211,10 @@ func (s *session) cancelTurn() {
 	ctx, done := context.WithTimeout(context.Background(), closeTimeout)
 	defer done()
 	for _, req := range pending {
-		_ = s.client.ReplyPermission(ctx, req, "reject", "cancelled")
+		_ = s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyPermission(ctx, req, "reject", "cancelled"))
 	}
 	for _, req := range questions {
-		_ = s.client.RejectQuestion(ctx, req)
+		_ = s.poisonMissingLiveSessionMapping(ctx, s.client.RejectQuestion(ctx, req))
 	}
 }
 
@@ -244,8 +247,12 @@ func (s *session) poisonNativeSessionDrift(ctx context.Context, field string, ac
 }
 
 func (s *session) poison(ctx context.Context, cause string) error {
+	return s.poisonWithError(ctx, "hermes_native_session_id_drift", cause)
+}
+
+func (s *session) poisonWithError(ctx context.Context, errorName string, cause string) error {
 	err := acp.NewInternalError(map[string]any{
-		jsonFieldError: "hermes_native_session_id_drift",
+		jsonFieldError: errorName,
 		"cause":        cause,
 	})
 
@@ -258,6 +265,17 @@ func (s *session) poison(ctx context.Context, cause string) error {
 	s.poisonCause = cause
 	s.mu.Unlock()
 
+	return err
+}
+
+func (s *session) poisonMissingLiveSessionMapping(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	var missing missingLiveSessionMappingError
+	if errors.As(err, &missing) {
+		return s.poisonWithError(ctx, "hermes_missing_live_session_mapping", missing.Error())
+	}
 	return err
 }
 
@@ -395,6 +413,7 @@ func (s *session) snapshot() sessionSnapshot {
 		id:                    s.id,
 		cwd:                   s.cwd,
 		additionalDirectories: append([]string(nil), s.additionalDirectories...),
+		mcpServers:            cloneMCPServers(s.mcpServers),
 		idmap:                 s.idmap,
 		title:                 s.title,
 		updatedAt:             s.updatedAt,
