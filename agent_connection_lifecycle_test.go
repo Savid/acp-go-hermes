@@ -113,6 +113,15 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionNew, mustJSON(t, acp.NewSessionRequest{})); reqErr == nil {
 		t.Fatal("invalid new-session params unexpectedly succeeded")
 	}
+	closedAgent := NewAgent()
+	if err := closedAgent.Close(); err != nil {
+		t.Fatalf("close agent: %v", err)
+	}
+	closedConn := &localAgentConnection{agent: closedAgent}
+	closedConn.initialized.Store(true)
+	if _, reqErr := closedConn.handle(ctx, acp.AgentMethodSessionNew, mustJSON(t, NewSessionRequest(t.TempDir()))); reqErr == nil {
+		t.Fatal("closed agent new-session error was not surfaced")
+	}
 	if _, reqErr := conn.handle(ctx, ForkSessionMethod, json.RawMessage(`{`)); reqErr == nil {
 		t.Fatal("malformed extension fork unexpectedly succeeded")
 	}
@@ -238,7 +247,7 @@ func TestNewLocalAgentConnectionDone(t *testing.T) {
 	}
 }
 
-func TestLifecycleCommandUpdateAfterResponseBytes(t *testing.T) {
+func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	c2aR, c2aW := io.Pipe()
@@ -259,7 +268,6 @@ func TestLifecycleCommandUpdateAfterResponseBytes(t *testing.T) {
 		}
 		client.xdg = xdg
 		client.createSession = testNativeSession("native-1")
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
 		return client, nil
 	}
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
@@ -299,290 +307,13 @@ func TestLifecycleCommandUpdateAfterResponseBytes(t *testing.T) {
 	if !strings.Contains(responseLine, `"id":2`) || !strings.Contains(responseLine, `"result"`) {
 		t.Fatalf("session/new response line = %s", responseLine)
 	}
-	updateLine := readLine()
-	if !strings.Contains(updateLine, `"method":"session/update"`) ||
-		!strings.Contains(updateLine, `"sessionUpdate":"available_commands_update"`) ||
-		!strings.Contains(updateLine, `"name":"review"`) {
-		t.Fatalf("post-response update line = %s", updateLine)
-	}
-}
-
-func TestConcurrentLifecycleCommandUpdatesFollowOwnResponses(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	c2aR, c2aW := io.Pipe()
-	a2cR, a2cW := io.Pipe()
-	t.Cleanup(func() {
-		_ = c2aR.Close()
-		_ = c2aW.Close()
-		_ = a2cR.Close()
-		_ = a2cW.Close()
-	})
-
-	type createControl struct {
-		started  chan struct{}
-		release  chan struct{}
-		nativeID string
-		command  string
-	}
-	controls := make(chan *createControl, 2)
-	var factoryMu sync.Mutex
-	factoryCount := 0
-	agent := NewAgent()
-	agent.options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
-		factoryMu.Lock()
-		factoryCount++
-		index := factoryCount
-		factoryMu.Unlock()
-
-		client := newFakeHermesClient()
-		xdg, err := createXDGDirs(t.TempDir(), string(opts.ACPSessionID))
-		if err != nil {
-			return nil, err
-		}
-		client.xdg = xdg
-		control := &createControl{
-			started:  make(chan struct{}),
-			release:  make(chan struct{}),
-			nativeID: "native-" + strconv.Itoa(index),
-			command:  "cmd" + strconv.Itoa(index),
-		}
-		client.commands = []nativeCommand{{Name: control.command, Description: "Command", Source: "command"}}
-		client.createSessionFunc = func(ctx context.Context, _ string) (nativeSession, error) {
-			close(control.started)
-			select {
-			case <-control.release:
-				return testNativeSession(control.nativeID), nil
-			case <-ctx.Done():
-				return nativeSession{}, ctx.Err()
-			}
-		}
-		controls <- control
-		return client, nil
-	}
-	conn := newLocalAgentConnection(agent, a2cW, c2aR)
-	agent.setAgentClient(conn)
-
-	lines := make(chan string, 8)
-	go func() {
-		scanner := bufio.NewScanner(a2cR)
-		for scanner.Scan() {
-			lines <- scanner.Text()
-		}
-	}()
-	writeJSONRPC := func(payload string) {
-		t.Helper()
-		if _, err := io.WriteString(c2aW, payload+"\n"); err != nil {
-			t.Fatalf("write request: %v", err)
-		}
-	}
-	readLine := func() string {
-		t.Helper()
-		select {
-		case line := <-lines:
-			return line
-		case <-ctx.Done():
-			t.Fatal("timed out waiting for JSON-RPC line")
-			return ""
-		}
-	}
-
-	writeJSONRPC(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	if line := readLine(); !strings.Contains(line, `"id":1`) || !strings.Contains(line, `"result"`) {
-		t.Fatalf("initialize line = %s", line)
-	}
-	writeJSONRPC(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":` + strconv.Quote(t.TempDir()) + `,"mcpServers":[]}}`)
-	writeJSONRPC(`{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":` + strconv.Quote(t.TempDir()) + `,"mcpServers":[]}}`)
-	first := <-controls
-	second := <-controls
-	<-first.started
-	<-second.started
-	close(first.release)
-	close(second.release)
-
-	responseAt := map[acp.SessionId]int{}
-	updateAt := map[acp.SessionId]int{}
-	for i := 0; i < 4; i++ {
-		line := readLine()
-		var msg struct {
-			ID     *json.RawMessage `json:"id,omitempty"`
-			Method string           `json:"method,omitempty"`
-			Result struct {
-				SessionID acp.SessionId `json:"sessionId"`
-			} `json:"result,omitempty"`
-			Params struct {
-				SessionID acp.SessionId `json:"sessionId"`
-				Update    struct {
-					SessionUpdate string `json:"sessionUpdate"`
-				} `json:"update"`
-			} `json:"params,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			t.Fatalf("parse line %q: %v", line, err)
-		}
-		if msg.ID != nil && msg.Result.SessionID != "" {
-			responseAt[msg.Result.SessionID] = i
-		}
-		if msg.Method == "session/update" && msg.Params.Update.SessionUpdate == "available_commands_update" {
-			updateAt[msg.Params.SessionID] = i
-		}
-	}
-	if len(responseAt) != 2 || len(updateAt) != 2 {
-		t.Fatalf("responseAt=%#v updateAt=%#v", responseAt, updateAt)
-	}
-	for sessionID, updateIndex := range updateAt {
-		responseIndex, ok := responseAt[sessionID]
-		if !ok {
-			t.Fatalf("update for %q had no lifecycle response; responseAt=%#v updateAt=%#v", sessionID, responseAt, updateAt)
-		}
-		if updateIndex <= responseIndex {
-			t.Fatalf("update for %q at %d, response at %d; responseAt=%#v updateAt=%#v", sessionID, updateIndex, responseIndex, responseAt, updateAt)
-		}
-	}
-}
-
-func TestPostResponseWriterIgnoresUnrelatedWriteBeforeLifecycleResponse(t *testing.T) {
-	hooks := make(chan acp.SessionId, 1)
-	writer := newPostResponseWriter(io.Discard, func(id acp.SessionId) func() {
-		return func() { hooks <- id }
-	})
-	writer.observeRequestLine([]byte(`{"jsonrpc":"2.0","id":7,"method":"session/resume","params":{"sessionId":"session-7","cwd":"/tmp/project","mcpServers":[]}}`))
-	if _, err := writer.Write([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"other","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"unrelated"}}}}` + "\n")); err != nil {
-		t.Fatalf("write unrelated update: %v", err)
-	}
 	select {
-	case id := <-hooks:
-		t.Fatalf("unrelated write fired hook for %q", id)
-	case <-time.After(25 * time.Millisecond):
-	}
-
-	if _, err := writer.Write([]byte(`{"jsonrpc":"2.0","id":7,"result":{"configOptions":[]}}` + "\n")); err != nil {
-		t.Fatalf("write lifecycle response: %v", err)
-	}
-	select {
-	case id := <-hooks:
-		if id != "session-7" {
-			t.Fatalf("hook id = %q, want session-7", id)
+	case line := <-lines:
+		if strings.Contains(line, "available_commands_update") {
+			t.Fatalf("unexpected command update line = %s", line)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("lifecycle response did not fire hook")
+	case <-time.After(50 * time.Millisecond):
 	}
-}
-
-func TestPostResponseWriterParserBranches(t *testing.T) {
-	if _, ok := postLifecycleRequestFromLine([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/list","params":{}}`)); ok {
-		t.Fatal("non-lifecycle request registered post-response hook")
-	}
-	if _, ok := postLifecycleRequestFromMessage(acp.AgentMethodSessionResume, json.RawMessage(`{`)); ok {
-		t.Fatal("malformed lifecycle params registered post-response hook")
-	}
-	if _, ok := postLifecycleRequestFromMessage(acp.AgentMethodSessionResume, json.RawMessage(`{"sessionId":""}`)); ok {
-		t.Fatal("empty lifecycle session id registered post-response hook")
-	}
-	if _, ok := jsonRPCIDKey(nil); ok {
-		t.Fatal("empty JSON-RPC id was accepted")
-	}
-	if _, ok := jsonRPCIDKey(json.RawMessage(`{`)); ok {
-		t.Fatal("malformed JSON-RPC id was accepted")
-	}
-
-	nilHookWriter := newPostResponseWriter(io.Discard, nil)
-	if hooks := nilHookWriter.hooksForResponseLine([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); hooks != nil {
-		t.Fatalf("nil hook writer returned hooks: %#v", hooks)
-	}
-
-	writer := newPostResponseWriter(io.Discard, func(id acp.SessionId) func() {
-		return func() {}
-	})
-	writer.observeRequestLine([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp/project","mcpServers":[]}}`))
-	if hooks := writer.hooksForResponseLine([]byte(`{"jsonrpc":"2.0","id":1,"result":"bad"}`)); hooks != nil {
-		t.Fatalf("malformed lifecycle result returned hooks: %#v", hooks)
-	}
-	writer.observeRequestLine([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp/project","mcpServers":[]}}`))
-	if hooks := writer.hooksForResponseLine([]byte(`{"jsonrpc":"2.0","id":2,"result":{}}`)); hooks != nil {
-		t.Fatalf("empty lifecycle result session id returned hooks: %#v", hooks)
-	}
-}
-
-func TestPostResponseHookBranches(t *testing.T) {
-	ctx := context.Background()
-	hooks := make(chan acp.SessionId, 1)
-	writer := newPostResponseWriter(errWriter{}, func(id acp.SessionId) func() {
-		return func() { hooks <- id }
-	})
-	writer.observeRequestLine([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"session-1"}}`))
-	if _, err := writer.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n")); err == nil {
-		t.Fatal("postResponseWriter write error = nil")
-	}
-	select {
-	case id := <-hooks:
-		t.Fatalf("hook ran after failed write for %q", id)
-	default:
-	}
-
-	handler := localLifecycleResponse(
-		func(*Agent, context.Context, acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-			return acp.NewSessionResponse{}, errors.New("new failed")
-		},
-	)
-	_, reqErr := handler(ctx, NewAgent(), mustJSON(t, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}}))
-	if reqErr == nil || !strings.Contains(reqErr.Message, "Internal error") {
-		t.Fatalf("lifecycle call error = %#v", reqErr)
-	}
-
-	emptyIDHandler := localLifecycleResponse(
-		func(*Agent, context.Context, acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-			return acp.NewSessionResponse{}, nil
-		},
-	)
-	result, reqErr := emptyIDHandler(ctx, NewAgent(), mustJSON(t, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}}))
-	if reqErr != nil {
-		t.Fatalf("empty id handler: %#v", reqErr)
-	}
-	if _, ok := result.(acp.NewSessionResponse); !ok {
-		t.Fatalf("empty id handler result = %#v", result)
-	}
-
-	missingAgent := NewAgent()
-	missingAgent.refreshCommandsAfterResponse("missing")()
-
-	refreshErrClient := newFakeHermesClient()
-	refreshErrClient.commandsErr = errors.New("commands failed")
-	refreshErrAgent := NewAgent()
-	refreshErrSession := testSession(refreshErrAgent, refreshErrClient)
-	refreshErrAgent.sessions[refreshErrSession.id] = refreshErrSession
-	refreshErrAgent.refreshCommandsAfterResponse(refreshErrSession.id)()
-
-	parentClient := newFakeHermesClient()
-	parentClient.forkSession = testNativeSession("native-child")
-	parentAgent := NewAgent()
-	parentAgent.options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
-		child := newFakeHermesClient()
-		xdg, err := createXDGDirs(t.TempDir(), string(opts.ACPSessionID))
-		if err != nil {
-			return nil, err
-		}
-		child.xdg = xdg
-		child.getSession = testNativeSession("native-child")
-		return child, nil
-	}
-	parent := testSession(parentAgent, parentClient)
-	parentAgent.sessions[parent.id] = parent
-	conn := &localAgentConnection{agent: parentAgent}
-	conn.initialized.Store(true)
-	result, reqErr = conn.handle(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, t.TempDir())))
-	if reqErr != nil {
-		t.Fatalf("fork extension handle: %#v", reqErr)
-	}
-	if _, ok := result.(acp.UnstableForkSessionResponse); !ok {
-		t.Fatalf("fork result = %#v", result)
-	}
-}
-
-type errWriter struct{}
-
-func (errWriter) Write([]byte) (int, error) {
-	return 0, errors.New("write failed")
 }
 
 func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {

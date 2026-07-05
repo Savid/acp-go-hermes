@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -44,67 +42,23 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	if err := s.ensureNotPoisoned(); err != nil {
 		return acp.PromptResponse{}, err
 	}
-	invocation, slashCandidate := slashCommandInvocation(params.Prompt)
-	_, matchedBeforeRefresh := s.cachedCommand(invocation.name)
-	if slashCandidate {
-		if err := s.refreshCommands(ctx); err != nil && s.agent != nil && s.agent.log != nil {
-			s.agent.log.DebugContext(ctx, "refresh Hermes commands before prompt failed", slog.String("session_id", string(s.id)), slog.String("error", err.Error()))
-		}
-	}
-	command, matchedCommand := s.cachedCommand(invocation.name)
-	if slashCandidate && matchedBeforeRefresh && !matchedCommand {
-		return acp.PromptResponse{}, acp.NewInvalidParams(map[string]any{
-			jsonFieldError:   "hermes_command_removed",
-			jsonFieldMessage: fmt.Sprintf("Hermes command %q is no longer available", invocation.name),
-			"command":        invocation.name,
-		})
-	}
-	acquire := s.acquireTurn
-	if matchedCommand {
-		acquire = s.acquireCommandTurn
-	}
-	release, err := acquire(ctx)
+	release, err := s.acquireTurn(ctx)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 	defer release()
 
-	var runNative func(context.Context) (nativeMessage, error)
-	if matchedCommand {
-		parts, err := commandPromptParts(params.Prompt[1:])
-		if err != nil {
-			return acp.PromptResponse{}, err
-		}
-		agent, model := s.commandContext()
-		req := hermesCommandRequest{
-			Agent:     agent,
-			Model:     model,
-			Command:   command.Name,
-			Arguments: invocation.arguments,
-			Parts:     parts,
-		}
-		if params.MessageId != nil {
-			req.MessageID = *params.MessageId
-		}
-		runNative = func(turnCtx context.Context) (nativeMessage, error) {
-			return s.client.RunCommand(turnCtx, s.idmap.NativeSessionID, req)
-		}
-	} else {
-		parts, err := promptToHermesParts(params.Prompt)
-		if err != nil {
-			return acp.PromptResponse{}, err
-		}
-		req := hermesMessageRequest{
-			Parts: parts,
-			Model: s.modelSelector(),
-			Agent: s.currentMode(),
-		}
-		if params.MessageId != nil {
-			req.MessageID = *params.MessageId
-		}
-		runNative = func(turnCtx context.Context) (nativeMessage, error) {
-			return s.client.SendMessage(turnCtx, s.idmap.NativeSessionID, req)
-		}
+	parts, err := promptToHermesParts(params.Prompt)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	req := hermesMessageRequest{
+		Parts: parts,
+		Model: s.modelSelector(),
+		Agent: s.currentMode(),
+	}
+	if params.MessageId != nil {
+		req.MessageID = *params.MessageId
 	}
 	if err := s.drainClientBacklog(ctx); err != nil {
 		if errors.Is(err, errPromptCancelled) {
@@ -113,7 +67,12 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 	turnCtx := s.beginTurn(ctx)
-	defer s.finishTurn()
+	turnActive := true
+	defer func() {
+		if turnActive {
+			s.finishTurn()
+		}
+	}()
 	var abortOnce sync.Once
 	abortTurn := func() {
 		abortOnce.Do(func() {
@@ -142,7 +101,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 	done := make(chan result, 1)
 	go func() {
-		message, err := runNative(turnCtx)
+		message, err := s.client.SendMessage(turnCtx, s.idmap.NativeSessionID, req)
 		done <- result{message: message, err: err}
 	}()
 
@@ -172,18 +131,6 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				if s.wasCancelled() || turnCtx.Err() != nil {
 					return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 				}
-				if matchedCommand && isHermesBadRequest(result.err) {
-					refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
-					if err := s.refreshCommands(refreshCtx); err != nil && s.agent != nil && s.agent.log != nil {
-						s.agent.log.DebugContext(refreshCtx, "refresh Hermes commands after command bad request failed", slog.String("session_id", string(s.id)), slog.String("error", err.Error()))
-					}
-					cancel()
-					return acp.PromptResponse{}, acp.NewInvalidParams(map[string]any{
-						jsonFieldError:   "hermes_command_bad_request",
-						jsonFieldMessage: result.err.Error(),
-						"command":        command.Name,
-					})
-				}
 				return acp.PromptResponse{}, result.err
 			}
 			final = result.message
@@ -195,6 +142,8 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			if s.wasCancelled() || turnCtx.Err() != nil {
 				stopReason = acp.StopReasonCancelled
 			}
+			s.finishTurn()
+			turnActive = false
 			if err := s.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
 				return acp.PromptResponse{}, err
 			}
@@ -204,28 +153,6 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 		}
 	}
-}
-
-type slashCommandPrompt struct {
-	name      string
-	arguments string
-}
-
-func slashCommandInvocation(blocks []acp.ContentBlock) (slashCommandPrompt, bool) {
-	if len(blocks) == 0 || blocks[0].Text == nil {
-		return slashCommandPrompt{}, false
-	}
-	text := blocks[0].Text.Text
-	if text == "" || text[0] != '/' {
-		return slashCommandPrompt{}, false
-	}
-	rest := text[1:]
-	for i, r := range rest {
-		if unicode.IsSpace(r) {
-			return slashCommandPrompt{name: rest[:i], arguments: rest[i+len(string(r)):]}, true
-		}
-	}
-	return slashCommandPrompt{name: rest}, true
 }
 
 func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
@@ -255,100 +182,6 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 		return nil, acp.NewInvalidParams(map[string]any{"field": "prompt"})
 	}
 	return parts, nil
-}
-
-func commandPromptParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
-	if len(blocks) == 0 {
-		return nil, nil
-	}
-	parts := make([]map[string]any, 0, len(blocks))
-	for _, block := range blocks {
-		part, ok, err := commandFilePart(block)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, acp.NewInvalidParams(map[string]any{
-				jsonFieldError: "unsupported",
-				"blockType":    contentBlockType(block),
-			})
-		}
-		parts = append(parts, part)
-	}
-	return parts, nil
-}
-
-func commandFilePart(block acp.ContentBlock) (map[string]any, bool, error) {
-	switch {
-	case block.Image != nil:
-		part, err := imageHermesPart(block.Image)
-		return part, true, err
-	case block.ResourceLink != nil:
-		return resourceLinkHermesPart(block.ResourceLink), true, nil
-	case block.Resource != nil && block.Resource.Resource.BlobResourceContents != nil:
-		part, err := blobResourceHermesPart(block.Resource.Resource.BlobResourceContents)
-		return part, true, err
-	default:
-		return nil, false, nil
-	}
-}
-
-func resourceLinkHermesPart(resource *acp.ContentBlockResourceLink) map[string]any {
-	mimeType := "application/octet-stream"
-	if resource.MimeType != nil && *resource.MimeType != "" {
-		mimeType = *resource.MimeType
-	}
-	part := map[string]any{
-		"type": "file",
-		"mime": mimeType,
-		"url":  resource.Uri,
-	}
-	if resource.Name != "" {
-		part["filename"] = resource.Name
-	} else if filename := filenameFromURI(resource.Uri); filename != "" {
-		part["filename"] = filename
-	}
-	return part
-}
-
-func blobResourceHermesPart(resource *acp.BlobResourceContents) (map[string]any, error) {
-	mimeType := "application/octet-stream"
-	if resource.MimeType != nil && *resource.MimeType != "" {
-		mimeType = *resource.MimeType
-	}
-	nativeURL := resource.Uri
-	if resource.Blob != "" {
-		nativeURL = "data:" + mimeType + ";base64," + resource.Blob
-	}
-	if nativeURL == "" {
-		return nil, acp.NewInvalidParams(map[string]any{"field": "prompt.resource", "error": "missing resource data or uri"})
-	}
-	part := map[string]any{
-		"type": "file",
-		"mime": mimeType,
-		"url":  nativeURL,
-	}
-	if filename := filenameFromURI(resource.Uri); filename != "" {
-		part["filename"] = filename
-	}
-	return part, nil
-}
-
-func contentBlockType(block acp.ContentBlock) string {
-	switch {
-	case block.Text != nil:
-		return firstNonEmpty(block.Text.Type, "text")
-	case block.Image != nil:
-		return firstNonEmpty(block.Image.Type, "image")
-	case block.Audio != nil:
-		return firstNonEmpty(block.Audio.Type, "audio")
-	case block.ResourceLink != nil:
-		return firstNonEmpty(block.ResourceLink.Type, "resource_link")
-	case block.Resource != nil:
-		return firstNonEmpty(block.Resource.Type, "resource")
-	default:
-		return "unknown"
-	}
 }
 
 func imageHermesPart(image *acp.ContentBlockImage) (map[string]any, error) {

@@ -98,21 +98,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}, nil
 }
 
-func (a *Agent) refreshCommandsAfterResponse(id acp.SessionId) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		defer cancel()
-		session, err := a.session(id)
-		if err != nil {
-			a.log.DebugContext(ctx, "skip Hermes command refresh for missing session", slog.String("session_id", string(id)), slog.String("error", err.Error()))
-			return
-		}
-		if err := session.refreshCommands(ctx); err != nil {
-			a.log.DebugContext(ctx, "refresh Hermes commands failed", slog.String("session_id", string(id)), slog.String("error", err.Error()))
-		}
-	}
-}
-
 func (a *Agent) loadOrResumeSession(
 	ctx context.Context,
 	id acp.SessionId,
@@ -260,8 +245,12 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
+	skipSnapshot := session.snapshotBlockedReason() != ""
 	closeErr := session.Close(ctx)
-	snapshotErr := session.snapshotToStore(context.WithoutCancel(ctx))
+	var snapshotErr error
+	if !skipSnapshot {
+		snapshotErr = session.snapshotToStore(context.WithoutCancel(ctx))
+	}
 	a.removeSessionIf(params.SessionId, session)
 	return acp.CloseSessionResponse{}, errors.Join(snapshotErr, closeErr)
 }
@@ -335,7 +324,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
-	if err := copyXDGDirs(parentSnapshot.client.XDGDirs(), xdg); err != nil {
+	if err := cloneHermesStateDB(parentSnapshot.client.XDGDirs(), xdg); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
 	if meta.Model == "" {
@@ -502,25 +491,15 @@ func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
 	return nil
 }
 
-func copyXDGDirs(source xdgDirs, target xdgDirs) error {
-	for _, item := range []struct {
-		src string
-		dst string
-	}{
-		{source.Data, target.Data},
-		{source.Config, target.Config},
-		{source.Cache, target.Cache},
-		{source.State, target.State},
-	} {
-		data, _, err := encodeXDGArchive(item.src)
-		if err != nil {
-			return err
-		}
-		if err := decodeXDGArchive(data, item.dst); err != nil {
-			return err
-		}
+func cloneHermesStateDB(source xdgDirs, target xdgDirs) error {
+	data, _, ok, err := encodeHermesStateDBArchive(source.Root)
+	if err != nil {
+		return err
 	}
-	return nil
+	if !ok {
+		return nil
+	}
+	return decodeXDGArchive(data, target.Root)
 }
 
 func paginateSessionInfos(infos []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {

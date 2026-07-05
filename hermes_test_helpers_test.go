@@ -21,7 +21,6 @@ type fakeHermesClient struct {
 	todos         []nativeTodo
 	providers     providersResponse
 	agents        []nativeAgent
-	commands      []nativeCommand
 
 	pendingPermissions []permissionRequest
 	permissionReplies  []fakePermissionReply
@@ -31,7 +30,6 @@ type fakeHermesClient struct {
 
 	createSessionFunc func(context.Context, string) (nativeSession, error)
 	sendMessage       func(context.Context, string, hermesMessageRequest) (nativeMessage, error)
-	runCommand        func(context.Context, string, hermesCommandRequest) (nativeMessage, error)
 
 	aborts         []string
 	deleted        []string
@@ -43,8 +41,6 @@ type fakeHermesClient struct {
 	listErr        error
 	deleteErr      error
 	messagesErr    error
-	commandsErr    error
-	commandErr     error
 	abortErr       error
 	forkErr        error
 	todosErr       error
@@ -111,17 +107,6 @@ func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
 	c.deleted = append(c.deleted, id)
 	c.mu.Unlock()
 	return c.deleteErr
-}
-
-func (c *fakeHermesClient) Commands(context.Context) ([]nativeCommand, error) {
-	return append([]nativeCommand(nil), c.commands...), c.commandsErr
-}
-
-func (c *fakeHermesClient) RunCommand(ctx context.Context, id string, req hermesCommandRequest) (nativeMessage, error) {
-	if c.runCommand != nil {
-		return c.runCommand(ctx, id, req)
-	}
-	return nativeMessage{Info: nativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, c.commandErr
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {

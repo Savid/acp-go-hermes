@@ -1,7 +1,6 @@
 package hermesacp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,10 +62,9 @@ var (
 )
 
 func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *localAgentConnection {
-	postWriter := newPostResponseWriter(output, agent.refreshCommandsAfterResponse)
 	conn := &localAgentConnection{agent: agent}
-	inputGate := newConnectionInputGate(input, postWriter)
-	conn.conn = acp.NewConnection(conn.handle, postWriter, inputGate)
+	inputGate := newConnectionInputGate(input)
+	conn.conn = acp.NewConnection(conn.handle, output, inputGate)
 	conn.conn.SetLogger(agent.log)
 	inputGate.open()
 
@@ -74,15 +72,13 @@ func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *l
 }
 
 type connectionInputGate struct {
-	reader     io.Reader
-	postWriter *postResponseWriter
-	ready      chan struct{}
-	once       sync.Once
-	pending    []byte
+	reader io.Reader
+	ready  chan struct{}
+	once   sync.Once
 }
 
-func newConnectionInputGate(reader io.Reader, postWriter *postResponseWriter) *connectionInputGate {
-	return &connectionInputGate{reader: reader, postWriter: postWriter, ready: make(chan struct{})}
+func newConnectionInputGate(reader io.Reader) *connectionInputGate {
+	return &connectionInputGate{reader: reader, ready: make(chan struct{})}
 }
 
 func (g *connectionInputGate) open() {
@@ -92,27 +88,7 @@ func (g *connectionInputGate) open() {
 func (g *connectionInputGate) Read(p []byte) (int, error) {
 	<-g.ready
 
-	n, err := g.reader.Read(p)
-	if n > 0 {
-		g.observeInput(p[:n])
-	}
-	return n, err
-}
-
-func (g *connectionInputGate) observeInput(data []byte) {
-	if g.postWriter == nil {
-		return
-	}
-	g.pending = append(g.pending, data...)
-	for {
-		index := bytes.IndexByte(g.pending, '\n')
-		if index < 0 {
-			return
-		}
-		line := append([]byte(nil), g.pending[:index]...)
-		g.pending = g.pending[index+1:]
-		g.postWriter.observeRequestLine(line)
-	}
+	return g.reader.Read(p)
 }
 
 func (c *localAgentConnection) Done() <-chan struct{} {
@@ -141,138 +117,6 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	}
 
 	return result, reqErr
-}
-
-type postResponseWriter struct {
-	w         io.Writer
-	hookForID func(acp.SessionId) func()
-
-	mu        sync.Mutex
-	lifecycle map[string]postLifecycleRequest
-}
-
-type postLifecycleRequest struct {
-	sessionID       acp.SessionId
-	sessionIDResult bool
-}
-
-type jsonRPCWireMessage struct {
-	ID     *json.RawMessage `json:"id,omitempty"`
-	Method string           `json:"method,omitempty"`
-	Params json.RawMessage  `json:"params,omitempty"`
-	Result json.RawMessage  `json:"result,omitempty"`
-	Error  json.RawMessage  `json:"error,omitempty"`
-}
-
-func newPostResponseWriter(w io.Writer, hookForID func(acp.SessionId) func()) *postResponseWriter {
-	return &postResponseWriter{w: w, hookForID: hookForID, lifecycle: map[string]postLifecycleRequest{}}
-}
-
-func (w *postResponseWriter) observeRequestLine(line []byte) {
-	target, ok := postLifecycleRequestFromLine(line)
-	if !ok {
-		return
-	}
-	key, _ := jsonRPCIDKey(target.id)
-
-	w.mu.Lock()
-	w.lifecycle[key] = target.request
-	w.mu.Unlock()
-}
-
-func (w *postResponseWriter) Write(p []byte) (int, error) {
-	n, err := w.w.Write(p)
-	if err != nil {
-		return n, err
-	}
-	for _, hook := range w.hooksForResponseLine(p) {
-		if hook != nil {
-			go hook()
-		}
-	}
-	return n, nil
-}
-
-type postLifecycleLineTarget struct {
-	id      json.RawMessage
-	request postLifecycleRequest
-}
-
-func postLifecycleRequestFromLine(line []byte) (postLifecycleLineTarget, bool) {
-	var msg jsonRPCWireMessage
-	if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil || msg.ID == nil || msg.Method == "" {
-		return postLifecycleLineTarget{}, false
-	}
-	request, ok := postLifecycleRequestFromMessage(msg.Method, msg.Params)
-	if !ok {
-		return postLifecycleLineTarget{}, false
-	}
-	return postLifecycleLineTarget{id: *msg.ID, request: request}, true
-}
-
-func postLifecycleRequestFromMessage(method string, params json.RawMessage) (postLifecycleRequest, bool) {
-	switch method {
-	case acp.AgentMethodSessionNew, ForkSessionMethod:
-		return postLifecycleRequest{sessionIDResult: true}, true
-	case acp.AgentMethodSessionLoad, acp.AgentMethodSessionResume:
-		var req struct {
-			SessionID acp.SessionId `json:"sessionId"`
-		}
-		if err := json.Unmarshal(params, &req); err != nil || req.SessionID == "" {
-			return postLifecycleRequest{}, false
-		}
-		return postLifecycleRequest{sessionID: req.SessionID}, true
-	default:
-		return postLifecycleRequest{}, false
-	}
-}
-
-func (w *postResponseWriter) hooksForResponseLine(line []byte) []func() {
-	if w.hookForID == nil {
-		return nil
-	}
-	var msg jsonRPCWireMessage
-	if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil || msg.ID == nil || msg.Method != "" {
-		return nil
-	}
-	key, _ := jsonRPCIDKey(*msg.ID)
-
-	w.mu.Lock()
-	request, ok := w.lifecycle[key]
-	if ok {
-		delete(w.lifecycle, key)
-	}
-	w.mu.Unlock()
-	if !ok || len(msg.Error) > 0 || len(msg.Result) == 0 {
-		return nil
-	}
-
-	sessionID := request.sessionID
-	if request.sessionIDResult {
-		var result struct {
-			SessionID acp.SessionId `json:"sessionId"`
-		}
-		if err := json.Unmarshal(msg.Result, &result); err != nil {
-			return nil
-		}
-		sessionID = result.SessionID
-	}
-	if sessionID == "" {
-		return nil
-	}
-	return []func(){w.hookForID(sessionID)}
-}
-
-func jsonRPCIDKey(raw json.RawMessage) (string, bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return "", false
-	}
-	var compacted bytes.Buffer
-	if err := json.Compact(&compacted, trimmed); err != nil {
-		return "", false
-	}
-	return compacted.String(), true
 }
 
 func localResponse[Req any, ReqPtr localAgentParams[Req], Resp any](

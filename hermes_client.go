@@ -32,8 +32,6 @@ type hermesClient interface {
 	GetSession(context.Context, string) (nativeSession, error)
 	ListSessions(context.Context, string) ([]nativeSession, error)
 	DeleteSession(context.Context, string) error
-	Commands(context.Context) ([]nativeCommand, error)
-	RunCommand(context.Context, string, hermesCommandRequest) (nativeMessage, error)
 	SendMessage(context.Context, string, hermesMessageRequest) (nativeMessage, error)
 	Messages(context.Context, string) ([]nativeMessage, error)
 	Abort(context.Context, string) error
@@ -190,17 +188,6 @@ type nativeAgent struct {
 	Mode        string `json:"mode"`
 }
 
-type nativeCommand struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Agent       string   `json:"agent,omitempty"`
-	Model       string   `json:"model,omitempty"`
-	Source      string   `json:"source,omitempty"`
-	Template    any      `json:"template,omitempty"`
-	Subtask     bool     `json:"subtask,omitempty"`
-	Hints       []string `json:"hints"`
-}
-
 type hermesEvent struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`
@@ -315,15 +302,6 @@ type hermesMessageRequest struct {
 	Agent     string               `json:"agent,omitempty"`
 	NoReply   bool                 `json:"noReply,omitempty"`
 	Parts     []map[string]any     `json:"parts"`
-}
-
-type hermesCommandRequest struct {
-	MessageID string           `json:"messageID,omitempty"`
-	Agent     string           `json:"agent,omitempty"`
-	Model     string           `json:"model,omitempty"`
-	Command   string           `json:"command"`
-	Arguments string           `json:"arguments"`
-	Parts     []map[string]any `json:"parts,omitempty"`
 }
 
 type hermesModelSelector struct {
@@ -456,7 +434,11 @@ func (s *hermesServer) Close(ctx context.Context) error {
 		} else if s.gateway != nil {
 			err = s.gateway.Close(1000, "closing")
 		}
-		err = errors.Join(err, os.Remove(filepath.Join(s.xdg.State, leaseFileName)))
+		removeErr := os.Remove(filepath.Join(s.xdg.State, leaseFileName))
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		err = errors.Join(err, removeErr)
 	})
 
 	return err
@@ -532,19 +514,6 @@ func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 	}
 	s.forgetGatewaySession(id)
 	return err
-}
-
-func (s *hermesServer) Commands(ctx context.Context) ([]nativeCommand, error) {
-	_ = ctx
-	return nil, nil
-}
-
-func (s *hermesServer) RunCommand(ctx context.Context, id string, req hermesCommandRequest) (nativeMessage, error) {
-	text := "/" + req.Command
-	if strings.TrimSpace(req.Arguments) != "" {
-		text += " " + req.Arguments
-	}
-	return s.submitGatewayText(ctx, id, text)
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
@@ -942,12 +911,46 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (n
 		return nativeSession{}, err
 	}
 	result, err := s.gateway.Branch(ctx, live, "")
+	if nativehermes.IsNotFound(err) {
+		s.forgetGatewaySession(id)
+		live, err = s.ensureLiveGatewaySession(ctx, id)
+		if err != nil {
+			return nativeSession{}, err
+		}
+		result, err = s.gateway.Branch(ctx, live, "")
+	}
 	if err != nil {
 		return nativeSession{}, err
 	}
-	stored := firstNonEmpty(result.StoredSessionID, result.SessionID)
+	if result.SessionID == "" {
+		return nativeSession{}, fmt.Errorf("hermes branch response missing session_id")
+	}
+	stored := result.StoredSessionID
+	if stored == "" {
+		stored, err = s.storedSessionIDForLive(ctx, result.SessionID)
+		if err != nil {
+			return nativeSession{}, err
+		}
+	}
 	s.rememberGatewaySession(stored, result.SessionID)
 	return s.nativeSessionFromGateway(stored, "Hermes branch"), nil
+}
+
+func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
+	active, err := s.gateway.ActiveList(ctx)
+	if err != nil {
+		return "", fmt.Errorf("hermes branch active_list lookup failed: %w", err)
+	}
+	for _, item := range active.Sessions {
+		if item.SessionID != live {
+			continue
+		}
+		if item.SessionKey == "" {
+			return "", fmt.Errorf("hermes branch active_list missing session_key for live session %q", live)
+		}
+		return item.SessionKey, nil
+	}
+	return "", fmt.Errorf("hermes branch active_list missing live session %q", live)
 }
 
 func (s *hermesServer) Todos(ctx context.Context, id string) ([]nativeTodo, error) {
@@ -1007,11 +1010,6 @@ func (s *hermesServer) RejectQuestion(ctx context.Context, req questionRequest) 
 		live = req.SessionID
 	}
 	return s.gateway.ClarifyRespond(ctx, live, "")
-}
-
-func isHermesBadRequest(err error) bool {
-	var rpcErr *nativehermes.RPCError
-	return errors.As(err, &rpcErr) && (rpcErr.Code == -32602 || rpcErr.Code == 400)
 }
 
 type streamError struct {
@@ -1181,14 +1179,11 @@ func leaseMatchesProcess(path string, lease serverLease) bool {
 	if identity.StartTime != lease.ProcessStartTime {
 		return false
 	}
-	stateDir := filepath.Dir(path)
-	if identity.Env["XDG_STATE_HOME"] != stateDir {
-		return false
-	}
 	if passwordHash(identity.Env["HERMES_DASHBOARD_SESSION_TOKEN"]) != lease.TokenHash {
 		return false
 	}
-	if lease.XDGRoot != "" && filepath.Clean(lease.XDGRoot) != filepath.Clean(filepath.Dir(stateDir)) {
+	root := firstNonEmpty(lease.XDGRoot, filepath.Dir(filepath.Dir(path)))
+	if filepath.Clean(identity.Env["HERMES_HOME"]) != filepath.Clean(root) {
 		return false
 	}
 	return cmdlineLooksLikeHermesServe(identity.Cmdline)

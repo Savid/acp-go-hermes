@@ -69,7 +69,7 @@ func integrationHermesPath(t *testing.T) string {
 	}
 	resolved, err := exec.LookPath(path)
 	if err != nil {
-		t.Fatalf("find hermes CLI: %v", err)
+		t.Skipf("find hermes CLI: %v", err)
 	}
 	return resolved
 }

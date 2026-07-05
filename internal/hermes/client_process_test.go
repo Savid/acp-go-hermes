@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -250,16 +251,19 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if err := client.Call(shortBadRPC, "bad-rpc", nil, nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("bad rpc frame error = %v", err)
 	}
-	writeClient, err := Dial(ctx, gateway.url(), nil)
+	rawConn, resp, err := websocket.Dial(ctx, gateway.url(), nil)
+	if resp != nil && resp.Body != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
 	if err != nil {
-		t.Fatalf("dial write client: %v", err)
+		t.Fatalf("dial raw write client: %v", err)
 	}
-	cancelledWrite, cancelWrite := context.WithCancel(context.Background())
-	cancelWrite()
-	if err := writeClient.Call(cancelledWrite, "session.active_list", nil, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("write canceled error = %v", err)
+	_ = rawConn.CloseNow()
+	writeClient := &Client{conn: rawConn, pending: map[int64]chan rpcResponse{}}
+	if err := writeClient.Call(ctx, "session.active_list", nil, nil); err == nil {
+		t.Fatal("closed websocket write error was nil")
 	}
-	_ = writeClient.Close(websocket.StatusNormalClosure, "done")
 	shortCtx, shortCancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer shortCancel()
 	if err := client.Call(shortCtx, "hang", nil, nil); !errors.Is(err, context.DeadlineExceeded) {
@@ -318,6 +322,12 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 	if _, err := Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil); err == nil {
 		t.Fatal("Dial unexpectedly succeeded")
 	}
+	if err := (&Client{closed: true}).Call(ctx, "closed", nil, nil); err == nil {
+		t.Fatal("Call on closed client succeeded")
+	}
+	if err := (&Client{pending: map[int64]chan rpcResponse{}}).Call(ctx, "bad", map[string]float64{"inf": math.Inf(1)}, nil); err == nil {
+		t.Fatal("Call accepted unmarshalable params")
+	}
 
 	var message Message
 	if err := message.UnmarshalJSON([]byte("{")); err == nil {
@@ -327,9 +337,28 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 	if err := options.UnmarshalJSON([]byte("{")); err == nil {
 		t.Fatal("ModelOptionsResult accepted malformed JSON")
 	}
+	var active ActiveSession
+	if err := active.UnmarshalJSON([]byte(`{"id":"live-child","session_key":"stored-child","title":"Child","cwd":"/repo"}`)); err != nil ||
+		active.SessionID != "live-child" || active.SessionKey != "stored-child" {
+		t.Fatalf("ActiveSession real shape = %#v err=%v", active, err)
+	}
+	if err := active.UnmarshalJSON([]byte(`{"session_id":"live-old","session_key":"stored-old"}`)); err != nil ||
+		active.SessionID != "live-old" || active.SessionKey != "stored-old" {
+		t.Fatalf("ActiveSession legacy shape = %#v err=%v", active, err)
+	}
+	if err := active.UnmarshalJSON([]byte("{")); err == nil {
+		t.Fatal("ActiveSession accepted malformed JSON")
+	}
 	var provider Provider
 	if err := provider.UnmarshalJSON([]byte("{")); err == nil {
 		t.Fatal("Provider accepted malformed JSON")
+	}
+	if err := provider.UnmarshalJSON([]byte(`{"slug":"openrouter","name":"OpenRouter","models":["anthropic/claude-fable-5"]}`)); err != nil ||
+		provider.ID != "openrouter" || provider.Models[0].ID != "anthropic/claude-fable-5" {
+		t.Fatalf("Provider slug shape = %#v err=%v", provider, err)
+	}
+	if firstNonEmpty("", "") != "" {
+		t.Fatal("firstNonEmpty returned non-empty value for empty inputs")
 	}
 	if err := provider.UnmarshalJSON([]byte(`{"id":"bad","models":1}`)); err != nil {
 		t.Fatalf("Provider numeric models: %v", err)
@@ -352,6 +381,7 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 func TestProcessStartCloseAndHelpers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	usedConfigure := false
 	proc, err := Start(ctx, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
 		Home:           t.TempDir(),
@@ -359,15 +389,44 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 		Env:            map[string]string{"BASE_ENV": "1"},
 		Timeout:        5 * time.Second,
 		LogWriter:      io.Discard,
+		Configure: func(cmd *exec.Cmd) {
+			usedConfigure = true
+			cmd.Env = append(cmd.Env, "CONFIGURED=1")
+		},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+	if !usedConfigure {
+		t.Fatal("Configure hook was not called")
 	}
 	if proc.Client == nil || proc.Port <= 0 || proc.Token == "" || !strings.Contains(proc.StatusURL, "/api/status") {
 		t.Fatalf("process = %#v", proc)
 	}
 	if err := proc.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	resumeDomainProc, err := Start(ctx, ProcessOptions{
+		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.resume"),
+		Home:           t.TempDir(),
+		Timeout:        5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Start with resume domain probe: %v", err)
+	}
+	if err := resumeDomainProc.Close(ctx); err != nil {
+		t.Fatalf("Close resume domain proc: %v", err)
+	}
+	deleteDomainProc, err := Start(ctx, ProcessOptions{
+		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.delete"),
+		Home:           t.TempDir(),
+		Timeout:        5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Start with delete domain probe: %v", err)
+	}
+	if err := deleteDomainProc.Close(ctx); err != nil {
+		t.Fatalf("Close delete domain proc: %v", err)
 	}
 	if err := (&Process{}).Close(ctx); err != nil {
 		t.Fatalf("empty Close: %v", err)
@@ -381,26 +440,43 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	if !IsStateDB("/tmp/state.db") || !IsStateDB("/tmp/state.db-wal") || !IsStateDB("/tmp/state.db-shm") || IsStateDB("/tmp/other.db") {
 		t.Fatal("IsStateDB mismatch")
 	}
+	if compareVersions("1.2.3", "1.2.2") <= 0 || compareVersions("1.2.3", "1.2.3") != 0 {
+		t.Fatal("compareVersions mismatch")
+	}
+	markExecutableProbed("already-probed")
+	if needed, err := ensureExecutableVersion(ctx, "already-probed"); err != nil || needed {
+		t.Fatalf("cached executable probe needed=%v err=%v", needed, err)
+	}
+	if err := methodPresent("domain.method", &RPCError{Code: 4001, Message: "domain"}); err != nil {
+		t.Fatalf("methodPresent rejected domain RPC error: %v", err)
+	}
+	if err := methodPresent("missing.method", &RPCError{Code: -32601, Message: "missing"}); err == nil {
+		t.Fatal("methodPresent accepted missing method")
+	}
+	if err := methodPresent("broken.method", errors.New("broken")); err == nil {
+		t.Fatal("methodPresent accepted ordinary error")
+	}
 
 	restoreProcessSeams(t)
-	usedConfigure := false
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "hermes" {
 			t.Fatalf("default executable = %q", name)
 		}
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
 	}
-	if _, err := Start(ctx, ProcessOptions{
-		Home: t.TempDir(),
-		Configure: func(cmd *exec.Cmd) {
-			usedConfigure = true
-			cmd.Env = append(cmd.Env, "CONFIGURED=1")
-		},
-	}); err == nil {
+	if _, err := Start(ctx, ProcessOptions{Home: t.TempDir()}); err == nil {
 		t.Fatal("Start default executable seam unexpectedly succeeded")
 	}
-	if !usedConfigure {
-		t.Fatal("Configure hook was not called")
+
+	restoreProcessSeams(t)
+	commandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		if len(args) == 1 && args[0] == "--version" {
+			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.18.0\\n'")
+		}
+		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: "start-fails", Home: t.TempDir()}); err == nil {
+		t.Fatal("Start command failure was ignored")
 	}
 }
 
@@ -416,14 +492,50 @@ func TestProcessFaultBranches(t *testing.T) {
 	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: fileHome}); err == nil {
 		t.Fatal("file home unexpectedly started")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeStatusOnly), Home: t.TempDir(), Timeout: 300 * time.Millisecond}); err == nil {
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeStatusOnly), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
 		t.Fatal("missing websocket unexpectedly passed")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeNoGatewayReady), Home: t.TempDir(), Timeout: 300 * time.Millisecond}); err == nil {
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeNoGatewayReady), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
 		t.Fatal("missing gateway.ready unexpectedly passed")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadStatus), Home: t.TempDir(), Timeout: 300 * time.Millisecond}); err == nil {
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadStatus), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
 		t.Fatal("bad status unexpectedly passed")
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOldVersion), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+		!strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("old version error = %v", err)
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadVersion), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+		!strings.Contains(err.Error(), "missing semantic version") {
+		t.Fatalf("bad version error = %v", err)
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeMissingMethod), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+		!strings.Contains(err.Error(), "model.options") {
+		t.Fatalf("missing method probe error = %v", err)
+	}
+	for _, tt := range []struct {
+		mode string
+		want string
+	}{
+		{"probe-error:session.create", "session.create"},
+		{"probe-empty:session.create", "session.create schema drift"},
+		{"probe-error:session.resume", "session.resume"},
+		{"probe-empty:session.resume", "session.resume schema drift"},
+		{"probe-error:session.active_list", "session.active_list"},
+		{"probe-empty:session.active_list", "session.active_list schema drift"},
+		{"probe-empty:model.options", "model.options schema drift"},
+		{"probe-error:prompt.submit", "prompt.submit"},
+		{"probe-error:approval.respond", "approval.respond"},
+		{"probe-error:clarify.respond", "clarify.respond"},
+		{"probe-error:session.close", "session.close"},
+		{"probe-error:session.delete", "session.delete"},
+	} {
+		t.Run(tt.mode, func(t *testing.T) {
+			if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, tt.mode), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+				!strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("probe mode %s error = %v", tt.mode, err)
+			}
+		})
 	}
 
 	restoreProcessSeams(t)
@@ -487,6 +599,15 @@ func TestProcessFaultBranches(t *testing.T) {
 		!strings.Contains(err.Error(), "status check failed") {
 		t.Fatalf("waitReady connection error = %v", err)
 	}
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer statusServer.Close()
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelStatus()
+	if err := (&Process{StatusURL: statusServer.URL}).waitReady(statusCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitReady bad status error = %v", err)
+	}
 
 	closedEvents := &Client{events: make(chan Event), errs: make(chan error)}
 	close(closedEvents.events)
@@ -508,30 +629,40 @@ func TestProcessFaultBranches(t *testing.T) {
 }
 
 func TestProcessCloseFaultBranches(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
-	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-		}
-	})
 	restoreProcessSeams(t)
 	waitProcessCommand = func(*exec.Cmd) error {
 		select {}
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := (&Process{Cmd: cmd}).Close(cancelled); !errors.Is(err, context.Canceled) {
+	if err := (&Process{Cmd: fakeStartedCommand()}).Close(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("context Close error = %v", err)
 	}
 
-	cmd = exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep timeout: %v", err)
+	restoreProcessSeams(t)
+	releaseWait := make(chan struct{})
+	waitProcessCommand = func(*exec.Cmd) error {
+		<-releaseWait
+		return nil
 	}
+	firstTimerFired := false
+	after = func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		if firstTimerFired {
+			return ch
+		}
+		firstTimerFired = true
+		ch <- time.Now()
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			close(releaseWait)
+		}()
+		return ch
+	}
+	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("kill-wait Close error = %v", err)
+	}
+
 	restoreProcessSeams(t)
 	waitProcessCommand = func(*exec.Cmd) error {
 		select {}
@@ -541,9 +672,33 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 		ch <- time.Now()
 		return ch
 	}
-	if err := (&Process{Cmd: cmd}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
+	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
 		t.Fatalf("timeout Close error = %v", err)
 	}
+
+	restoreProcessSeams(t)
+	waitProcessCommand = func(*exec.Cmd) error {
+		select {}
+	}
+	innerCtx, innerCancel := context.WithCancel(context.Background())
+	calls := 0
+	after = func(time.Duration) <-chan time.Time {
+		calls++
+		ch := make(chan time.Time, 1)
+		if calls == 1 {
+			ch <- time.Now()
+			return ch
+		}
+		innerCancel()
+		return ch
+	}
+	if err := (&Process{Cmd: fakeStartedCommand()}).Close(innerCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("inner-cancel Close error = %v", err)
+	}
+}
+
+func fakeStartedCommand() *exec.Cmd {
+	return &exec.Cmd{Process: &os.Process{Pid: 999999}}
 }
 
 const (
@@ -551,6 +706,9 @@ const (
 	fakeProcessModeStatusOnly     = "status-only"
 	fakeProcessModeNoGatewayReady = "no-ready"
 	fakeProcessModeBadStatus      = "bad-status"
+	fakeProcessModeOldVersion     = "old-version"
+	fakeProcessModeBadVersion     = "bad-version"
+	fakeProcessModeMissingMethod  = "missing-method"
 )
 
 func TestFakeHermesProcessHelper(t *testing.T) {
@@ -579,6 +737,20 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 }
 
 func runFakeHermesProcess(args []string, mode string) error {
+	for _, arg := range args {
+		if arg == "--version" {
+			switch mode {
+			case fakeProcessModeOldVersion:
+				_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.17.9 (test)")
+				return nil
+			case fakeProcessModeBadVersion:
+				_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent test build")
+				return nil
+			}
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (test)")
+			return nil
+		}
+	}
 	port := ""
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {
@@ -609,7 +781,38 @@ func runFakeHermesProcess(args []string, mode string) error {
 				data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": Event{Type: "gateway.ready"}})
 				_ = conn.Write(r.Context(), websocket.MessageText, data)
 			}
-			<-r.Context().Done()
+			for {
+				typ, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				if typ != websocket.MessageText {
+					continue
+				}
+				var req struct {
+					ID     int64           `json:"id"`
+					Method string          `json:"method"`
+					Params json.RawMessage `json:"params"`
+				}
+				if err := json.Unmarshal(data, &req); err != nil {
+					return
+				}
+				params := map[string]any{}
+				_ = json.Unmarshal(req.Params, &params)
+				var response []byte
+				if target, ok := strings.CutPrefix(mode, "probe-error:"); ok && req.Method == target {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				} else if target, ok := strings.CutPrefix(mode, "probe-domain:"); ok && req.Method == target {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 4007, "message": "session not found"}})
+				} else if target, ok := strings.CutPrefix(mode, "probe-empty:"); ok && req.Method == target {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+				} else if mode == fakeProcessModeMissingMethod && req.Method == "model.options" {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				} else {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": resultForMethod(req.Method, params)})
+				}
+				_ = conn.Write(r.Context(), websocket.MessageText, response)
+			}
 		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -628,6 +831,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldAfter := after
 	oldHTTPClient := newStatusHTTPClient
 	oldWait := waitProcessCommand
+	oldProbed := cloneExecutableProbeCache()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
 		listenTCP = oldListenTCP
@@ -639,6 +843,9 @@ func restoreProcessSeams(t *testing.T) {
 		after = oldAfter
 		newStatusHTTPClient = oldHTTPClient
 		waitProcessCommand = oldWait
+		executableProbeMu.Lock()
+		executableProbed = oldProbed
+		executableProbeMu.Unlock()
 	})
 }
 
@@ -653,6 +860,19 @@ func resetProcessSeams() {
 	after = time.After
 	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	executableProbeMu.Lock()
+	executableProbed = map[string]struct{}{}
+	executableProbeMu.Unlock()
+}
+
+func cloneExecutableProbeCache() map[string]struct{} {
+	executableProbeMu.Lock()
+	defer executableProbeMu.Unlock()
+	out := make(map[string]struct{}, len(executableProbed))
+	for key, value := range executableProbed {
+		out[key] = value
+	}
+	return out
 }
 
 type errorReader struct {

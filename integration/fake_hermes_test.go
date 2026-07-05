@@ -74,10 +74,13 @@ func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
 	waitOrphan := make(chan error, 1)
 	go func() { waitOrphan <- orphan.Wait() }()
 	t.Cleanup(func() {
-		if orphan.ProcessState == nil {
-			_ = orphan.Process.Kill()
-			<-waitOrphan
+		select {
+		case <-waitOrphan:
+			return
+		default:
 		}
+		_ = orphan.Process.Kill()
+		<-waitOrphan
 	})
 
 	leaseDir := filepath.Join(home, "orphan", "state")
@@ -200,6 +203,12 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 }
 
 func runFakeHermesServer(args []string, mode string) error {
+	for _, arg := range args {
+		if arg == "--version" {
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (fake)")
+			return nil
+		}
+	}
 	port := ""
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {
@@ -297,6 +306,10 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 		}}})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
+		if strings.HasPrefix(live, "__acp_go_hermes_missing_probe__") {
+			writeFakeGatewayError(ctx, conn, id, 4001, "session not found")
+			return
+		}
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
 		writeFakeGatewayEvent(ctx, conn, "message.delta", live, map[string]any{"text": "fake response"})
 		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{"usage": map[string]any{"total_tokens": 1}})

@@ -92,7 +92,7 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 				case strings.HasSuffix(path, "/cmdline"):
 					return []byte("hermes\x00serve\x00"), nil
 				case strings.HasSuffix(path, "/environ"):
-					return []byte("XDG_STATE_HOME=/tmp/state\x00"), nil
+					return []byte("HERMES_HOME=/tmp/home\x00"), nil
 				default:
 					return nil, nil
 				}
@@ -108,7 +108,7 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || identity.StartTime != "123" || len(identity.Cmdline) != 2 || identity.Env["XDG_STATE_HOME"] != "/tmp/state" {
+			if err != nil || identity.StartTime != "123" || len(identity.Cmdline) != 2 || identity.Env["HERMES_HOME"] != "/tmp/home" {
 				t.Fatalf("identity=%#v err=%v", identity, err)
 			}
 		})
@@ -198,7 +198,7 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 			StartTime: "start",
 			Cmdline:   []string{"hermes", "serve"},
 			Env: map[string]string{
-				"XDG_STATE_HOME":                 xdg.State,
+				"HERMES_HOME":                    xdg.Root,
 				"HERMES_DASHBOARD_SESSION_TOKEN": "secret",
 			},
 		}, nil

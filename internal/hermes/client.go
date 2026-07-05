@@ -286,6 +286,24 @@ type ActiveSession struct {
 	Cwd        string `json:"cwd"`
 }
 
+func (s *ActiveSession) UnmarshalJSON(data []byte) error {
+	var object struct {
+		ID         string `json:"id"`
+		SessionID  string `json:"session_id"`
+		SessionKey string `json:"session_key"`
+		Title      string `json:"title"`
+		Cwd        string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	s.SessionID = firstNonEmpty(object.SessionID, object.ID)
+	s.SessionKey = object.SessionKey
+	s.Title = object.Title
+	s.Cwd = object.Cwd
+	return nil
+}
+
 type ModelOptionsResult struct {
 	Providers []Provider      `json:"providers"`
 	Raw       json.RawMessage `json:"-"`
@@ -304,6 +322,7 @@ func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 
 type Provider struct {
 	ID     string          `json:"id"`
+	Slug   string          `json:"slug"`
 	Name   string          `json:"name"`
 	Models []ProviderModel `json:"models"`
 	Raw    json.RawMessage `json:"-"`
@@ -312,13 +331,15 @@ type Provider struct {
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	var object struct {
 		ID     string          `json:"id"`
+		Slug   string          `json:"slug"`
 		Name   string          `json:"name"`
 		Models json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
 	}
-	p.ID = object.ID
+	p.ID = firstNonEmpty(object.ID, object.Slug)
+	p.Slug = object.Slug
 	p.Name = object.Name
 	if len(object.Models) > 0 {
 		switch object.Models[0] {
@@ -441,4 +462,13 @@ func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelO
 	var out ModelOptionsResult
 	err := c.Call(ctx, "model.options", map[string]any{"session_id": liveSessionID}, &out)
 	return out, err
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

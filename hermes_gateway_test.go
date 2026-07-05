@@ -36,6 +36,11 @@ type fakeGatewayServer struct {
 	failMethods      map[string]struct{}
 	promptEvents     *[]nativehermes.Event
 	malformedAfter   map[string]struct{}
+	branchNotFound   int
+	branchCreated    bool
+	branchNoSession  bool
+	branchNoActive   bool
+	branchNoKey      bool
 }
 
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
@@ -125,12 +130,30 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			"stored_session_id": stored,
 		})
 	case "session.active_list":
-		s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{
-			"session_id":  "live-1",
+		s.mu.Lock()
+		branchCreated := s.branchCreated
+		branchNoActive := s.branchNoActive
+		branchNoKey := s.branchNoKey
+		s.mu.Unlock()
+		sessions := []map[string]any{{
+			"id":          "live-1",
 			"session_key": "stored-1",
 			"title":       "Listed",
 			"cwd":         "/repo",
-		}}})
+		}}
+		if branchCreated && !branchNoActive {
+			sessionKey := "stored-branch"
+			if branchNoKey {
+				sessionKey = ""
+			}
+			sessions = append(sessions, map[string]any{
+				"id":          "live-branch",
+				"session_key": sessionKey,
+				"title":       "branch",
+				"cwd":         "/repo",
+			})
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
 	case "session.delete":
 		sessionID, _ := params["session_id"].(string)
 		if sessionID == "missing" {
@@ -152,9 +175,31 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			{"role": "assistant", "content": map[string]any{"text": "history"}},
 		}})
 	case "session.branch":
+		s.mu.Lock()
+		branchNotFound := s.branchNotFound > 0
+		if branchNotFound {
+			s.branchNotFound--
+		}
+		s.mu.Unlock()
+		if branchNotFound {
+			s.writeError(ctx, conn, id, 4007, "not found")
+			return
+		}
+		s.mu.Lock()
+		s.branchCreated = true
+		branchNoSession := s.branchNoSession
+		s.mu.Unlock()
+		if branchNoSession {
+			s.writeResult(ctx, conn, id, map[string]any{
+				"title":  "branch",
+				"parent": "stored-1",
+			})
+			return
+		}
 		s.writeResult(ctx, conn, id, map[string]any{
-			"session_id":        "live-branch",
-			"stored_session_id": "stored-branch",
+			"session_id": "live-branch",
+			"title":      "branch",
+			"parent":     "stored-1",
 		})
 	case "model.options":
 		s.writeResult(ctx, conn, id, map[string]any{"providers": []map[string]any{
@@ -261,6 +306,16 @@ func (s *fakeGatewayServer) setMalformedAfter(method string) {
 	s.mu.Unlock()
 }
 
+func (s *fakeGatewayServer) setBranchNotFoundOnce() {
+	s.setBranchNotFoundCount(1)
+}
+
+func (s *fakeGatewayServer) setBranchNotFoundCount(count int) {
+	s.mu.Lock()
+	s.branchNotFound = count
+	s.mu.Unlock()
+}
+
 func (s *fakeGatewayServer) setPromptEvents(events ...nativehermes.Event) {
 	s.mu.Lock()
 	copied := append([]nativehermes.Event(nil), events...)
@@ -339,9 +394,6 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if live := server.liveSessionID("stored-1"); live != "" {
 		t.Fatalf("deleted session still mapped to %q", live)
 	}
-	if commands, err := server.Commands(ctx); err != nil || commands != nil {
-		t.Fatalf("Commands = %#v err=%v", commands, err)
-	}
 	if agents, err := server.Agents(ctx); err != nil || agents != nil {
 		t.Fatalf("Agents = %#v err=%v", agents, err)
 	}
@@ -388,9 +440,6 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if err := server.Abort(ctx, "stored-1"); err != nil {
 		t.Fatalf("Abort: %v", err)
 	}
-	if _, err := server.RunCommand(ctx, "stored-1", hermesCommandRequest{Command: "review", Arguments: "arg"}); err != nil {
-		t.Fatalf("RunCommand: %v", err)
-	}
 	history, err := server.Messages(ctx, "stored-1")
 	if err != nil || len(history) != 2 || history[1].Parts[0].Text != "history" {
 		t.Fatalf("Messages = %#v err=%v", history, err)
@@ -398,6 +447,15 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	fork, err := server.Fork(ctx, "stored-1", "ignored-message")
 	if err != nil || fork.ID != "stored-branch" {
 		t.Fatalf("Fork = %#v err=%v", fork, err)
+	}
+	fake.setBranchNotFoundOnce()
+	retryFork, err := server.Fork(ctx, "stored-1", "")
+	if err != nil || retryFork.ID != "stored-branch" {
+		t.Fatalf("Fork retry = %#v err=%v", retryFork, err)
+	}
+	fake.setBranchNotFoundCount(2)
+	if _, err := server.Fork(ctx, "stored-1", ""); err == nil {
+		t.Fatal("Fork succeeded after repeated live session not found")
 	}
 	providers, err := server.ConfigProviders(ctx)
 	if err != nil || len(providers.Providers) != 3 || providers.Providers[0].Models["gpt-test"].Limit["context"] != 128000 {
@@ -447,9 +505,6 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	tokens := gatewayUsageTokens(json.RawMessage(`{"usage":{"total":1,"input":2,"output":3,"reasoning":4}}`))
 	if tokens.Total != 1 || tokens.Input != 2 || tokens.Output != 3 || tokens.Reasoning != 4 {
 		t.Fatalf("fallback usage tokens = %#v", tokens)
-	}
-	if !isHermesBadRequest(&nativehermes.RPCError{Code: -32602, Message: "bad"}) || isHermesBadRequest(errors.New("bad")) {
-		t.Fatal("bad request detection mismatch")
 	}
 	if err := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Finish: "error"}}); err == nil {
 		t.Fatal("assistant finish error accepted")
@@ -682,6 +737,61 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 		})
 	}
 
+	t.Run("fork retry resume error", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setBranchNotFoundOnce()
+		fake.setFail("session.resume")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		server.rememberGatewaySession("stored", "live-stored")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := server.Fork(ctx, "stored", ""); err == nil {
+			t.Fatal("fork retry resume error was nil")
+		}
+	})
+
+	for _, tt := range []struct {
+		name      string
+		configure func(*fakeGatewayServer)
+	}{
+		{
+			name: "missing branch session id",
+			configure: func(fake *fakeGatewayServer) {
+				fake.branchNoSession = true
+			},
+		},
+		{
+			name: "missing branch active session",
+			configure: func(fake *fakeGatewayServer) {
+				fake.branchNoActive = true
+			},
+		},
+		{
+			name: "branch active list failure",
+			configure: func(fake *fakeGatewayServer) {
+				fake.setFail("session.active_list")
+			},
+		},
+		{
+			name: "missing branch stored key",
+			configure: func(fake *fakeGatewayServer) {
+				fake.branchNoKey = true
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			tt.configure(fake)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			server.rememberGatewaySession("stored", "live-stored")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := server.Fork(ctx, "stored", ""); err == nil {
+				t.Fatal("fork schema drift error was nil")
+			}
+		})
+	}
+
 	t.Run("event stream closed mid turn", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
 		fake.setPromptEvents()
@@ -875,7 +985,7 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 		StartTime: "start",
 		Cmdline:   []string{"/usr/bin/hermes", "serve"},
 		Env: map[string]string{
-			"XDG_STATE_HOME":                 xdg.State,
+			"HERMES_HOME":                    xdg.Root,
 			"HERMES_DASHBOARD_SESSION_TOKEN": "token",
 		},
 	}
@@ -911,8 +1021,8 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	}{
 		{name: "inspect error", identity: baseIdentity, lease: baseLease, err: errors.New("inspect failed")},
 		{name: "start mismatch", identity: processIdentity{StartTime: "other", Cmdline: baseIdentity.Cmdline, Env: baseIdentity.Env}, lease: baseLease},
-		{name: "state mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"XDG_STATE_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
-		{name: "token mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"XDG_STATE_HOME": xdg.State, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
+		{name: "home mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
+		{name: "token mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
 		{name: "root mismatch", identity: baseIdentity, lease: serverLease{PID: baseLease.PID, TokenHash: baseLease.TokenHash, XDGRoot: t.TempDir(), ProcessStartTime: baseLease.ProcessStartTime}},
 		{name: "cmdline mismatch", identity: processIdentity{StartTime: "start", Cmdline: []string{"node"}, Env: baseIdentity.Env}, lease: baseLease},
 	} {
@@ -985,6 +1095,12 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string) string {
 }
 
 func runFakeHermesGatewayProcess(args []string, mode string) error {
+	for _, arg := range args {
+		if arg == "--version" {
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (fake)")
+			return nil
+		}
+	}
 	port := ""
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {

@@ -352,7 +352,7 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	if requestError(errors.New("boom")).Code != -32603 {
 		t.Fatal("generic error did not map to internal error")
 	}
-	gate := newConnectionInputGate(strings.NewReader("x"), nil)
+	gate := newConnectionInputGate(strings.NewReader("x"))
 	gate.open()
 	buf := make([]byte, 1)
 	if n, err := gate.Read(buf); n != 1 || err != nil || string(buf) != "x" {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -122,7 +121,6 @@ func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer) 
 	}
 
 	conn := acp.NewClientSideConnection(&client{output: output}, stdin, agentStdout)
-	conn.SetLogger(slog.New(slog.DiscardHandler))
 
 	return &startedAgent{conn: conn, close: func() { _ = stdin.Close() }, wait: cmd.Wait}, nil
 }

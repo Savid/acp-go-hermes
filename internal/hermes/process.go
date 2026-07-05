@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -30,6 +33,9 @@ var (
 	after               = time.After
 	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
 	waitProcessCommand  = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	executableProbeMu   sync.Mutex
+	executableProbed    = map[string]struct{}{}
+	versionPattern      = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
 )
 
 type ProcessOptions struct {
@@ -71,6 +77,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		}
 	}
 	if err := mkdirAll(home, 0o700); err != nil {
+		return nil, err
+	}
+	versionCtx, versionCancel := context.WithTimeout(ctx, timeout)
+	probeNeeded, err := ensureExecutableVersion(versionCtx, executable)
+	versionCancel()
+	if err != nil {
 		return nil, err
 	}
 	port, err := freePort()
@@ -137,29 +149,164 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		_ = process.Close(context.Background())
 		return nil, err
 	}
+	if probeNeeded {
+		if err := process.probeGatewayMethods(readyCtx); err != nil {
+			_ = process.Close(context.Background())
+			return nil, err
+		}
+		markExecutableProbed(executable)
+	}
 	return process, nil
+}
+
+func ensureExecutableVersion(ctx context.Context, executable string) (bool, error) {
+	executableProbeMu.Lock()
+	_, ok := executableProbed[executable]
+	executableProbeMu.Unlock()
+	if ok {
+		return false, nil
+	}
+	cmd := commandContext(ctx, executable, "--version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("hermes --version probe failed: %w: %s", err, string(out))
+	}
+	version, ok := parseVersion(string(out))
+	if !ok {
+		return false, fmt.Errorf("hermes --version output missing semantic version: %s", string(out))
+	}
+	if compareVersions(version, MinimumVersion) < 0 {
+		return false, fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
+	}
+	return true, nil
+}
+
+func markExecutableProbed(executable string) {
+	executableProbeMu.Lock()
+	executableProbed[executable] = struct{}{}
+	executableProbeMu.Unlock()
+}
+
+func parseVersion(output string) (string, bool) {
+	match := versionPattern.FindStringSubmatch(output)
+	if len(match) != 4 {
+		return "", false
+	}
+	return match[1] + "." + match[2] + "." + match[3], true
+}
+
+func compareVersions(left string, right string) int {
+	l := versionParts(left)
+	r := versionParts(right)
+	for i := range l {
+		switch {
+		case l[i] < r[i]:
+			return -1
+		case l[i] > r[i]:
+			return 1
+		}
+	}
+	return 0
+}
+
+func versionParts(value string) [3]int {
+	var out [3]int
+	parts := regexp.MustCompile(`\.`).Split(value, 3)
+	for i := 0; i < len(parts) && i < len(out); i++ {
+		n, _ := strconv.Atoi(parts[i])
+		out[i] = n
+	}
+	return out
+}
+
+func (p *Process) probeGatewayMethods(ctx context.Context) error {
+	created, err := p.Client.CreateSession(ctx, map[string]any{"cwd": p.Home, "title": "acp-go-hermes startup probe"})
+	if err != nil {
+		return fmt.Errorf("hermes startup probe session.create failed: %w", err)
+	}
+	if created.SessionID == "" || created.StoredSessionID == "" {
+		return fmt.Errorf("hermes startup probe session.create schema drift")
+	}
+	if resumed, err := p.Client.ResumeSession(ctx, created.StoredSessionID, map[string]any{}); err != nil {
+		if err := methodPresent("session.resume", err); err != nil {
+			return err
+		}
+	} else if resumed.SessionID == "" || resumed.StoredSessionID == "" {
+		return fmt.Errorf("hermes startup probe session.resume schema drift")
+	}
+	if active, err := p.Client.ActiveList(ctx); err != nil {
+		return fmt.Errorf("hermes startup probe session.active_list failed: %w", err)
+	} else if active.Sessions == nil {
+		return fmt.Errorf("hermes startup probe session.active_list schema drift")
+	}
+	live := created.SessionID
+	if models, err := p.Client.ModelOptions(ctx, live); err != nil {
+		return fmt.Errorf("hermes startup probe model.options failed: %w", err)
+	} else if models.Providers == nil {
+		return fmt.Errorf("hermes startup probe model.options schema drift")
+	}
+	if err := methodPresent("prompt.submit", p.Client.SubmitPrompt(ctx, "__acp_go_hermes_missing_probe__", "")); err != nil {
+		return err
+	}
+	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, live, "deny", false)); err != nil {
+		return err
+	}
+	if err := methodPresent("clarify.respond", p.Client.ClarifyRespond(ctx, live, "")); err != nil {
+		return err
+	}
+	if err := p.Client.CloseSession(ctx, live); err != nil {
+		return fmt.Errorf("hermes startup probe session.close failed: %w", err)
+	}
+	if err := p.Client.DeleteSession(ctx, created.StoredSessionID); err != nil {
+		if err := methodPresent("session.delete", err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func methodPresent(method string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code != -32601 && rpcErr.Code >= 4000 {
+		return nil
+	}
+	return fmt.Errorf("hermes startup probe %s failed: %w", method, err)
 }
 
 func (p *Process) Close(ctx context.Context) error {
 	if p.Client != nil {
 		_ = p.Client.Close(websocket.StatusNormalClosure, "closing")
 	}
-	if p.cancel != nil {
-		p.cancel()
-	}
+	defer func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
+	}()
 	if p.Cmd == nil || p.Cmd.Process == nil {
 		return nil
 	}
+	afterFn := after
+	waitFn := waitProcessCommand
 	done := make(chan error, 1)
-	go func() { done <- waitProcessCommand(p.Cmd) }()
+	go func() { done <- waitFn(p.Cmd) }()
+	_ = terminateProcess(p.Cmd)
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		_ = p.Cmd.Process.Kill()
+		_ = killProcess(p.Cmd)
 		return ctx.Err()
-	case <-after(5 * time.Second):
-		_ = p.Cmd.Process.Kill()
+	case <-afterFn(5 * time.Second):
+		_ = killProcess(p.Cmd)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-afterFn(time.Second):
+		}
 		return fmt.Errorf("hermes serve did not exit")
 	}
 }

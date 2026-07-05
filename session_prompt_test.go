@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
@@ -1392,449 +1391,39 @@ func TestPromptSendsNativeImageFileParts(t *testing.T) {
 	}
 }
 
-func TestSlashCommandRefreshAdvertisesNativeListWithSanitizer(t *testing.T) {
-	ctx := context.Background()
-	client := newFakeHermesClient()
-	client.commands = []nativeCommand{
-		{Name: "init", Description: "Initialize", Source: "command", Template: "must not leak", Hints: []string{"$ARGUMENTS", "$1"}},
-		{Name: "mcp:server:prompt", Source: "mcp"},
-		{Name: ""},
-		{Name: "/bad"},
-		{Name: "bad/name"},
-		{Name: "bad name"},
-		{Name: "bad\nname"},
-		{Name: "bad\u0007name"},
-		{Name: "bad\u200dname"},
-		{Name: string([]byte{0xff})},
-	}
-	conn := newRecordingAgentClient()
-	agent := NewAgent()
-	agent.setAgentClient(conn)
-	session := testSession(agent, client)
-
-	if err := session.refreshCommands(ctx); err != nil {
-		t.Fatalf("refreshCommands: %v", err)
-	}
-	if conn.updateCount() != 1 {
-		t.Fatalf("updates = %#v", conn.updates)
-	}
-	update := conn.updates[0].Update.AvailableCommandsUpdate
-	if update == nil {
-		t.Fatalf("update = %#v", conn.updates[0].Update)
-	}
-	if got := commandNames(update.AvailableCommands); !reflect.DeepEqual(got, []string{"init", "mcp:server:prompt"}) {
-		t.Fatalf("advertised names = %#v", got)
-	}
-	if update.AvailableCommands[0].Input == nil ||
-		update.AvailableCommands[0].Input.Unstructured == nil ||
-		update.AvailableCommands[0].Input.Unstructured.Hint != "$ARGUMENTS $1" {
-		t.Fatalf("hint = %#v", update.AvailableCommands[0].Input)
-	}
-	if update.AvailableCommands[1].Description != "Hermes mcp command" {
-		t.Fatalf("synthesized description = %q", update.AvailableCommands[1].Description)
-	}
-	raw, err := json.Marshal(conn.updates)
-	if err != nil {
-		t.Fatalf("marshal updates: %v", err)
-	}
-	if strings.Contains(string(raw), "template") || strings.Contains(string(raw), "must not leak") {
-		t.Fatalf("template leaked in update: %s", raw)
-	}
-	if _, ok := session.cachedCommand("mcp:server:prompt"); !ok {
-		t.Fatal("colon command was not routable")
-	}
-	for _, invalid := range []string{"", "/bad", "bad/name", "bad name", "bad\nname", "bad\u0007name", "bad\u200dname", string([]byte{0xff})} {
-		if _, ok := session.cachedCommand(invalid); ok {
-			t.Fatalf("invalid command %q was routable", invalid)
-		}
-	}
-	if got := availableCommandFromNative(nativeCommand{Name: "native"}).Description; got != "Hermes command" {
-		t.Fatalf("empty source description = %q", got)
-	}
-	cloned := cloneAvailableCommands([]acp.AvailableCommand{{Name: "meta", Description: "Meta", Meta: map[string]any{"k": "v"}}})
-	cloned[0].Meta["k"] = "changed"
-	if cloned[0].Meta["k"] == "v" {
-		t.Fatal("metadata clone did not return mutable copy")
-	}
-}
-
-func TestSlashCommandRefreshEmptyClearAndFailureKeepsCache(t *testing.T) {
-	ctx := context.Background()
+func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	agent := NewAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-
-	if err := session.refreshCommands(ctx); err != nil {
-		t.Fatalf("initial refresh: %v", err)
-	}
-	if conn.updateCount() != 0 {
-		t.Fatalf("initial empty update emitted: %#v", conn.updates)
-	}
-
-	client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-	if err := session.refreshCommands(ctx); err != nil {
-		t.Fatalf("non-empty refresh: %v", err)
-	}
-	if conn.updateCount() != 1 {
-		t.Fatalf("updates after non-empty = %#v", conn.updates)
-	}
-	if err := session.refreshCommands(ctx); err != nil {
-		t.Fatalf("unchanged refresh: %v", err)
-	}
-	if conn.updateCount() != 1 {
-		t.Fatalf("unchanged refresh emitted: %#v", conn.updates)
+	messageID := "msg-user"
+	client.sendMessage = func(_ context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
+		if id != "native-1" {
+			t.Fatalf("native id = %q", id)
+		}
+		if req.MessageID != messageID || len(req.Parts) != 1 || req.Parts[0]["text"] != "/review inspect this" {
+			t.Fatalf("plain slash request = %#v", req)
+		}
+		return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 	}
 
-	client.commandsErr = errors.New("commands failed")
-	if err := session.refreshCommands(ctx); err == nil {
-		t.Fatal("refresh failure returned nil")
-	}
-	if conn.updateCount() != 1 {
-		t.Fatalf("failed refresh emitted update: %#v", conn.updates)
-	}
-	if _, ok := session.cachedCommand("review"); !ok {
-		t.Fatal("failed refresh did not keep last good command")
-	}
-
-	client.commandsErr = nil
-	client.commands = nil
-	if err := session.refreshCommands(ctx); err != nil {
-		t.Fatalf("clear refresh: %v", err)
-	}
-	if conn.updateCount() != 2 {
-		t.Fatalf("clear update missing: %#v", conn.updates)
-	}
-	clearUpdate := conn.updates[1].Update.AvailableCommandsUpdate
-	if clearUpdate == nil || len(clearUpdate.AvailableCommands) != 0 {
-		t.Fatalf("clear update = %#v", clearUpdate)
-	}
-	wire, err := json.Marshal(conn.updates[1])
+	resp, err := session.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: session.id,
+		MessageId: &messageID,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("/review inspect this")},
+	})
 	if err != nil {
-		t.Fatalf("marshal clear update: %v", err)
+		t.Fatalf("Prompt: %v", err)
 	}
-	if !strings.Contains(string(wire), `"availableCommands":[]`) {
-		t.Fatalf("clear update JSON = %s", wire)
+	if resp.StopReason != acp.StopReasonEndTurn || resp.UserMessageId == nil || *resp.UserMessageId != messageID {
+		t.Fatalf("response = %#v", resp)
 	}
-	if strings.Contains(string(wire), `"availableCommands":null`) {
-		t.Fatalf("clear update JSON used null: %s", wire)
+	for _, notification := range conn.updates {
+		if notification.Update.AvailableCommandsUpdate != nil {
+			t.Fatalf("unexpected command update = %#v", notification)
+		}
 	}
-}
-
-func TestPromptSlashCommandRouting(t *testing.T) {
-	ctx := context.Background()
-	t.Run("exact match routes to native command", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-		agent := NewAgent()
-		session := testSession(agent, client)
-		messageID := "msg-user"
-		client.runCommand = func(_ context.Context, id string, req hermesCommandRequest) (nativeMessage, error) {
-			if id != "native-1" {
-				t.Fatalf("native id = %q", id)
-			}
-			if req.MessageID != messageID || req.Agent != "build" || req.Model != "openai/gpt-test" ||
-				req.Command != "review" || req.Arguments != " inspect this" || len(req.Parts) != 0 {
-				t.Fatalf("command request = %#v", req)
-			}
-			return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-		}
-		resp, err := session.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.id,
-			MessageId: &messageID,
-			Prompt:    []acp.ContentBlock{acp.TextBlock("/review  inspect this")},
-		})
-		if err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-		if resp.StopReason != acp.StopReasonEndTurn || resp.UserMessageId == nil || *resp.UserMessageId != messageID {
-			t.Fatalf("response = %#v", resp)
-		}
-	})
-
-	t.Run("unmatched slash and leading whitespace are plain messages", func(t *testing.T) {
-		for _, tt := range []struct {
-			name string
-			text string
-		}{
-			{name: "unmatched", text: "/missing args"},
-			{name: "escaped", text: " /review args"},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				client := newFakeHermesClient()
-				client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-				agent := NewAgent()
-				session := testSession(agent, client)
-				client.sendMessage = func(_ context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
-					if req.Parts[0]["text"] != tt.text {
-						t.Fatalf("plain text part = %#v", req.Parts)
-					}
-					return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-				}
-				if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock(tt.text)}}); err != nil {
-					t.Fatalf("Prompt: %v", err)
-				}
-			})
-		}
-	})
-
-	t.Run("refresh failure before slash prompt keeps plain path", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commandsErr = errors.New("commands failed")
-		agent := NewAgent()
-		session := testSession(agent, client)
-		client.sendMessage = func(_ context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
-			if req.Parts[0]["text"] != "/missing args" {
-				t.Fatalf("plain text part = %#v", req.Parts)
-			}
-			return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-		}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("/missing args")}}); err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	})
-
-	t.Run("pre-prompt refresh removed cached command", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "stale", Description: "Stale", Source: "command"}}
-		conn := newRecordingAgentClient()
-		agent := NewAgent()
-		agent.setAgentClient(conn)
-		session := testSession(agent, client)
-		if err := session.refreshCommands(ctx); err != nil {
-			t.Fatalf("initial refresh: %v", err)
-		}
-		if conn.updateCount() != 1 {
-			t.Fatalf("initial updates = %#v", conn.updates)
-		}
-		client.commands = nil
-		client.sendMessage = func(context.Context, string, hermesMessageRequest) (nativeMessage, error) {
-			t.Fatal("removed command fell back to plain message")
-			return nativeMessage{}, nil
-		}
-		client.runCommand = func(context.Context, string, hermesCommandRequest) (nativeMessage, error) {
-			t.Fatal("removed command was sent to native command endpoint")
-			return nativeMessage{}, nil
-		}
-
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("/stale now")}})
-		if err == nil || !strings.Contains(err.Error(), "hermes_command_removed") || !strings.Contains(err.Error(), "stale") {
-			t.Fatalf("removed command error = %v", err)
-		}
-		if conn.updateCount() != 2 {
-			t.Fatalf("updates = %#v", conn.updates)
-		}
-		clearUpdate := conn.updates[1].Update.AvailableCommandsUpdate
-		if clearUpdate == nil || len(clearUpdate.AvailableCommands) != 0 {
-			t.Fatalf("refreshed clear update = %#v", clearUpdate)
-		}
-	})
-
-	t.Run("custom shadowing fixture routes exact name as data", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "init", Description: "Workspace init", Source: "command"}}
-		session := testSession(NewAgent(), client)
-		client.sendMessage = func(context.Context, string, hermesMessageRequest) (nativeMessage, error) {
-			t.Fatal("shadowing command fell back to plain message")
-			return nativeMessage{}, nil
-		}
-		client.runCommand = func(_ context.Context, id string, req hermesCommandRequest) (nativeMessage, error) {
-			if req.Command != "init" || req.Arguments != " custom args" {
-				t.Fatalf("shadow command request = %#v", req)
-			}
-			return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-		}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("/init  custom args")}}); err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	})
-}
-
-func TestPromptSlashCommandMixedContent(t *testing.T) {
-	ctx := context.Background()
-	t.Run("matched command sends file parts", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-		session := testSession(NewAgent(), client)
-		imageURI := "file:///tmp/screenshot.png"
-		resourceMime := "text/plain"
-		blobMime := "application/octet-stream"
-		client.runCommand = func(_ context.Context, id string, req hermesCommandRequest) (nativeMessage, error) {
-			want := []map[string]any{
-				{"type": "file", "mime": "image/png", "url": "data:image/png;base64,AA=="},
-				{"type": "file", "mime": "image/jpeg", "url": "file:///tmp/screenshot.png", "filename": "screenshot.png"},
-				{"type": "file", "mime": "text/plain", "url": "file:///tmp/notes.txt", "filename": "notes.txt"},
-				{"type": "file", "mime": "application/octet-stream", "url": "data:application/octet-stream;base64,AA==", "filename": "blob.bin"},
-			}
-			if !reflect.DeepEqual(req.Parts, want) {
-				t.Fatalf("command parts = %#v, want %#v", req.Parts, want)
-			}
-			return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-		}
-		_, err := session.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.id,
-			Prompt: []acp.ContentBlock{
-				acp.TextBlock("/review"),
-				{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}},
-				{Image: &acp.ContentBlockImage{Type: "image", Uri: &imageURI, MimeType: "image/jpeg"}},
-				{ResourceLink: &acp.ContentBlockResourceLink{Type: "resource_link", Uri: "file:///tmp/notes.txt", MimeType: &resourceMime}},
-				{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
-					BlobResourceContents: &acp.BlobResourceContents{Blob: "AA==", Uri: "file:///tmp/blob.bin", MimeType: &blobMime},
-				}}},
-			},
-		})
-		if err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	})
-
-	t.Run("matched command rejects unconvertible block type", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-		session := testSession(NewAgent(), client)
-		client.runCommand = func(context.Context, string, hermesCommandRequest) (nativeMessage, error) {
-			t.Fatal("RunCommand called for unconvertible block")
-			return nativeMessage{}, nil
-		}
-		_, err := session.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.id,
-			Prompt: []acp.ContentBlock{
-				acp.TextBlock("/review"),
-				{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}},
-			},
-		})
-		if err == nil || !strings.Contains(err.Error(), "audio") {
-			t.Fatalf("unconvertible block error = %v", err)
-		}
-	})
-
-	t.Run("command part conversion errors name block types", func(t *testing.T) {
-		if _, err := commandPromptParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}}); err == nil {
-			t.Fatal("empty command image accepted")
-		}
-		if _, err := commandPromptParts([]acp.ContentBlock{acp.TextBlock("extra text")}); err == nil ||
-			!strings.Contains(err.Error(), "text") {
-			t.Fatalf("text command part error = %v", err)
-		}
-		if _, err := commandPromptParts([]acp.ContentBlock{{Resource: &acp.ContentBlockResource{Type: "resource"}}}); err == nil ||
-			!strings.Contains(err.Error(), "resource") {
-			t.Fatalf("resource command part error = %v", err)
-		}
-		if _, err := commandPromptParts([]acp.ContentBlock{{}}); err == nil || !strings.Contains(err.Error(), "unknown") {
-			t.Fatalf("unknown command part error = %v", err)
-		}
-		if _, err := blobResourceHermesPart(&acp.BlobResourceContents{}); err == nil {
-			t.Fatal("empty blob resource accepted")
-		}
-		named := resourceLinkHermesPart(&acp.ContentBlockResourceLink{Name: "named.txt", Uri: "file:///tmp/ignored"})
-		if named["mime"] != "application/octet-stream" || named["filename"] != "named.txt" {
-			t.Fatalf("named resource link part = %#v", named)
-		}
-		if got := contentBlockType(acp.ContentBlock{Image: &acp.ContentBlockImage{}}); got != "image" {
-			t.Fatalf("image block type = %q", got)
-		}
-		if got := contentBlockType(acp.ContentBlock{ResourceLink: &acp.ContentBlockResourceLink{}}); got != "resource_link" {
-			t.Fatalf("resource link block type = %q", got)
-		}
-	})
-
-	t.Run("unmatched slash keeps supported mixed content as plain message", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-		session := testSession(NewAgent(), client)
-		client.sendMessage = func(_ context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
-			if len(req.Parts) != 2 || req.Parts[0]["text"] != "/missing" || req.Parts[1]["type"] != "file" {
-				t.Fatalf("plain mixed parts = %#v", req.Parts)
-			}
-			return nativeMessage{Info: nativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-		}
-		_, err := session.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.id,
-			Prompt: []acp.ContentBlock{
-				acp.TextBlock("/missing"),
-				{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}},
-			},
-		})
-		if err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	})
-}
-
-func TestPromptSlashCommandStaleRaceRefreshesWithoutPlainRetry(t *testing.T) {
-	ctx := context.Background()
-	for _, tt := range []struct {
-		name       string
-		refreshErr bool
-	}{
-		{name: "refresh clears deleted command"},
-		{name: "refresh failure is logged", refreshErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			client := newFakeHermesClient()
-			client.commands = []nativeCommand{{Name: "stale", Description: "Stale", Source: "command"}}
-			client.sendMessage = func(context.Context, string, hermesMessageRequest) (nativeMessage, error) {
-				t.Fatal("stale command retried as plain prompt")
-				return nativeMessage{}, nil
-			}
-			client.runCommand = func(context.Context, string, hermesCommandRequest) (nativeMessage, error) {
-				if tt.refreshErr {
-					client.commandsErr = errors.New("refresh failed")
-				} else {
-					client.commands = nil
-				}
-				return nativeMessage{}, &nativehermes.RPCError{Code: -32602, Message: "unknown command"}
-			}
-			conn := newRecordingAgentClient()
-			agent := NewAgent()
-			agent.setAgentClient(conn)
-			session := testSession(agent, client)
-
-			_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("/stale now")}})
-			if err == nil || !strings.Contains(err.Error(), "hermes_command_bad_request") {
-				t.Fatalf("stale race error = %v", err)
-			}
-			if tt.refreshErr {
-				if conn.updateCount() != 1 {
-					t.Fatalf("failed refresh updates = %#v", conn.updates)
-				}
-				return
-			}
-			if conn.updateCount() != 2 {
-				t.Fatalf("updates = %#v", conn.updates)
-			}
-			clearUpdate := conn.updates[1].Update.AvailableCommandsUpdate
-			if clearUpdate == nil || len(clearUpdate.AvailableCommands) != 0 {
-				t.Fatalf("refreshed clear update = %#v", clearUpdate)
-			}
-		})
-	}
-}
-
-func TestPromptSlashCommandExclusiveTurn(t *testing.T) {
-	ctx := context.Background()
-	client := newFakeHermesClient()
-	client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: 2}))
-	session := testSession(agent, client)
-	release, err := session.acquireTurn(ctx)
-	if err != nil {
-		t.Fatalf("acquire normal turn: %v", err)
-	}
-	defer release()
-	_, err = session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("/review")}})
-	if err == nil || !strings.Contains(err.Error(), "backpressure") {
-		t.Fatalf("command during active prompt error = %v", err)
-	}
-}
-
-func commandNames(commands []acp.AvailableCommand) []string {
-	names := make([]string, 0, len(commands))
-	for _, command := range commands {
-		names = append(names, command.Name)
-	}
-	return names
 }
 
 func TestPromptSuccessCancelAndErrors(t *testing.T) {
@@ -1979,15 +1568,11 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 
 	t.Run("mismatched final message info session id", func(t *testing.T) {
 		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
 		conn := newRecordingAgentClient()
 		store := newCountingSessionStore()
 		agent := NewAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		if err := session.refreshCommands(ctx); err != nil {
-			t.Fatalf("refreshCommands: %v", err)
-		}
 		client.sendMessage = func(_ context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
 			return nativeMessage{
 				Info:  nativeMessageInfo{ID: "assistant", SessionID: "native-other", Role: "assistant", Finish: "stop"},
@@ -2001,15 +1586,11 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 
 	t.Run("mismatched final message part session id", func(t *testing.T) {
 		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
 		conn := newRecordingAgentClient()
 		store := newCountingSessionStore()
 		agent := NewAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		if err := session.refreshCommands(ctx); err != nil {
-			t.Fatalf("refreshCommands: %v", err)
-		}
 		client.sendMessage = func(_ context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
 			return nativeMessage{
 				Info:  nativeMessageInfo{ID: "assistant", SessionID: "native-1", Role: "assistant", Finish: "stop"},
@@ -2023,15 +1604,11 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 
 	t.Run("mismatched replay message session id", func(t *testing.T) {
 		client := newFakeHermesClient()
-		client.commands = []nativeCommand{{Name: "review", Description: "Review", Source: "command"}}
 		conn := newRecordingAgentClient()
 		store := newCountingSessionStore()
 		agent := NewAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		if err := session.refreshCommands(ctx); err != nil {
-			t.Fatalf("refreshCommands: %v", err)
-		}
 		client.messages = []nativeMessage{{
 			Info: nativeMessageInfo{ID: "user", SessionID: "native-other", Role: "user"},
 			Parts: []nativePart{{
@@ -2064,7 +1641,7 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 		t.Fatalf("poison error = %v", err)
 	}
 	if conn.updateCount() != 0 {
-		t.Fatalf("poison without commands emitted updates: %#v", conn.updates)
+		t.Fatalf("poison emitted updates: %#v", conn.updates)
 	}
 	if err := s.poison(ctx, "second poison"); err == nil ||
 		!strings.Contains(err.Error(), "session_poisoned") ||
@@ -2073,9 +1650,6 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 	}
 	if _, err := s.acquireTurn(ctx); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
 		t.Fatalf("acquire poisoned session error = %v", err)
-	}
-	if err := s.refreshCommands(ctx); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
-		t.Fatalf("refresh poisoned session error = %v", err)
 	}
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: s.id}); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
 		t.Fatalf("cancel poisoned session error = %v", err)
@@ -2110,12 +1684,8 @@ func assertNativeSessionDriftPoison(
 	if err == nil || !strings.Contains(err.Error(), "hermes_native_session_id_drift") || !strings.Contains(err.Error(), gotNativeID) {
 		t.Fatalf("drift error = %v", err)
 	}
-	if conn.updateCount() != 2 {
+	if conn.updateCount() != 0 {
 		t.Fatalf("updates after poison = %#v", conn.updates)
-	}
-	clearUpdate := conn.updates[1].Update.AvailableCommandsUpdate
-	if clearUpdate == nil || clearUpdate.AvailableCommands == nil || len(clearUpdate.AvailableCommands) != 0 {
-		t.Fatalf("poison clear update = %#v", clearUpdate)
 	}
 	if store.replaceCount() != 0 {
 		t.Fatalf("store writes after poison = %d, want 0", store.replaceCount())

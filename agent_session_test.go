@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -81,6 +82,9 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	if len(listResp.Sessions) != 1 {
 		t.Fatalf("list sessions = %#v", listResp.Sessions)
 	}
+	if err := os.WriteFile(filepath.Join(parent.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
+		t.Fatalf("seed parent state db: %v", err)
+	}
 
 	rawFork, err := json.Marshal(ForkSessionRequest(newResp.SessionId, cwd))
 	if err != nil {
@@ -104,6 +108,9 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	}
 	if idmap.ParentSessionID != string(newResp.SessionId) || idmap.NativeParentSessionID != "native-parent" {
 		t.Fatalf("child idmap lineage = %#v", idmap)
+	}
+	if data, err := os.ReadFile(filepath.Join(child.xdg.Root, "state.db")); err != nil || string(data) != "parent-state" {
+		t.Fatalf("child state db clone = %q err=%v", data, err)
 	}
 
 	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId}); err != nil {
@@ -167,6 +174,48 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	}
 	if resp.Meta[hermesMetaKey] == nil || conn.updateCount() != 1 {
 		t.Fatalf("load resp=%#v updates=%#v", resp, conn.updates)
+	}
+}
+
+func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
+	ctx := context.Background()
+	store := newCountingSessionStore()
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+		return nativeMessage{}, ctx.Err()
+	}
+	agent := NewAgent(WithSessionStore(store))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "blocked"))
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not start")
+	}
+	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("prompt returned error after close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not finish after close")
+	}
+	if got := store.replaceCount(); got != 0 {
+		t.Fatalf("close wrote snapshot during blocked turn: %d", got)
 	}
 }
 
@@ -505,13 +554,12 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 		t.Fatal("unstable fork accepted invalid meta")
 	}
 
-	missingSource := xdgDirs{Data: filepath.Join(t.TempDir(), "missing"), Config: t.TempDir(), Cache: t.TempDir(), State: t.TempDir()}
 	validTarget, err := createXDGDirs(t.TempDir(), "target")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := copyXDGDirs(missingSource, validTarget); err == nil {
-		t.Fatal("copyXDGDirs accepted missing source")
+	if err := cloneHermesStateDB(xdgDirs{Root: string([]byte{0})}, validTarget); err == nil {
+		t.Fatal("cloneHermesStateDB accepted invalid source")
 	}
 	restoreStateStoreSeams(t)
 	stateRemoveAll = func(string) error { return errors.New("remove failed") }
@@ -519,8 +567,11 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := copyXDGDirs(validSource, validTarget); err == nil {
-		t.Fatal("copyXDGDirs ignored decode error")
+	if err := os.WriteFile(filepath.Join(validSource.Root, "state.db"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloneHermesStateDB(validSource, validTarget); err == nil {
+		t.Fatal("cloneHermesStateDB ignored decode error")
 	}
 }
 
@@ -804,9 +855,9 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		}
 		sessionIDRandReader = oldReader
 
-		parentClient.xdg = xdgDirs{}
+		parentClient.xdg = xdgDirs{Root: string([]byte{0})}
 		if _, err := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err == nil {
-			t.Fatal("fork ignored XDG copy error")
+			t.Fatal("fork ignored state db clone error")
 		}
 		parentClient.xdg, _ = createXDGDirs(t.TempDir(), "parent")
 

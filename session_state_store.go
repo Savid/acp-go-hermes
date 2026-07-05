@@ -15,7 +15,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +123,9 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 	if err := s.ensureNotPoisoned(); err != nil {
 		return err
 	}
+	if reason := s.snapshotBlockedReason(); reason != "" {
+		return fmt.Errorf("cannot snapshot Hermes session while %s pending", reason)
+	}
 	snapshot := s.snapshot()
 	if snapshot.client == nil {
 		return nil
@@ -163,11 +165,9 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 	replacements := []SessionStoreReplacement{}
 	mainKey := SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}
 	xdg := snapshot.client.XDGDirs()
-	storedStateDB := false
 	if archive, sha, ok, err := encodeHermesStateDBArchive(xdg.Root); err != nil {
 		return err
 	} else if ok {
-		storedStateDB = true
 		main.Archives["state-db"] = archiveInfo{
 			Subpath: stateDBSubpath,
 			SHA256:  sha,
@@ -188,42 +188,6 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 			Key:     SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
 			Entries: []SessionStoreEntry{entry},
 		})
-	}
-	if !storedStateDB {
-		for _, item := range []struct {
-			name string
-			dir  string
-		}{
-			{xdgDataSubpath, xdg.Data},
-			{xdgConfigSubpath, xdg.Config},
-			{xdgCacheSubpath, xdg.Cache},
-			{xdgStateSubpath, xdg.State},
-		} {
-			archive, sha, err := encodeXDGArchive(item.dir)
-			if err != nil {
-				return err
-			}
-			main.Archives[strings.TrimPrefix(item.name, "xdg/")] = archiveInfo{
-				Subpath: item.name,
-				SHA256:  sha,
-				Bytes:   len(archive),
-			}
-			entry, err := stateJSONMarshal(archiveEntry{
-				Format:   SessionStoreFormat,
-				Encoding: "tar+zstd+base64",
-				Sequence: 0,
-				Final:    true,
-				SHA256:   sha,
-				Data:     base64.StdEncoding.EncodeToString(archive),
-			})
-			if err != nil {
-				return err
-			}
-			replacements = append(replacements, SessionStoreReplacement{
-				Key:     SessionKey{SessionID: string(s.id), Subpath: item.name},
-				Entries: []SessionStoreEntry{entry},
-			})
-		}
 	}
 	mainEntry, err := stateJSONMarshal(main)
 	if err != nil {
@@ -297,163 +261,61 @@ func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID st
 		}
 		return idmap, snapshot, true, nil
 	}
-	for _, item := range []struct {
-		subpath string
-		target  string
-	}{
-		{xdgDataSubpath, xdg.Data},
-		{xdgConfigSubpath, xdg.Config},
-		{xdgCacheSubpath, xdg.Cache},
-		{xdgStateSubpath, xdg.State},
-	} {
-		entries, err := store.Load(ctx, SessionKey{SessionID: sessionID, Subpath: item.subpath})
-		if err != nil {
-			return idmapRecord{}, stateSnapshot{}, false, err
-		}
-		if len(entries) == 0 {
-			return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("store missing archive %s", item.subpath)
-		}
-		var archive archiveEntry
-		if err := json.Unmarshal(entries[len(entries)-1], &archive); err != nil {
-			return idmapRecord{}, stateSnapshot{}, false, err
-		}
-		data, err := base64.StdEncoding.DecodeString(archive.Data)
-		if err != nil {
-			return idmapRecord{}, stateSnapshot{}, false, err
-		}
-		sum := sha256.Sum256(data)
-		if archive.SHA256 != "" && archive.SHA256 != hex.EncodeToString(sum[:]) {
-			return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("archive %s checksum mismatch", item.subpath)
-		}
-		if err := decodeXDGArchive(data, item.target); err != nil {
-			return idmapRecord{}, stateSnapshot{}, false, err
-		}
-	}
 
 	return idmap, snapshot, true, nil
 }
 
-func encodeXDGArchive(root string) ([]byte, string, error) {
-	var files []string
-	if err := stateWalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == root {
-			return nil
-		}
-		rel, err := stateRel(root, path)
-		if err != nil {
-			return err
-		}
-		if shouldExcludeStatePath(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.IsDir() && shouldSkipSQLiteCompanion(rel) {
-			return nil
-		}
-		files = append(files, filepath.ToSlash(rel))
-		return nil
-	}); err != nil {
-		return nil, "", err
+func (s *session) snapshotBlockedReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.cancel != nil:
+		return "turn"
+	case len(s.pending) > 0:
+		return "permission"
+	case len(s.questions) > 0:
+		return "elicitation"
+	case len(s.activeMessageIDs) > 0:
+		return "generation"
+	default:
+		return ""
 	}
-	slices.Sort(files)
-
-	var tarbuf bytes.Buffer
-	tw := stateNewTarWriter(&tarbuf)
-	for _, relSlash := range files {
-		rel := filepath.FromSlash(relSlash)
-		path := filepath.Join(root, rel)
-		info, err := stateLstat(path)
-		if err != nil {
-			return nil, "", err
-		}
-		header, err := stateFileInfoHeader(info, "")
-		if err != nil {
-			return nil, "", err
-		}
-		header.Name = relSlash
-		header.Uid = 0
-		header.Gid = 0
-		header.Uname = ""
-		header.Gname = ""
-		header.ModTime = time.Unix(0, 0)
-		header.AccessTime = time.Unix(0, 0)
-		header.ChangeTime = time.Unix(0, 0)
-		var scrubbed []byte
-		if info.Mode().IsRegular() {
-			var ok bool
-			scrubbed, ok, err = stateSQLiteArchiveContent(path)
-			if err != nil {
-				return nil, "", err
-			}
-			if ok {
-				header.Size = int64(len(scrubbed))
-			}
-		}
-		if err := tw.WriteHeader(header); err != nil {
-			return nil, "", err
-		}
-		if info.Mode().IsRegular() {
-			if scrubbed != nil {
-				if _, err := tw.Write(scrubbed); err != nil {
-					return nil, "", err
-				}
-			} else {
-				file, err := stateOpen(path)
-				if err != nil {
-					return nil, "", err
-				}
-				_, copyErr := stateCopy(tw, file)
-				closeErr := file.Close()
-				if copyErr != nil {
-					return nil, "", copyErr
-				}
-				if closeErr != nil {
-					return nil, "", closeErr
-				}
-			}
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return nil, "", err
-	}
-	var zbuf bytes.Buffer
-	zw, err := stateNewZstdWriter(&zbuf)
-	if err != nil {
-		return nil, "", err
-	}
-	if _, err := zw.Write(tarbuf.Bytes()); err != nil {
-		zw.Close()
-		return nil, "", err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, "", err
-	}
-	sum := sha256.Sum256(zbuf.Bytes())
-
-	return zbuf.Bytes(), hex.EncodeToString(sum[:]), nil
 }
 
 func encodeHermesStateDBArchive(root string) ([]byte, string, bool, error) {
 	if root == "" {
 		return nil, "", false, nil
 	}
-	files := []string{}
-	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
-		path := filepath.Join(root, name)
-		info, err := stateLstat(path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
+	type stateDBFile struct {
+		name string
+		data []byte
+	}
+	files := []stateDBFile{}
+	stateDBPath := filepath.Join(root, "state.db")
+	if info, err := stateLstat(stateDBPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
 			return nil, "", false, err
 		}
-		if info.Mode().IsRegular() {
-			files = append(files, name)
+	} else if info.Mode().IsRegular() {
+		if data, ok, err := stateSQLiteArchiveContent(stateDBPath); err != nil {
+			return nil, "", false, err
+		} else if ok {
+			files = append(files, stateDBFile{name: "state.db", data: data})
+		}
+	}
+	if len(files) == 0 {
+		for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
+			path := filepath.Join(root, name)
+			info, err := stateLstat(path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, "", false, err
+			}
+			if info.Mode().IsRegular() {
+				files = append(files, stateDBFile{name: name})
+			}
 		}
 	}
 	if len(files) == 0 {
@@ -461,7 +323,8 @@ func encodeHermesStateDBArchive(root string) ([]byte, string, bool, error) {
 	}
 	var tarbuf bytes.Buffer
 	tw := stateNewTarWriter(&tarbuf)
-	for _, name := range files {
+	for _, item := range files {
+		name := item.name
 		path := filepath.Join(root, name)
 		info, err := stateLstat(path)
 		if err != nil {
@@ -479,8 +342,17 @@ func encodeHermesStateDBArchive(root string) ([]byte, string, bool, error) {
 		header.ModTime = time.Unix(0, 0)
 		header.AccessTime = time.Unix(0, 0)
 		header.ChangeTime = time.Unix(0, 0)
+		if item.data != nil {
+			header.Size = int64(len(item.data))
+		}
 		if err := tw.WriteHeader(header); err != nil {
 			return nil, "", false, err
+		}
+		if item.data != nil {
+			if _, err := tw.Write(item.data); err != nil {
+				return nil, "", false, err
+			}
+			continue
 		}
 		file, err := stateOpen(path)
 		if err != nil {
@@ -582,15 +454,6 @@ func decodeXDGArchive(data []byte, target string) error {
 	}
 }
 
-func shouldExcludeStatePath(rel string) bool {
-	rel = filepath.ToSlash(strings.ToLower(rel))
-	base := pathBase(rel)
-	if base == "auth.json" || base == leaseFileName || strings.Contains(base, "credential") || strings.Contains(rel, "/credential") {
-		return true
-	}
-	return false
-}
-
 func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapshot stateSnapshot) error {
 	if idmap.SessionID != sessionID {
 		return fmt.Errorf("hermes store idmap session mismatch: %q != %q", idmap.SessionID, sessionID)
@@ -610,11 +473,6 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 	return nil
 }
 
-func shouldSkipSQLiteCompanion(rel string) bool {
-	rel = strings.ToLower(filepath.ToSlash(rel))
-	return strings.HasSuffix(rel, ".db-wal") || strings.HasSuffix(rel, ".db-shm")
-}
-
 func sqliteArchiveContent(path string) ([]byte, bool, error) {
 	ok, err := isSQLiteDatabase(path)
 	if err != nil || !ok {
@@ -627,15 +485,8 @@ func sqliteArchiveContent(path string) ([]byte, bool, error) {
 	defer func() { _ = stateRemoveAll(tempDir) }()
 
 	copyPath := filepath.Join(tempDir, "archive.db")
-	if err := stateCopyFile(path, copyPath, 0o600); err != nil {
+	if err := vacuumSQLiteInto(path, copyPath); err != nil {
 		return nil, false, err
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		if _, err := stateStat(path + suffix); err == nil {
-			if err := stateCopyFile(path+suffix, copyPath+suffix, 0o600); err != nil {
-				return nil, false, err
-			}
-		}
 	}
 	if err := stateScrubSQLiteCredentialTables(copyPath); err != nil {
 		return nil, false, err
@@ -663,6 +514,20 @@ func isSQLiteDatabase(path string) (bool, error) {
 		return false, err
 	}
 	return n == len(header) && string(header) == "SQLite format 3\x00", nil
+}
+
+func vacuumSQLiteInto(source string, target string) error {
+	db, err := stateSQLOpen("sqlite", source)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	_, execErr := db.ExecContext(ctx, "VACUUM INTO "+quoteSQLiteString(target)) // #nosec G202 -- target is string-literal quoted before interpolation.
+	closeErr := db.Close()
+	if execErr != nil {
+		return execErr
+	}
+	return closeErr
 }
 
 func copyFile(source string, target string, mode os.FileMode) error {
@@ -799,10 +664,6 @@ func quoteSQLiteIdent(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func pathBase(path string) string {
-	index := strings.LastIndex(path, "/")
-	if index == -1 {
-		return path
-	}
-	return path[index+1:]
+func quoteSQLiteString(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
 }
