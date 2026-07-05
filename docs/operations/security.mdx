@@ -1,8 +1,10 @@
 # Security
 
-Each Hermes server binds to `127.0.0.1` and uses a per-session random basic
-auth password. Child stdout and stderr are never connected to the ACP stdout
-stream.
+Each Hermes server binds to `127.0.0.1` and gates the dashboard WebSocket with
+a per-session random `HERMES_DASHBOARD_SESSION_TOKEN`. Child stdout and stderr
+are never connected to the ACP stdout stream.
 
-Session snapshots exclude obvious credential-bearing files such as `auth.json`
-and credential-named files.
+Session snapshots store only the Hermes state database archive plus adapter
+metadata. They exclude obvious credential-bearing files such as `auth.json`,
+credential-named files, logs, caches, checkpoints, and backups; credential
+tables in SQLite archives are scrubbed.

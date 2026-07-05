@@ -166,7 +166,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		case err := <-s.client.EventErrors():
 			s.markStreamFailed(streamErrorEpoch(err))
 			abortTurn()
-			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_sse_disconnect", jsonFieldMessage: err.Error()})
+			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: err.Error()})
 		case result := <-done:
 			if result.err != nil {
 				if s.wasCancelled() || turnCtx.Err() != nil {

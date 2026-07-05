@@ -11,3 +11,10 @@ The store writes a complete snapshot after completed turns:
 The `state-db` archive contains `state.db`, `state.db-wal`, and `state.db-shm`
 when present. Archive entries are `tar+zstd+base64` and are restored into a
 fresh per-session `HERMES_HOME`.
+
+The `idmap` subpath records the ACP session ID, durable Hermes session key, and
+fork lineage. Live gateway session IDs and auth tokens are not persisted.
+
+Restore after native deletion is supported by hydrating `state-db` into a fresh
+home, calling native `session.resume`, and then replaying `session.history` for
+`session/load`.

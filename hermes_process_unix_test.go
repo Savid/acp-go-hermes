@@ -198,8 +198,8 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 			StartTime: "start",
 			Cmdline:   []string{"hermes", "serve"},
 			Env: map[string]string{
-				"XDG_STATE_HOME":         xdg.State,
-				"HERMES_SERVER_PASSWORD": "secret",
+				"XDG_STATE_HOME":                 xdg.State,
+				"HERMES_DASHBOARD_SESSION_TOKEN": "secret",
 			},
 		}, nil
 	}
@@ -207,7 +207,7 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 	hermesSyscallKill = func(int, syscall.Signal) error { return errors.New("kill failed") }
 	if err := writeLease(xdg.State, serverLease{
 		PID:              123,
-		PasswordHash:     passwordHash("secret"),
+		TokenHash:        passwordHash("secret"),
 		XDGRoot:          xdg.Root,
 		ProcessStartTime: "start",
 	}); err != nil {

@@ -1,8 +1,8 @@
 # Permissions
 
-Hermes permission events are mapped to ACP `session/request_permission`.
-The adapter replies through the current native route families that correspond
-to the event shape emitted by Hermes.
+Hermes `approval.request` gateway events are mapped to ACP
+`session/request_permission`. ACP replies are sent back through native
+`approval.respond` with `once`, `always`, or `deny`.
 
 On cancellation, pending native permission requests are rejected with a
 cancelled explanation and the ACP prompt returns `cancelled`.

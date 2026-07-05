@@ -16,14 +16,16 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/coder/websocket"
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
 const (
-	envFakeHermesHelper = "ACP_GO_HERMES_FAKE_HELPER"
-	envFakeHermesMode   = "ACP_GO_HERMES_FAKE_MODE"
-	fakeModeOK          = "ok"
-	fakeModeMissingDoc  = "missing-doc"
+	envFakeHermesHelper  = "ACP_GO_HERMES_FAKE_HELPER"
+	envFakeHermesMode    = "ACP_GO_HERMES_FAKE_MODE"
+	fakeModeOK           = "ok"
+	fakeModeStatusOnly   = "status-only"
+	fakeStoredSessionKey = "stored-fake"
 )
 
 func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
@@ -45,6 +47,13 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	}
 	if session.SessionId == "" {
 		t.Fatalf("empty fake session response: %#v", session)
+	}
+	fork, err := hermesacp.CallForkSession(ctx, conn, hermesacp.ForkSessionRequest(session.SessionId, t.TempDir()))
+	if err != nil {
+		t.Fatalf("extension fork through fake gateway: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	if fork.SessionId == "" || fork.SessionId == session.SessionId {
+		t.Fatalf("fake fork response = %#v", fork)
 	}
 }
 
@@ -75,7 +84,7 @@ func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		t.Fatalf("mkdir lease dir: %v", err)
 	}
-	lease := map[string]any{"pid": orphan.Process.Pid, "port": 0, "startedAtUnixMilli": time.Now().UnixMilli(), "passwordHash": "test"}
+	lease := map[string]any{"pid": orphan.Process.Pid, "port": 0, "startedAtUnixMilli": time.Now().UnixMilli(), "tokenHash": "test"}
 	data, err := json.Marshal(lease)
 	if err != nil {
 		t.Fatal(err)
@@ -117,13 +126,13 @@ func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
 	}
 }
 
-func TestHermesACPAgentFakeExecutablePermissionDocFailClosed(t *testing.T) {
+func TestHermesACPAgentFakeExecutableGatewayFailClosed(t *testing.T) {
 	requireRunIntegration(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeMissingDoc), t.TempDir())
+	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeStatusOnly), t.TempDir())
 	defer agent.close()
 
 	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
@@ -131,8 +140,8 @@ func TestHermesACPAgentFakeExecutablePermissionDocFailClosed(t *testing.T) {
 		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	_, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir()))
-	if err == nil || !strings.Contains(err.Error(), "/api/session/{sessionID}/permission/{requestID}/reply") {
-		t.Fatalf("new session with missing permission /doc path err = %v\nstderr:\n%s", err, agent.stderrString())
+	if err == nil {
+		t.Fatalf("new session with missing websocket unexpectedly succeeded\nstderr:\n%s", agent.stderrString())
 	}
 }
 
@@ -205,261 +214,123 @@ func runFakeHermesServer(args []string, mode string) error {
 		mode = fakeModeOK
 	}
 
-	_, _ = fmt.Fprintln(os.Stdout, "native stdout noise before HTTP readiness")
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/global/health":
-			writeFakeJSON(w, map[string]any{"healthy": true, "version": "9.0.0"})
-		case r.URL.Path == "/doc":
-			writeFakeJSON(w, fakeHermesDoc(mode))
-		case r.URL.Path == "/event":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-			<-r.Context().Done()
-		case r.URL.Path == "/session" && r.Method == http.MethodPost:
-			writeFakeJSON(w, fakeNativeSession("native-fake"))
-		case r.URL.Path == "/session/native-fake" && r.Method == http.MethodGet:
-			writeFakeJSON(w, fakeNativeSession("native-fake"))
-		case r.URL.Path == "/session/native-fake/todo" && r.Method == http.MethodGet:
-			writeFakeJSON(w, []any{})
-		case r.URL.Path == "/session/native-fake/abort" && r.Method == http.MethodPost:
-			writeFakeJSON(w, map[string]any{"ok": true})
-		case r.URL.Path == "/config/providers":
-			writeFakeJSON(w, map[string]any{"providers": []map[string]any{{
-				"id":   "openai",
-				"name": "OpenAI",
-				"models": map[string]any{
-					"gpt-test": map[string]any{"id": "gpt-test", "name": "GPT Test"},
-				},
-			}}})
-		case r.URL.Path == "/command" && r.Method == http.MethodGet:
-			writeFakeJSON(w, []any{})
-		case r.URL.Path == "/agent":
-			writeFakeJSON(w, []map[string]any{{"name": "build", "description": "Build"}})
-		case r.URL.Path == "/permission" && r.Method == http.MethodGet:
-			writeFakeJSON(w, []any{})
-		case r.URL.Path == "/question" && r.Method == http.MethodGet:
-			writeFakeJSON(w, []any{})
-		case r.URL.Path == "/api/permission/request" && r.Method == http.MethodGet:
-			writeFakeJSON(w, map[string]any{"location": map[string]any{}, "data": []any{}})
-		case r.URL.Path == "/api/question/request" && r.Method == http.MethodGet:
-			writeFakeJSON(w, map[string]any{"location": map[string]any{}, "data": []any{}})
-		default:
-			http.NotFound(w, r)
-		}
+	_, _ = fmt.Fprintln(os.Stdout, "native stdout noise before websocket readiness")
+	handler := http.NewServeMux()
+	handler.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
+	if mode != fakeModeStatusOnly {
+		handler.HandleFunc("/api/ws", handleFakeGatewayWS)
+	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return server.ListenAndServe()
 }
 
-func fakeHermesDoc(mode string) map[string]any {
-	required := []string{
-		"/command",
-		"/config/providers",
-		"/event",
-		"/session/status",
-		"/session",
-		"/session/{sessionID}",
-		"/session/{sessionID}/command",
-		"/session/{sessionID}/message",
-		"/session/{sessionID}/abort",
-		"/session/{sessionID}/fork",
-		"/session/{sessionID}/todo",
-		"/session/{sessionID}/revert",
-		"/session/{sessionID}/unrevert",
-		"/permission",
-		"/permission/{requestID}/reply",
-		"/question",
-		"/question/{requestID}/reply",
-		"/question/{requestID}/reject",
-		"/api/session/{sessionID}/agent",
-		"/api/session/{sessionID}/message",
-		"/api/session/{sessionID}/model",
-		"/api/session/{sessionID}/permission/{requestID}/reply",
-		"/api/permission/request",
-		"/api/session/{sessionID}/question/{requestID}/reply",
-		"/api/session/{sessionID}/question/{requestID}/reject",
-		"/api/question/request",
+func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
 	}
-	paths := map[string]any{}
-	for _, path := range required {
-		if mode == fakeModeMissingDoc && path == "/api/session/{sessionID}/permission/{requestID}/reply" {
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+	writeFakeGatewayEvent(r.Context(), conn, "gateway.ready", "", nil)
+	for {
+		typ, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		if typ != websocket.MessageText {
 			continue
 		}
-		paths[path] = map[string]any{}
-	}
-	paths["/api/permission/request"] = fakePendingRequestPath("PermissionV2Request")
-	paths["/permission"] = fakePendingArrayPath("PermissionRequest")
-	if mode != fakeModeMissingDoc {
-		paths["/api/session/{sessionID}/permission/{requestID}/reply"] = map[string]any{
-			"post": map[string]any{
-				"responses": map[string]any{"204": map[string]any{"description": "<No Content>"}},
-				"requestBody": map[string]any{
-					"required": true,
-					"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"reply":   map[string]any{"$ref": "#/components/schemas/PermissionV2Reply"},
-							"message": map[string]any{"type": "string"},
-						},
-						"required": []any{"reply"},
-					}}},
-				},
-			},
+		var req struct {
+			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 		}
-	}
-	paths["/permission/{requestID}/reply"] = map[string]any{
-		"post": map[string]any{
-			"responses": map[string]any{"200": map[string]any{"description": "Permission processed"}},
-			"requestBody": map[string]any{
-				"required": true,
-				"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"reply":   map[string]any{"type": "string"},
-						"message": map[string]any{"type": "string"},
-					},
-					"required": []any{"reply"},
-				}}},
-			},
-		},
-	}
-	paths["/api/question/request"] = fakePendingRequestPath("QuestionV2Request")
-	paths["/question"] = fakePendingArrayPath("QuestionRequest")
-	paths["/api/session/{sessionID}/question/{requestID}/reply"] = map[string]any{
-		"post": map[string]any{
-			"responses": map[string]any{"204": map[string]any{"description": "<No Content>"}},
-			"requestBody": map[string]any{
-				"required": true,
-				"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{
-					"$ref": "#/components/schemas/QuestionV2Reply",
-				}}},
-			},
-		},
-	}
-	paths["/api/session/{sessionID}/question/{requestID}/reject"] = map[string]any{
-		"post": map[string]any{"responses": map[string]any{"204": map[string]any{"description": "<No Content>"}}},
-	}
-	paths["/question/{requestID}/reply"] = map[string]any{
-		"post": map[string]any{"responses": map[string]any{"200": map[string]any{"description": "Question answered"}}},
-	}
-	paths["/question/{requestID}/reject"] = map[string]any{
-		"post": map[string]any{"responses": map[string]any{"200": map[string]any{"description": "Question rejected"}}},
-	}
-	return map[string]any{
-		"paths": paths,
-		"components": map[string]any{"schemas": map[string]any{
-			"Event": fakeEventUnion(
-				"EventPermissionV2Asked",
-				"EventPermissionV2Replied",
-				"EventPermissionAsked",
-				"EventPermissionReplied",
-				"EventQuestionV2Asked",
-				"EventQuestionV2Replied",
-				"EventQuestionAsked",
-				"EventQuestionReplied",
-				"EventMessagePartUpdated",
-				"EventServerConnected",
-			),
-			"EventPermissionV2Asked": fakeEventSchema("permission.v2.asked", []string{"id", "sessionID", "action", "resources"}),
-			"EventPermissionV2Replied": fakeEventSchema("permission.v2.replied", []string{
-				"sessionID",
-				"requestID",
-				"reply",
-			}),
-			"EventPermissionAsked": fakeEventSchema("permission.asked", []string{"id", "sessionID", "permission", "patterns"}),
-			"EventPermissionReplied": fakeEventSchema("permission.replied", []string{
-				"sessionID",
-				"requestID",
-				"reply",
-			}),
-			"EventQuestionV2Asked":    fakeEventSchema("question.v2.asked", []string{"id", "sessionID", "questions"}),
-			"EventQuestionV2Replied":  fakeEventSchema("question.v2.replied", []string{"sessionID", "requestID", "answers"}),
-			"EventQuestionAsked":      fakeEventSchema("question.asked", []string{"id", "sessionID", "questions"}),
-			"EventQuestionReplied":    fakeEventSchema("question.replied", []string{"sessionID", "requestID", "answers"}),
-			"EventMessagePartUpdated": fakeEventSchema("message.part.updated", []string{"sessionID", "part", "time"}),
-			"EventServerConnected":    fakeEventSchema("server.connected", nil),
-			"QuestionV2Reply": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"answers": map[string]any{"type": "array"}},
-				"required":   []any{"answers"},
-			},
-		}},
+		if err := json.Unmarshal(data, &req); err != nil {
+			return
+		}
+		params := map[string]any{}
+		_ = json.Unmarshal(req.Params, &params)
+		handleFakeGatewayRPC(r.Context(), conn, req.ID, req.Method, params)
 	}
 }
 
-func fakeEventUnion(names ...string) map[string]any {
-	refs := make([]any, 0, len(names))
-	for _, name := range names {
-		refs = append(refs, map[string]any{"$ref": "#/components/schemas/" + name})
-	}
-	return map[string]any{"anyOf": refs}
-}
-
-func fakeEventSchema(eventType string, required []string) map[string]any {
-	properties := map[string]any{}
-	for _, property := range required {
-		properties[property] = map[string]any{"type": "string"}
-	}
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"id":   map[string]any{"type": "string"},
-			"type": map[string]any{"type": "string", "enum": []string{eventType}},
-			"properties": map[string]any{
-				"type":                 "object",
-				"properties":           properties,
-				"required":             required,
-				"additionalProperties": false,
-			},
-		},
-		"required":             []string{"id", "type", "properties"},
-		"additionalProperties": false,
-	}
-}
-
-func fakePendingRequestPath(itemRef string) map[string]any {
-	return map[string]any{
-		"get": map[string]any{"responses": map[string]any{"200": map[string]any{
-			"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{"data": map[string]any{
-					"type":  "array",
-					"items": map[string]any{"$ref": "#/components/schemas/" + itemRef},
-				}},
-			}}},
-		}}},
-	}
-}
-
-func fakePendingArrayPath(itemRef string) map[string]any {
-	return map[string]any{
-		"get": map[string]any{"responses": map[string]any{"200": map[string]any{
-			"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{
-				"type":  "array",
-				"items": map[string]any{"$ref": "#/components/schemas/" + itemRef},
-			}}},
-		}}},
+func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any) {
+	switch method {
+	case "session.create":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{
+			"session_id":        "live-fake",
+			"stored_session_id": fakeStoredSessionKey,
+		})
+	case "session.resume":
+		stored, _ := params["session_id"].(string)
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{
+			"session_id":        "live-" + stored,
+			"stored_session_id": stored,
+		})
+	case "session.active_list":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{
+			"session_id":  "live-fake",
+			"session_key": fakeStoredSessionKey,
+			"title":       "Fake",
+			"cwd":         params["cwd"],
+		}}})
+	case "session.history":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": 0, "messages": []any{}})
+	case "session.branch":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{
+			"session_id":        "live-branch",
+			"stored_session_id": "stored-branch",
+		})
+	case "model.options":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"providers": []map[string]any{{
+			"id":   "openai",
+			"name": "OpenAI",
+			"models": []map[string]any{{
+				"id":                "gpt-test",
+				"name":              "GPT Test",
+				"context_window":    128000,
+				"max_output_tokens": 4096,
+				"capabilities":      []string{"tools"},
+			}},
+		}}})
+	case "prompt.submit":
+		live, _ := params["session_id"].(string)
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
+		writeFakeGatewayEvent(ctx, conn, "message.delta", live, map[string]any{"text": "fake response"})
+		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{"usage": map[string]any{"total_tokens": 1}})
+	case "session.delete", "session.close", "session.interrupt",
+		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
+	default:
+		writeFakeGatewayError(ctx, conn, id, -32601, "missing")
 	}
 }
 
-func fakeNativeSession(id string) map[string]any {
-	return map[string]any{
-		"id":    id,
-		"title": "Fake",
-		"agent": "build",
-		"model": map[string]any{
-			"providerID": "openai",
-			"modelID":    "gpt-test",
-		},
-		"time": map[string]any{"updated": time.Now().UnixMilli()},
-	}
+func writeFakeGatewayResult(ctx context.Context, conn *websocket.Conn, id int64, result any) {
+	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	_ = conn.Write(ctx, websocket.MessageText, data)
 }
 
-func writeFakeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(value)
+func writeFakeGatewayError(ctx context.Context, conn *websocket.Conn, id int64, code int, message string) {
+	data, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]any{"code": code, "message": message},
+	})
+	_ = conn.Write(ctx, websocket.MessageText, data)
+}
+
+func writeFakeGatewayEvent(ctx context.Context, conn *websocket.Conn, eventType string, sessionID string, payload any) {
+	params := map[string]any{"type": eventType}
+	if sessionID != "" {
+		params["session_id"] = sessionID
+	}
+	if payload != nil {
+		data, _ := json.Marshal(payload)
+		params["payload"] = json.RawMessage(data)
+	}
+	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": params})
+	_ = conn.Write(ctx, websocket.MessageText, data)
 }

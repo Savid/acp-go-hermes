@@ -22,6 +22,28 @@ func TestServeContextAndInputDone(t *testing.T) {
 	if err := Serve(cancelled, strings.NewReader(""), io.Discard); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Serve canceled error = %v", err)
 	}
+	startCtx, startCancel := context.WithCancel(context.Background())
+	blocking := &signalBlockingReader{started: make(chan struct{}), release: make(chan struct{})}
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- Serve(startCtx, blocking, io.Discard)
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("Serve reader did not start")
+	}
+	startCancel()
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Serve started cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after started context cancellation")
+	}
+	close(blocking.release)
+
 	waitCtx, waitCancel := context.WithCancel(context.Background())
 	waitReader, waitWriter := io.Pipe()
 	done := make(chan error, 1)
@@ -45,6 +67,18 @@ func TestServeContextAndInputDone(t *testing.T) {
 	if err := Serve(ctx, strings.NewReader(""), io.Discard); err != nil {
 		t.Fatalf("Serve EOF error = %v", err)
 	}
+}
+
+type signalBlockingReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *signalBlockingReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return 0, io.EOF
 }
 
 func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {

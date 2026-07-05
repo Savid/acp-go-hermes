@@ -1,8 +1,14 @@
 # Authentication
 
 Hermes/provider authentication remains native to Hermes. The ACP agent
-advertises no ACP auth methods and rejects every `authenticate` request.
+advertises `authMethods: []`, rejects every `authenticate` request, and treats
+`logout` as a no-op.
 
-Every per-session Hermes server receives a random
-`HERMES_SERVER_PASSWORD`, and all REST/SSE calls use HTTP basic auth.
-Credential-bearing native state is not intentionally stored by the adapter.
+Every per-session `hermes serve` process runs with an isolated `HERMES_HOME`
+and a random `HERMES_DASHBOARD_SESSION_TOKEN` for the loopback dashboard
+gateway. The token hash is written to the lease file only for stale-process
+identity checks.
+
+Auth material is never persisted to the ACP session store. Credential-bearing
+native files and SQLite credential tables are excluded or scrubbed from store
+snapshots.

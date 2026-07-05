@@ -19,3 +19,13 @@ or:
 ```go
 err := hermesacp.Serve(ctx, input, output, hermesacp.WithHome(home))
 ```
+
+## Native Gateway
+
+For each ACP session, the adapter starts `hermes serve --host 127.0.0.1` with
+an isolated `HERMES_HOME` and connects to `/api/ws`. `--skip-build` is passed
+only when `HERMES_WEB_DIST` is configured or the default Hermes web dist exists;
+otherwise Hermes builds or locates its web assets normally.
+
+The adapter wraps the dashboard gateway directly, not Hermes' native ACP
+server mode.

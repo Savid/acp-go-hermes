@@ -6,8 +6,10 @@ acp-go-hermes [flags]
 
 Flags:
 
-- `-path`
-- `-home`
-- `-model`
-- `-debug`
-- `-version`
+- `-path`: Hermes executable path; defaults to `hermes`
+- `-home`: parent directory for isolated per-session Hermes homes
+- `-model`: default model value passed as `provider/model`
+- `-debug`: enable debug logging on stderr
+- `-version`: print the wrapper version and exit
+
+No vendor-specific process flags are exposed in v1.

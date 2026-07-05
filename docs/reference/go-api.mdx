@@ -13,3 +13,7 @@ Common options include `WithExecutablePath`, `WithHome`, `WithDefaultModel`,
 
 Session `HermesOptions` include `WithHermesModel`, `WithHermesEnv`, and
 `WithHermesOutputSchema`.
+
+`WithHermesOutputSchema` is accepted for API symmetry but fails session start
+with the uniform unsupported structured-output error. Native auth material must
+be supplied through Hermes' own environment/configuration, not the ACP store.

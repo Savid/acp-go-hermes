@@ -160,6 +160,72 @@ func TestStateStoreArchiveRoundTripAndHelpers(t *testing.T) {
 	}
 }
 
+func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	xdg, err := createXDGDirs(root, "session-1")
+	if err != nil {
+		t.Fatalf("createXDGDirs: %v", err)
+	}
+	for name, body := range map[string]string{
+		"state.db":     "main",
+		"state.db-wal": "wal",
+		"state.db-shm": "shm",
+		"state.db-bak": "ignored",
+	} {
+		if err := os.WriteFile(filepath.Join(xdg.Root, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	store := NewInMemorySessionStore()
+	client := newFakeHermesClient()
+	client.xdg = xdg
+	session := testSession(NewAgent(WithSessionStore(store)), client)
+	if err := session.snapshotToStore(ctx); err != nil {
+		t.Fatalf("snapshotToStore: %v", err)
+	}
+
+	mainEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: SessionStoreMainSubpath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot stateSnapshot
+	if err := json.Unmarshal(mainEntries[len(mainEntries)-1], &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Archives["state-db"].Subpath != stateDBSubpath {
+		t.Fatalf("snapshot archives = %#v", snapshot.Archives)
+	}
+	stateEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
+	if err != nil || len(stateEntries) != 1 {
+		t.Fatalf("state-db entries = %d err=%v", len(stateEntries), err)
+	}
+	if xdgEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: xdgDataSubpath}); err != nil || len(xdgEntries) != 0 {
+		t.Fatalf("fallback xdg data entries = %d err=%v", len(xdgEntries), err)
+	}
+
+	if err := os.RemoveAll(xdg.Root); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := createXDGDirs(root, "session-1-restored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := hydrateStateFromStore(ctx, store, "session-1", restored); err != nil || !ok {
+		t.Fatalf("hydrate state-db ok=%v err=%v", ok, err)
+	}
+	for name, want := range map[string]string{"state.db": "main", "state.db-wal": "wal", "state.db-shm": "shm"} {
+		data, err := os.ReadFile(filepath.Join(restored.Root, name))
+		if err != nil || string(data) != want {
+			t.Fatalf("restored %s = %q err=%v", name, data, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(restored.Root, "state.db-bak")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected state.db-bak restored err=%v", err)
+	}
+}
+
 func TestHydrateStateFromStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
@@ -197,6 +263,79 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 	}
 	if _, _, _, err := hydrateStateFromStore(ctx, store, "s", xdg); err == nil {
 		t.Fatal("hydrate accepted missing archive")
+	}
+}
+
+func TestHydrateStateDBArchiveFaults(t *testing.T) {
+	ctx := context.Background()
+	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testTarZstd(t, []tar.Header{{Name: "state.db", Typeflag: tar.TypeReg, Mode: 0o600, Size: 4}}, map[string]string{"state.db": "body"})
+	sum := sha256.Sum256(data)
+
+	t.Run("load error", func(t *testing.T) {
+		store := validStateDBHydrateStore(t, ctx, data, hex.EncodeToString(sum[:]))
+		errStore := selectiveLoadErrorStore{
+			SessionStore: store,
+			key:          SessionKey{SessionID: "s", Subpath: stateDBSubpath},
+			err:          errors.New("state-db load failed"),
+		}
+		if _, _, _, err := hydrateStateFromStore(ctx, errStore, "s", xdg); err == nil {
+			t.Fatal("hydrate ignored state-db load error")
+		}
+	})
+
+	for name, entry := range map[string]SessionStoreEntry{
+		"missing": nil,
+		"json":    json.RawMessage(`{`),
+		"metadata": mustStateJSON(t, archiveEntry{
+			Format:   "bad",
+			Encoding: "tar+zstd+base64",
+			Final:    true,
+			SHA256:   hex.EncodeToString(sum[:]),
+			Data:     base64.StdEncoding.EncodeToString(data),
+		}),
+		"base64": mustStateJSON(t, archiveEntry{
+			Format:   SessionStoreFormat,
+			Encoding: "tar+zstd+base64",
+			Final:    true,
+			Data:     "not base64",
+		}),
+		"checksum": mustStateJSON(t, archiveEntry{
+			Format:   SessionStoreFormat,
+			Encoding: "tar+zstd+base64",
+			Final:    true,
+			SHA256:   "bad",
+			Data:     base64.StdEncoding.EncodeToString(data),
+		}),
+		"decode": mustStateJSON(t, archiveEntry{
+			Format:   SessionStoreFormat,
+			Encoding: "tar+zstd+base64",
+			Final:    true,
+			SHA256:   hex.EncodeToString(sha256Bytes([]byte("not zstd"))),
+			Data:     base64.StdEncoding.EncodeToString([]byte("not zstd")),
+		}),
+		"traversal": mustStateJSON(t, archiveEntry{
+			Format:   SessionStoreFormat,
+			Encoding: "tar+zstd+base64",
+			Final:    true,
+			SHA256:   hex.EncodeToString(sha256Bytes(testTarZstd(t, []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Size: 0}}, nil))),
+			Data:     base64.StdEncoding.EncodeToString(testTarZstd(t, []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Size: 0}}, nil)),
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := validStateDBHydrateStore(t, ctx, data, hex.EncodeToString(sum[:]))
+			if entry == nil {
+				replaceStateDBHydrateRecords(t, ctx, store, nil)
+			} else {
+				replaceStateDBHydrateRecords(t, ctx, store, []SessionStoreEntry{entry})
+			}
+			if _, _, _, err := hydrateStateFromStore(ctx, store, "s", xdg); err == nil {
+				t.Fatalf("hydrate accepted state-db %s fault", name)
+			}
+		})
 	}
 }
 
@@ -344,6 +483,32 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 		}
 		if err := snapshotFaultSession(t).snapshotToStore(ctx); err == nil {
 			t.Fatal("snapshot ignored archive error")
+		}
+	})
+
+	t.Run("state db archive encode error", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		session := snapshotFaultSession(t)
+		if err := os.WriteFile(filepath.Join(session.client.XDGDirs().Root, "state.db"), []byte("body"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stateLstat = func(string) (os.FileInfo, error) { return nil, errors.New("state db lstat failed") }
+		if err := session.snapshotToStore(ctx); err == nil {
+			t.Fatal("snapshot ignored state db archive error")
+		}
+	})
+
+	t.Run("state db archive marshal error", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		session := snapshotFaultSession(t)
+		if err := os.WriteFile(filepath.Join(session.client.XDGDirs().Root, "state.db"), []byte("body"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stateJSONMarshal = func(any) ([]byte, error) {
+			return nil, errors.New("marshal failed")
+		}
+		if err := session.snapshotToStore(ctx); err == nil {
+			t.Fatal("snapshot ignored state db archive marshal error")
 		}
 	})
 
@@ -544,6 +709,96 @@ func TestEncodeXDGArchiveFaults(t *testing.T) {
 			setup()
 			if _, _, err := encodeXDGArchive(root); err == nil {
 				t.Fatal("encodeXDGArchive ignored injected error")
+			}
+		})
+	}
+}
+
+func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
+	if _, _, ok, err := encodeHermesStateDBArchive(""); err != nil || ok {
+		t.Fatalf("empty root ok=%v err=%v", ok, err)
+	}
+	emptyRoot := t.TempDir()
+	if _, _, ok, err := encodeHermesStateDBArchive(emptyRoot); err != nil || ok {
+		t.Fatalf("empty state db root ok=%v err=%v", ok, err)
+	}
+	dirRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dirRoot, "state.db"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := encodeHermesStateDBArchive(dirRoot); err != nil || ok {
+		t.Fatalf("directory state db ok=%v err=%v", ok, err)
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "state.db"), []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if archive, sha, ok, err := encodeHermesStateDBArchive(root); err != nil || !ok || len(archive) == 0 || sha == "" {
+		t.Fatalf("encodeHermesStateDBArchive ok=%v sha=%q len=%d err=%v", ok, sha, len(archive), err)
+	}
+
+	tests := map[string]func(){
+		"initial lstat": func() {
+			stateLstat = func(string) (os.FileInfo, error) { return nil, errors.New("lstat failed") }
+		},
+		"second lstat": func() {
+			originalLstat := stateLstat
+			calls := 0
+			stateLstat = func(path string) (os.FileInfo, error) {
+				calls++
+				if calls == 4 {
+					return nil, errors.New("second lstat failed")
+				}
+				return originalLstat(path)
+			}
+		},
+		"header": func() {
+			stateFileInfoHeader = func(os.FileInfo, string) (*tar.Header, error) { return nil, errors.New("header failed") }
+		},
+		"write header": func() {
+			stateNewTarWriter = func(io.Writer) archiveTarWriter {
+				return fakeTarWriter{writeHeaderErr: errors.New("write header failed")}
+			}
+		},
+		"open": func() {
+			stateOpen = func(string) (io.ReadCloser, error) { return nil, errors.New("open failed") }
+		},
+		"copy": func() {
+			stateCopy = func(io.Writer, io.Reader) (int64, error) { return 0, errors.New("copy failed") }
+		},
+		"file close": func() {
+			stateOpen = func(string) (io.ReadCloser, error) {
+				return fakeReadCloser{Reader: strings.NewReader("body"), closeErr: errors.New("close failed")}, nil
+			}
+		},
+		"tar close": func() {
+			stateNewTarWriter = func(io.Writer) archiveTarWriter {
+				return fakeTarWriter{closeErr: errors.New("tar close failed")}
+			}
+		},
+		"zstd new": func() {
+			stateNewZstdWriter = func(io.Writer) (archiveZstdWriter, error) {
+				return nil, errors.New("zstd new failed")
+			}
+		},
+		"zstd write": func() {
+			stateNewZstdWriter = func(io.Writer) (archiveZstdWriter, error) {
+				return fakeZstdWriter{writeErr: errors.New("zstd write failed")}, nil
+			}
+		},
+		"zstd close": func() {
+			stateNewZstdWriter = func(io.Writer) (archiveZstdWriter, error) {
+				return fakeZstdWriter{closeErr: errors.New("zstd close failed")}, nil
+			}
+		},
+	}
+	for name, setup := range tests {
+		t.Run(name, func(t *testing.T) {
+			restoreStateStoreSeams(t)
+			setup()
+			if _, _, _, err := encodeHermesStateDBArchive(root); err == nil {
+				t.Fatal("encodeHermesStateDBArchive ignored injected error")
 			}
 		})
 	}
@@ -871,6 +1126,30 @@ func validHydrateStore(t *testing.T, ctx context.Context) *InMemorySessionStore 
 	return store
 }
 
+func validStateDBHydrateStore(t *testing.T, ctx context.Context, data []byte, sha string) *InMemorySessionStore {
+	t.Helper()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s", Subpath: SessionStoreMainSubpath}
+	snapshot := validHydrateSnapshot()
+	snapshot.Archives = map[string]archiveInfo{"state-db": {Subpath: stateDBSubpath, SHA256: sha, Bytes: len(data)}}
+	archive := mustStateJSON(t, archiveEntry{
+		Format:   SessionStoreFormat,
+		Encoding: "tar+zstd+base64",
+		Sequence: 0,
+		Final:    true,
+		SHA256:   sha,
+		Data:     base64.StdEncoding.EncodeToString(data),
+	})
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{mustStateJSON(t, snapshot)}},
+		{Key: SessionKey{SessionID: "s", Subpath: idmapSubpath}, Entries: []SessionStoreEntry{mustStateJSON(t, validHydrateIDMap())}},
+		{Key: SessionKey{SessionID: "s", Subpath: stateDBSubpath}, Entries: []SessionStoreEntry{archive}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
 func validHydrateIDMap() idmapRecord {
 	return idmapRecord{
 		SessionID:       "s",
@@ -936,6 +1215,30 @@ func replaceArchiveEntry(t *testing.T, ctx context.Context, store *InMemorySessi
 	if err := store.Replace(ctx, main, replacements); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func replaceStateDBHydrateRecords(t *testing.T, ctx context.Context, store *InMemorySessionStore, stateEntries []SessionStoreEntry) {
+	t.Helper()
+	main := SessionKey{SessionID: "s", Subpath: SessionStoreMainSubpath}
+	entries := []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{mustStateJSON(t, func() stateSnapshot {
+			snapshot := validHydrateSnapshot()
+			snapshot.Archives = map[string]archiveInfo{"state-db": {Subpath: stateDBSubpath}}
+			return snapshot
+		}())}},
+		{Key: SessionKey{SessionID: "s", Subpath: idmapSubpath}, Entries: []SessionStoreEntry{mustStateJSON(t, validHydrateIDMap())}},
+	}
+	if stateEntries != nil {
+		entries = append(entries, SessionStoreReplacement{Key: SessionKey{SessionID: "s", Subpath: stateDBSubpath}, Entries: stateEntries})
+	}
+	if err := store.Replace(ctx, main, entries); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sha256Bytes(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
 }
 
 func mustStateJSON(t *testing.T, value any) SessionStoreEntry {

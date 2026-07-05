@@ -80,6 +80,14 @@ func TestOptionsAndRequestBuilders(t *testing.T) {
 	if len(unstable) != 4 || unstable[0].Http == nil || unstable[1].Stdio == nil || unstable[2].Sse == nil || unstable[3].Acp == nil {
 		t.Fatalf("unstable MCP servers = %#v", unstable)
 	}
+	stable := stableMCPServersFromUnstable(append(unstable, acp.UnstableMcpServer{}))
+	if len(stable) != 5 || stable[0].Http == nil || stable[1].Stdio == nil || stable[2].Sse == nil || stable[3].Acp == nil {
+		t.Fatalf("stable MCP servers = %#v", stable)
+	}
+	if stable[0].Http.Headers[0].Value != "Y" || stable[1].Stdio.Env[0].Value != "V" ||
+		stable[2].Sse.Url != "https://sse.example" || stable[3].Acp.Id != "acp-1" {
+		t.Fatalf("stable MCP server fields = %#v", stable)
+	}
 }
 
 func TestRequestBuilderCloneEdgeBranches(t *testing.T) {
@@ -98,7 +106,7 @@ func TestRequestBuilderCloneEdgeBranches(t *testing.T) {
 		t.Fatalf("output schema was not cloned: %#v", outputSchemaClone.OutputSchema)
 	}
 	if cloneMCPServers(nil) != nil || cloneMCPServerStdio(nil) != nil || cloneHTTPHeaders(nil) != nil ||
-		cloneEnvVariables(nil) != nil || unstableMCPServersFromStable(nil) != nil {
+		cloneEnvVariables(nil) != nil || unstableMCPServersFromStable(nil) != nil || stableMCPServersFromUnstable(nil) != nil {
 		t.Fatal("nil clone helper returned non-nil")
 	}
 	if cloneMCPServer(acp.McpServer{}).Http != nil {

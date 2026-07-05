@@ -1,7 +1,8 @@
 # Sessions
 
-Each ACP session owns one Hermes server process and four isolated XDG
-directories under the configured home parent.
+Each ACP session owns one `hermes serve` process and one isolated per-session
+`HERMES_HOME` under the configured home parent. The adapter talks to the
+native dashboard gateway over loopback WebSocket JSON-RPC.
 
 Lifecycle support:
 
@@ -13,5 +14,12 @@ Lifecycle support:
 - `session/delete`
 - `_hermes/session/fork`
 
-`session/load` replays messages from Hermes REST. `session/resume` restores
-native state and returns without replay.
+ACP session IDs are adapter-owned. The native durable Hermes session key is
+stored in the `idmap` store subpath, while live gateway session IDs are runtime
+only.
+
+`session/load` hydrates native state, resumes the stored Hermes session, and
+replays `session.history` to the ACP client. `session/resume` hydrates and
+resumes without replay. `session/delete` tombstones the ACP store first, then
+best-effort deletes native state; native missing-session responses count as
+success.

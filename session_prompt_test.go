@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
@@ -331,7 +332,7 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	client.errs <- errors.New("stream closed")
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_sse_disconnect") {
+		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
 			t.Fatalf("Prompt error = %v", err)
 		}
 	case <-ctx.Done():
@@ -411,7 +412,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	client.errs <- streamError{epoch: 7, err: errors.New("stream failed")}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_sse_disconnect") {
+		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
 			t.Fatalf("Prompt error = %v", err)
 		}
 	case <-ctx.Done():
@@ -457,10 +458,10 @@ func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Prompt did not start")
 	}
-	client.errs <- streamError{epoch: 11, err: errHermesSSEDisconnect}
+	client.errs <- streamError{epoch: 11, err: errors.New("websocket closed")}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_sse_disconnect") {
+		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
 			t.Fatalf("Prompt error = %v", err)
 		}
 	case <-ctx.Done():
@@ -1783,7 +1784,7 @@ func TestPromptSlashCommandStaleRaceRefreshesWithoutPlainRetry(t *testing.T) {
 				} else {
 					client.commands = nil
 				}
-				return nativeMessage{}, &hermesHTTPError{Method: "POST", Path: "/session/native-1/command", Status: "400 Bad Request", StatusCode: 400, Body: "unknown command"}
+				return nativeMessage{}, &nativehermes.RPCError{Code: -32602, Message: "unknown command"}
 			}
 			conn := newRecordingAgentClient()
 			agent := NewAgent()

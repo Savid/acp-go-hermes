@@ -1,9 +1,11 @@
 # Prompt Streaming
 
-Prompt turns post to Hermes REST and consume the session SSE stream. Text
-parts become ACP message chunks, reasoning parts become thought chunks, tool
-parts become tool-call updates, todos become plan updates, and token data
-becomes `usage_update`.
+Prompt turns call native `prompt.submit` over the Hermes WebSocket gateway and
+consume gateway events until `message.complete`. `message.delta` events become
+ACP text chunks, `thinking.delta` events become reasoning chunks, and token
+data from completion payloads becomes `usage_update`.
 
-If the SSE stream fails during a turn, the adapter aborts the native turn and
-returns one terminal ACP error for that prompt. The session remains usable.
+If the WebSocket stream fails during a turn, the adapter aborts the native turn
+and returns one terminal ACP error for that prompt. Idle disconnects are
+treated as a gateway lifecycle failure and future session operations reconnect
+through normal session hydration.

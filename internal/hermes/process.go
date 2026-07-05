@@ -19,6 +19,19 @@ import (
 
 const MinimumVersion = "0.18.0"
 
+var (
+	commandContext      = exec.CommandContext
+	listenTCP           = net.Listen
+	randReader          = rand.Reader
+	mkdirTemp           = os.MkdirTemp
+	mkdirAll            = os.MkdirAll
+	userHomeDir         = os.UserHomeDir
+	statPath            = os.Stat
+	after               = time.After
+	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
+	waitProcessCommand  = func(cmd *exec.Cmd) error { return cmd.Wait() }
+)
+
 type ProcessOptions struct {
 	ExecutablePath string
 	Home           string
@@ -52,12 +65,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	home := opts.Home
 	if home == "" {
 		var err error
-		home, err = os.MkdirTemp("", "acp-go-hermes-*")
+		home, err = mkdirTemp("", "acp-go-hermes-*")
 		if err != nil {
 			return nil, err
 		}
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	if err := mkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
 	port, err := freePort()
@@ -74,7 +87,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if opts.Env["HERMES_WEB_DIST"] != "" || defaultWebDistExists() {
 		args = append(args, "--skip-build")
 	}
-	cmd := exec.CommandContext(processCtx, executable, args...)
+	cmd := commandContext(processCtx, executable, args...)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}
@@ -138,21 +151,21 @@ func (p *Process) Close(ctx context.Context) error {
 		return nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.Cmd.Wait() }()
+	go func() { done <- waitProcessCommand(p.Cmd) }()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
 		_ = p.Cmd.Process.Kill()
 		return ctx.Err()
-	case <-time.After(5 * time.Second):
+	case <-after(5 * time.Second):
 		_ = p.Cmd.Process.Kill()
 		return fmt.Errorf("hermes serve did not exit")
 	}
 }
 
 func (p *Process) waitReady(ctx context.Context) error {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := newStatusHTTPClient()
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.StatusURL, http.NoBody)
 		if err != nil {
@@ -171,7 +184,7 @@ func (p *Process) waitReady(ctx context.Context) error {
 				return fmt.Errorf("hermes status check failed: %w", err)
 			}
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-after(100 * time.Millisecond):
 		}
 	}
 }
@@ -197,7 +210,7 @@ func (p *Process) waitGatewayReady(ctx context.Context) error {
 }
 
 func freePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := listenTCP("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
 	}
@@ -207,18 +220,18 @@ func freePort() (int, error) {
 
 func randomToken() (string, error) {
 	var buf [32]byte
-	if _, err := rand.Read(buf[:]); err != nil {
+	if _, err := randReader.Read(buf[:]); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
 func defaultWebDistExists() bool {
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(home, ".hermes", "hermes-agent", "hermes_cli", "web_dist"))
+	info, err := statPath(filepath.Join(home, ".hermes", "hermes-agent", "hermes_cli", "web_dist"))
 	return err == nil && info.IsDir()
 }
 
