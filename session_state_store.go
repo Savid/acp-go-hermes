@@ -269,7 +269,7 @@ func (s *session) snapshotBlockedReason() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
-	case s.cancel != nil:
+	case s.turnInFlight || s.cancel != nil:
 		return "turn"
 	case len(s.pending) > 0:
 		return "permission"

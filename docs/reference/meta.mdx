@@ -8,9 +8,7 @@ Lifecycle requests accept:
     "hermes": {
       "options": {
         "model": "provider/model",
-        "env": {},
-        "mode": "build",
-        "permission": "ask"
+        "env": {}
       },
       "rawEvent": {
         "enabled": false
@@ -23,6 +21,7 @@ Lifecycle requests accept:
 Unknown keys under `_meta.hermes` are rejected. Foreign namespaces are
 ignored.
 
-`_meta.hermes.options.permission` accepts `ask` or `allow`. Empty is treated
-as `ask`. The adapter writes the value into the isolated per-session Hermes
-config as `permission: {"*": "<value>"}` before starting `hermes serve`.
+`_meta.hermes.options.model` selects the provider/model pair. `env` injects
+per-session environment variables. No other option keys are accepted; any
+unsupported field fails with an invalid-params `{"error":"unsupported"}`
+response.

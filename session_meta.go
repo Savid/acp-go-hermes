@@ -1,9 +1,6 @@
 package hermesacp
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -22,9 +19,6 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 	if err != nil {
 		return sessionMeta{}, err
 	}
-	if options.OutputSchema != nil {
-		return sessionMeta{}, unsupportedField("_meta.hermes.options.outputSchema")
-	}
 
 	return sessionMeta{
 		Model:       options.Model,
@@ -34,9 +28,8 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 }
 
 type hermesMetaOptions struct {
-	Model        string
-	Env          map[string]string
-	OutputSchema any
+	Model string
+	Env   map[string]string
 }
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
@@ -57,12 +50,6 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 		options.Env = env
 	}
-	if schema, ok := optionsMap[metaOutputSchemaKey]; ok {
-		if err := validateSchemaObject(schema); err != nil {
-			return hermesMetaOptions{}, err
-		}
-		options.OutputSchema = cloneAny(schema)
-	}
 	return options, nil
 }
 
@@ -76,7 +63,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 	hermesMeta, ok := meta[hermesMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[hermesMetaKey]; exists {
-			return fmt.Errorf("_meta.hermes must be an object")
+			return unsupportedField("_meta.hermes")
 		}
 		return nil
 	}
@@ -85,11 +72,17 @@ func validateLifecycleMeta(meta map[string]any) error {
 		case metaOptionsKey:
 			optionsMap, ok := value.(map[string]any)
 			if !ok {
-				return fmt.Errorf("_meta.hermes.options must be an object")
+				return unsupportedField("_meta.hermes.options")
 			}
-			for optionKey := range optionsMap {
+			for optionKey, optionValue := range optionsMap {
 				switch optionKey {
-				case "model", "env", "outputSchema":
+				case metaModelKey:
+					if _, ok := optionValue.(string); !ok {
+						return unsupportedField("_meta.hermes.options.model")
+					}
+				case metaEnvKey:
+				case metaOutputSchemaKey:
+					return unsupportedField("_meta.hermes.options.outputSchema")
 				default:
 					return unsupportedField("_meta.hermes.options." + optionKey)
 				}
@@ -97,13 +90,13 @@ func validateLifecycleMeta(meta map[string]any) error {
 		case rawEventKey:
 			rawEvent, ok := value.(map[string]any)
 			if !ok {
-				return fmt.Errorf("_meta.hermes.rawEvent must be an object")
+				return unsupportedField("_meta.hermes.rawEvent")
 			}
 			for rawKey, rawValue := range rawEvent {
 				switch rawKey {
 				case rawEventEnabledKey:
 					if _, ok := rawValue.(bool); !ok {
-						return fmt.Errorf("_meta.hermes.rawEvent.enabled must be a boolean")
+						return unsupportedField("_meta.hermes.rawEvent.enabled")
 					}
 				default:
 					return unsupportedField("_meta.hermes.rawEvent." + rawKey)
@@ -124,18 +117,6 @@ func unsupportedField(path string) error {
 	})
 }
 
-func validateSchemaObject(schema any) error {
-	obj, ok := schema.(map[string]any)
-	if !ok || len(obj) == 0 {
-		return fmt.Errorf("output schema must be a non-empty JSON object")
-	}
-	if _, err := json.Marshal(obj); err != nil {
-		return fmt.Errorf("output schema must be JSON serializable: %w", err)
-	}
-
-	return nil
-}
-
 func stringMapFromMeta(value any) (map[string]string, error) {
 	switch typed := value.(type) {
 	case map[string]string:
@@ -145,13 +126,13 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 		for key, raw := range typed {
 			str, ok := raw.(string)
 			if !ok {
-				return nil, fmt.Errorf("_meta.hermes.options.env.%s must be a string", key)
+				return nil, unsupportedField("_meta.hermes.options.env")
 			}
 			out[key] = str
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("_meta.hermes.options.env must be an object")
+		return nil, unsupportedField("_meta.hermes.options.env")
 	}
 }
 

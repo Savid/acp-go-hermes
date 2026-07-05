@@ -193,15 +193,22 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env lifecycle meta accepted")
 	}
-	if _, err := hermesOptionsFromMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: map[string]any{"bad": func() {}}}}}); err == nil {
-		t.Fatal("non-json output schema accepted")
+	for name, schema := range map[string]any{
+		"object":       map[string]any{"type": "object"},
+		"empty-object": map[string]any{},
+		"array":        []any{"bad"},
+		"string":       "bad",
+	} {
+		_, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: schema}}})
+		requireUnsupportedField(t, err, "_meta.hermes.options.outputSchema", "outputSchema "+name)
 	}
-	if err := validateSchemaObject([]any{"bad"}); err == nil {
-		t.Fatal("bad schema accepted")
-	}
-	if err := validateSchemaObject(map[string]any{}); err == nil {
-		t.Fatal("empty schema accepted")
-	}
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: "bad"})), "_meta.hermes", "hermes non-object")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: "bad"}})), "_meta.hermes.options", "options non-object")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaModelKey: 7}}})), "_meta.hermes.options.model", "non-string model")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}})), "_meta.hermes.options.env", "env non-object")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: map[string]any{"A": 1}}}})), "_meta.hermes.options.env", "env non-string value")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{rawEventKey: "bad"}})), "_meta.hermes.rawEvent", "rawEvent non-object")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{rawEventKey: map[string]any{rawEventEnabledKey: "bad"}}})), "_meta.hermes.rawEvent.enabled", "rawEvent enabled non-bool")
 	if got := cloneAny([]any{map[string]any{"a": "b"}}); !reflect.DeepEqual(got, []any{map[string]any{"a": "b"}}) {
 		t.Fatalf("cloneAny slice = %#v", got)
 	}
@@ -213,9 +220,6 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	}
 	if joinModelValue("", "m") != "m" || joinModelValue("p", "") != "p" {
 		t.Fatal("joinModelValue fallback mismatch")
-	}
-	if titleASCII("") != "" || titleASCII("plan") != "Plan" {
-		t.Fatal("titleASCII mismatch")
 	}
 }
 
@@ -475,5 +479,27 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	}
 	if _, err := io.Copy(io.Discard, strings.NewReader("")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func mustErr(_ sessionMeta, err error) error {
+	return err
+}
+
+func requireUnsupportedField(t *testing.T, err error, field string, name string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: expected unsupported-field error, got nil", name)
+	}
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("%s: error type = %T", name, err)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("%s: error data = %#v", name, reqErr.Data)
+	}
+	if data["error"] != "unsupported" || data["field"] != field {
+		t.Fatalf("%s: error data = %#v want field %q", name, data, field)
 	}
 }

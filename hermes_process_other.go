@@ -29,7 +29,14 @@ func killHermesProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
-func killProcessID(pid int) error {
+func terminateProcessGroupID(pid int) error {
+	return killProcessGroupID(pid)
+}
+
+func killProcessGroupID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return err

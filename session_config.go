@@ -33,11 +33,6 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"field": "value"})
 		}
 		session.setModel(value)
-	case configMode:
-		if !session.hasConfigValue(ctx, configMode, value) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"field": "value"})
-		}
-		session.setMode(value)
 	default:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{"field": "configId"})
 	}
@@ -83,11 +78,6 @@ func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {
 	if providers, err := snapshot.client.ConfigProviders(ctx); err == nil {
 		if model := modelConfigOption(snapshot, providers); model.Select != nil {
 			options = append(options, model)
-		}
-	}
-	if agents, err := snapshot.client.Agents(ctx); err == nil && len(agents) > 0 {
-		if mode := modeConfigOption(snapshot, agents); mode.Select != nil {
-			options = append(options, mode)
 		}
 	}
 	return options
@@ -149,53 +139,6 @@ func modelConfigOption(snapshot sessionSnapshot, providers providersResponse) ac
 		Type:         configTypeSelect,
 		CurrentValue: acp.SessionConfigValueId(current),
 		Options:      acp.SessionConfigSelectOptions{Grouped: &groups},
-	}}
-}
-
-func modeConfigOption(snapshot sessionSnapshot, agents []nativeAgent) acp.SessionConfigOption {
-	category := acp.SessionConfigOptionCategoryMode
-	current := firstNonEmpty(snapshot.mode, "build")
-	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(agents))
-	seen := map[string]struct{}{}
-	for _, agent := range agents {
-		value := firstNonEmpty(agent.Name, agent.Mode)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		description := agent.Description
-		item := acp.SessionConfigSelectOption{
-			Name:  titleASCII(value),
-			Value: acp.SessionConfigValueId(value),
-		}
-		if description != "" {
-			item.Description = &description
-		}
-		values = append(values, item)
-	}
-	if len(values) == 0 {
-		return acp.SessionConfigOption{}
-	}
-	foundCurrent := false
-	for _, value := range values {
-		if string(value.Value) == current {
-			foundCurrent = true
-			break
-		}
-	}
-	if !foundCurrent {
-		current = string(values[0].Value)
-	}
-	return acp.SessionConfigOption{Select: &acp.SessionConfigOptionSelect{
-		Id:           configMode,
-		Name:         "Mode",
-		Category:     &category,
-		Type:         configTypeSelect,
-		CurrentValue: acp.SessionConfigValueId(current),
-		Options:      acp.SessionConfigSelectOptions{Ungrouped: &values},
 	}}
 }
 
@@ -308,11 +251,4 @@ func unstableConfigOptions(options []acp.SessionConfigOption) []acp.UnstableSess
 		}
 	}
 	return out
-}
-
-func titleASCII(value string) string {
-	if value == "" {
-		return ""
-	}
-	return strings.ToUpper(value[:1]) + value[1:]
 }

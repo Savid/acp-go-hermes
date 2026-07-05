@@ -275,6 +275,12 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 	return session, nil
 }
 
+func (a *Agent) activeSession(id acp.SessionId) *session {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessions[id]
+}
+
 func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

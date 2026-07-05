@@ -311,6 +311,14 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 }
 
+// Redial opens a fresh WebSocket gateway connection to the still-running
+// `hermes serve` process, used to recover from an idle disconnect. It does not
+// mutate p.Client; the caller owns the returned client's lifetime.
+func (p *Process) Redial(ctx context.Context) (*Client, error) {
+	url := "ws://127.0.0.1:" + strconv.Itoa(p.Port) + "/api/ws?token=" + p.Token
+	return Dial(ctx, url, http.Header{"X-Hermes-Session-Token": []string{p.Token}})
+}
+
 func (p *Process) waitReady(ctx context.Context) error {
 	client := newStatusHTTPClient()
 	for {

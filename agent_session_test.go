@@ -7,11 +7,151 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+// toggleReplaceStore wraps InMemorySessionStore and can be switched to fail all
+// Replace calls, simulating a disk-full/store outage after native success.
+type toggleReplaceStore struct {
+	*InMemorySessionStore
+	mu   sync.Mutex
+	fail bool
+}
+
+func (s *toggleReplaceStore) setFail(fail bool) {
+	s.mu.Lock()
+	s.fail = fail
+	s.mu.Unlock()
+}
+
+func (s *toggleReplaceStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
+	s.mu.Lock()
+	fail := s.fail
+	s.mu.Unlock()
+	if fail {
+		return errors.New("replace failed")
+	}
+	return s.InMemorySessionStore.Replace(ctx, main, replacements)
+}
+
+// TestNewSessionSnapshotFailureLeavesNoOrphan proves HW2: a failed initial
+// snapshot removes the session from the active map and native state.
+func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cwd := t.TempDir()
+	store := &toggleReplaceStore{InMemorySessionStore: NewInMemorySessionStore(), fail: true}
+	createClient := newFakeHermesClient()
+	createClient.createSession = testNativeSession("native-created")
+	createClient.getSession = createClient.createSession
+	// A native close error during cleanup is logged, not surfaced.
+	createClient.closeErr = errors.New("close boom")
+	agent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
+			xdg, err := createXDGDirs(opts.Root, string(opts.ACPSessionID))
+			if err != nil {
+				return nil, err
+			}
+			createClient.xdg = xdg
+			return createClient, nil
+		}
+	})
+
+	if _, err := agent.NewSession(ctx, NewSessionRequest(cwd)); err == nil {
+		t.Fatal("NewSession snapshot failure was ignored")
+	}
+	agent.mu.Lock()
+	activeCount := len(agent.sessions)
+	agent.mu.Unlock()
+	if activeCount != 0 {
+		t.Fatalf("failed session still active: %d", activeCount)
+	}
+	listResp, err := agent.ListSessions(ctx, acp.ListSessionsRequest{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(listResp.Sessions) != 0 {
+		t.Fatalf("failed session still listable: %#v", listResp.Sessions)
+	}
+	if !createClient.closed {
+		t.Fatal("native client not closed after failed snapshot")
+	}
+	if len(createClient.deleted) != 1 || createClient.deleted[0] != "native-created" {
+		t.Fatalf("native session not deleted: %#v", createClient.deleted)
+	}
+	if _, err := os.Stat(createClient.xdg.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("XDG root not removed after failed snapshot: %v", err)
+	}
+}
+
+// TestForkSnapshotFailureLeavesNoOrphan proves HW2 for the fork path.
+func TestForkSnapshotFailureLeavesNoOrphan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cwd := t.TempDir()
+	store := &toggleReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	parent := newFakeHermesClient()
+	parent.createSession = testNativeSession("native-parent")
+	parent.getSession = parent.createSession
+	parent.forkSession = testNativeSession("native-child")
+	child := newFakeHermesClient()
+	child.getSession = testNativeSession("native-child")
+	factoryCalls := 0
+	agent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
+			factoryCalls++
+			client := parent
+			if factoryCalls > 1 {
+				client = child
+			}
+			xdg := opts.ExistingXDG
+			if xdg.Root == "" {
+				var err error
+				xdg, err = createXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+			}
+			client.xdg = xdg
+			return client, nil
+		}
+	})
+
+	parentResp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	store.setFail(true)
+	rawFork, err := json.Marshal(ForkSessionRequest(parentResp.SessionId, cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, rawFork); err == nil {
+		t.Fatal("fork snapshot failure was ignored")
+	}
+	agent.mu.Lock()
+	activeCount := len(agent.sessions)
+	agent.mu.Unlock()
+	if activeCount != 1 {
+		t.Fatalf("fork left extra active session: %d", activeCount)
+	}
+	if _, err := agent.session(parentResp.SessionId); err != nil {
+		t.Fatalf("parent session lost after failed fork: %v", err)
+	}
+	if !child.closed {
+		t.Fatal("child native client not closed after failed fork snapshot")
+	}
+	if len(child.deleted) != 1 || child.deleted[0] != "native-child" {
+		t.Fatalf("child native session not deleted: %#v", child.deleted)
+	}
+	if _, err := os.Stat(child.xdg.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child XDG root not removed after failed fork snapshot: %v", err)
+	}
+}
 
 func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	ctx := context.Background()
@@ -21,11 +161,9 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	parent.getSession = parent.createSession
 	parent.forkSession = testNativeSession("native-child")
 	parent.providers = testProviders()
-	parent.agents = []nativeAgent{{Name: "build", Description: "Build"}, {Name: "plan", Description: "Plan"}}
 	child := newFakeHermesClient()
 	child.getSession = testNativeSession("native-child")
 	child.providers = parent.providers
-	child.agents = parent.agents
 	store := NewInMemorySessionStore()
 	factoryCalls := 0
 	agent := NewAgent(
@@ -61,17 +199,17 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if newResp.SessionId == "" || len(newResp.ConfigOptions) != 2 {
+	if newResp.SessionId == "" || len(newResp.ConfigOptions) != 1 {
 		t.Fatalf("new response = %#v", newResp)
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, SetModelRequest(newResp.SessionId, "openai/gpt-other")); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, "plan")); err != nil {
-		t.Fatalf("SetMode: %v", err)
+	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, acp.SessionConfigId("mode"), "plan")); err == nil {
+		t.Fatal("mode config option unexpectedly accepted")
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
-		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: newResp.SessionId, ConfigId: configMode, Type: "boolean", Value: true},
+		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: newResp.SessionId, ConfigId: configModel, Type: "boolean", Value: true},
 	}); err == nil {
 		t.Fatal("boolean config option unexpectedly accepted")
 	}
@@ -153,7 +291,6 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	loadedClient := newFakeHermesClient()
 	loadedClient.getSession = testNativeSession("native-1")
 	loadedClient.providers = testProviders()
-	loadedClient.agents = []nativeAgent{{Name: "build"}}
 	var replayPart nativePart
 	if err := json.Unmarshal([]byte(`{"id":"part-1","sessionID":"native-1","messageID":"user-1","type":"text","text":"hello"}`), &replayPart); err != nil {
 		t.Fatal(err)
@@ -216,6 +353,128 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 	}
 	if got := store.replaceCount(); got != 0 {
 		t.Fatalf("close wrote snapshot during blocked turn: %d", got)
+	}
+}
+
+// TestSnapshotFencedAfterAcquireTurn parks a turn after acquireTurn but before
+// beginTurn and asserts no Replace happens (HW3 turn-in-flight snapshot fence).
+func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
+	ctx := context.Background()
+	store := newCountingSessionStore()
+	client := newFakeHermesClient()
+	agent := NewAgent(WithSessionStore(store))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	release, err := session.acquireTurn(ctx)
+	if err != nil {
+		t.Fatalf("acquireTurn: %v", err)
+	}
+	if reason := session.snapshotBlockedReason(); reason != "turn" {
+		t.Fatalf("fence not set after acquireTurn: %q", reason)
+	}
+	if err := session.snapshotToStore(ctx); err == nil {
+		t.Fatal("snapshot ran while turn in flight")
+	}
+	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	if got := store.replaceCount(); got != 0 {
+		t.Fatalf("Replace happened while turn in flight: %d", got)
+	}
+	release()
+	if reason := session.snapshotBlockedReason(); reason != "" {
+		t.Fatalf("fence not cleared after release: %q", reason)
+	}
+}
+
+// TestActiveLoadResumeReusesSession proves HW1/X1: active session/load and
+// session/resume validate the request first, reuse the active session without
+// starting a second native process, do not overwrite the map, and reject
+// invalid/mismatched active requests with the cold-path error.
+func TestActiveLoadResumeReusesSession(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cwd := t.TempDir()
+	store := NewInMemorySessionStore()
+	client := newFakeHermesClient()
+	client.createSession = testNativeSession("native-1")
+	client.getSession = client.createSession
+	factoryCalls := 0
+	agent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
+			factoryCalls++
+			xdg := opts.ExistingXDG
+			if xdg.Root == "" {
+				var err error
+				xdg, err = createXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+			}
+			client.xdg = xdg
+			return client, nil
+		}
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	id := newResp.SessionId
+	if factoryCalls != 1 {
+		t.Fatalf("factory calls after new = %d", factoryCalls)
+	}
+	active := agent.activeSession(id)
+
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd)); err != nil {
+		t.Fatalf("active LoadSession: %v", err)
+	}
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd)); err != nil {
+		t.Fatalf("active ResumeSession: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("active load/resume started a second native process: %d", factoryCalls)
+	}
+	if agent.activeSession(id) != active {
+		t.Fatal("active load/resume overwrote the session map entry")
+	}
+
+	// Validation runs before the active-session reuse: bad _meta, relative
+	// cwd, and SSE MCP all return the cold-path error without reuse.
+	badMeta := map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"unknown": "x"}}}
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMeta(badMeta))); err == nil {
+		t.Fatal("active load accepted bad _meta")
+	}
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMeta(badMeta))); err == nil {
+		t.Fatal("active resume accepted bad _meta")
+	}
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, "relative-cwd")); err == nil {
+		t.Fatal("active load accepted relative cwd")
+	}
+	sse := acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMCPServers(sse))); err == nil {
+		t.Fatal("active load accepted SSE MCP server")
+	}
+	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMCPServers(sse))); err == nil {
+		t.Fatal("active resume accepted SSE MCP server")
+	}
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, filepath.Join(cwd, "other"))); err == nil {
+		t.Fatal("active load accepted mismatched cwd")
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("invalid active load/resume started a native process: %d", factoryCalls)
+	}
+
+	if err := agent.Close(); err != nil {
+		t.Fatalf("Agent.Close: %v", err)
+	}
+	if !client.closed {
+		t.Fatal("Agent.Close did not close the single native client")
 	}
 }
 
@@ -312,18 +571,22 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	loadedClient := newFakeHermesClient()
 	loadedClient.getSession = testNativeSession("native-1")
 	loadedClient.providers = testProviders()
-	loadedClient.agents = []nativeAgent{{Name: "build"}}
 	loadAgent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 			loadedClient.xdg = opts.ExistingXDG
 			return loadedClient, nil
 		}
 	})
+	// Cold cwd mismatch (session not yet active) is rejected after hydrate.
+	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err == nil {
+		t.Fatal("cold cwd mismatch load succeeded")
+	}
 	if _, err := loadAgent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
+	// Active cwd mismatch (session now active) is rejected before reuse.
 	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err == nil {
-		t.Fatal("cwd mismatch load succeeded")
+		t.Fatal("active cwd mismatch load succeeded")
 	}
 
 	getErrClient := newFakeHermesClient()

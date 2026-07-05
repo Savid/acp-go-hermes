@@ -30,6 +30,7 @@ type session struct {
 
 	turn                chan struct{}
 	mu                  sync.Mutex
+	turnInFlight        bool
 	cancel              context.CancelFunc
 	turnDone            <-chan struct{}
 	cancelled           bool
@@ -133,8 +134,10 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "session_prompt"})
 	}
 	turn <- struct{}{}
+	s.turnInFlight = true
 	return func() {
 		s.mu.Lock()
+		s.turnInFlight = false
 		<-turn
 		s.mu.Unlock()
 	}, nil
@@ -170,6 +173,7 @@ func (s *session) finishTurn() {
 	cancel := s.cancel
 	s.cancel = nil
 	s.turnDone = nil
+	s.turnInFlight = false
 	s.cancelled = false
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.pending = map[string]permissionRequest{}
@@ -408,12 +412,6 @@ func (s *session) setModel(value string) {
 	s.mu.Lock()
 	s.providerID = provider
 	s.modelID = model
-	s.mu.Unlock()
-}
-
-func (s *session) setMode(value string) {
-	s.mu.Lock()
-	s.mode = value
 	s.mu.Unlock()
 }
 

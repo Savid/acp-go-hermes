@@ -57,7 +57,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		_ = session.Close(context.Background())
+		a.cleanupFailedStartedSession(ctx, session)
 		return acp.NewSessionResponse{}, err
 	}
 
@@ -66,6 +66,23 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		Meta:          sessionResponseMeta(session.snapshot()),
 		ConfigOptions: session.configOptions(ctx),
 	}, nil
+}
+
+// cleanupFailedStartedSession removes a registered session whose durable
+// snapshot never committed: it deregisters the session so it is neither active
+// nor listable, deletes and closes the native Hermes session, and removes the
+// XDG root and lease. The store is the durability boundary, so a failed initial
+// or fork Replace must leave no orphan process or listable session behind.
+func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *session) {
+	a.removeSessionIf(session.id, session)
+	record := a.deleteCleanupRecord(session.id, session)
+	closeCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	err := session.DeleteNativeAndClose(closeCtx)
+	cancel()
+	err = errors.Join(err, a.cleanupDeletedSession(record))
+	if err != nil {
+		a.log.DebugContext(ctx, "clean up Hermes session after failed snapshot", slog.String("error", err.Error()))
+	}
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
@@ -128,6 +145,17 @@ func (a *Agent) loadOrResumeSession(
 	meta, err := sessionMetaFromLifecycle(metaMap)
 	if err != nil {
 		return nil, err
+	}
+
+	// X1: validate the full request first (done above), then reuse an
+	// already-active session instead of starting a second `hermes serve`.
+	// session/load replays on the reused session (LoadSession calls
+	// replayMessages); session/resume returns without replay.
+	if existing := a.activeSession(id); existing != nil {
+		if existing.cwd != "" && existing.cwd != cwd {
+			return nil, acp.NewInvalidParams(map[string]any{"error": "cwd_mismatch", "field": jsonFieldCwd})
+		}
+		return existing, nil
 	}
 
 	xdg, err := createXDGDirs(a.homeRoot(), string(id))
@@ -352,7 +380,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		_ = session.Close(context.Background())
+		a.cleanupFailedStartedSession(ctx, session)
 		return acp.UnstableForkSessionResponse{}, err
 	}
 	return acp.UnstableForkSessionResponse{

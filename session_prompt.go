@@ -128,6 +128,11 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: err.Error()})
 		case result := <-done:
 			if result.err != nil {
+				if isGatewayDisconnect(result.err) {
+					s.markStreamFailed(0)
+					abortTurn()
+					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: result.err.Error()})
+				}
 				if s.wasCancelled() || turnCtx.Err() != nil {
 					return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 				}

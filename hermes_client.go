@@ -38,7 +38,6 @@ type hermesClient interface {
 	Fork(context.Context, string, string) (nativeSession, error)
 	Todos(context.Context, string) ([]nativeTodo, error)
 	ConfigProviders(context.Context) (providersResponse, error)
-	Agents(context.Context) ([]nativeAgent, error)
 	PendingPermissions(context.Context) ([]permissionRequest, error)
 	ReplyPermission(context.Context, permissionRequest, string, string) error
 	PendingQuestions(context.Context) ([]questionRequest, error)
@@ -89,6 +88,11 @@ type hermesServer struct {
 	storedByLive map[string]string
 	cwd          string
 	defaultModel string
+
+	connMu   sync.Mutex
+	turnBusy int
+	turnIdle *sync.Cond
+	redial   func(context.Context) (*nativehermes.Client, error)
 }
 
 type nativeSession struct {
@@ -180,12 +184,6 @@ type nativeTodo struct {
 	Content  string `json:"content"`
 	Status   string `json:"status"`
 	Priority string `json:"priority"`
-}
-
-type nativeAgent struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Mode        string `json:"mode"`
 }
 
 type hermesEvent struct {
@@ -409,7 +407,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 		_ = proc.Close(context.Background())
 		return nil, err
 	}
-	return &hermesServer{
+	server := &hermesServer{
 		cmd:          proc.Cmd,
 		xdg:          xdg,
 		log:          options.Logger,
@@ -422,17 +420,23 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 		storedByLive: make(map[string]string),
 		cwd:          options.Cwd,
 		defaultModel: options.DefaultModel,
-	}, nil
+	}
+	server.enableReconnect(proc.Redial)
+	return server, nil
 }
 
 func (s *hermesServer) Close(ctx context.Context) error {
 	var err error
 	s.once.Do(func() {
 		close(s.closed)
+		if gw := s.gatewayClient(); gw != nil {
+			gwErr := gw.Close(1000, "closing")
+			if s.process == nil {
+				err = gwErr
+			}
+		}
 		if s.process != nil {
 			err = s.process.Close(ctx)
-		} else if s.gateway != nil {
-			err = s.gateway.Close(1000, "closing")
 		}
 		removeErr := os.Remove(filepath.Join(s.xdg.State, leaseFileName))
 		if errors.Is(removeErr, os.ErrNotExist) {
@@ -456,6 +460,120 @@ func (s *hermesServer) XDGDirs() xdgDirs {
 	return s.xdg
 }
 
+// errGatewayDisconnected marks a mid-turn WebSocket disconnect so the prompt
+// loop can fence the turn with a single terminal hermes_ws_disconnect error.
+var errGatewayDisconnected = errors.New("hermes gateway disconnected")
+
+// errGatewayStreamClosed is the disconnect cause when the gateway error channel
+// closes without a specific native error.
+var errGatewayStreamClosed = errors.New("hermes gateway event stream closed")
+
+func isGatewayDisconnect(err error) bool {
+	return errors.Is(err, errGatewayDisconnected)
+}
+
+// gatewayClient returns the current live gateway client. A reconnect can swap
+// it, so all callers read it through this accessor under connMu.
+func (s *hermesServer) gatewayClient() *nativehermes.Client {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.gateway
+}
+
+// enableReconnect wires the idle-reconnect supervisor: it records the redial
+// function and starts a goroutine that watches the connection and redials while
+// no turn is in progress.
+func (s *hermesServer) enableReconnect(redial func(context.Context) (*nativehermes.Client, error)) {
+	s.connMu.Lock()
+	s.redial = redial
+	if s.turnIdle == nil {
+		s.turnIdle = sync.NewCond(&s.connMu)
+	}
+	s.connMu.Unlock()
+	go s.superviseGateway()
+}
+
+func (s *hermesServer) beginGatewayTurn() {
+	s.connMu.Lock()
+	s.turnBusy++
+	s.connMu.Unlock()
+}
+
+func (s *hermesServer) endGatewayTurn() {
+	s.connMu.Lock()
+	if s.turnBusy > 0 {
+		s.turnBusy--
+	}
+	cond := s.turnIdle
+	s.connMu.Unlock()
+	if cond != nil {
+		cond.Broadcast()
+	}
+}
+
+// superviseGateway watches the live connection and, on an idle disconnect,
+// redials the still-running `hermes serve` process so the next turn reconnects
+// instead of failing. A mid-turn disconnect is fenced by the prompt loop; the
+// supervisor waits for the turn to finish before reconnecting.
+func (s *hermesServer) superviseGateway() {
+	for {
+		gw := s.gatewayClient()
+		select {
+		case <-s.closed:
+			return
+		case <-gw.Done():
+		}
+		s.connMu.Lock()
+		for s.turnBusy > 0 {
+			s.turnIdle.Wait()
+		}
+		s.connMu.Unlock()
+		if s.serverClosed() {
+			return
+		}
+		s.reconnectGateway()
+	}
+}
+
+func (s *hermesServer) serverClosed() bool {
+	select {
+	case <-s.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *hermesServer) reconnectGateway() {
+	dialCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	client, err := s.redial(dialCtx)
+	cancel()
+	if err != nil {
+		if s.log != nil {
+			s.log.Debug("reconnect hermes gateway failed", slog.String("error", err.Error()))
+		}
+		leaseReapSleep(leaseReapPollInterval)
+		return
+	}
+	s.connMu.Lock()
+	closed := s.serverClosed()
+	if !closed {
+		s.gateway = client
+	}
+	s.connMu.Unlock()
+	if closed {
+		// The server shut down while redialing; discard the new connection.
+		_ = client.Close(1000, "closing")
+		return
+	}
+	// Live session ids are runtime-only; force re-resume against the new
+	// connection on next use.
+	s.gatewayMu.Lock()
+	s.liveByStored = map[string]string{}
+	s.storedByLive = map[string]string{}
+	s.gatewayMu.Unlock()
+}
+
 func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeSession, error) {
 	params := map[string]any{"cwd": s.cwd, "source": "acp-go-hermes"}
 	if title != "" {
@@ -467,7 +585,7 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 			params["provider"] = provider
 		}
 	}
-	result, err := s.gateway.CreateSession(ctx, params)
+	result, err := s.gatewayClient().CreateSession(ctx, params)
 	if err != nil {
 		return nativeSession{}, err
 	}
@@ -478,7 +596,7 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession, error) {
 	if s.liveSessionID(id) == "" {
-		result, err := s.gateway.ResumeSession(ctx, id, map[string]any{})
+		result, err := s.gatewayClient().ResumeSession(ctx, id, map[string]any{})
 		if err != nil {
 			return nativeSession{}, err
 		}
@@ -488,7 +606,7 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession
 }
 
 func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSession, error) {
-	active, err := s.gateway.ActiveList(ctx)
+	active, err := s.gatewayClient().ActiveList(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +626,7 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSe
 }
 
 func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
-	err := s.gateway.DeleteSession(ctx, id)
+	err := s.gatewayClient().DeleteSession(ctx, id)
 	if nativehermes.IsNotFound(err) {
 		err = nil
 	}
@@ -579,7 +697,7 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	if live := s.liveSessionID(stored); live != "" {
 		return live, nil
 	}
-	result, err := s.gateway.ResumeSession(ctx, stored, map[string]any{})
+	result, err := s.gatewayClient().ResumeSession(ctx, stored, map[string]any{})
 	if err != nil {
 		return "", err
 	}
@@ -624,16 +742,21 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 	if err != nil {
 		return nativeMessage{}, err
 	}
+	s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+	gw := s.gatewayClient()
 	messageID := "hermes-" + live
-	if err := s.gateway.SubmitPrompt(ctx, live, text); err != nil {
+	if err := gw.SubmitPrompt(ctx, live, text); err != nil {
 		return nativeMessage{}, err
 	}
 	var textBuilder strings.Builder
 	for {
 		select {
-		case event, ok := <-s.gateway.Events():
+		case event, ok := <-gw.Events():
 			if !ok {
-				return nativeMessage{}, errors.New("hermes gateway event stream closed")
+				// The event channel closes when the gateway connection
+				// terminates; fence the turn as a disconnect.
+				return nativeMessage{}, s.reportGatewayDisconnect(errGatewayStreamClosed)
 			}
 			if event.SessionID != "" && event.SessionID != live {
 				continue
@@ -673,14 +796,21 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 					}},
 				}, nil
 			}
-		case err := <-s.gateway.Errors():
-			if err != nil {
-				return nativeMessage{}, err
-			}
 		case <-ctx.Done():
 			return nativeMessage{}, ctx.Err()
 		}
 	}
+}
+
+// reportGatewayDisconnect feeds a mid-turn disconnect into the server error
+// channel that the prompt loop watches via EventErrors and returns the
+// disconnect sentinel so the turn is fenced exactly once.
+func (s *hermesServer) reportGatewayDisconnect(cause error) error {
+	select {
+	case s.errs <- streamError{err: cause}:
+	default:
+	}
+	return errGatewayDisconnected
 }
 
 func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event nativehermes.Event, text string) {
@@ -741,11 +871,11 @@ func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event 
 func (s *hermesServer) declineGatewayQuestion(ctx context.Context, live string, eventType string) {
 	switch eventType {
 	case "terminal.read.request":
-		_ = s.gateway.Call(ctx, "terminal.read.respond", map[string]any{"session_id": live, "text": ""}, nil)
+		_ = s.gatewayClient().Call(ctx, "terminal.read.respond", map[string]any{"session_id": live, "text": ""}, nil)
 	case "sudo.request":
-		_ = s.gateway.Call(ctx, "sudo.respond", map[string]any{"session_id": live, "password": ""}, nil)
+		_ = s.gatewayClient().Call(ctx, "sudo.respond", map[string]any{"session_id": live, "password": ""}, nil)
 	case "secret.request":
-		_ = s.gateway.Call(ctx, "secret.respond", map[string]any{"session_id": live, "value": ""}, nil)
+		_ = s.gatewayClient().Call(ctx, "secret.respond", map[string]any{"session_id": live, "value": ""}, nil)
 	}
 }
 
@@ -889,7 +1019,7 @@ func (s *hermesServer) Messages(ctx context.Context, id string) ([]nativeMessage
 	if err != nil {
 		return nil, err
 	}
-	history, err := s.gateway.History(ctx, live)
+	history, err := s.gatewayClient().History(ctx, live)
 	if err != nil {
 		return nil, err
 	}
@@ -901,7 +1031,7 @@ func (s *hermesServer) Abort(ctx context.Context, id string) error {
 	if live == "" {
 		return nil
 	}
-	return s.gateway.Interrupt(ctx, live)
+	return s.gatewayClient().Interrupt(ctx, live)
 }
 
 func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (nativeSession, error) {
@@ -910,14 +1040,14 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (n
 	if err != nil {
 		return nativeSession{}, err
 	}
-	result, err := s.gateway.Branch(ctx, live, "")
+	result, err := s.gatewayClient().Branch(ctx, live, "")
 	if nativehermes.IsNotFound(err) {
 		s.forgetGatewaySession(id)
 		live, err = s.ensureLiveGatewaySession(ctx, id)
 		if err != nil {
 			return nativeSession{}, err
 		}
-		result, err = s.gateway.Branch(ctx, live, "")
+		result, err = s.gatewayClient().Branch(ctx, live, "")
 	}
 	if err != nil {
 		return nativeSession{}, err
@@ -937,7 +1067,7 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (n
 }
 
 func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
-	active, err := s.gateway.ActiveList(ctx)
+	active, err := s.gatewayClient().ActiveList(ctx)
 	if err != nil {
 		return "", fmt.Errorf("hermes branch active_list lookup failed: %w", err)
 	}
@@ -960,16 +1090,11 @@ func (s *hermesServer) Todos(ctx context.Context, id string) ([]nativeTodo, erro
 
 func (s *hermesServer) ConfigProviders(ctx context.Context) (providersResponse, error) {
 	live := s.anyLiveSessionID()
-	models, err := s.gateway.ModelOptions(ctx, live)
+	models, err := s.gatewayClient().ModelOptions(ctx, live)
 	if err != nil {
 		return providersResponse{}, err
 	}
 	return providersFromGateway(models), nil
-}
-
-func (s *hermesServer) Agents(ctx context.Context) ([]nativeAgent, error) {
-	_ = ctx
-	return nil, nil
 }
 
 func (s *hermesServer) PendingPermissions(ctx context.Context) ([]permissionRequest, error) {
@@ -988,7 +1113,7 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req permissionReques
 	if live == "" {
 		live = req.SessionID
 	}
-	return s.gateway.ApprovalRespond(ctx, live, choice, reply == "always")
+	return s.gatewayClient().ApprovalRespond(ctx, live, choice, reply == "always")
 }
 
 func (s *hermesServer) PendingQuestions(ctx context.Context) ([]questionRequest, error) {
@@ -1001,7 +1126,7 @@ func (s *hermesServer) ReplyQuestion(ctx context.Context, req questionRequest, a
 	if live == "" {
 		live = req.SessionID
 	}
-	return s.gateway.ClarifyRespond(ctx, live, answers)
+	return s.gatewayClient().ClarifyRespond(ctx, live, answers)
 }
 
 func (s *hermesServer) RejectQuestion(ctx context.Context, req questionRequest) error {
@@ -1009,7 +1134,7 @@ func (s *hermesServer) RejectQuestion(ctx context.Context, req questionRequest) 
 	if live == "" {
 		live = req.SessionID
 	}
-	return s.gateway.ClarifyRespond(ctx, live, "")
+	return s.gatewayClient().ClarifyRespond(ctx, live, "")
 }
 
 type streamError struct {
@@ -1147,12 +1272,16 @@ func reapStaleLeases(root string, log *slog.Logger) error {
 	return nil
 }
 
+var (
+	leaseReapTimeout      = 3 * time.Second
+	leaseReapPollInterval = 20 * time.Millisecond
+	leaseReapSleep        = time.Sleep
+	leaseReapNow          = time.Now
+)
+
 func reapLeaseFile(path string, log *slog.Logger) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
 		return
 	}
 	var lease serverLease
@@ -1160,12 +1289,69 @@ func reapLeaseFile(path string, log *slog.Logger) {
 		_ = os.Remove(path)
 		return
 	}
-	if lease.PID > 0 && leaseMatchesProcess(path, lease) {
-		if err := killProcessID(lease.PID); err != nil && log != nil {
-			log.Debug("reap stale hermes lease failed", slog.Int("pid", lease.PID), slog.String("error", err.Error()))
-		}
+	if lease.PID <= 0 || !leaseMatchesProcess(path, lease) {
+		// Not our identified live process (gone, replaced, or
+		// unidentifiable): the lease is safe to remove.
+		_ = os.Remove(path)
+		return
 	}
-	_ = os.Remove(path)
+	if reapLeaseProcess(lease, log) {
+		_ = os.Remove(path)
+		return
+	}
+	// The process survived termination or could not be verified dead: KEEP
+	// the lease so the next startup retries the reap ladder.
+	if log != nil {
+		log.Debug("stale hermes lease process survived termination; keeping lease", slog.Int("pid", lease.PID))
+	}
+}
+
+// reapLeaseProcess runs the shutdown ladder against an identified stale server
+// process: signal the group, wait, escalate to SIGKILL, then VERIFY the process
+// is gone. It returns true only when the process is confirmed dead.
+func reapLeaseProcess(lease serverLease, log *slog.Logger) bool {
+	if err := terminateProcessGroupID(lease.PID); err != nil {
+		if log != nil {
+			log.Debug("terminate stale hermes lease group failed", slog.Int("pid", lease.PID), slog.String("error", err.Error()))
+		}
+		return leaseProcessGone(lease)
+	}
+	if waitLeaseProcessGone(lease) {
+		return true
+	}
+	if err := killProcessGroupID(lease.PID); err != nil {
+		if log != nil {
+			log.Debug("kill stale hermes lease group failed", slog.Int("pid", lease.PID), slog.String("error", err.Error()))
+		}
+		return leaseProcessGone(lease)
+	}
+	return waitLeaseProcessGone(lease)
+}
+
+func waitLeaseProcessGone(lease serverLease) bool {
+	deadline := leaseReapNow().Add(leaseReapTimeout)
+	for {
+		if leaseProcessGone(lease) {
+			return true
+		}
+		if !leaseReapNow().Before(deadline) {
+			return false
+		}
+		leaseReapSleep(leaseReapPollInterval)
+	}
+}
+
+// leaseProcessGone reports whether the leased process no longer exists or was
+// replaced by an unrelated process reusing the PID.
+func leaseProcessGone(lease serverLease) bool {
+	identity, err := hermesInspectProcess(lease.PID)
+	if err != nil {
+		return true
+	}
+	if lease.ProcessStartTime != "" && identity.StartTime != lease.ProcessStartTime {
+		return true
+	}
+	return false
 }
 
 func leaseMatchesProcess(path string, lease serverLease) bool {

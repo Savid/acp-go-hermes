@@ -20,7 +20,6 @@ type fakeHermesClient struct {
 	messages      []nativeMessage
 	todos         []nativeTodo
 	providers     providersResponse
-	agents        []nativeAgent
 
 	pendingPermissions []permissionRequest
 	permissionReplies  []fakePermissionReply
@@ -45,7 +44,6 @@ type fakeHermesClient struct {
 	forkErr        error
 	todosErr       error
 	providersErr   error
-	agentsErr      error
 	permissionsErr error
 	questionsErr   error
 	replyErr       error
@@ -137,10 +135,6 @@ func (c *fakeHermesClient) Todos(context.Context, string) ([]nativeTodo, error) 
 
 func (c *fakeHermesClient) ConfigProviders(context.Context) (providersResponse, error) {
 	return c.providers, c.providersErr
-}
-
-func (c *fakeHermesClient) Agents(context.Context) ([]nativeAgent, error) {
-	return append([]nativeAgent(nil), c.agents...), c.agentsErr
 }
 
 func (c *fakeHermesClient) PendingPermissions(context.Context) ([]permissionRequest, error) {

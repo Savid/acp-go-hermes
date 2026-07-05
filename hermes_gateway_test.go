@@ -35,7 +35,6 @@ type fakeGatewayServer struct {
 	closeAfterResult string
 	failMethods      map[string]struct{}
 	promptEvents     *[]nativehermes.Event
-	malformedAfter   map[string]struct{}
 	branchNotFound   int
 	branchCreated    bool
 	branchNoSession  bool
@@ -45,7 +44,7 @@ type fakeGatewayServer struct {
 
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	t.Helper()
-	fake := &fakeGatewayServer{t: t, failMethods: map[string]struct{}{}, malformedAfter: map[string]struct{}{}}
+	fake := &fakeGatewayServer{t: t, failMethods: map[string]struct{}{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.server.Close)
 	return fake
@@ -103,12 +102,6 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.respond(r.Context(), conn, req.ID, req.Method, params)
-		s.mu.Lock()
-		_, malformedAfter := s.malformedAfter[req.Method]
-		s.mu.Unlock()
-		if malformedAfter {
-			_ = conn.Write(r.Context(), websocket.MessageText, []byte("{"))
-		}
 		if closeAfterResult {
 			_ = conn.Close(websocket.StatusNormalClosure, "forced close")
 			return
@@ -300,12 +293,6 @@ func (s *fakeGatewayServer) setFail(method string) {
 	s.mu.Unlock()
 }
 
-func (s *fakeGatewayServer) setMalformedAfter(method string) {
-	s.mu.Lock()
-	s.malformedAfter[method] = struct{}{}
-	s.mu.Unlock()
-}
-
 func (s *fakeGatewayServer) setBranchNotFoundOnce() {
 	s.setBranchNotFoundCount(1)
 }
@@ -393,9 +380,6 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	}
 	if live := server.liveSessionID("stored-1"); live != "" {
 		t.Fatalf("deleted session still mapped to %q", live)
-	}
-	if agents, err := server.Agents(ctx); err != nil || agents != nil {
-		t.Fatalf("Agents = %#v err=%v", agents, err)
 	}
 	if perms, err := server.PendingPermissions(ctx); err != nil || perms != nil {
 		t.Fatalf("PendingPermissions = %#v err=%v", perms, err)
@@ -801,22 +785,18 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
-		if err == nil || !strings.Contains(err.Error(), "event stream closed") {
+		if !errors.Is(err, errGatewayDisconnected) {
 			t.Fatalf("mid-turn close error = %v", err)
 		}
-	})
-
-	t.Run("gateway error mid turn", func(t *testing.T) {
-		fake := newFakeGatewayServer(t)
-		fake.setPromptEvents()
-		fake.setMalformedAfter("prompt.submit")
-		server := newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored", "live-stored")
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
-		if err == nil {
-			t.Fatal("gateway malformed frame error was nil")
+		// The disconnect is wired into the server error channel so the prompt
+		// loop can fence the turn with hermes_ws_disconnect.
+		select {
+		case fed := <-server.EventErrors():
+			if fed == nil {
+				t.Fatal("mid-turn disconnect fed nil error")
+			}
+		default:
+			t.Fatal("mid-turn disconnect not fed into EventErrors")
 		}
 	})
 
@@ -930,6 +910,126 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 }
 
+// TestGatewaySupervisorReconnectsOnIdleDisconnect proves HW4 idle reconnect:
+// when the WebSocket drops while no turn is in progress, the supervisor redials
+// the still-running process and swaps in the new connection.
+func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	redialed := make(chan struct{}, 2)
+	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+		client := fake.dialClient(t)
+		redialed <- struct{}{}
+		return client, nil
+	})
+	original := server.gatewayClient()
+
+	// Simulate an idle disconnect by dropping the current connection.
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+
+	select {
+	case <-redialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not reconnect after idle disconnect")
+	}
+	if server.gatewayClient() == original {
+		t.Fatal("gateway not swapped after reconnect")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := server.CreateSession(ctx, ""); err != nil {
+		t.Fatalf("CreateSession after reconnect: %v", err)
+	}
+	if err := server.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	reconnies := make(chan struct{}, 4)
+	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+		client := fake.dialClient(t)
+		reconnies <- struct{}{}
+		return client, nil
+	})
+
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+
+	select {
+	case <-reconnies:
+		t.Fatal("reconnected while a turn was in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+	server.endGatewayTurn()
+	select {
+	case <-reconnies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not reconnect after the turn ended")
+	}
+	if err := server.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	reconnied := make(chan struct{}, 1)
+	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+		reconnied <- struct{}{}
+		return fake.dialClient(t), nil
+	})
+
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+	// Shut down while the turn is still in flight; the supervisor must stop
+	// after the turn ends without reconnecting.
+	close(server.closed)
+	server.endGatewayTurn()
+
+	select {
+	case <-reconnied:
+		t.Fatal("supervisor reconnected during shutdown")
+	case <-time.After(150 * time.Millisecond):
+	}
+	_ = original.Close(websocket.StatusNormalClosure, "done")
+}
+
+func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
+	restoreLeaseReapSeams(t)
+	leaseReapSleep = func(time.Duration) {}
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.turnIdle = sync.NewCond(&server.connMu)
+	original := server.gatewayClient()
+	server.redial = func(context.Context) (*nativehermes.Client, error) {
+		return nil, errors.New("no dial")
+	}
+	// Redial error with the server still open: logs and backs off.
+	server.reconnectGateway()
+
+	// Redial succeeds but the server has since closed: the new connection is
+	// discarded instead of being installed.
+	close(server.closed)
+	server.redial = func(context.Context) (*nativehermes.Client, error) {
+		return fake.dialClient(t), nil
+	}
+	server.reconnectGateway()
+	if server.gatewayClient() != original {
+		t.Fatal("reconnect installed a connection after the server closed")
+	}
+	_ = original.Close(websocket.StatusNormalClosure, "done")
+
+	// endGatewayTurn is safe with no active turn and without reconnect wired.
+	plain := &hermesServer{}
+	plain.endGatewayTurn()
+}
+
 func TestXDGLeaseAndHelpers(t *testing.T) {
 	root := t.TempDir()
 	xdg, err := createXDGDirs(root, "")
@@ -1036,6 +1136,30 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 		})
 	}
 
+	restoreLeaseReapSeams(t)
+	leaseReapTimeout = 40 * time.Millisecond
+	leaseReapPollInterval = time.Millisecond
+
+	// Confirmed dead: the process matches for identity but is gone when the
+	// ladder verifies it, so the lease is removed.
+	inspectCalls := 0
+	hermesInspectProcess = func(int) (processIdentity, error) {
+		inspectCalls++
+		if inspectCalls == 1 {
+			return baseIdentity, nil
+		}
+		return processIdentity{}, os.ErrNotExist
+	}
+	if err := writeLease(xdg.State, baseLease); err != nil {
+		t.Fatal(err)
+	}
+	reapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
+	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease after reap of dead process = %v", err)
+	}
+
+	// Survives termination: the process stays alive and identity-matched, so
+	// the lease is KEPT for the next startup retry.
 	hermesInspectProcess = func(int) (processIdentity, error) {
 		return baseIdentity, nil
 	}
@@ -1043,9 +1167,10 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	reapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
-	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lease after reap = %v", err)
+	if _, err := os.Stat(leasePath); err != nil {
+		t.Fatalf("lease of surviving process was removed: %v", err)
 	}
+	_ = os.Remove(leasePath)
 	reapLeaseFile(t.TempDir(), nil)
 }
 
@@ -1200,6 +1325,20 @@ func restoreHermesClientSeams(t *testing.T) {
 		hermesMarshalIndent = marshalIndent
 		hermesWriteLease = writeLease
 		hermesInspectProcess = inspectProcess
+	})
+}
+
+func restoreLeaseReapSeams(t *testing.T) {
+	t.Helper()
+	timeout := leaseReapTimeout
+	interval := leaseReapPollInterval
+	sleep := leaseReapSleep
+	now := leaseReapNow
+	t.Cleanup(func() {
+		leaseReapTimeout = timeout
+		leaseReapPollInterval = interval
+		leaseReapSleep = sleep
+		leaseReapNow = now
 	})
 }
 

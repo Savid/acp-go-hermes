@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -170,6 +171,38 @@ func gatewayCallCount(gateway *wsGateway, method string) int {
 		}
 	}
 	return count
+}
+
+func TestProcessRedialAndClientDone(t *testing.T) {
+	gateway := newWSGateway(t)
+	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(gateway.server.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	proc := &Process{Port: port, Token: "tok"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := proc.Redial(ctx)
+	if err != nil {
+		t.Fatalf("Redial: %v", err)
+	}
+	select {
+	case <-client.Done():
+		t.Fatal("Done closed while connection is live")
+	default:
+	}
+	if err := client.Close(websocket.StatusNormalClosure, "bye"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-client.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done not closed after connection close")
+	}
 }
 
 func TestClientRPCEventsAndWrappers(t *testing.T) {

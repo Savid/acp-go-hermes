@@ -18,6 +18,7 @@ type Client struct {
 	conn   *websocket.Conn
 	events chan Event
 	errs   chan error
+	done   chan struct{}
 
 	nextID  atomic.Int64
 	writeMu sync.Mutex
@@ -78,6 +79,7 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 		conn:    conn,
 		events:  make(chan Event, 256),
 		errs:    make(chan error, 8),
+		done:    make(chan struct{}),
 		pending: make(map[int64]chan rpcResponse),
 	}
 	go client.readLoop() //nolint:gosec // WebSocket reader owns the connection lifetime, not the dial context.
@@ -90,6 +92,14 @@ func (c *Client) Events() <-chan Event {
 
 func (c *Client) Errors() <-chan error {
 	return c.errs
+}
+
+// Done is closed when the read loop exits, i.e. when the underlying WebSocket
+// connection has terminated (normal close or disconnect). It carries no value
+// and never blocks a producer, so a supervisor can watch it without competing
+// with Events/Errors consumers.
+func (c *Client) Done() <-chan struct{} {
+	return c.done
 }
 
 func (c *Client) Close(status websocket.StatusCode, reason string) error {
@@ -174,6 +184,7 @@ func (c *Client) readLoop() {
 		}
 		close(c.events)
 		close(c.errs)
+		close(c.done)
 	}()
 	for {
 		typ, data, err := c.conn.Read(context.Background())

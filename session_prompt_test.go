@@ -342,6 +342,29 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	}
 }
 
+// TestPromptGatewayDisconnectSentinelFences proves HW4: when SendMessage itself
+// returns the gateway-disconnect sentinel (the read loop wired the disconnect
+// into the error channel), the turn is fenced with exactly one
+// hermes_ws_disconnect terminal error and one native abort.
+func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
+	client := newFakeHermesClient()
+	client.sendMessage = func(_ context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
+		return nativeMessage{}, errGatewayDisconnected
+	}
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+
+	_, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
+		t.Fatalf("Prompt error = %v", err)
+	}
+	if client.abortCount() != 1 {
+		t.Fatalf("abort count = %d, want 1", client.abortCount())
+	}
+}
+
 func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	client.errs <- errors.New("idle stream closed")

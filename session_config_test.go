@@ -73,12 +73,6 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 			},
 		}},
 	}}
-	client.agents = []nativeAgent{
-		{Name: "", Mode: ""},
-		{Name: "build", Description: "Build"},
-		{Name: "build", Description: "Duplicate"},
-		{Mode: "plan"},
-	}
 	agent := NewAgent()
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -105,8 +99,8 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "missing/model")); err == nil {
 		t.Fatal("unknown model accepted")
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configMode, "missing")); err == nil {
-		t.Fatal("unknown mode accepted")
+	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, acp.SessionConfigId("mode"), "missing")); err == nil {
+		t.Fatal("mode config option accepted")
 	}
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "p/m")); err != nil {
 		t.Fatalf("set model: %v", err)
@@ -121,13 +115,6 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	}
 	if empty := modelConfigOption(sessionSnapshot{}, providersResponse{}); empty.Select != nil {
 		t.Fatalf("empty model option = %#v", empty)
-	}
-	mode := modeConfigOption(sessionSnapshot{mode: "missing"}, client.agents)
-	if mode.Select == nil || len(*mode.Select.Options.Ungrouped) != 2 || mode.Select.CurrentValue != "build" {
-		t.Fatalf("mode option = %#v", mode)
-	}
-	if empty := modeConfigOption(sessionSnapshot{}, []nativeAgent{{}}); empty.Select != nil {
-		t.Fatalf("empty mode option = %#v", empty)
 	}
 	efforts := supportedEfforts(client.providers.Providers[1].Models["m"])
 	if len(efforts) != 1 || efforts[0] != "medium" {
@@ -160,6 +147,26 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 		},
 	}}); len(got) != 0 {
 		t.Fatalf("bad unstable config option was not skipped: %#v", got)
+	}
+}
+
+func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
+	ctx := context.Background()
+	client := newFakeHermesClient()
+	// Empty providers with a current model yields an ungrouped fallback option.
+	agent := NewAgent()
+	sess := testSession(agent, client)
+	sess.providerID = "openai"
+	sess.modelID = "gpt-test"
+
+	if !sess.hasConfigValue(ctx, configModel, "openai/gpt-test") {
+		t.Fatal("current ungrouped model value not found")
+	}
+	if sess.hasConfigValue(ctx, configModel, "openai/other") {
+		t.Fatal("absent ungrouped model value reported present")
+	}
+	if sess.hasConfigValue(ctx, acp.SessionConfigId("mode"), "anything") {
+		t.Fatal("non-model config id matched")
 	}
 }
 
