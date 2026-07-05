@@ -1,0 +1,11 @@
+# Elicitation
+
+Hermes question events are reserved for ACP elicitation. The adapter records
+client capabilities during initialize and must only send elicitation requests
+when the client advertises the matching capability.
+
+When `hermes serve` emits a native question request, the adapter maps it to
+ACP `elicitation/create` using the unstable form elicitation shape. If the ACP
+client did not advertise form elicitation support, or if the client declines or
+cancels the request, the adapter rejects the native Hermes question
+deterministically.

@@ -1,0 +1,13 @@
+# Session Store
+
+`SessionStoreFormat` is `hermes-state-db-v1`.
+
+The store writes a complete snapshot after completed turns:
+
+- main snapshot entry
+- `idmap`
+- `state-db`
+
+The `state-db` archive contains `state.db`, `state.db-wal`, and `state.db-shm`
+when present. Archive entries are `tar+zstd+base64` and are restored into a
+fresh per-session `HERMES_HOME`.

@@ -1,0 +1,13 @@
+# Install
+
+```sh
+go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
+```
+
+Requirements:
+
+- Go matching the module toolchain
+- an `hermes` CLI with `serve` support
+- provider credentials configured for any live prompt tests
+
+Smoke tests that do not spend tokens are under `make test-integration-smoke`.

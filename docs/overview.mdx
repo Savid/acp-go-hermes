@@ -1,0 +1,16 @@
+# Overview
+
+`acp-go-hermes` exposes Hermes as an embeddable ACP agent. The adapter
+creates one loopback `hermes serve` process per ACP session and talks to it
+through authenticated WebSocket JSON-RPC.
+
+The package provides:
+
+- ACP `Serve` and `Agent` APIs
+- isolated per-session HERMES_HOME directories
+- native Hermes message replay for `session/load`
+- `session/resume` without replay
+- `session/delete` with store tombstones
+- `_hermes/session/fork`
+- `_hermes/rawEvent` after per-session opt-in
+- `hermes-state-db-v1` session storage

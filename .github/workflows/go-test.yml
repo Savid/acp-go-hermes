@@ -1,0 +1,42 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: make coverage-check
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tee coverage-summary.txt
+
+      - name: Check module tidiness
+        run: |
+          go mod tidy -diff
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: go-coverage
+          path: |
+            coverage.out
+            coverage-summary.txt

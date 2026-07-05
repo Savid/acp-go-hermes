@@ -1,0 +1,548 @@
+package hermesacp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	if err := validateMCPServers(params.McpServers); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	meta, err := sessionMetaFromLifecycle(params.Meta)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	if meta.Model == "" {
+		meta.Model = a.options.DefaultModel
+	}
+	idValue, err := newSessionID()
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	id := acp.SessionId(idValue)
+	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, xdgDirs{}, params.McpServers)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	native, err := client.CreateSession(ctx, "")
+	if err != nil {
+		_ = client.Close(context.Background())
+		return acp.NewSessionResponse{}, err
+	}
+	idmap := idmapRecord{
+		SessionID:       string(id),
+		NativeSessionID: native.ID,
+		Format:          SessionStoreFormat,
+	}
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, native, client, meta, idmap)
+	if err := a.storeStartedSession(session); err != nil {
+		_ = session.Close(context.Background())
+		return acp.NewSessionResponse{}, err
+	}
+	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
+		_ = session.Close(context.Background())
+		return acp.NewSessionResponse{}, err
+	}
+
+	return acp.NewSessionResponse{
+		SessionId:     id,
+		Meta:          sessionResponseMeta(session.snapshot()),
+		ConfigOptions: session.configOptions(ctx),
+	}, nil
+}
+
+func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	if err := session.replayMessages(ctx); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	return acp.LoadSessionResponse{
+		Meta:          sessionResponseMeta(session.snapshot()),
+		ConfigOptions: session.configOptions(ctx),
+	}, nil
+}
+
+func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	if err := validateMCPServers(params.McpServers); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	return acp.ResumeSessionResponse{
+		Meta:          sessionResponseMeta(session.snapshot()),
+		ConfigOptions: session.configOptions(ctx),
+	}, nil
+}
+
+func (a *Agent) refreshCommandsAfterResponse(id acp.SessionId) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+		session, err := a.session(id)
+		if err != nil {
+			a.log.DebugContext(ctx, "skip Hermes command refresh for missing session", slog.String("session_id", string(id)), slog.String("error", err.Error()))
+			return
+		}
+		if err := session.refreshCommands(ctx); err != nil {
+			a.log.DebugContext(ctx, "refresh Hermes commands failed", slog.String("session_id", string(id)), slog.String("error", err.Error()))
+		}
+	}
+}
+
+func (a *Agent) loadOrResumeSession(
+	ctx context.Context,
+	id acp.SessionId,
+	cwd string,
+	additionalDirectories []string,
+	mcpServers []acp.McpServer,
+	metaMap map[string]any,
+) (*session, error) {
+	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
+	}
+	if a.isDeleted(id) {
+		_ = a.retryDeletedSessionCleanup(ctx)
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: "deleted"})
+	}
+	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String("error", err.Error()))
+	}
+	if err := validateSessionStartPaths(cwd, additionalDirectories); err != nil {
+		return nil, err
+	}
+	if err := validateMCPServers(mcpServers); err != nil {
+		return nil, err
+	}
+	meta, err := sessionMetaFromLifecycle(metaMap)
+	if err != nil {
+		return nil, err
+	}
+
+	xdg, err := createXDGDirs(a.homeRoot(), string(id))
+	if err != nil {
+		return nil, err
+	}
+	storeCtx, cancel := a.sessionStoreContext(ctx)
+	idmap, snapshot, ok, err := hydrateStateFromStore(storeCtx, a.sessionStore(), string(id), xdg)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: "unknown"})
+	}
+	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
+		return nil, acp.NewInvalidParams(map[string]any{"error": "cwd_mismatch", "field": jsonFieldCwd})
+	}
+	client, err := a.newHermesClient(ctx, id, cwd, meta, xdg, mcpServers)
+	if err != nil {
+		return nil, err
+	}
+	native, err := client.GetSession(ctx, idmap.NativeSessionID)
+	if err != nil {
+		_ = client.Close(context.Background())
+		return nil, err
+	}
+	if meta.Model == "" {
+		meta.Model = joinModelValue(snapshot.Session.Model.ProviderID, snapshot.Session.Model.ModelID)
+	}
+	session := newSession(a, id, cwd, additionalDirectories, native, client, meta, idmap)
+	if err := a.storeStartedSession(session); err != nil {
+		_ = session.Close(context.Background())
+		return nil, err
+	}
+
+	return session, nil
+}
+
+func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if err := a.ensureOpen(); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String("error", err.Error()))
+	}
+	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	a.mu.Lock()
+	active := make([]*session, 0, len(a.sessions))
+	for _, session := range a.sessions {
+		if params.Cwd != nil && session.cwd != *params.Cwd {
+			continue
+		}
+		active = append(active, session)
+	}
+	a.mu.Unlock()
+
+	infos := make([]acp.SessionInfo, 0, len(active))
+	seen := map[acp.SessionId]struct{}{}
+	for _, session := range active {
+		info := session.info()
+		infos = append(infos, info)
+		seen[info.SessionId] = struct{}{}
+	}
+	storeCtx, cancel := a.sessionStoreContext(ctx)
+	stored, err := a.sessionStore().ListSessions(storeCtx)
+	cancel()
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	for _, summary := range stored {
+		id := acp.SessionId(summary.SessionID)
+		if _, ok := seen[id]; ok || a.isDeleted(id) {
+			continue
+		}
+		if params.Cwd != nil && summary.Cwd != "" && summary.Cwd != *params.Cwd {
+			continue
+		}
+		title := summary.Title
+		updated := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
+		infos = append(infos, acp.SessionInfo{
+			SessionId: id,
+			Cwd:       summary.Cwd,
+			Title:     &title,
+			UpdatedAt: &updated,
+			Meta:      summary.Meta,
+		})
+	}
+	slices.SortFunc(infos, func(left, right acp.SessionInfo) int {
+		l := ""
+		r := ""
+		if left.UpdatedAt != nil {
+			l = *left.UpdatedAt
+		}
+		if right.UpdatedAt != nil {
+			r = *right.UpdatedAt
+		}
+		if r != l {
+			return strings.Compare(r, l)
+		}
+		return strings.Compare(string(left.SessionId), string(right.SessionId))
+	})
+	paged, next, err := paginateSessionInfos(infos, params.Cursor)
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
+	return acp.ListSessionsResponse{Sessions: paged, NextCursor: next}, nil
+}
+
+func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+	session, err := a.session(params.SessionId)
+	if err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+	closeErr := session.Close(ctx)
+	snapshotErr := session.snapshotToStore(context.WithoutCancel(ctx))
+	a.removeSessionIf(params.SessionId, session)
+	return acp.CloseSessionResponse{}, errors.Join(snapshotErr, closeErr)
+}
+
+func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+	if params.SessionId == "" {
+		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
+	}
+	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String("error", err.Error()))
+	}
+	a.mu.Lock()
+	session := a.sessions[params.SessionId]
+	a.mu.Unlock()
+
+	record := a.deleteCleanupRecord(params.SessionId, session)
+	storeCtx, cancel := a.sessionStoreContext(ctx)
+	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)})
+	cancel()
+	if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
+	a.mu.Lock()
+	if session == nil || a.sessions[params.SessionId] == session {
+		delete(a.sessions, params.SessionId)
+	}
+	a.deleted[params.SessionId] = struct{}{}
+	a.mu.Unlock()
+
+	if record.SessionID != "" {
+		a.rememberDeleteCleanup(record)
+	}
+	if session != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = session.DeleteNativeAndClose(closeCtx)
+		closeCancel()
+	}
+	cleanupErr := a.cleanupDeletedSession(record)
+	a.forgetDeleteCleanupIfDone(record.SessionID)
+
+	return acp.UnstableDeleteSessionResponse{}, errors.Join(err, cleanupErr)
+}
+
+func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	if err := validateUnstableMCPServers(params.McpServers); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	meta, err := sessionMetaFromLifecycle(params.Meta)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	parent, err := a.session(params.SessionId)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	parentSnapshot := parent.snapshot()
+	nativeChild, err := parentSnapshot.client.Fork(ctx, parentSnapshot.idmap.NativeSessionID, "")
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	idValue, err := newSessionID()
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	id := acp.SessionId(idValue)
+	xdg, err := createXDGDirs(a.homeRoot(), string(id))
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	if err := copyXDGDirs(parentSnapshot.client.XDGDirs(), xdg); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	if meta.Model == "" {
+		meta.Model = joinModelValue(parentSnapshot.providerID, parentSnapshot.modelID)
+	}
+	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, xdg, stableMCPServersFromUnstable(params.McpServers))
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	native, err := client.GetSession(ctx, nativeChild.ID)
+	if err != nil {
+		_ = client.Close(context.Background())
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	idmap := idmapRecord{
+		SessionID:             string(id),
+		NativeSessionID:       native.ID,
+		ParentSessionID:       string(params.SessionId),
+		NativeParentSessionID: parentSnapshot.idmap.NativeSessionID,
+		Format:                SessionStoreFormat,
+	}
+	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, native, client, meta, idmap)
+	if err := a.storeStartedSession(session); err != nil {
+		_ = session.Close(context.Background())
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
+		_ = session.Close(context.Background())
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	return acp.UnstableForkSessionResponse{
+		SessionId:     id,
+		Meta:          sessionResponseMeta(session.snapshot()),
+		ConfigOptions: unstableConfigOptions(session.configOptions(ctx)),
+	}, nil
+}
+
+func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing xdgDirs, mcpServers ...[]acp.McpServer) (hermesClient, error) {
+	factory := a.options.clientFactory
+	if factory == nil {
+		factory = startHermesServer
+	}
+	env := cloneStringMap(a.options.Env)
+	if env == nil && len(meta.Env) > 0 {
+		env = map[string]string{}
+	}
+	for key, value := range meta.Env {
+		env[key] = value
+	}
+	var servers []acp.McpServer
+	if len(mcpServers) > 0 {
+		servers = cloneMCPServers(mcpServers[0])
+	}
+	return factory(ctx, hermesStartOptions{
+		ACPSessionID:   acpSessionIDString(id),
+		Root:           a.homeRoot(),
+		Cwd:            cwd,
+		ExecutablePath: a.options.ExecutablePath,
+		DefaultModel:   firstNonEmpty(meta.Model, a.options.DefaultModel),
+		Env:            env,
+		Logger:         a.log,
+		ExistingXDG:    existing,
+		MCPServers:     servers,
+	})
+}
+
+type deleteCleanupRecord struct {
+	SessionID acp.SessionId
+	NativeID  string
+	XDGRoot   string
+}
+
+func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCleanupRecord {
+	record := deleteCleanupRecord{
+		SessionID: id,
+		XDGRoot:   filepath.Join(a.homeRoot(), safePathName(string(id))),
+	}
+	if session == nil {
+		return record
+	}
+	snapshot := session.snapshot()
+	record.NativeID = snapshot.idmap.NativeSessionID
+	if snapshot.client != nil {
+		if xdg := snapshot.client.XDGDirs(); xdg.Root != "" {
+			record.XDGRoot = xdg.Root
+		}
+	}
+
+	return record
+}
+
+func (a *Agent) rememberDeleteCleanup(record deleteCleanupRecord) {
+	if record.SessionID == "" {
+		return
+	}
+	a.mu.Lock()
+	a.deleteCleanup[record.SessionID] = record
+	a.mu.Unlock()
+}
+
+func (a *Agent) forgetDeleteCleanupIfDone(id acp.SessionId) {
+	if id == "" {
+		return
+	}
+	record := a.deleteCleanupRecord(id, nil)
+	if _, err := os.Stat(record.XDGRoot); err == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.deleteCleanup, id)
+	a.mu.Unlock()
+}
+
+func (a *Agent) retryDeletedSessionCleanup(ctx context.Context) error {
+	a.mu.Lock()
+	records := make([]deleteCleanupRecord, 0, len(a.deleteCleanup))
+	for _, record := range a.deleteCleanup {
+		records = append(records, record)
+	}
+	a.mu.Unlock()
+
+	var err error
+	for _, record := range records {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(err, ctxErr)
+		}
+		cleanupErr := a.cleanupDeletedSession(record)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			continue
+		}
+		a.mu.Lock()
+		delete(a.deleteCleanup, record.SessionID)
+		a.mu.Unlock()
+	}
+
+	return err
+}
+
+func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
+	if record.SessionID == "" || record.XDGRoot == "" {
+		return nil
+	}
+	reapLeaseFile(filepath.Join(record.XDGRoot, "state", leaseFileName), a.log)
+	return os.RemoveAll(record.XDGRoot)
+}
+
+func (a *Agent) homeRoot() string {
+	if a.options.Home != "" {
+		return a.options.Home
+	}
+	return filepath.Join(os.TempDir(), "acp-go-hermes")
+}
+
+func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
+	for index, server := range servers {
+		if server.Sse != nil {
+			return acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": fmt.Sprintf("mcpServers[%d]", index), "server": server.Sse.Name})
+		}
+		if server.Acp != nil {
+			return acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": fmt.Sprintf("mcpServers[%d]", index), "server": server.Acp.Name})
+		}
+	}
+	return nil
+}
+
+func copyXDGDirs(source xdgDirs, target xdgDirs) error {
+	for _, item := range []struct {
+		src string
+		dst string
+	}{
+		{source.Data, target.Data},
+		{source.Config, target.Config},
+		{source.Cache, target.Cache},
+		{source.State, target.State},
+	} {
+		data, _, err := encodeXDGArchive(item.src)
+		if err != nil {
+			return err
+		}
+		if err := decodeXDGArchive(data, item.dst); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func paginateSessionInfos(infos []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
+	start := 0
+	if cursor != nil && *cursor != "" {
+		parsed, err := strconv.Atoi(*cursor)
+		if err != nil || parsed < 0 {
+			return nil, nil, acp.NewInvalidParams(map[string]any{"field": "cursor"})
+		}
+		start = parsed
+	}
+	if start >= len(infos) {
+		return []acp.SessionInfo{}, nil, nil
+	}
+	end := start + listSessionsPageSize
+	if end > len(infos) {
+		end = len(infos)
+	}
+	var next *string
+	if end < len(infos) {
+		value := strconv.Itoa(end)
+		next = &value
+	}
+	return infos[start:end], next, nil
+}

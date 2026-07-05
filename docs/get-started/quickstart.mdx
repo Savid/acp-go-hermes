@@ -1,0 +1,16 @@
+# Quickstart
+
+Install or build the command, then let an ACP host run it over stdin/stdout.
+
+```sh
+go run ./cmd/acp-go-hermes -path "$(command -v hermes)" -home /tmp/acp-hermes
+```
+
+For a local end-to-end client:
+
+```sh
+go run ./examples/minimal-client "Reply with hello from ACP"
+```
+
+The command writes ACP JSON-RPC only to stdout. Use `-debug` for diagnostic logs
+on stderr.

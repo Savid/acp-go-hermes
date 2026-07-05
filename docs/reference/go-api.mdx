@@ -1,0 +1,15 @@
+# Go API
+
+Primary entry points:
+
+```go
+agent := hermesacp.NewAgent()
+err := hermesacp.Serve(ctx, input, output)
+```
+
+Common options include `WithExecutablePath`, `WithHome`, `WithDefaultModel`,
+`WithEnv`, OpenTelemetry provider options, `WithSessionStore`, and
+`WithConcurrencyLimits`.
+
+Session `HermesOptions` include `WithHermesModel`, `WithHermesEnv`, and
+`WithHermesOutputSchema`.

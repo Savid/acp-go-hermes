@@ -1,0 +1,42 @@
+//go:build !unix
+
+package hermesacp
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+)
+
+var procReadFile = os.ReadFile
+
+func configureHermesProcess(*exec.Cmd) {}
+
+func terminateHermesProcess(cmd *exec.Cmd) error {
+	return killHermesProcess(cmd)
+}
+
+func killHermesProcess(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func killProcessID(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Kill()
+}
+
+func inspectHermesProcess(int) (processIdentity, error) {
+	return processIdentity{}, os.ErrNotExist
+}

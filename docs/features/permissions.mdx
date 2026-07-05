@@ -1,0 +1,8 @@
+# Permissions
+
+Hermes permission events are mapped to ACP `session/request_permission`.
+The adapter replies through the current native route families that correspond
+to the event shape emitted by Hermes.
+
+On cancellation, pending native permission requests are rejected with a
+cancelled explanation and the ACP prompt returns `cancelled`.

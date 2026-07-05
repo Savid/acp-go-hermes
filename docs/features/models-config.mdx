@@ -1,0 +1,12 @@
+# Models And Config
+
+The model selector is an ACP config option with id `model` and category
+`model`. Values are built from authenticated `GET /config/providers` as
+`provider/model`.
+
+Mode selection uses config id `mode` and category `mode` when Hermes agents
+are enumerable.
+
+Structured output is not advertised for Hermes. Supplying
+`_meta.hermes.options.outputSchema` returns the uniform unsupported-field
+error.

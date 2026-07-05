@@ -1,0 +1,8 @@
+# Security
+
+Each Hermes server binds to `127.0.0.1` and uses a per-session random basic
+auth password. Child stdout and stderr are never connected to the ACP stdout
+stream.
+
+Session snapshots exclude obvious credential-bearing files such as `auth.json`
+and credential-named files.

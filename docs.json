@@ -1,0 +1,70 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "acp-go-hermes",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#3B82F6",
+    "dark": "#1D4ED8"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "docs/overview",
+              "docs/get-started/quickstart",
+              "docs/get-started/install",
+              "docs/get-started/run-modes",
+              "docs/get-started/examples"
+            ]
+          },
+          {
+            "group": "Core",
+            "pages": [
+              "docs/core/sessions",
+              "docs/core/prompt-streaming"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "docs/features/authentication",
+              "docs/features/mcp",
+              "docs/features/models-config",
+              "docs/features/permissions",
+              "docs/features/elicitation",
+              "docs/features/session-store",
+              "docs/features/raw-events"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API",
+            "pages": [
+              "docs/reference/go-api",
+              "docs/reference/cli",
+              "docs/reference/acp-methods",
+              "docs/reference/meta",
+              "docs/reference/updates"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "docs/operations/security",
+              "docs/operations/observability"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

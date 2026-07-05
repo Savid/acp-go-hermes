@@ -1,0 +1,8 @@
+# Authentication
+
+Hermes/provider authentication remains native to Hermes. The ACP agent
+advertises no ACP auth methods and rejects every `authenticate` request.
+
+Every per-session Hermes server receives a random
+`HERMES_SERVER_PASSWORD`, and all REST/SSE calls use HTTP basic auth.
+Credential-bearing native state is not intentionally stored by the adapter.

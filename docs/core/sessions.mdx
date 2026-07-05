@@ -1,0 +1,17 @@
+# Sessions
+
+Each ACP session owns one Hermes server process and four isolated XDG
+directories under the configured home parent.
+
+Lifecycle support:
+
+- `session/new`
+- `session/load`
+- `session/resume`
+- `session/list`
+- `session/close`
+- `session/delete`
+- `_hermes/session/fork`
+
+`session/load` replays messages from Hermes REST. `session/resume` restores
+native state and returns without replay.

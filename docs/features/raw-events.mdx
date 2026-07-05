@@ -1,0 +1,17 @@
+# Raw Events
+
+Raw native events are emitted only after opt-in:
+
+```json
+{
+  "_meta": {
+    "hermes": {
+      "rawEvent": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Events are sent as `_hermes/rawEvent` notifications and capped at 64 KiB.

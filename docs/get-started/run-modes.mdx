@@ -1,0 +1,21 @@
+# Run Modes
+
+## Command
+
+`acp-go-hermes` is intended to be launched by an ACP client.
+
+```sh
+acp-go-hermes -path /usr/bin/hermes -home /tmp/acp-hermes
+```
+
+## Embedded
+
+```go
+agent := hermesacp.NewAgent(hermesacp.WithHome(home))
+```
+
+or:
+
+```go
+err := hermesacp.Serve(ctx, input, output, hermesacp.WithHome(home))
+```

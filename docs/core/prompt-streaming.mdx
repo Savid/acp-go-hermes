@@ -1,0 +1,9 @@
+# Prompt Streaming
+
+Prompt turns post to Hermes REST and consume the session SSE stream. Text
+parts become ACP message chunks, reasoning parts become thought chunks, tool
+parts become tool-call updates, todos become plan updates, and token data
+becomes `usage_update`.
+
+If the SSE stream fails during a turn, the adapter aborts the native turn and
+returns one terminal ACP error for that prompt. The session remains usable.
