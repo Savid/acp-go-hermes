@@ -561,7 +561,9 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	if record.SessionID == "" || record.XDGRoot == "" {
 		return nil
 	}
-	reapLeaseFile(filepath.Join(record.XDGRoot, "state", leaseFileName), a.log)
+	if reapLeaseFile(filepath.Join(record.XDGRoot, "state", leaseFileName), a.log) {
+		return fmt.Errorf("hermes delete cleanup kept live lease for session %q", record.SessionID)
+	}
 	return os.RemoveAll(record.XDGRoot)
 }
 

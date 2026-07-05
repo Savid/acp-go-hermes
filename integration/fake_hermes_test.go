@@ -302,17 +302,21 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			"parent":     fakeStoredSessionKey,
 		})
 	case "model.options":
-		writeFakeGatewayResult(ctx, conn, id, map[string]any{"providers": []map[string]any{{
-			"id":   "openai",
-			"name": "OpenAI",
-			"models": []map[string]any{{
-				"id":                "gpt-test",
-				"name":              "GPT Test",
-				"context_window":    128000,
-				"max_output_tokens": 4096,
-				"capabilities":      []string{"tools"},
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{
+			"model":    "anthropic/claude-sonnet-4",
+			"provider": "",
+			"providers": []map[string]any{{
+				"slug":            "openrouter",
+				"name":            "OpenRouter",
+				"authenticated":   true,
+				"is_current":      false,
+				"is_user_defined": false,
+				"models":          []string{"openai/gpt-test"},
+				"capabilities":    map[string]any{"openai/gpt-test": map[string]any{"fast": true, "reasoning": true}},
+				"source":          "built-in",
+				"total_models":    1,
 			}},
-		}}})
+		})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		if strings.HasPrefix(live, "__acp_go_hermes_missing_probe__") {

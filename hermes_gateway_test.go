@@ -40,6 +40,13 @@ type fakeGatewayServer struct {
 	branchNoSession  bool
 	branchNoActive   bool
 	branchNoKey      bool
+	createNoLive     bool
+	createNoStored   bool
+	resumeNoLive     bool
+	resumeNoStored   bool
+	resumeActive     bool
+	activeNoID       bool
+	activeNoKey      bool
 }
 
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
@@ -112,28 +119,69 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any) {
 	switch method {
 	case "session.create":
-		s.writeResult(ctx, conn, id, map[string]any{
+		s.mu.Lock()
+		createNoLive := s.createNoLive
+		createNoStored := s.createNoStored
+		s.mu.Unlock()
+		result := map[string]any{
 			"session_id":        "live-1",
 			"stored_session_id": "stored-1",
-		})
+		}
+		if createNoLive {
+			delete(result, "session_id")
+		}
+		if createNoStored {
+			delete(result, "stored_session_id")
+		}
+		s.writeResult(ctx, conn, id, result)
 	case "session.resume":
 		stored, _ := params["session_id"].(string)
-		s.writeResult(ctx, conn, id, map[string]any{
+		s.mu.Lock()
+		resumeNoLive := s.resumeNoLive
+		resumeNoStored := s.resumeNoStored
+		s.mu.Unlock()
+		result := map[string]any{
 			"session_id":        "live-" + stored,
 			"stored_session_id": stored,
-		})
+		}
+		if resumeNoLive {
+			delete(result, "session_id")
+		}
+		if resumeNoStored {
+			delete(result, "stored_session_id")
+		}
+		s.writeResult(ctx, conn, id, result)
 	case "session.active_list":
 		s.mu.Lock()
 		branchCreated := s.branchCreated
 		branchNoActive := s.branchNoActive
 		branchNoKey := s.branchNoKey
+		resumeActive := s.resumeActive
+		activeNoID := s.activeNoID
+		activeNoKey := s.activeNoKey
 		s.mu.Unlock()
+		sessionID := "live-1"
+		if activeNoID {
+			sessionID = ""
+		}
+		sessionKey := "stored-1"
+		if activeNoKey {
+			sessionKey = ""
+		}
 		sessions := []map[string]any{{
-			"id":          "live-1",
-			"session_key": "stored-1",
+			"id":          sessionID,
+			"session_key": sessionKey,
 			"title":       "Listed",
 			"cwd":         "/repo",
 		}}
+		if resumeActive {
+			sessions = append(sessions, map[string]any{
+				"id":          "live-stored",
+				"session_key": "stored",
+				"title":       "Resumed",
+				"cwd":         "/repo",
+			})
+		}
 		if branchCreated && !branchNoActive {
 			sessionKey := "stored-branch"
 			if branchNoKey {
@@ -195,17 +243,42 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			"parent":     "stored-1",
 		})
 	case "model.options":
-		s.writeResult(ctx, conn, id, map[string]any{"providers": []map[string]any{
-			{"id": "openai", "name": "OpenAI", "models": []map[string]any{{
-				"id":                "gpt-test",
-				"name":              "GPT Test",
-				"context_window":    128000,
-				"max_output_tokens": 4096,
-				"capabilities":      []string{"tools", "reasoning"},
-			}}},
-			{"id": "stringy", "models": "string-model"},
-			{"id": "mapped", "models": map[string]any{"map-key": map[string]any{"name": "Map Model"}}},
-		}})
+		s.writeResult(ctx, conn, id, map[string]any{
+			"model":    "anthropic/claude-sonnet-4",
+			"provider": "",
+			"providers": []map[string]any{
+				{
+					"slug":            "openrouter",
+					"name":            "OpenRouter",
+					"authenticated":   true,
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"openai/gpt-test", "anthropic/claude-fable-5"},
+					"capabilities": map[string]any{
+						"openai/gpt-test":          map[string]any{"fast": true, "reasoning": true},
+						"anthropic/claude-fable-5": map[string]any{"fast": false, "reasoning": true},
+					},
+					"pricing": map[string]any{
+						"openai/gpt-test": map[string]any{"cache": nil, "free": false, "input": "$1.00", "output": "$2.00"},
+					},
+					"source":       "built-in",
+					"total_models": 2,
+				},
+				{
+					"auth_type":       "virtual",
+					"authenticated":   true,
+					"capabilities":    map[string]any{"default": map[string]any{"fast": false, "reasoning": true}},
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"default"},
+					"name":            "Mixture of Agents",
+					"slug":            "moa",
+					"source":          "virtual",
+					"total_models":    1,
+					"warning":         "Aggregator acts as the selected model.",
+				},
+			},
+		})
 	default:
 		s.writeError(ctx, conn, id, -32601, "missing")
 	}
@@ -300,6 +373,48 @@ func (s *fakeGatewayServer) setBranchNotFoundOnce() {
 func (s *fakeGatewayServer) setBranchNotFoundCount(count int) {
 	s.mu.Lock()
 	s.branchNotFound = count
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setCreateNoStored() {
+	s.mu.Lock()
+	s.createNoStored = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setCreateNoLive() {
+	s.mu.Lock()
+	s.createNoLive = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeNoStored() {
+	s.mu.Lock()
+	s.resumeNoStored = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeActive() {
+	s.mu.Lock()
+	s.resumeActive = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeNoLive() {
+	s.mu.Lock()
+	s.resumeNoLive = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setActiveNoKey() {
+	s.mu.Lock()
+	s.activeNoKey = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setActiveNoID() {
+	s.mu.Lock()
+	s.activeNoID = true
 	s.mu.Unlock()
 }
 
@@ -442,7 +557,7 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 		t.Fatal("Fork succeeded after repeated live session not found")
 	}
 	providers, err := server.ConfigProviders(ctx)
-	if err != nil || len(providers.Providers) != 3 || providers.Providers[0].Models["gpt-test"].Limit["context"] != 128000 {
+	if err != nil || len(providers.Providers) != 2 || !providers.Providers[0].Models["openai/gpt-test"].Reasoning {
 		t.Fatalf("ConfigProviders = %#v err=%v", providers, err)
 	}
 	if err := server.Close(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -536,10 +651,11 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 		t.Fatalf("providersResponse valid = %#v err=%v", providers, err)
 	}
 	mapped := providersFromGateway(nativehermes.ModelOptionsResult{Providers: []nativehermes.Provider{{
-		ID:     "p",
-		Models: []nativehermes.ProviderModel{{}, {Name: "named"}},
+		Slug:         "p",
+		Models:       []string{"", "named"},
+		Capabilities: map[string]nativehermes.ProviderModelCapability{"named": {Reasoning: true}},
 	}}})
-	if _, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 {
+	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || !model.Reasoning {
 		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
 	}
 	if safePathName(" \t ") != "session" {
@@ -569,6 +685,169 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 }
 
 func TestHermesGatewayServerEdgeBranches(t *testing.T) {
+	t.Run("identity schema drift", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			want  string
+			setup func(*fakeGatewayServer)
+			call  func(context.Context, *hermesServer) error
+		}{
+			{
+				name: "create missing live",
+				want: "session.create response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setCreateNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.CreateSession(ctx, "")
+					return err
+				},
+			},
+			{
+				name: "create missing stored",
+				want: "session.create response missing stored_session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setCreateNoStored()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.CreateSession(ctx, "")
+					return err
+				},
+			},
+			{
+				name: "get missing resume live",
+				want: "session.resume response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored")
+					return err
+				},
+			},
+			{
+				name: "get missing resume stored",
+				want: "session.resume response missing stored_session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoStored()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored")
+					return err
+				},
+			},
+			{
+				name: "ensure missing resume live",
+				want: "session.resume response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.Messages(ctx, "stored")
+					return err
+				},
+			},
+			{
+				name: "ensure missing resume stored",
+				want: "session.resume response missing stored_session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoStored()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.Messages(ctx, "stored")
+					return err
+				},
+			},
+			{
+				name: "get active missing id",
+				want: "active_list response missing id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoID()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored-1")
+					return err
+				},
+			},
+			{
+				name: "get active missing session key",
+				want: "active_list response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored-1")
+					return err
+				},
+			},
+			{
+				name: "list missing id",
+				want: "active_list response missing id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoID()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.ListSessions(ctx, "")
+					return err
+				},
+			},
+			{
+				name: "list missing session key",
+				want: "active_list response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.ListSessions(ctx, "")
+					return err
+				},
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				fake := newFakeGatewayServer(t)
+				tt.setup(fake)
+				server := newGatewayBackedHermesServer(t, fake, "")
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				err := tt.call(ctx, server)
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("schema drift error = %v, want %q", err, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("get session from active list mapping", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		server := newGatewayBackedHermesServer(t, fake, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		session, err := server.GetSession(ctx, "stored-1")
+		if err != nil || session.ID != "stored-1" || server.liveSessionID("stored-1") != "live-1" {
+			t.Fatalf("GetSession active mapping = %#v live=%q err=%v", session, server.liveSessionID("stored-1"), err)
+		}
+		if len(fake.callsFor("session.resume")) != 0 {
+			t.Fatalf("GetSession active mapping called resume: %#v", fake.callsFor("session.resume"))
+		}
+	})
+
+	t.Run("resume missing stored requires active list proof", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setResumeNoStored()
+		fake.setResumeActive()
+		server := newGatewayBackedHermesServer(t, fake, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		session, err := server.GetSession(ctx, "stored")
+		if err != nil || session.ID != "stored" || server.liveSessionID("stored") != "live-stored" {
+			t.Fatalf("GetSession proven resume = %#v live=%q err=%v", session, server.liveSessionID("stored"), err)
+		}
+		_, err = server.storedSessionIDFromResume(ctx, "other", nativehermes.SessionResumeResult{SessionID: "live-stored"})
+		if err == nil || !strings.Contains(err.Error(), "active_list session_key mismatch") {
+			t.Fatalf("resume mismatch error = %v", err)
+		}
+	})
+
 	t.Run("accessors and missing live mapping replies", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
 		server := newGatewayBackedHermesServer(t, fake, "")
@@ -932,8 +1211,15 @@ func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("supervisor did not reconnect after idle disconnect")
 	}
-	if server.gatewayClient() == original {
-		t.Fatal("gateway not swapped after reconnect")
+	swapDeadline := time.After(2 * time.Second)
+	swapPoll := time.NewTicker(5 * time.Millisecond)
+	defer swapPoll.Stop()
+	for server.gatewayClient() == original {
+		select {
+		case <-swapDeadline:
+			t.Fatal("gateway not swapped after reconnect")
+		case <-swapPoll.C:
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1297,7 +1583,7 @@ func gatewayProcessResult(method string, params map[string]any) any {
 	case "session.history":
 		return map[string]any{"count": 0, "messages": []any{}}
 	case "model.options":
-		return map[string]any{"providers": []any{}}
+		return map[string]any{"model": "anthropic/claude-sonnet-4", "provider": "", "providers": []any{}}
 	default:
 		return map[string]any{}
 	}

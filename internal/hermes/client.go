@@ -298,6 +298,8 @@ type ActiveSession struct {
 }
 
 type ModelOptionsResult struct {
+	Model     string          `json:"model"`
+	Provider  string          `json:"provider"`
 	Providers []Provider      `json:"providers"`
 	Raw       json.RawMessage `json:"-"`
 }
@@ -314,79 +316,78 @@ func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 }
 
 type Provider struct {
-	ID     string          `json:"id"`
-	Slug   string          `json:"slug"`
-	Name   string          `json:"name"`
-	Models []ProviderModel `json:"models"`
-	Raw    json.RawMessage `json:"-"`
+	Slug          string                             `json:"slug"`
+	Name          string                             `json:"name"`
+	AuthType      string                             `json:"auth_type"`
+	Authenticated bool                               `json:"authenticated"`
+	Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
+	IsCurrent     bool                               `json:"is_current"`
+	IsUserDefined bool                               `json:"is_user_defined"`
+	KeyEnv        string                             `json:"key_env"`
+	Models        []string                           `json:"models"`
+	Pricing       map[string]ProviderModelPricing    `json:"pricing"`
+	Source        string                             `json:"source"`
+	TotalModels   int                                `json:"total_models"`
+	Warning       string                             `json:"warning"`
+	Raw           json.RawMessage                    `json:"-"`
 }
 
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	var object struct {
-		ID     string          `json:"id"`
-		Slug   string          `json:"slug"`
-		Name   string          `json:"name"`
-		Models json.RawMessage `json:"models"`
+		Slug          string                             `json:"slug"`
+		Name          string                             `json:"name"`
+		AuthType      string                             `json:"auth_type"`
+		Authenticated bool                               `json:"authenticated"`
+		Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
+		IsCurrent     bool                               `json:"is_current"`
+		IsUserDefined bool                               `json:"is_user_defined"`
+		KeyEnv        string                             `json:"key_env"`
+		Models        json.RawMessage                    `json:"models"`
+		Pricing       map[string]ProviderModelPricing    `json:"pricing"`
+		Source        string                             `json:"source"`
+		TotalModels   int                                `json:"total_models"`
+		Warning       string                             `json:"warning"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
 	}
-	p.ID = firstNonEmpty(object.ID, object.Slug)
+	if object.Slug == "" {
+		return fmt.Errorf("hermes model.options provider missing slug")
+	}
+	if len(object.Models) == 0 || string(object.Models) == "null" {
+		return fmt.Errorf("hermes model.options provider %q missing models", object.Slug)
+	}
+	var models []string
+	if err := json.Unmarshal(object.Models, &models); err != nil {
+		return fmt.Errorf("hermes model.options provider %q models: %w", object.Slug, err)
+	}
 	p.Slug = object.Slug
 	p.Name = object.Name
-	if len(object.Models) > 0 {
-		switch object.Models[0] {
-		case '[':
-			_ = json.Unmarshal(object.Models, &p.Models)
-		case '{':
-			var modelMap map[string]ProviderModel
-			if err := json.Unmarshal(object.Models, &modelMap); err == nil {
-				for key, model := range modelMap {
-					if model.ID == "" {
-						model.ID = key
-					}
-					p.Models = append(p.Models, model)
-				}
-			}
-		case '"':
-			var modelID string
-			if err := json.Unmarshal(object.Models, &modelID); err == nil && modelID != "" {
-				p.Models = append(p.Models, ProviderModel{ID: modelID, Name: modelID})
-			}
-		}
-	}
+	p.AuthType = object.AuthType
+	p.Authenticated = object.Authenticated
+	p.Capabilities = object.Capabilities
+	p.IsCurrent = object.IsCurrent
+	p.IsUserDefined = object.IsUserDefined
+	p.KeyEnv = object.KeyEnv
+	p.Models = models
+	p.Pricing = object.Pricing
+	p.Source = object.Source
+	p.TotalModels = object.TotalModels
+	p.Warning = object.Warning
 	p.Raw = append(p.Raw[:0], data...)
 	return nil
 }
 
-type ProviderModel struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Context      int             `json:"context_window"`
-	MaxOutput    int             `json:"max_output_tokens"`
-	Capabilities []string        `json:"capabilities"`
-	Raw          json.RawMessage `json:"-"`
+type ProviderModelCapability struct {
+	Fast      bool `json:"fast"`
+	Reasoning bool `json:"reasoning"`
 }
 
-func (m *ProviderModel) UnmarshalJSON(data []byte) error {
-	if len(data) > 0 && data[0] == '"' {
-		var id string
-		if err := json.Unmarshal(data, &id); err != nil {
-			return err
-		}
-		m.ID = id
-		m.Name = id
-		m.Raw = append(m.Raw[:0], data...)
-		return nil
-	}
-	type alias ProviderModel
-	var value alias
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-	*m = ProviderModel(value)
-	m.Raw = append(m.Raw[:0], data...)
-	return nil
+type ProviderModelPricing struct {
+	Cache  *string `json:"cache"`
+	Free   bool    `json:"free"`
+	Input  string  `json:"input"`
+	Output string  `json:"output"`
 }
 
 type BranchResult struct {
@@ -461,13 +462,4 @@ func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelO
 	var out ModelOptionsResult
 	err := c.Call(ctx, "model.options", map[string]any{"session_id": liveSessionID}, &out)
 	return out, err
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

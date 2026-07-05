@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -597,18 +596,42 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 	if err != nil {
 		return nativeSession{}, err
 	}
-	stored := firstNonEmpty(result.StoredSessionID, result.SessionID)
-	s.rememberGatewaySession(stored, result.SessionID)
-	return s.nativeSessionFromGateway(stored, title), nil
+	if result.SessionID == "" {
+		return nativeSession{}, fmt.Errorf("hermes session.create response missing session_id")
+	}
+	if result.StoredSessionID == "" {
+		return nativeSession{}, fmt.Errorf("hermes session.create response missing stored_session_id")
+	}
+	s.rememberGatewaySession(result.StoredSessionID, result.SessionID)
+	return s.nativeSessionFromGateway(result.StoredSessionID, title), nil
 }
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession, error) {
 	if s.liveSessionID(id) == "" {
+		active, err := s.gatewayClient().ActiveList(ctx)
+		if err == nil {
+			for _, item := range active.Sessions {
+				if item.SessionID == "" {
+					return nativeSession{}, fmt.Errorf("hermes active_list response missing id")
+				}
+				if item.SessionKey == "" {
+					return nativeSession{}, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
+				}
+				s.rememberGatewaySession(item.SessionKey, item.SessionID)
+				if item.SessionKey == id {
+					return s.nativeSessionFromGateway(id, item.Title), nil
+				}
+			}
+		}
 		result, err := s.gatewayClient().ResumeSession(ctx, id, map[string]any{})
 		if err != nil {
 			return nativeSession{}, err
 		}
-		s.rememberGatewaySession(firstNonEmpty(result.StoredSessionID, id), result.SessionID)
+		stored, err := s.storedSessionIDFromResume(ctx, id, result)
+		if err != nil {
+			return nativeSession{}, err
+		}
+		s.rememberGatewaySession(stored, result.SessionID)
 	}
 	return s.nativeSessionFromGateway(id, ""), nil
 }
@@ -620,11 +643,14 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSe
 	}
 	out := make([]nativeSession, 0, len(active.Sessions))
 	for _, item := range active.Sessions {
-		stored := firstNonEmpty(item.SessionKey, s.storedSessionID(item.SessionID), item.SessionID)
-		if item.SessionID != "" {
-			s.rememberGatewaySession(stored, item.SessionID)
+		if item.SessionID == "" {
+			return nil, fmt.Errorf("hermes active_list response missing id")
 		}
-		session := s.nativeSessionFromGateway(stored, item.Title)
+		if item.SessionKey == "" {
+			return nil, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
+		}
+		s.rememberGatewaySession(item.SessionKey, item.SessionID)
+		session := s.nativeSessionFromGateway(item.SessionKey, item.Title)
 		session.Directory = firstNonEmpty(item.Cwd, s.cwd)
 		if cwd == "" || session.Directory == cwd {
 			out = append(out, session)
@@ -686,12 +712,6 @@ func (s *hermesServer) liveSessionID(stored string) string {
 	return s.liveByStored[stored]
 }
 
-func (s *hermesServer) storedSessionID(live string) string {
-	s.gatewayMu.Lock()
-	defer s.gatewayMu.Unlock()
-	return s.storedByLive[live]
-}
-
 func (s *hermesServer) anyLiveSessionID() string {
 	s.gatewayMu.Lock()
 	defer s.gatewayMu.Unlock()
@@ -709,8 +729,29 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	if err != nil {
 		return "", err
 	}
-	s.rememberGatewaySession(firstNonEmpty(result.StoredSessionID, stored), result.SessionID)
+	resolvedStored, err := s.storedSessionIDFromResume(ctx, stored, result)
+	if err != nil {
+		return "", err
+	}
+	s.rememberGatewaySession(resolvedStored, result.SessionID)
 	return result.SessionID, nil
+}
+
+func (s *hermesServer) storedSessionIDFromResume(ctx context.Context, requested string, result nativehermes.SessionResumeResult) (string, error) {
+	if result.SessionID == "" {
+		return "", fmt.Errorf("hermes session.resume response missing session_id")
+	}
+	if result.StoredSessionID != "" {
+		return result.StoredSessionID, nil
+	}
+	stored, err := s.lookupStoredSessionIDForLive(ctx, result.SessionID, "hermes session.resume")
+	if err != nil {
+		return "", fmt.Errorf("hermes session.resume response missing stored_session_id: %w", err)
+	}
+	if stored != requested {
+		return "", fmt.Errorf("hermes session.resume active_list session_key mismatch for live session %q: %q != %q", result.SessionID, stored, requested)
+	}
+	return stored, nil
 }
 
 func (s *hermesServer) nativeSessionFromGateway(stored string, title string) nativeSession {
@@ -997,24 +1038,19 @@ func providersFromGateway(result nativehermes.ModelOptionsResult) providersRespo
 	providers := make([]providerInfo, 0, len(result.Providers))
 	for _, provider := range result.Providers {
 		info := providerInfo{
-			ID:     provider.ID,
-			Name:   firstNonEmpty(provider.Name, provider.ID),
+			ID:     provider.Slug,
+			Name:   firstNonEmpty(provider.Name, provider.Slug),
 			Models: map[string]providerModel{},
 		}
-		for _, model := range provider.Models {
-			id := firstNonEmpty(model.ID, model.Name)
-			if id == "" {
+		for _, modelID := range provider.Models {
+			if modelID == "" {
 				continue
 			}
-			info.Models[id] = providerModel{
-				ID:   id,
-				Name: firstNonEmpty(model.Name, id),
-				Limit: map[string]any{
-					"context": model.Context,
-					"output":  model.MaxOutput,
-				},
-				Reasoning: slices.Contains(model.Capabilities, "reasoning"),
-				ToolCall:  slices.Contains(model.Capabilities, "tools"),
+			capability := provider.Capabilities[modelID]
+			info.Models[modelID] = providerModel{
+				ID:        modelID,
+				Name:      modelID,
+				Reasoning: capability.Reasoning,
 			}
 		}
 		providers = append(providers, info)
@@ -1072,20 +1108,24 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (n
 }
 
 func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
+	return s.lookupStoredSessionIDForLive(ctx, live, "hermes branch")
+}
+
+func (s *hermesServer) lookupStoredSessionIDForLive(ctx context.Context, live string, label string) (string, error) {
 	active, err := s.gatewayClient().ActiveList(ctx)
 	if err != nil {
-		return "", fmt.Errorf("hermes branch active_list lookup failed: %w", err)
+		return "", fmt.Errorf("%s active_list lookup failed: %w", label, err)
 	}
 	for _, item := range active.Sessions {
 		if item.SessionID != live {
 			continue
 		}
 		if item.SessionKey == "" {
-			return "", fmt.Errorf("hermes branch active_list missing session_key for live session %q", live)
+			return "", fmt.Errorf("%s active_list missing session_key for live session %q", label, live)
 		}
 		return item.SessionKey, nil
 	}
-	return "", fmt.Errorf("hermes branch active_list missing live session %q", live)
+	return "", fmt.Errorf("%s active_list missing live session %q", label, live)
 }
 
 func (s *hermesServer) Todos(ctx context.Context, id string) ([]nativeTodo, error) {
@@ -1284,31 +1324,32 @@ var (
 	leaseReapNow          = time.Now
 )
 
-func reapLeaseFile(path string, log *slog.Logger) {
+func reapLeaseFile(path string, log *slog.Logger) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return false
 	}
 	var lease serverLease
 	if err := json.Unmarshal(data, &lease); err != nil {
 		_ = os.Remove(path)
-		return
+		return false
 	}
 	if lease.PID <= 0 || !leaseMatchesProcess(path, lease) {
 		// Not our identified live process (gone, replaced, or
 		// unidentifiable): the lease is safe to remove.
 		_ = os.Remove(path)
-		return
+		return false
 	}
 	if reapLeaseProcess(lease, log) {
 		_ = os.Remove(path)
-		return
+		return false
 	}
 	// The process survived termination or could not be verified dead: KEEP
 	// the lease so the next startup retries the reap ladder.
 	if log != nil {
 		log.Debug("stale hermes lease process survived termination; keeping lease", slog.Int("pid", lease.PID))
 	}
+	return true
 }
 
 // reapLeaseProcess runs the shutdown ladder against an identified stale server

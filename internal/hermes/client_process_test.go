@@ -123,11 +123,37 @@ func resultForMethod(method string, params map[string]any) any {
 	case "session.active_list":
 		return map[string]any{"sessions": []map[string]any{{"id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
 	case "model.options":
-		return map[string]any{"providers": []map[string]any{
-			{"id": "array", "models": []map[string]any{{"id": "m1", "name": "M1"}}},
-			{"id": "map", "models": map[string]any{"m2": map[string]any{"name": "M2"}}},
-			{"id": "string", "models": "m3"},
-		}}
+		return map[string]any{
+			"model":    "anthropic/claude-sonnet-4",
+			"provider": "",
+			"providers": []map[string]any{
+				{
+					"slug":            "openrouter",
+					"name":            "OpenRouter",
+					"authenticated":   true,
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"anthropic/claude-fable-5", "openai/gpt-5.5"},
+					"capabilities":    map[string]any{"anthropic/claude-fable-5": map[string]any{"fast": false, "reasoning": true}},
+					"pricing":         map[string]any{"anthropic/claude-fable-5": map[string]any{"cache": "$1.00", "free": false, "input": "$10.00", "output": "$50.00"}},
+					"source":          "built-in",
+					"total_models":    2,
+				},
+				{
+					"auth_type":       "virtual",
+					"authenticated":   true,
+					"capabilities":    map[string]any{"default": map[string]any{"fast": false, "reasoning": true}},
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"default"},
+					"name":            "Mixture of Agents",
+					"slug":            "moa",
+					"source":          "virtual",
+					"total_models":    1,
+					"warning":         "Aggregator acts as the selected model.",
+				},
+			},
+		}
 	default:
 		return map[string]any{}
 	}
@@ -265,7 +291,7 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if err := client.ClarifyRespond(ctx, "live", "yes"); err != nil {
 		t.Fatalf("ClarifyRespond: %v", err)
 	}
-	if out, err := client.ModelOptions(ctx, "live"); err != nil || len(out.Providers) != 3 {
+	if out, err := client.ModelOptions(ctx, "live"); err != nil || len(out.Providers) != 2 {
 		t.Fatalf("ModelOptions = %#v err=%v", out, err)
 	}
 	if err := client.Call(ctx, "missing", nil, nil); !IsNotFound(err) {
@@ -389,28 +415,21 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 	if err := provider.UnmarshalJSON([]byte("{")); err == nil {
 		t.Fatal("Provider accepted malformed JSON")
 	}
-	if err := provider.UnmarshalJSON([]byte(`{"slug":"openrouter","name":"OpenRouter","models":["anthropic/claude-fable-5"]}`)); err != nil ||
-		provider.ID != "openrouter" || provider.Models[0].ID != "anthropic/claude-fable-5" {
+	if err := provider.UnmarshalJSON([]byte(`{"slug":"openrouter","name":"OpenRouter","authenticated":true,"is_current":false,"is_user_defined":false,"source":"built-in","total_models":1,"models":["anthropic/claude-fable-5"],"capabilities":{"anthropic/claude-fable-5":{"fast":false,"reasoning":true}},"pricing":{"anthropic/claude-fable-5":{"cache":"$1.00","free":false,"input":"$10.00","output":"$50.00"}}}`)); err != nil ||
+		provider.Slug != "openrouter" || provider.Models[0] != "anthropic/claude-fable-5" || !provider.Capabilities["anthropic/claude-fable-5"].Reasoning {
 		t.Fatalf("Provider slug shape = %#v err=%v", provider, err)
 	}
-	if firstNonEmpty("", "") != "" {
-		t.Fatal("firstNonEmpty returned non-empty value for empty inputs")
-	}
-	if err := provider.UnmarshalJSON([]byte(`{"id":"bad","models":1}`)); err != nil {
-		t.Fatalf("Provider numeric models: %v", err)
-	}
-	var model ProviderModel
-	if err := model.UnmarshalJSON([]byte("{")); err == nil {
-		t.Fatal("ProviderModel accepted malformed JSON")
-	}
-	if err := model.UnmarshalJSON([]byte(`"model-id"`)); err != nil || model.ID != "model-id" || len(model.Raw) == 0 {
-		t.Fatalf("ProviderModel string = %#v err=%v", model, err)
-	}
-	if err := model.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
-		t.Fatal("ProviderModel accepted invalid string")
-	}
-	if err := model.UnmarshalJSON([]byte(`1`)); err == nil {
-		t.Fatal("ProviderModel numeric accepted")
+	for _, raw := range []string{
+		`{"id":"openrouter","models":["anthropic/claude-fable-5"]}`,
+		`{"slug":"openrouter","models":[{"id":"anthropic/claude-fable-5"}]}`,
+		`{"slug":"openrouter","models":{"anthropic/claude-fable-5":{}}}`,
+		`{"slug":"openrouter","models":"anthropic/claude-fable-5"}`,
+		`{"slug":"openrouter"}`,
+		`{"slug":"openrouter","models":null}`,
+	} {
+		if err := provider.UnmarshalJSON([]byte(raw)); err == nil {
+			t.Fatalf("Provider accepted non-real model.options shape: %s", raw)
+		}
 	}
 }
 

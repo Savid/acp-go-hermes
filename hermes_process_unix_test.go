@@ -3,6 +3,7 @@
 package hermesacp
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -127,6 +128,61 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 	}
 	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lease not removed after killing child: %v", err)
+	}
+}
+
+func TestDeleteCleanupKeepsSurvivingLeaseRecord(t *testing.T) {
+	restoreHermesClientSeams(t)
+	restoreLeaseReapSeams(t)
+	oldGetpgid := hermesSyscallGetpgid
+	oldKill := hermesSyscallKill
+	t.Cleanup(func() {
+		hermesSyscallGetpgid = oldGetpgid
+		hermesSyscallKill = oldKill
+	})
+
+	root := t.TempDir()
+	xdg, err := createXDGDirs(root, "cleanup-survivor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leasePath := filepath.Join(xdg.State, leaseFileName)
+	const token = "cleanup-token"
+	const pid = 5151
+	identity := processIdentity{
+		StartTime: "cleanup-start",
+		Cmdline:   []string{"hermes", "serve"},
+		Env: map[string]string{
+			"HERMES_HOME":                    xdg.Root,
+			"HERMES_DASHBOARD_SESSION_TOKEN": token,
+		},
+	}
+	hermesInspectProcess = func(int) (processIdentity, error) { return identity, nil }
+	hermesSyscallGetpgid = func(int) (int, error) { return pid, nil }
+	hermesSyscallKill = func(int, syscall.Signal) error { return errors.New("signal failed") }
+	if err := writeLease(xdg.State, serverLease{
+		PID:              pid,
+		TokenHash:        passwordHash(token),
+		XDGRoot:          xdg.Root,
+		ProcessStartTime: identity.StartTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := NewAgent(WithHome(root))
+	agent.deleteCleanup["cleanup-survivor"] = deleteCleanupRecord{SessionID: "cleanup-survivor", XDGRoot: xdg.Root}
+	err = agent.retryDeletedSessionCleanup(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "kept live lease") {
+		t.Fatalf("retry cleanup error = %v", err)
+	}
+	if _, err := os.Stat(leasePath); err != nil {
+		t.Fatalf("surviving lease was removed: %v", err)
+	}
+	if _, err := os.Stat(xdg.Root); err != nil {
+		t.Fatalf("XDG root was removed: %v", err)
+	}
+	if _, ok := agent.deleteCleanup["cleanup-survivor"]; !ok {
+		t.Fatal("cleanup record was forgotten")
 	}
 }
 
