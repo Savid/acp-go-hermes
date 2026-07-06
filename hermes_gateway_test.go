@@ -55,6 +55,7 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	fake := &fakeGatewayServer{t: t, failMethods: map[string]struct{}{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.server.Close)
+
 	return fake
 }
 
@@ -66,17 +67,20 @@ func (s *fakeGatewayServer) dialClient(t *testing.T) *nativehermes.Client {
 	if err != nil {
 		t.Fatalf("dial fake gateway: %v", err)
 	}
+
 	return client
 }
 
 func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/ws" {
 		http.NotFound(w, r)
+
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		s.t.Errorf("accept websocket: %v", err)
+
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
@@ -96,6 +100,7 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.Unmarshal(data, &req); err != nil {
 			s.t.Errorf("decode request: %v", err)
+
 			return
 		}
 		params := map[string]any{}
@@ -107,11 +112,13 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		if fail {
 			s.writeError(r.Context(), conn, req.ID, -32000, req.Method+" failed")
+
 			continue
 		}
 		s.respond(r.Context(), conn, req.ID, req.Method, params)
 		if closeAfterResult {
 			_ = conn.Close(websocket.StatusNormalClosure, "forced close")
+
 			return
 		}
 	}
@@ -195,6 +202,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		sessionID, _ := params["session_id"].(string)
 		if sessionID == "missing" {
 			s.writeError(ctx, conn, id, 4007, "not found")
+
 			return
 		}
 		s.writeResult(ctx, conn, id, map[string]any{})
@@ -220,6 +228,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.mu.Unlock()
 		if branchNotFound {
 			s.writeError(ctx, conn, id, 4007, "not found")
+
 			return
 		}
 		s.mu.Lock()
@@ -231,6 +240,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 				"title":  "branch",
 				"parent": "stored-1",
 			})
+
 			return
 		}
 		s.writeResult(ctx, conn, id, map[string]any{
@@ -290,8 +300,10 @@ func (s *fakeGatewayServer) promptEventScript(live string) []nativehermes.Event 
 				events[index].SessionID = live
 			}
 		}
+
 		return events
 	}
+
 	return []nativehermes.Event{
 		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"id":"approval-1","title":"Edit file","command":"write"}`)},
 		{Type: "clarify.request", SessionID: live, Payload: json.RawMessage(`{"id":"clarify-1","question":"Continue?"}`)},
@@ -311,6 +323,7 @@ func (s *fakeGatewayServer) writeResult(ctx context.Context, conn *websocket.Con
 	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	if err != nil {
 		s.t.Errorf("marshal result: %v", err)
+
 		return
 	}
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
@@ -322,6 +335,7 @@ func (s *fakeGatewayServer) writeError(ctx context.Context, conn *websocket.Conn
 	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
 	if err != nil {
 		s.t.Errorf("marshal error: %v", err)
+
 		return
 	}
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
@@ -333,6 +347,7 @@ func (s *fakeGatewayServer) writeEvent(ctx context.Context, conn *websocket.Conn
 	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": event})
 	if err != nil {
 		s.t.Errorf("marshal event: %v", err)
+
 		return
 	}
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
@@ -347,6 +362,7 @@ func (s *fakeGatewayServer) callMethods() []string {
 	for _, call := range s.calls {
 		out = append(out, call.Method)
 	}
+
 	return out
 }
 
@@ -430,11 +446,13 @@ func (s *fakeGatewayServer) callsFor(method string) []gatewayRPCCall {
 			out = append(out, call)
 		}
 	}
+
 	return out
 }
 
 func newGatewayBackedHermesServer(t *testing.T, fake *fakeGatewayServer, defaultModel string) *hermesServer {
 	t.Helper()
+
 	return &hermesServer{
 		cmd:          &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 		xdg:          testXDGDirs(t),
@@ -473,34 +491,40 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if err != nil || created.ID != "stored-1" || created.Title != "Created" || created.Model.ProviderID != "openai" {
 		t.Fatalf("CreateSession = %#v err=%v", created, err)
 	}
-	if got, err := server.GetSession(ctx, "stored-1"); err != nil || got.ID != "stored-1" {
-		t.Fatalf("GetSession existing = %#v err=%v", got, err)
+	if got, err2 := server.GetSession(ctx, "stored-1"); err2 != nil || got.ID != "stored-1" {
+		t.Fatalf("GetSession existing = %#v err=%v", got, err2)
 	}
-	if got, err := server.GetSession(ctx, "restored"); err != nil || got.ID != "restored" {
-		t.Fatalf("GetSession resume = %#v err=%v", got, err)
+	if got, err3 := server.GetSession(ctx, "restored"); err3 != nil || got.ID != "restored" {
+		t.Fatalf("GetSession resume = %#v err=%v", got, err3)
 	}
 	list, err := server.ListSessions(ctx, "/repo")
 	if err != nil || len(list) != 1 || list[0].ID != "stored-1" {
 		t.Fatalf("ListSessions = %#v err=%v", list, err)
 	}
-	if err := server.DeleteSession(ctx, "missing"); err != nil {
-		t.Fatalf("DeleteSession missing: %v", err)
+	if err4 := server.DeleteSession(ctx, "missing"); err4 != nil {
+		t.Fatalf("DeleteSession missing: %v", err4)
 	}
-	if err := server.DeleteSession(ctx, "stored-1"); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
+	if err5 := server.DeleteSession(ctx, "stored-1"); err5 != nil {
+		t.Fatalf("DeleteSession: %v", err5)
 	}
 	if live := server.liveSessionID("stored-1"); live != "" {
 		t.Fatalf("deleted session still mapped to %q", live)
 	}
-	if perms, err := server.PendingPermissions(ctx); err != nil || perms != nil {
-		t.Fatalf("PendingPermissions = %#v err=%v", perms, err)
+	if perms, err6 := server.PendingPermissions(ctx); err6 != nil || perms != nil {
+		t.Fatalf("PendingPermissions = %#v err=%v", perms, err6)
 	}
-	if questions, err := server.PendingQuestions(ctx); err != nil || questions != nil {
-		t.Fatalf("PendingQuestions = %#v err=%v", questions, err)
+	if questions, err7 := server.PendingQuestions(ctx); err7 != nil || questions != nil {
+		t.Fatalf("PendingQuestions = %#v err=%v", questions, err7)
 	}
-	if todos, err := server.Todos(ctx, "stored-1"); err != nil || todos != nil {
-		t.Fatalf("Todos = %#v err=%v", todos, err)
+	if todos, err8 := server.Todos(ctx, "stored-1"); err8 != nil || todos != nil {
+		t.Fatalf("Todos = %#v err=%v", todos, err8)
 	}
+
+	testGatewayServerMessageForkAndClose(ctx, t, server, fake)
+}
+
+func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
+	t.Helper()
 
 	message, err := server.SendMessage(ctx, "stored-1", hermesMessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
 	if err != nil {
@@ -517,23 +541,23 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 			t.Fatalf("missing forwarded event %q", want)
 		}
 	}
-	if err := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "always", "ignored"); err != nil {
-		t.Fatalf("ReplyPermission: %v", err)
+	if err9 := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "always", "ignored"); err9 != nil {
+		t.Fatalf("ReplyPermission: %v", err9)
 	}
-	if err := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err != nil {
-		t.Fatalf("ReplyPermission reject: %v", err)
+	if err10 := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err10 != nil {
+		t.Fatalf("ReplyPermission reject: %v", err10)
 	}
-	if err := server.ReplyQuestion(ctx, questionRequest{SessionID: "stored-1"}, [][]string{{"yes"}}); err != nil {
-		t.Fatalf("ReplyQuestion: %v", err)
+	if err11 := server.ReplyQuestion(ctx, questionRequest{SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
+		t.Fatalf("ReplyQuestion: %v", err11)
 	}
-	if err := server.RejectQuestion(ctx, questionRequest{SessionID: "stored-1"}); err != nil {
-		t.Fatalf("RejectQuestion: %v", err)
+	if err12 := server.RejectQuestion(ctx, questionRequest{SessionID: "stored-1"}); err12 != nil {
+		t.Fatalf("RejectQuestion: %v", err12)
 	}
-	if err := server.Abort(ctx, "missing-live"); err != nil {
-		t.Fatalf("Abort missing live: %v", err)
+	if err13 := server.Abort(ctx, "missing-live"); err13 != nil {
+		t.Fatalf("Abort missing live: %v", err13)
 	}
-	if err := server.Abort(ctx, "stored-1"); err != nil {
-		t.Fatalf("Abort: %v", err)
+	if err14 := server.Abort(ctx, "stored-1"); err14 != nil {
+		t.Fatalf("Abort: %v", err14)
 	}
 	history, err := server.Messages(ctx, "stored-1")
 	if err != nil || len(history) != 2 || history[1].Parts[0].Text != "history" {
@@ -549,7 +573,7 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 		t.Fatalf("Fork retry = %#v err=%v", retryFork, err)
 	}
 	fake.setBranchNotFoundCount(2)
-	if _, err := server.Fork(ctx, "stored-1", ""); err == nil {
+	if _, err15 := server.Fork(ctx, "stored-1", ""); err15 == nil {
 		t.Fatal("Fork succeeded after repeated live session not found")
 	}
 	providers, err := server.ConfigProviders(ctx)
@@ -639,6 +663,12 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if got := gatewayMessageText(nativehermes.Message{Content: json.RawMessage(`not-json`)}); got != "not-json" {
 		t.Fatalf("fallback gateway message text = %q", got)
 	}
+	testGatewayProvidersAndConfigHelpers(t)
+}
+
+func testGatewayProvidersAndConfigHelpers(t *testing.T) {
+	t.Helper()
+
 	if got := errors.Unwrap(streamError{epoch: 7, err: errors.New("wrapped")}); got == nil || got.Error() != "wrapped" {
 		t.Fatalf("stream error unwrap = %v", got)
 	}
@@ -1028,6 +1058,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.CreateSession(ctx, "")
+
 					return err
 				},
 			},
@@ -1039,6 +1070,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.CreateSession(ctx, "")
+
 					return err
 				},
 			},
@@ -1050,6 +1082,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.GetSession(ctx, "stored")
+
 					return err
 				},
 			},
@@ -1061,6 +1094,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.GetSession(ctx, "stored")
+
 					return err
 				},
 			},
@@ -1072,6 +1106,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.Messages(ctx, "stored")
+
 					return err
 				},
 			},
@@ -1083,6 +1118,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.Messages(ctx, "stored")
+
 					return err
 				},
 			},
@@ -1094,6 +1130,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.GetSession(ctx, "stored-1")
+
 					return err
 				},
 			},
@@ -1105,6 +1142,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.GetSession(ctx, "stored-1")
+
 					return err
 				},
 			},
@@ -1116,6 +1154,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.ListSessions(ctx, "")
+
 					return err
 				},
 			},
@@ -1127,6 +1166,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 				},
 				call: func(ctx context.Context, server *hermesServer) error {
 					_, err := server.ListSessions(ctx, "")
+
 					return err
 				},
 			},
@@ -1144,7 +1184,9 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			})
 		}
 	})
+}
 
+func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 	t.Run("get session from active list mapping", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
 		server := newGatewayBackedHermesServer(t, fake, "")
@@ -1224,7 +1266,9 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			t.Fatalf("event channel len = %d", got)
 		}
 	})
+}
 
+func TestHermesGatewayServerFailureBranches(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		method string
@@ -1235,6 +1279,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.create",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.CreateSession(ctx, "title")
+
 				return err
 			},
 		},
@@ -1243,6 +1288,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.resume",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.GetSession(ctx, "stored")
+
 				return err
 			},
 		},
@@ -1251,6 +1297,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.active_list",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.ListSessions(ctx, "")
+
 				return err
 			},
 		},
@@ -1259,6 +1306,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.resume",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
 				return err
 			},
 		},
@@ -1268,6 +1316,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			call: func(ctx context.Context, server *hermesServer) error {
 				server.rememberGatewaySession("stored", "live-stored")
 				_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
 				return err
 			},
 		},
@@ -1277,6 +1326,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			call: func(ctx context.Context, server *hermesServer) error {
 				server.rememberGatewaySession("stored", "live-stored")
 				_, err := server.Messages(ctx, "stored")
+
 				return err
 			},
 		},
@@ -1285,6 +1335,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.resume",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.Messages(ctx, "stored")
+
 				return err
 			},
 		},
@@ -1294,6 +1345,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			call: func(ctx context.Context, server *hermesServer) error {
 				server.rememberGatewaySession("stored", "live-stored")
 				_, err := server.Fork(ctx, "stored", "")
+
 				return err
 			},
 		},
@@ -1302,6 +1354,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "session.resume",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.Fork(ctx, "stored", "")
+
 				return err
 			},
 		},
@@ -1310,6 +1363,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			method: "model.options",
 			call: func(ctx context.Context, server *hermesServer) error {
 				_, err := server.ConfigProviders(ctx)
+
 				return err
 			},
 		},
@@ -1443,7 +1497,10 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startHermesServer: %v", err)
 	}
-	server := client.(*hermesServer)
+	server, serverOK := client.(*hermesServer)
+	if !serverOK {
+		t.Fatalf("client type = %T", client)
+	}
 	if server.xdg.Root == "" || !strings.Contains(filepath.Base(server.xdg.Root), "session_one") {
 		t.Fatalf("xdg dirs = %#v", server.xdg)
 	}
@@ -1525,6 +1582,7 @@ func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
 	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
 		client := fake.dialClient(t)
 		redialed <- struct{}{}
+
 		return client, nil
 	})
 	original := server.gatewayClient()
@@ -1564,6 +1622,7 @@ func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
 	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
 		client := fake.dialClient(t)
 		reconnies <- struct{}{}
+
 		return client, nil
 	})
 
@@ -1593,6 +1652,7 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	reconnied := make(chan struct{}, 1)
 	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
 		reconnied <- struct{}{}
+
 		return fake.dialClient(t), nil
 	})
 
@@ -1760,6 +1820,7 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 		if inspectCalls == 1 {
 			return baseIdentity, nil
 		}
+
 		return processIdentity{}, os.ErrNotExist
 	}
 	if err := writeLease(xdg.State, baseLease); err != nil {
@@ -1828,6 +1889,7 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string) string {
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("write fake executable: %v", err)
 	}
+
 	return script
 }
 
@@ -1835,6 +1897,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
 			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (fake)")
+
 			return nil
 		}
 	}
@@ -1842,6 +1905,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {
 			port = args[i+1]
+
 			break
 		}
 	}
@@ -1860,6 +1924,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 			token := os.Getenv("HERMES_DASHBOARD_SESSION_TOKEN")
 			if token != "" && r.URL.Query().Get("token") != token && r.Header.Get("X-Hermes-Session-Token") != token {
 				w.WriteHeader(http.StatusUnauthorized)
+
 				return
 			}
 			conn, err := websocket.Accept(w, r, nil)
@@ -1894,6 +1959,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+
 	return server.ListenAndServe()
 }
 
@@ -1903,6 +1969,7 @@ func gatewayProcessResult(method string, params map[string]any) any {
 		return map[string]any{"session_id": "live-fake", "stored_session_id": "stored-fake"}
 	case "session.resume":
 		stored, _ := params["session_id"].(string)
+
 		return map[string]any{"session_id": "live-" + stored, "session_key": stored}
 	case "session.active_list":
 		return map[string]any{"sessions": []any{}}
@@ -1920,6 +1987,7 @@ func writeGatewayResult(ctx context.Context, conn *websocket.Conn, id int64, res
 	if err != nil {
 		return err
 	}
+
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
@@ -1931,11 +1999,11 @@ func writeGatewayEvent(ctx context.Context, conn *websocket.Conn, event nativehe
 func restoreHermesClientSeams(t *testing.T) {
 	t.Helper()
 	marshalIndent := hermesMarshalIndent
-	writeLease := hermesWriteLease
+	writeLease2 := hermesWriteLease
 	inspectProcess := hermesInspectProcess
 	t.Cleanup(func() {
 		hermesMarshalIndent = marshalIndent
-		hermesWriteLease = writeLease
+		hermesWriteLease = writeLease2
 		hermesInspectProcess = inspectProcess
 	})
 }
@@ -1957,6 +2025,7 @@ func restoreLeaseReapSeams(t *testing.T) {
 func testXDGDirs(t *testing.T) xdgDirs {
 	t.Helper()
 	root := t.TempDir()
+
 	return xdgDirs{
 		Root:   root,
 		Data:   filepath.Join(root, "data"),
@@ -1992,5 +2061,6 @@ func containsString(values []string, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }

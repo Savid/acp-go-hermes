@@ -72,8 +72,10 @@ func TestOptionsAndRequestBuilders(t *testing.T) {
 	if !rawMessageConfigFromMeta(req.Meta).Enabled() {
 		t.Fatalf("raw events not enabled in meta: %#v", req.Meta)
 	}
-	options := req.Meta[hermesMetaKey].(map[string]any)[metaOptionsKey].(map[string]any)
-	if options[metaModelKey] != "openai/gpt" || options[metaEnvKey].(map[string]string)["K"] != "V" {
+	hermesMeta, _ := req.Meta[hermesMetaKey].(map[string]any)
+	options, _ := hermesMeta[metaOptionsKey].(map[string]any)
+	envMap, _ := options[metaEnvKey].(map[string]string)
+	if options[metaModelKey] != "openai/gpt" || envMap["K"] != "V" {
 		t.Fatalf("options not set in meta: %#v", req.Meta)
 	}
 	if ResumeSessionRequest("s", "/tmp/project", WithSessionMCPServers(httpServer)).SessionId != "s" {
@@ -86,7 +88,13 @@ func TestOptionsAndRequestBuilders(t *testing.T) {
 	if list.Cursor == nil || *list.Cursor != "next" || list.Meta["a"] != "b" {
 		t.Fatalf("ListSessionsRequest = %#v", list)
 	}
-	unstable := unstableMCPServersFromStable(req.McpServers)
+	assertMCPServerConversions(t, req.McpServers)
+}
+
+func assertMCPServerConversions(t *testing.T, servers []acp.McpServer) {
+	t.Helper()
+
+	unstable := unstableMCPServersFromStable(servers)
 	if len(unstable) != 4 || unstable[0].Http == nil || unstable[1].Stdio == nil || unstable[2].Sse == nil || unstable[3].Acp == nil {
 		t.Fatalf("unstable MCP servers = %#v", unstable)
 	}
@@ -128,7 +136,8 @@ func TestRequestBuilderCloneEdgeBranches(t *testing.T) {
 	meta := map[string]any{hermesMetaKey: map[string]any{"a": "b"}}
 	ensured := ensureMetaMap(meta, hermesMetaKey)
 	ensured["a"] = "changed"
-	if meta[hermesMetaKey].(map[string]any)["a"] != "changed" {
+	storedMeta, _ := meta[hermesMetaKey].(map[string]any)
+	if storedMeta["a"] != "changed" {
 		t.Fatalf("ensureMetaMap did not store clone: %#v", meta)
 	}
 }
@@ -203,6 +212,12 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env lifecycle meta accepted")
 	}
+	testValidationSchemaAndCloneHelpers(t)
+}
+
+func testValidationSchemaAndCloneHelpers(t *testing.T) {
+	t.Helper()
+
 	for name, schema := range map[string]any{
 		"object":       map[string]any{"type": "object"},
 		"empty-object": map[string]any{},
@@ -328,12 +343,12 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireClientCall: %v", err)
 	}
-	if _, err := agent.acquireClientCall(ctx); err == nil {
+	if _, err2 := agent.acquireClientCall(ctx); err2 == nil {
 		t.Fatal("client call backpressure not enforced")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := agent.acquireClientCall(cancelled); err == nil {
+	if _, err3 := agent.acquireClientCall(cancelled); err3 == nil {
 		t.Fatal("cancelled acquire succeeded")
 	}
 	release()
@@ -403,6 +418,7 @@ func forkClientConnection(t *testing.T, agent forkExtensionAgent) (*acp.ClientSi
 	agentToClientReader, agentToClientWriter := io.Pipe()
 	_ = acp.NewAgentSideConnection(agent, agentToClientWriter, clientToAgentReader)
 	conn := acp.NewClientSideConnection(noopACPClient{}, clientToAgentWriter, agentToClientReader)
+
 	return conn, func() {
 		_ = clientToAgentWriter.Close()
 		_ = clientToAgentReader.Close()

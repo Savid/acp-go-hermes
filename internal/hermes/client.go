@@ -14,6 +14,12 @@ import (
 	"github.com/coder/websocket"
 )
 
+const (
+	jsonrpcVersion = "2.0"
+	methodEvent    = "event"
+	fieldSessionID = "session_id"
+)
+
 type Client struct {
 	conn   *websocket.Conn
 	events chan Event
@@ -51,11 +57,13 @@ func (e *RPCError) Error() string {
 	if e == nil {
 		return ""
 	}
+
 	return fmt.Sprintf("hermes json-rpc %d: %s", e.Code, e.Message)
 }
 
 func IsNotFound(err error) bool {
 	var rpcErr *RPCError
+
 	return errors.As(err, &rpcErr) && rpcErr.Code == 4007
 }
 
@@ -72,9 +80,11 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
+
 	if err != nil {
 		return nil, err
 	}
+
 	client := &Client{
 		conn:    conn,
 		events:  make(chan Event, 256),
@@ -83,6 +93,7 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 		pending: make(map[int64]chan rpcResponse),
 	}
 	go client.readLoop() //nolint:gosec // WebSocket reader owns the connection lifetime, not the dial context.
+
 	return client, nil
 }
 
@@ -106,32 +117,40 @@ func (c *Client) Close(status websocket.StatusCode, reason string) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+
 		return nil
 	}
+
 	c.closed = true
 	pending := c.pending
 	c.pending = map[int64]chan rpcResponse{}
 	c.mu.Unlock()
+
 	for _, ch := range pending {
 		close(ch)
 	}
+
 	return c.conn.Close(status, reason)
 }
 
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	id := c.nextID.Add(1)
 	respCh := make(chan rpcResponse, 1)
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+
 		return errors.New("hermes client closed")
 	}
+
 	c.pending[id] = respCh
+
 	c.mu.Unlock()
 	defer c.forget(id)
 
 	data, err := json.Marshal(rpcRequest{
-		JSONRPC: "2.0",
+		JSONRPC: jsonrpcVersion,
 		ID:      id,
 		Method:  method,
 		Params:  params,
@@ -139,9 +158,11 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	if err != nil {
 		return err
 	}
+
 	c.writeMu.Lock()
 	err = c.conn.Write(ctx, websocket.MessageText, data)
 	c.writeMu.Unlock()
+
 	if err != nil {
 		return err
 	}
@@ -151,15 +172,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 		if !ok {
 			return errors.New("hermes client closed")
 		}
+
 		if resp.Error != nil {
 			return resp.Error
 		}
+
 		if out == nil {
 			return nil
 		}
+
 		if len(resp.Result) == 0 {
 			return nil
 		}
+
 		return json.Unmarshal(resp.Result, out)
 	case <-ctx.Done():
 		return ctx.Err()
@@ -179,28 +204,35 @@ func (c *Client) readLoop() {
 		pending := c.pending
 		c.pending = map[int64]chan rpcResponse{}
 		c.mu.Unlock()
+
 		for _, ch := range pending {
 			close(ch)
 		}
+
 		close(c.events)
 		close(c.errs)
 		close(c.done)
 	}()
+
 	for {
 		typ, data, err := c.conn.Read(context.Background())
 		if err != nil {
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
 				return
 			}
+
 			select {
 			case c.errs <- err:
 			default:
 			}
+
 			return
 		}
+
 		if typ != websocket.MessageText {
 			continue
 		}
+
 		var probe struct {
 			ID     *int64           `json:"id,omitempty"`
 			Method string           `json:"method,omitempty"`
@@ -211,8 +243,10 @@ func (c *Client) readLoop() {
 			case c.errs <- err:
 			default:
 			}
+
 			continue
 		}
+
 		if probe.ID != nil {
 			var resp rpcResponse
 			if err := json.Unmarshal(data, &resp); err != nil {
@@ -220,25 +254,32 @@ func (c *Client) readLoop() {
 				case c.errs <- err:
 				default:
 				}
+
 				continue
 			}
+
 			c.mu.Lock()
 			ch := c.pending[resp.ID]
 			c.mu.Unlock()
+
 			if ch != nil {
 				ch <- resp
 			}
+
 			continue
 		}
-		if probe.Method == "event" && probe.Params != nil {
+
+		if probe.Method == methodEvent && probe.Params != nil {
 			var event Event
 			if err := json.Unmarshal(*probe.Params, &event); err != nil {
 				select {
 				case c.errs <- err:
 				default:
 				}
+
 				continue
 			}
+
 			event.Raw = append(event.Raw[:0], data...)
 			select {
 			case c.events <- event:
@@ -277,12 +318,15 @@ type Message struct {
 
 func (m *Message) UnmarshalJSON(data []byte) error {
 	type alias Message
+
 	var value alias
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
+
 	*m = Message(value)
 	m.Raw = append(m.Raw[:0], data...)
+
 	return nil
 }
 
@@ -306,12 +350,15 @@ type ModelOptionsResult struct {
 
 func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 	type alias ModelOptionsResult
+
 	var value alias
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
+
 	*m = ModelOptionsResult(value)
 	m.Raw = append(m.Raw[:0], data...)
+
 	return nil
 }
 
@@ -351,16 +398,20 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
 	}
+
 	if object.Slug == "" {
 		return fmt.Errorf("hermes model.options provider missing slug")
 	}
+
 	if len(object.Models) == 0 || string(object.Models) == "null" {
 		return fmt.Errorf("hermes model.options provider %q missing models", object.Slug)
 	}
+
 	var models []string
 	if err := json.Unmarshal(object.Models, &models); err != nil {
 		return fmt.Errorf("hermes model.options provider %q models: %w", object.Slug, err)
 	}
+
 	p.Slug = object.Slug
 	p.Name = object.Name
 	p.AuthType = object.AuthType
@@ -375,6 +426,7 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	p.TotalModels = object.TotalModels
 	p.Warning = object.Warning
 	p.Raw = append(p.Raw[:0], data...)
+
 	return nil
 }
 
@@ -398,7 +450,9 @@ type BranchResult struct {
 
 func (c *Client) CreateSession(ctx context.Context, params map[string]any) (SessionCreateResult, error) {
 	var out SessionCreateResult
+
 	err := c.Call(ctx, "session.create", params, &out)
+
 	return out, err
 }
 
@@ -406,60 +460,73 @@ func (c *Client) ResumeSession(ctx context.Context, storedSessionID string, para
 	if params == nil {
 		params = map[string]any{}
 	}
-	params["session_id"] = storedSessionID
+
+	params[fieldSessionID] = storedSessionID
+
 	var out SessionResumeResult
+
 	err := c.Call(ctx, "session.resume", params, &out)
+
 	return out, err
 }
 
 func (c *Client) History(ctx context.Context, liveSessionID string) (SessionHistoryResult, error) {
 	var out SessionHistoryResult
-	err := c.Call(ctx, "session.history", map[string]any{"session_id": liveSessionID}, &out)
+
+	err := c.Call(ctx, "session.history", map[string]any{fieldSessionID: liveSessionID}, &out)
+
 	return out, err
 }
 
 func (c *Client) ActiveList(ctx context.Context) (ActiveListResult, error) {
 	var out ActiveListResult
+
 	err := c.Call(ctx, "session.active_list", map[string]any{}, &out)
+
 	return out, err
 }
 
 func (c *Client) DeleteSession(ctx context.Context, storedSessionID string) error {
-	return c.Call(ctx, "session.delete", map[string]any{"session_id": storedSessionID}, nil)
+	return c.Call(ctx, "session.delete", map[string]any{fieldSessionID: storedSessionID}, nil)
 }
 
 func (c *Client) CloseSession(ctx context.Context, liveSessionID string) error {
-	return c.Call(ctx, "session.close", map[string]any{"session_id": liveSessionID}, nil)
+	return c.Call(ctx, "session.close", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
 func (c *Client) Branch(ctx context.Context, liveSessionID string, name string) (BranchResult, error) {
-	params := map[string]any{"session_id": liveSessionID}
+	params := map[string]any{fieldSessionID: liveSessionID}
 	if name != "" {
 		params["name"] = name
 	}
+
 	var out BranchResult
+
 	err := c.Call(ctx, "session.branch", params, &out)
+
 	return out, err
 }
 
 func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text string) error {
-	return c.Call(ctx, "prompt.submit", map[string]any{"session_id": liveSessionID, "text": text}, nil)
+	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, "text": text}, nil)
 }
 
 func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {
-	return c.Call(ctx, "session.interrupt", map[string]any{"session_id": liveSessionID}, nil)
+	return c.Call(ctx, "session.interrupt", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
 func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string, all bool) error {
-	return c.Call(ctx, "approval.respond", map[string]any{"session_id": liveSessionID, "choice": choice, "all": all}, nil)
+	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": all}, nil)
 }
 
 func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID string, answer any) error {
-	return c.Call(ctx, "clarify.respond", map[string]any{"session_id": liveSessionID, "answer": answer}, nil)
+	return c.Call(ctx, "clarify.respond", map[string]any{fieldSessionID: liveSessionID, "answer": answer}, nil)
 }
 
 func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelOptionsResult, error) {
 	var out ModelOptionsResult
-	err := c.Call(ctx, "model.options", map[string]any{"session_id": liveSessionID}, &out)
+
+	err := c.Call(ctx, "model.options", map[string]any{fieldSessionID: liveSessionID}, &out)
+
 	return out, err
 }

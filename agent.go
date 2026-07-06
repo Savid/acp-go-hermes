@@ -58,6 +58,7 @@ func NewAgent(opts ...Option) *Agent {
 	if log == nil {
 		log = slog.Default()
 	}
+
 	if options.SessionStore == nil {
 		options.SessionStore = NewInMemorySessionStore()
 	}
@@ -77,10 +78,11 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	agent := newAgentForServe(opts...)
 	defer func() {
 		if err := agent.Close(); err != nil {
-			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String("error", err.Error()))
+			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String(jsonFieldError, err.Error()))
 		}
 	}()
 
@@ -98,30 +100,36 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 func (a *Agent) setAgentClient(conn agentClient) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	a.conn = conn
 }
 
 func (a *Agent) connection() agentClient {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	return a.conn
 }
 
 func (a *Agent) Close() error {
 	a.mu.Lock()
+
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
+
 	a.sessions = make(map[acp.SessionId]*session)
 	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
 
 	var err error
+
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		err = errors.Join(err, session.Close(ctx))
+
 		cancel()
 	}
 
@@ -132,8 +140,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	if a.optionsErr != nil {
 		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
 	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
+
 	a.mu.Lock()
 	a.clientCapabilities = cloneClientCapabilities(params.ClientCapabilities)
 	a.positionEncoding = positionEncoding
@@ -141,25 +151,25 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	hermesMeta := map[string]any{
 		"fork": map[string]any{
-			"unstable": true,
-			"method":   ForkSessionMethod,
-			"request":  "acp.UnstableForkSessionRequest JSON payload only",
-			"response": "acp.UnstableForkSessionResponse JSON payload only",
+			"unstable":      true,
+			jsonFieldMethod: ForkSessionMethod,
+			"request":       "acp.UnstableForkSessionRequest JSON payload only",
+			"response":      "acp.UnstableForkSessionResponse JSON payload only",
 		},
-		"elicitation": map[string]any{
+		valElicitation: map[string]any{
 			"unstable": true,
-			"scope":    "session",
+			"scope":    string(permissionRouteSession),
 			"tracks":   "in-progress ACP elicitation RFD",
 		},
 		rawEventCapabilityKey: map[string]any{
-			"method":         RawEventMethod,
+			jsonFieldMethod:  RawEventMethod,
 			"enabledBy":      rawEventEnabledByPath,
 			"maxBytes":       rawEventMaxBytes,
 			"defaultEnabled": false,
 		},
 		"sessionStore": map[string]any{
 			"format": SessionStoreFormat,
-			"key":    []string{"sessionId", "subpath"},
+			"key":    []string{jsonFieldSessionID, "subpath"},
 		},
 	}
 
@@ -208,15 +218,18 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
+
 	switch method {
 	case ForkSessionMethod:
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 		}
+
 		if err := req.Validate(); err != nil {
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 		}
+
 		return a.forkSession(ctx, req)
 	default:
 		return nil, acp.NewMethodNotFound(method)
@@ -226,6 +239,7 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 func (a *Agent) ensureOpen() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
 	}
@@ -237,6 +251,7 @@ func (a *Agent) sessionStore() SessionStore {
 	if a.options.SessionStore == nil {
 		return NewInMemorySessionStore()
 	}
+
 	return a.options.SessionStore
 }
 
@@ -256,19 +271,21 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "client_calls"})
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "client_calls"})
 	}
 }
 
 func (a *Agent) session(id acp.SessionId) (*session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	if _, ok := a.deleted[id]; ok {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: "deleted"})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: valDeleted})
 	}
+
 	session := a.sessions[id]
 	if session == nil {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: "unknown"})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: valUnknown})
 	}
 
 	return session, nil
@@ -277,18 +294,22 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 func (a *Agent) activeSession(id acp.SessionId) *session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	return a.sessions[id]
 }
 
 func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
 	}
+
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "backpressure", "limit": "active_sessions"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
 	}
+
 	a.sessions[session.id] = session
 	delete(a.deleted, session.id)
 
@@ -298,9 +319,11 @@ func (a *Agent) storeStartedSession(session *session) error {
 func (a *Agent) removeSessionIf(id acp.SessionId, target *session) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	if a.sessions[id] != target {
 		return false
 	}
+
 	delete(a.sessions, id)
 
 	return true
@@ -309,21 +332,26 @@ func (a *Agent) removeSessionIf(id acp.SessionId, target *session) bool {
 func (a *Agent) isDeleted(id acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	_, ok := a.deleted[id]
+
 	return ok
 }
 
 func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	caps := a.clientCapabilities.Elicitation
 	if caps == nil {
 		return nil
 	}
+
 	encoded, err := agentJSONMarshal(caps)
 	if err != nil {
 		return caps
 	}
+
 	var cloned acp.ElicitationCapabilities
 	if err := agentJSONUnmarshal(encoded, &cloned); err != nil {
 		return caps
@@ -337,11 +365,13 @@ func (a *Agent) clientSupportsFormElicitation() bool {
 	if caps == nil {
 		return false
 	}
+
 	return caps.Form != nil || caps.Url == nil
 }
 
 func (a *Agent) clientSupportsURLElicitation() bool {
 	caps := a.clientElicitationCapabilities()
+
 	return caps != nil && caps.Url != nil
 }
 
@@ -351,6 +381,7 @@ func selectPositionEncoding(values []acp.PositionEncodingKind) acp.PositionEncod
 			return value
 		}
 	}
+
 	for _, value := range values {
 		if value == acp.PositionEncodingKindUtf16 {
 			return value
@@ -365,6 +396,7 @@ func cloneClientCapabilities(caps acp.ClientCapabilities) acp.ClientCapabilities
 	if err != nil {
 		return caps
 	}
+
 	var cloned acp.ClientCapabilities
 	if err := agentJSONUnmarshal(encoded, &cloned); err != nil {
 		return caps

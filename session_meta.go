@@ -15,6 +15,7 @@ func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
 	if err := validateLifecycleMeta(meta); err != nil {
 		return sessionMeta{}, err
 	}
+
 	options, err := hermesOptionsFromMeta(meta)
 	if err != nil {
 		return sessionMeta{}, err
@@ -34,6 +35,7 @@ type hermesMetaOptions struct {
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 	hermesMeta, _ := meta[hermesMetaKey].(map[string]any)
+
 	optionsMap, _ := hermesMeta[metaOptionsKey].(map[string]any)
 	if optionsMap == nil {
 		return hermesMetaOptions{}, nil
@@ -43,13 +45,16 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 	if model, _ := optionsMap[metaModelKey].(string); model != "" {
 		options.Model = model
 	}
+
 	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
 		env, err := stringMapFromMeta(rawEnv)
 		if err != nil {
 			return hermesMetaOptions{}, err
 		}
+
 		options.Env = env
 	}
+
 	return options, nil
 }
 
@@ -57,16 +62,20 @@ func validateLifecycleMeta(meta map[string]any) error {
 	if len(meta) == 0 {
 		return nil
 	}
+
 	if _, ok := meta["github.com/savid/acp-go-hermes"]; ok {
 		return unsupportedField("_meta.github.com/savid/acp-go-hermes")
 	}
+
 	hermesMeta, ok := meta[hermesMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[hermesMetaKey]; exists {
 			return unsupportedField("_meta.hermes")
 		}
+
 		return nil
 	}
+
 	for key, value := range hermesMeta {
 		switch key {
 		case metaOptionsKey:
@@ -74,6 +83,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 			if !ok {
 				return unsupportedField("_meta.hermes.options")
 			}
+
 			for optionKey, optionValue := range optionsMap {
 				switch optionKey {
 				case metaModelKey:
@@ -92,6 +102,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 			if !ok {
 				return unsupportedField("_meta.hermes.rawEvent")
 			}
+
 			for rawKey, rawValue := range rawEvent {
 				switch rawKey {
 				case rawEventEnabledKey:
@@ -112,8 +123,8 @@ func validateLifecycleMeta(meta map[string]any) error {
 
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		"error": "unsupported",
-		"field": path,
+		jsonFieldError: valUnsupported,
+		keyField:       path,
 	})
 }
 
@@ -128,8 +139,10 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 			if !ok {
 				return nil, unsupportedField("_meta.hermes.options.env")
 			}
+
 			out[key] = str
 		}
+
 		return out, nil
 	default:
 		return nil, unsupportedField("_meta.hermes.options.env")
@@ -140,6 +153,7 @@ func cloneAnyMap(values map[string]any) map[string]any {
 	if values == nil {
 		return nil
 	}
+
 	cloned := make(map[string]any, len(values))
 	for key, value := range values {
 		cloned[key] = cloneAny(value)
@@ -152,6 +166,7 @@ func cloneAnySlice(values []any) []any {
 	if values == nil {
 		return nil
 	}
+
 	cloned := make([]any, len(values))
 	for i, value := range values {
 		cloned[i] = cloneAny(value)
@@ -177,6 +192,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 	if values == nil {
 		return nil
 	}
+
 	cloned := make(map[string]string, len(values))
 	for key, value := range values {
 		cloned[key] = value
@@ -193,15 +209,18 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 		hermesMeta["model"] = model
 		hermesMeta["modelId"] = model
 	}
+
 	if snapshot.mode != "" {
-		hermesMeta["mode"] = snapshot.mode
+		hermesMeta[keyMode] = snapshot.mode
 	}
 
 	return map[string]any{hermesMetaKey: hermesMeta}
 }
 
 func sessionInfoMeta(snapshot sessionSnapshot) map[string]any {
+	hermesMeta, _ := sessionResponseMeta(snapshot)[hermesMetaKey].(map[string]any)
+
 	return map[string]any{
-		hermesMetaKey: cloneAnyMap(sessionResponseMeta(snapshot)[hermesMetaKey].(map[string]any)),
+		hermesMetaKey: cloneAnyMap(hermesMeta),
 	}
 }

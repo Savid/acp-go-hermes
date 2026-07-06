@@ -19,6 +19,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
+
 	return session.Prompt(ctx, params)
 }
 
@@ -27,12 +28,16 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 	if err != nil {
 		return err
 	}
+
 	if err := session.ensureNotPoisoned(); err != nil {
 		return err
 	}
+
 	session.cancelTurn()
+
 	cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
+
 	return session.client.Abort(cancelCtx, session.idmap.NativeSessionID)
 }
 
@@ -40,6 +45,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	if err := s.ensureNotPoisoned(); err != nil {
 		return acp.PromptResponse{}, err
 	}
+
 	release, err := s.acquireTurn(ctx)
 	if err != nil {
 		return acp.PromptResponse{}, err
@@ -50,6 +56,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
+
 	req := hermesMessageRequest{
 		Parts: parts,
 		Model: s.modelSelector(),
@@ -58,37 +65,48 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	if params.MessageId != nil {
 		req.MessageID = *params.MessageId
 	}
+
 	if err := s.drainClientBacklog(ctx); err != nil {
 		if errors.Is(err, errPromptCancelled) {
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 		}
+
 		return acp.PromptResponse{}, err
 	}
+
 	turnCtx := s.beginTurn(ctx)
+
 	turnActive := true
 	defer func() {
 		if turnActive {
 			s.finishTurn()
 		}
 	}()
+
 	var abortOnce sync.Once
+
 	abortTurn := func() {
 		abortOnce.Do(func() {
 			abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			_ = s.client.Abort(abortCtx, s.idmap.NativeSessionID)
+
 			cancel()
 		})
 	}
+
 	failTurn := func(err error) (acp.PromptResponse, error) {
 		if errors.Is(err, errPromptCancelled) {
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 		}
+
 		abortTurn()
+
 		return acp.PromptResponse{}, err
 	}
 	if err := s.reconcilePermissions(turnCtx); err != nil {
 		return failTurn(err)
 	}
+
 	if err := s.reconcileQuestions(turnCtx); err != nil {
 		return failTurn(err)
 	}
@@ -97,62 +115,82 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		message nativeMessage
 		err     error
 	}
+
 	done := make(chan result, 1)
+
 	go func() {
 		message, err := s.client.SendMessage(turnCtx, s.idmap.NativeSessionID, req)
 		done <- result{message: message, err: err}
 	}()
 
-	var final nativeMessage
-	var usage *acp.Usage
+	var (
+		final nativeMessage
+		usage *acp.Usage
+	)
+
 	for {
 		select {
 		case event := <-s.client.Events():
-			if event.Type == "server.connected" {
+			if event.Type == evtServerConnected {
 				if err := s.reconcilePermissions(turnCtx); err != nil {
 					return failTurn(err)
 				}
+
 				if err := s.reconcileQuestions(turnCtx); err != nil {
 					return failTurn(err)
 				}
+
 				continue
 			}
+
 			if err := s.handleEvent(turnCtx, event); err != nil {
 				return failTurn(err)
 			}
 		case err := <-s.client.EventErrors():
 			s.markStreamFailed(streamErrorEpoch(err))
 			abortTurn()
+
 			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: err.Error()})
 		case result := <-done:
 			if result.err != nil {
 				if isGatewayDisconnect(result.err) {
 					s.markStreamFailed(0)
 					abortTurn()
+
 					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: result.err.Error()})
 				}
+
 				if s.wasCancelled() || turnCtx.Err() != nil {
 					return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 				}
+
 				return acp.PromptResponse{}, result.err
 			}
+
 			final = result.message
 			if err := s.emitMessage(turnCtx, final, false); err != nil {
 				return acp.PromptResponse{}, err
 			}
+
 			usage = usageFromTokens(final.Info.Tokens)
+
 			stopReason := stopReasonFromHermes(final.Info.Finish)
 			if s.wasCancelled() || turnCtx.Err() != nil {
 				stopReason = acp.StopReasonCancelled
 			}
+
 			s.finishTurn()
+
 			turnActive = false
+
 			if err := s.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
 				return acp.PromptResponse{}, err
 			}
+
 			return acp.PromptResponse{StopReason: stopReason, Usage: usage, UserMessageId: params.MessageId}, nil
 		case <-turnCtx.Done():
 			abortTurn()
+
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 		}
 	}
@@ -163,36 +201,42 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 	for _, block := range blocks {
 		switch {
 		case block.Text != nil:
-			parts = append(parts, map[string]any{"type": "text", "text": block.Text.Text})
+			parts = append(parts, map[string]any{keyType: valText, valText: block.Text.Text})
 		case block.ResourceLink != nil:
-			parts = append(parts, map[string]any{"type": "text", "text": block.ResourceLink.Uri})
+			parts = append(parts, map[string]any{keyType: valText, valText: block.ResourceLink.Uri})
 		case block.Resource != nil:
 			text := embeddedResourceText(block.Resource.Resource)
 			if text != "" {
-				parts = append(parts, map[string]any{"type": "text", "text": text})
+				parts = append(parts, map[string]any{keyType: valText, valText: text})
 			}
 		case block.Image != nil:
-			return nil, acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": "prompt.image"})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "prompt.image"})
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{"error": "unsupported", "field": "prompt"})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "prompt"})
 		}
 	}
+
 	if len(parts) == 0 {
-		return nil, acp.NewInvalidParams(map[string]any{"field": "prompt"})
+		return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt"})
 	}
+
 	return parts, nil
 }
 
 func embeddedResourceText(resource acp.EmbeddedResourceResource) string {
 	data, _ := json.Marshal(resource)
+
 	var raw map[string]any
+
 	_ = json.Unmarshal(data, &raw)
-	if text, _ := raw["text"].(string); text != "" {
+	if text, _ := raw[valText].(string); text != "" {
 		return text
 	}
+
 	if uri, _ := raw["uri"].(string); uri != "" {
 		return uri
 	}
+
 	return ""
 }
 
@@ -200,15 +244,18 @@ func (s *session) replayMessages(ctx context.Context) error {
 	if err := s.ensureNotPoisoned(); err != nil {
 		return err
 	}
+
 	messages, err := s.client.Messages(ctx, s.idmap.NativeSessionID)
 	if err != nil {
 		return err
 	}
-	for _, message := range messages {
-		if err := s.emitMessage(ctx, message, true); err != nil {
+
+	for i := range messages {
+		if err := s.emitMessage(ctx, messages[i], true); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -216,20 +263,25 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 	if err := s.validateNativeMessageSession(ctx, message); err != nil {
 		return err
 	}
-	isUser := message.Info.Role == "user"
+
+	isUser := message.Info.Role == valUser
 	if isUser && !includeUser {
 		return nil
 	}
-	for _, part := range message.Parts {
-		if !s.markPart(part) {
+
+	for i := range message.Parts {
+		part := &message.Parts[i]
+		if !s.markPart(*part) {
 			continue
 		}
-		for _, update := range partUpdates(message.Info.Role, part) {
+
+		for _, update := range partUpdates(message.Info.Role, *part) {
 			if err := s.emitUpdate(ctx, update); err != nil {
 				return err
 			}
 		}
-		if part.Type == "step-finish" {
+
+		if part.Type == valStepFinish {
 			if update := usageUpdateFromTokens(part.MessageID, part.Tokens); update != nil {
 				if err := s.emitUpdate(ctx, *update); err != nil {
 					return err
@@ -237,11 +289,13 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 			}
 		}
 	}
+
 	if message.Info.Tokens.Total > 0 {
 		if update := usageUpdateFromTokens(message.Info.ID, message.Info.Tokens); update != nil {
 			return s.emitUpdate(ctx, *update)
 		}
 	}
+
 	return nil
 }
 
@@ -250,47 +304,55 @@ func (s *session) validateNativeMessageSession(ctx context.Context, message nati
 	if expected == "" {
 		return nil
 	}
+
 	if message.Info.SessionID != "" && message.Info.SessionID != expected {
 		return s.poisonNativeSessionDrift(ctx, "message info.sessionID", message.Info.SessionID)
 	}
-	for _, part := range message.Parts {
+
+	for i := range message.Parts {
+		part := &message.Parts[i]
 		if part.SessionID == "" || part.SessionID == expected {
 			continue
 		}
+
 		return s.poisonNativeSessionDrift(ctx, "message part sessionID", part.SessionID)
 	}
+
 	return nil
 }
 
 func partUpdates(role string, part nativePart) []acp.SessionUpdate {
 	messageID := part.MessageID
 	switch part.Type {
-	case "text":
+	case valText:
 		if part.Text == "" {
 			return nil
 		}
-		if role == "user" {
+
+		if role == valUser {
 			return []acp.SessionUpdate{{UserMessageChunk: &acp.SessionUpdateUserMessageChunk{
 				SessionUpdate: "user_message_chunk",
 				MessageId:     &messageID,
 				Content:       acp.TextBlock(part.Text),
 			}}}
 		}
+
 		return []acp.SessionUpdate{{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
 			SessionUpdate: "agent_message_chunk",
 			MessageId:     &messageID,
 			Content:       acp.TextBlock(part.Text),
 		}}}
-	case "reasoning":
+	case valReasoning:
 		if part.Text == "" {
 			return nil
 		}
+
 		return []acp.SessionUpdate{{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
 			SessionUpdate: "agent_thought_chunk",
 			MessageId:     &messageID,
 			Content:       acp.TextBlock(part.Text),
 		}}}
-	case "tool":
+	case valTool:
 		return toolPartUpdates(part)
 	default:
 		return nil
@@ -301,16 +363,20 @@ func toolPartUpdates(part nativePart) []acp.SessionUpdate {
 	id := acp.ToolCallId(firstNonEmpty(part.CallID, part.ID, "hermes-tool"))
 	title := firstNonEmpty(part.Tool, string(id))
 	status := acp.ToolCallStatusInProgress
+
 	if len(part.State) > 0 {
 		var state map[string]any
+
 		_ = json.Unmarshal(part.State, &state)
 		if stateStatus, _ := state["status"].(string); stateStatus != "" {
 			status = toolStatus(stateStatus)
 		}
-		if titleValue, _ := state["title"].(string); titleValue != "" {
+
+		if titleValue, _ := state[keyTitle].(string); titleValue != "" {
 			title = titleValue
 		}
 	}
+
 	return []acp.SessionUpdate{acp.StartToolCall(
 		id,
 		title,
@@ -324,15 +390,18 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 	if s.shouldSuppressEvent(event) {
 		return nil
 	}
+
 	if err := s.emitRawHermesEvent(ctx, event); err != nil {
 		return err
 	}
+
 	switch event.Type {
-	case "approval.request":
+	case evtApprovalRequest:
 		var req permissionRequest
 		if err := json.Unmarshal(event.Properties, &req); err != nil {
 			return err
 		}
+
 		req.ReplyRoute = permissionRouteAPI
 		if req.SessionID == s.idmap.NativeSessionID {
 			return s.handlePermission(ctx, req)
@@ -345,23 +414,26 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 		if err := json.Unmarshal(event.Properties, &payload); err == nil && payload.SessionID == s.idmap.NativeSessionID {
 			return s.emitPlan(ctx, payload.Todos)
 		}
-	case "message.part.updated", "message.part.created":
+	case evtMessagePartUpdated, evtMessagePartCreated:
 		part, ok := eventPart(event.Properties)
 		if ok && part.SessionID == s.idmap.NativeSessionID && s.markPart(part) {
 			s.markActiveMessageID(part.MessageID)
-			for _, update := range partUpdates("assistant", part) {
+
+			for _, update := range partUpdates(valAssistant, part) {
 				if err := s.emitUpdate(ctx, update); err != nil {
 					return err
 				}
 			}
 		}
-	case "clarify.request":
+	case evtClarifyRequest:
 		req, ok := eventQuestion(event.Properties)
 		if ok && req.SessionID == s.idmap.NativeSessionID {
 			req.ReplyRoute = questionRouteAPI
+
 			return s.handleQuestion(ctx, req)
 		}
 	}
+
 	return nil
 }
 
@@ -370,12 +442,14 @@ func eventPart(data json.RawMessage) (nativePart, bool) {
 	if err := json.Unmarshal(data, &part); err == nil && part.Type != "" {
 		return part, true
 	}
+
 	var wrapper struct {
 		Part nativePart `json:"part"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Part.Type != "" {
 		return wrapper.Part, true
 	}
+
 	return nativePart{}, false
 }
 
@@ -384,15 +458,18 @@ func eventQuestion(data json.RawMessage) (questionRequest, bool) {
 	if err := json.Unmarshal(data, &req); err == nil && req.ID != "" {
 		return req, true
 	}
-	for _, key := range []string{"question", "request", "data"} {
+
+	for _, key := range []string{keyQuestion, "request", "data"} {
 		var wrapper map[string]json.RawMessage
 		if err := json.Unmarshal(data, &wrapper); err != nil {
 			continue
 		}
+
 		raw := wrapper[key]
 		if len(raw) == 0 {
 			continue
 		}
+
 		if err := json.Unmarshal(raw, &req); err == nil && req.ID != "" {
 			return req, true
 		}
@@ -406,13 +483,16 @@ func (s *session) reconcilePermissions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, req := range requests {
+
+	for i := range requests {
+		req := &requests[i]
 		if req.SessionID == s.idmap.NativeSessionID {
-			if err := s.handlePermission(ctx, req); err != nil {
+			if err := s.handlePermission(ctx, *req); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -421,6 +501,7 @@ func (s *session) reconcileQuestions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	for _, req := range requests {
 		if req.SessionID == s.idmap.NativeSessionID {
 			if err := s.handleQuestion(ctx, req); err != nil {
@@ -428,6 +509,7 @@ func (s *session) reconcileQuestions(ctx context.Context) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -435,28 +517,36 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 	if req.ID == "" || req.SessionID == "" {
 		return nil
 	}
+
 	if !s.claimPermissionRequest(req.ID) {
 		return nil
 	}
+
 	s.addPendingPermission(req)
 
 	conn := s.agent.connection()
 	if conn == nil {
 		_, _, cancelled := s.takePendingPermission(req.ID)
+
 		replyCtx := ctx
 		if cancelled || ctx.Err() != nil {
 			backgroundCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			defer cancel()
+
 			replyCtx = backgroundCtx
 		}
-		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "client unavailable"))
+
+		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, "client unavailable"))
 	}
+
 	title := req.actionName()
 	if title == "" {
 		title = "Hermes permission"
 	}
+
 	status := acp.ToolCallStatusPending
 	kind := acp.ToolKindOther
+
 	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
@@ -468,17 +558,17 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 				"action":     req.actionName(),
 				"resources":  req.resourceList(),
 				"metadata":   req.Metadata,
-				"source":     req.Source,
+				keySource:    req.Source,
 				"save":       req.Save,
-				"always":     req.Always,
+				valAlways:    req.Always,
 				"toolCallId": req.Tool.CallID,
-				"messageId":  req.Tool.MessageID,
+				keyMessageID: req.Tool.MessageID,
 			},
 		},
 		Options: []acp.PermissionOption{
-			{OptionId: "once", Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
-			{OptionId: "always", Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
-			{OptionId: "reject", Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+			{OptionId: valOnce, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
+			{OptionId: valAlways, Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
+			{OptionId: valReject, Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
 		},
 		Meta: map[string]any{hermesMetaKey: map[string]any{"requestId": req.ID, "nativeSessionId": req.SessionID}},
 	})
@@ -487,42 +577,57 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 		if !ok {
 			return errPromptCancelled
 		}
+
 		if cancelled || s.wasCancelled() || ctx.Err() != nil {
 			replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-			_ = s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "cancelled"))
+			_ = s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, valCancelled))
+
 			cancel()
+
 			return errPromptCancelled
 		}
+
 		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		replyErr := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "client permission request failed"))
+		replyErr := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, "client permission request failed"))
+
 		cancel()
+
 		if replyErr != nil {
 			return errors.Join(err, replyErr)
 		}
+
 		return err
 	}
-	reply := "reject"
+
+	reply := valReject
+
 	if resp.Outcome.Selected != nil {
 		switch resp.Outcome.Selected.OptionId {
-		case "once", "always", "reject":
+		case valOnce, valAlways, valReject:
 			reply = string(resp.Outcome.Selected.OptionId)
 		}
 	}
+
 	if resp.Outcome.Cancelled != nil {
-		reply = "reject"
+		reply = valReject
 	}
+
 	_, ok, cancelled := s.takePendingPermission(req.ID)
 	if !ok {
 		return errPromptCancelled
 	}
+
 	if cancelled || ctx.Err() != nil {
 		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
-		if err := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, "reject", "cancelled")); err != nil {
+
+		if err := s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, valCancelled)); err != nil {
 			return err
 		}
+
 		return errPromptCancelled
 	}
+
 	return s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyPermission(ctx, req, reply, ""))
 }
 
@@ -530,23 +635,30 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 	if req.ID == "" || req.SessionID == "" {
 		return nil
 	}
+
 	if !s.claimQuestionRequest(req.ID) {
 		return nil
 	}
+
 	s.addPendingQuestion(req)
 
 	conn := s.agent.connection()
 	if conn == nil || !s.agent.clientSupportsFormElicitation() {
 		_, _, cancelled := s.takePendingQuestion(req.ID)
+
 		rejectCtx := ctx
 		if cancelled || ctx.Err() != nil {
 			backgroundCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			defer cancel()
+
 			rejectCtx = backgroundCtx
 		}
+
 		return s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
 	}
+
 	request, propertyIDs := questionElicitationRequest(req)
+
 	resp, err := conn.CreateElicitation(ctx, request, elicitationScope{
 		SessionID:  s.id,
 		ToolCallID: acp.ToolCallId(firstNonEmpty(req.Tool.CallID, req.ID)),
@@ -556,37 +668,50 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 		if !ok {
 			return errPromptCancelled
 		}
+
 		if cancelled || s.wasCancelled() || ctx.Err() != nil {
 			rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			_ = s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
+
 			cancel()
+
 			return errPromptCancelled
 		}
+
 		rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		rejectErr := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
+
 		cancel()
+
 		if rejectErr != nil {
 			return errors.Join(err, rejectErr)
 		}
+
 		return err
 	}
+
 	if resp.Accept == nil {
 		_, ok, cancelled := s.takePendingQuestion(req.ID)
 		if !ok {
 			return errPromptCancelled
 		}
+
 		rejectCtx := ctx
 		if cancelled || ctx.Err() != nil {
 			backgroundCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			defer cancel()
+
 			rejectCtx = backgroundCtx
 		}
+
 		if err := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req)); err != nil {
 			return err
 		}
+
 		if cancelled || ctx.Err() != nil {
 			return errPromptCancelled
 		}
+
 		return nil
 	}
 
@@ -594,26 +719,32 @@ func (s *session) handleQuestion(ctx context.Context, req questionRequest) error
 	if !ok {
 		return errPromptCancelled
 	}
+
 	if cancelled || ctx.Err() != nil {
 		rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
+
 		if err := s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req)); err != nil {
 			return err
 		}
+
 		return errPromptCancelled
 	}
+
 	return s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyQuestion(ctx, req, questionAnswersFromContent(resp.Accept.Content, propertyIDs)))
 }
 
 func (s *session) drainClientBacklog(ctx context.Context) error {
 	suppress := s.suppressBacklog()
 	defer s.clearSuppressBacklog()
+
 	for {
 		select {
 		case event := <-s.client.Events():
-			if suppress || event.Type == "server.connected" || s.shouldSuppressEvent(event) {
+			if suppress || event.Type == evtServerConnected || s.shouldSuppressEvent(event) {
 				continue
 			}
+
 			if err := s.handleEvent(ctx, event); err != nil {
 				return err
 			}
@@ -628,6 +759,7 @@ func (s *session) drainClientBacklog(ctx context.Context) error {
 func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitationRequest, []string) {
 	properties := make(map[string]any, len(req.Questions))
 	required := make([]string, 0, len(req.Questions))
+
 	propertyIDs := make([]string, 0, len(req.Questions))
 	for index, question := range req.Questions {
 		id := fmt.Sprintf("question_%d", index+1)
@@ -635,16 +767,19 @@ func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitat
 		required = append(required, id)
 		properties[id] = questionPropertySchema(index, question)
 	}
+
 	if len(properties) == 0 {
-		propertyIDs = []string{"question_1"}
-		required = []string{"question_1"}
-		properties["question_1"] = map[string]any{"type": "string", "title": "Question 1"}
+		propertyIDs = []string{valQuestion1}
+		required = []string{valQuestion1}
+		properties[valQuestion1] = map[string]any{keyType: valString, keyTitle: "Question 1"}
 	}
+
 	title := "Hermes question"
+
 	return acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message: questionElicitationMessage(req.Questions),
-			Mode:    "form",
+			Mode:    valForm,
 			RequestedSchema: acp.UnstableElicitationSchema{
 				Title:      &title,
 				Type:       acp.UnstableElicitationSchemaTypeObject,
@@ -654,9 +789,9 @@ func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitat
 			Meta: map[string]any{hermesMetaKey: map[string]any{
 				"requestId":       req.ID,
 				"nativeSessionId": req.SessionID,
-				"tool": map[string]any{
-					"messageId": req.Tool.MessageID,
-					"callId":    req.Tool.CallID,
+				valTool: map[string]any{
+					keyMessageID: req.Tool.MessageID,
+					"callId":     req.Tool.CallID,
 				},
 			}},
 		},
@@ -665,26 +800,31 @@ func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitat
 
 func questionPropertySchema(index int, question questionInfo) map[string]any {
 	title := firstNonEmpty(question.Header, fmt.Sprintf("Question %d", index+1))
+
 	description := question.Question
 	if question.Multiple {
-		items := map[string]any{"type": "string"}
+		items := map[string]any{keyType: valString}
+
 		if !question.Custom {
 			if options := questionOptionSchemas(question.Options); len(options) > 0 {
 				items["anyOf"] = options
 			}
 		}
+
 		return map[string]any{
-			"type":        "array",
-			"title":       title,
+			keyType:       "array",
+			keyTitle:      title,
 			"description": description,
 			"items":       items,
 		}
 	}
+
 	property := map[string]any{
-		"type":        "string",
-		"title":       title,
+		keyType:       valString,
+		keyTitle:      title,
 		"description": description,
 	}
+
 	if !question.Custom {
 		if options := questionOptionSchemas(question.Options); len(options) > 0 {
 			property["oneOf"] = options
@@ -701,13 +841,15 @@ func questionOptionSchemas(options []questionOption) []map[string]any {
 		if label == "" {
 			continue
 		}
+
 		item := map[string]any{
-			"const": label,
-			"title": label,
+			"const":  label,
+			keyTitle: label,
 		}
 		if option.Description != "" {
 			item["description"] = option.Description
 		}
+
 		out = append(out, item)
 	}
 
@@ -718,7 +860,8 @@ func questionElicitationMessage(questions []questionInfo) string {
 	if len(questions) == 1 && questions[0].Question != "" {
 		return questions[0].Question
 	}
-	return "Hermes needs input"
+
+	return msgHermesNeedsInput
 }
 
 func questionAnswersFromContent(content map[string]any, propertyIDs []string) [][]string {
@@ -744,12 +887,16 @@ func stringAnswersFromAny(value any) []string {
 			if item == nil {
 				continue
 			}
+
 			if str, ok := item.(string); ok {
 				out = append(out, str)
+
 				continue
 			}
+
 			out = append(out, fmt.Sprint(item))
 		}
+
 		return out
 	default:
 		return []string{fmt.Sprint(value)}
@@ -762,15 +909,18 @@ func (s *session) emitPlan(ctx context.Context, todos []nativeTodo) error {
 		if todo.Content == "" {
 			continue
 		}
+
 		entries = append(entries, acp.PlanEntry{
 			Content:  todo.Content,
 			Priority: planPriority(todo.Priority),
 			Status:   planStatus(todo.Status),
 		})
 	}
+
 	if len(entries) == 0 {
 		return nil
 	}
+
 	return s.emitUpdate(ctx, acp.UpdatePlan(entries...))
 }
 
@@ -779,6 +929,7 @@ func (s *session) emitUpdate(ctx context.Context, update acp.SessionUpdate) erro
 	if conn == nil {
 		return nil
 	}
+
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }
 
@@ -786,20 +937,24 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event hermesEvent) err
 	if !s.rawMessages.Enabled() {
 		return nil
 	}
+
 	conn := s.agent.connection()
 	if conn == nil {
 		return nil
 	}
+
 	var raw map[string]any
 	if len(event.Raw) > 0 {
 		_ = json.Unmarshal(event.Raw, &raw)
 	}
+
 	payload := map[string]any{
-		"sessionId": s.id,
-		"sequence":  s.nextRawEventSequence(),
-		"source":    "hermes-serve",
-		"event":     raw,
+		jsonFieldSessionID: s.id,
+		keySequence:        s.nextRawEventSequence(),
+		keySource:          "hermes-serve",
+		keyEvent:           raw,
 	}
+
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
 }
 
@@ -808,11 +963,14 @@ func usageUpdateFromTokens(messageID string, tokens nativeTokens) *acp.SessionUp
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)
 	}
+
 	if used <= 0 {
 		return nil
 	}
+
 	size := used
-	meta := map[string]any{hermesMetaKey: map[string]any{"messageId": messageID}}
+	meta := map[string]any{hermesMetaKey: map[string]any{keyMessageID: messageID}}
+
 	return &acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
 		SessionUpdate: "usage_update",
 		Used:          used,
@@ -826,12 +984,15 @@ func usageFromTokens(tokens nativeTokens) *acp.Usage {
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)
 	}
+
 	if used <= 0 {
 		return nil
 	}
+
 	thought := int(tokens.Reasoning)
 	cacheRead := int(tokens.Cache.Read)
 	cacheWrite := int(tokens.Cache.Write)
+
 	return &acp.Usage{
 		InputTokens:       int(tokens.Input),
 		OutputTokens:      int(tokens.Output),
@@ -844,9 +1005,9 @@ func usageFromTokens(tokens nativeTokens) *acp.Usage {
 
 func stopReasonFromHermes(reason string) acp.StopReason {
 	switch strings.ToLower(reason) {
-	case "length", "max_tokens":
+	case valLength, "max_tokens":
 		return acp.StopReasonMaxTokens
-	case "cancelled", "canceled":
+	case valCancelled, "canceled":
 		return acp.StopReasonCancelled
 	case "refusal":
 		return acp.StopReasonRefusal
@@ -857,11 +1018,11 @@ func stopReasonFromHermes(reason string) acp.StopReason {
 
 func toolStatus(value string) acp.ToolCallStatus {
 	switch strings.ToLower(value) {
-	case "pending":
+	case valPending:
 		return acp.ToolCallStatusPending
-	case "completed", "success":
+	case valCompleted, valSuccess:
 		return acp.ToolCallStatusCompleted
-	case "failed", "error":
+	case "failed", jsonFieldError:
 		return acp.ToolCallStatusFailed
 	default:
 		return acp.ToolCallStatusInProgress
@@ -870,11 +1031,11 @@ func toolStatus(value string) acp.ToolCallStatus {
 
 func toolKind(tool string) acp.ToolKind {
 	switch strings.ToLower(tool) {
-	case "read", "view":
+	case valRead, "view":
 		return acp.ToolKindRead
-	case "edit", "write":
+	case valEdit, "write":
 		return acp.ToolKindEdit
-	case "delete", "remove":
+	case valDelete, "remove":
 		return acp.ToolKindDelete
 	case "move", "rename":
 		return acp.ToolKindMove
@@ -893,9 +1054,9 @@ func toolKind(tool string) acp.ToolKind {
 
 func planPriority(value string) acp.PlanEntryPriority {
 	switch strings.ToLower(value) {
-	case "high":
+	case valHigh:
 		return acp.PlanEntryPriorityHigh
-	case "low":
+	case valLow:
 		return acp.PlanEntryPriorityLow
 	default:
 		return acp.PlanEntryPriorityMedium
@@ -904,7 +1065,7 @@ func planPriority(value string) acp.PlanEntryPriority {
 
 func planStatus(value string) acp.PlanEntryStatus {
 	switch strings.ToLower(value) {
-	case "completed", "done":
+	case valCompleted, "done":
 		return acp.PlanEntryStatusCompleted
 	case "in_progress", "running":
 		return acp.PlanEntryStatusInProgress

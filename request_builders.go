@@ -28,12 +28,15 @@ func (options HermesOptions) Meta() map[string]any {
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
 	}
+
 	if len(options.Env) > 0 {
 		values[metaEnvKey] = cloneStringMap(options.Env)
 	}
+
 	if options.OutputSchema != nil {
 		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
 	}
+
 	return map[string]any{
 		hermesMetaKey: map[string]any{
 			metaOptionsKey: values,
@@ -145,6 +148,7 @@ func WithSessionRawEvents(enabled bool) SessionRequestOption {
 		if config.meta == nil {
 			config.meta = map[string]any{}
 		}
+
 		hermesMeta := ensureMetaMap(config.meta, hermesMetaKey)
 		hermesMeta[rawEventKey] = map[string]any{rawEventEnabledKey: enabled}
 		config.meta[hermesMetaKey] = hermesMeta
@@ -208,6 +212,7 @@ func CallForkSession(ctx context.Context, conn *acp.ClientSideConnection, params
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
 	var resp acp.UnstableForkSessionResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
@@ -316,13 +321,16 @@ func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
 	if result == nil {
 		result = map[string]any{}
 	}
+
 	for key, value := range overlay {
 		if valueMap, ok := value.(map[string]any); ok {
 			if existingMap, ok := result[key].(map[string]any); ok {
 				result[key] = mergeAnyMap(existingMap, valueMap)
+
 				continue
 			}
 		}
+
 		result[key] = cloneAny(value)
 	}
 
@@ -336,6 +344,7 @@ func ensureMetaMap(meta map[string]any, key string) map[string]any {
 	} else {
 		current = cloneAnyMap(current)
 	}
+
 	meta[key] = current
 
 	return current
@@ -345,6 +354,7 @@ func cloneMCPServers(servers []acp.McpServer) []acp.McpServer {
 	if servers == nil {
 		return nil
 	}
+
 	cloned := make([]acp.McpServer, len(servers))
 	for index, server := range servers {
 		cloned[index] = cloneMCPServer(server)
@@ -359,15 +369,18 @@ func cloneMCPServer(server acp.McpServer) acp.McpServer {
 		value := *server.Http
 		value.Meta = cloneAnyMap(value.Meta)
 		value.Headers = cloneHTTPHeaders(value.Headers)
+
 		return acp.McpServer{Http: &value}
 	case server.Sse != nil:
 		value := *server.Sse
 		value.Meta = cloneAnyMap(value.Meta)
 		value.Headers = cloneHTTPHeaders(value.Headers)
+
 		return acp.McpServer{Sse: &value}
 	case server.Acp != nil:
 		value := *server.Acp
 		value.Meta = cloneAnyMap(value.Meta)
+
 		return acp.McpServer{Acp: &value}
 	case server.Stdio != nil:
 		return acp.McpServer{Stdio: cloneMCPServerStdio(server.Stdio)}
@@ -380,6 +393,7 @@ func cloneMCPServerStdio(server *acp.McpServerStdio) *acp.McpServerStdio {
 	if server == nil {
 		return nil
 	}
+
 	value := *server
 	value.Meta = cloneAnyMap(value.Meta)
 	value.Args = append([]string(nil), value.Args...)
@@ -392,6 +406,7 @@ func cloneHTTPHeaders(headers []acp.HttpHeader) []acp.HttpHeader {
 	if headers == nil {
 		return nil
 	}
+
 	cloned := make([]acp.HttpHeader, len(headers))
 	for index, header := range headers {
 		cloned[index] = header
@@ -405,6 +420,7 @@ func cloneEnvVariables(env []acp.EnvVariable) []acp.EnvVariable {
 	if env == nil {
 		return nil
 	}
+
 	cloned := make([]acp.EnvVariable, len(env))
 	for index, variable := range env {
 		cloned[index] = variable
@@ -418,6 +434,7 @@ func unstableMCPServersFromStable(servers []acp.McpServer) []acp.UnstableMcpServ
 	if servers == nil {
 		return nil
 	}
+
 	cloned := make([]acp.UnstableMcpServer, len(servers))
 	for index, server := range servers {
 		cloned[index] = unstableMCPServerFromStable(server)
@@ -436,6 +453,7 @@ func unstableMCPServerFromStable(server acp.McpServer) acp.UnstableMcpServer {
 			Type:    server.Http.Type,
 			Url:     server.Http.Url,
 		}
+
 		return acp.UnstableMcpServer{Http: &value}
 	case server.Sse != nil:
 		value := acp.UnstableMcpServerSse{
@@ -445,6 +463,7 @@ func unstableMCPServerFromStable(server acp.McpServer) acp.UnstableMcpServer {
 			Type:    server.Sse.Type,
 			Url:     server.Sse.Url,
 		}
+
 		return acp.UnstableMcpServer{Sse: &value}
 	case server.Acp != nil:
 		value := acp.UnstableMcpServerAcpInline{
@@ -453,6 +472,7 @@ func unstableMCPServerFromStable(server acp.McpServer) acp.UnstableMcpServer {
 			Name: server.Acp.Name,
 			Type: server.Acp.Type,
 		}
+
 		return acp.UnstableMcpServer{Acp: &value}
 	case server.Stdio != nil:
 		return acp.UnstableMcpServer{Stdio: cloneMCPServerStdio(server.Stdio)}
@@ -465,6 +485,7 @@ func stableMCPServersFromUnstable(servers []acp.UnstableMcpServer) []acp.McpServ
 	if servers == nil {
 		return nil
 	}
+
 	out := make([]acp.McpServer, len(servers))
 	for index, server := range servers {
 		switch {
@@ -495,5 +516,6 @@ func stableMCPServersFromUnstable(servers []acp.UnstableMcpServer) []acp.McpServ
 			out[index] = acp.McpServer{Stdio: cloneMCPServerStdio(server.Stdio)}
 		}
 	}
+
 	return out
 }

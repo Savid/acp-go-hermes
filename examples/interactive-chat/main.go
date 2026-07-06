@@ -57,8 +57,10 @@ func run(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Write
 	}()
 
 	scanner := bufio.NewScanner(stdin)
+
 	for {
 		fmt.Fprint(stdout, "> ")
+
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				printError(stderr, err)

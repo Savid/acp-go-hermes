@@ -25,17 +25,21 @@ func signalHermesProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
+
 	pgid, err := hermesSyscallGetpgid(cmd.Process.Pid)
 	if err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
+
 		return err
 	}
+
 	if err := hermesSyscallKill(-pgid, signal); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
+
 		return err
 	}
 
@@ -54,15 +58,19 @@ func signalLeaseGroup(pid int, signal syscall.Signal) error {
 	if pid <= 0 {
 		return nil
 	}
+
 	target := pid
 	if pgid, err := hermesSyscallGetpgid(pid); err == nil {
 		target = -pgid
 	}
+
 	if err := hermesSyscallKill(target, signal); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
+
 		return err
 	}
+
 	return nil
 }

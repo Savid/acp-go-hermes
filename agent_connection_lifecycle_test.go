@@ -78,6 +78,7 @@ type signalBlockingReader struct {
 func (r *signalBlockingReader) Read([]byte) (int, error) {
 	r.once.Do(func() { close(r.started) })
 	<-r.release
+
 	return 0, io.EOF
 }
 
@@ -101,7 +102,8 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	if reqErr != nil {
 		t.Fatalf("initialize reqErr = %v", reqErr)
 	}
-	if initResp.(acp.InitializeResponse).AgentCapabilities.PositionEncoding == nil {
+	initTyped, initOK := initResp.(acp.InitializeResponse)
+	if !initOK || initTyped.AgentCapabilities.PositionEncoding == nil {
 		t.Fatalf("initialize response = %#v", initResp)
 	}
 	if _, reqErr := conn.handle(ctx, "missing/method", json.RawMessage(`{}`)); reqErr == nil || reqErr.Code != -32601 {
@@ -268,6 +270,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 		}
 		client.xdg = xdg
 		client.createSession = testNativeSession("native-1")
+
 		return client, nil
 	}
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
@@ -293,6 +296,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 			return line
 		case <-ctx.Done():
 			t.Fatal("timed out waiting for JSON-RPC line")
+
 			return ""
 		}
 	}
@@ -333,20 +337,20 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(conn)
 
-	permission, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{Options: []acp.PermissionOption{
+	permission, permErr := conn.RequestPermission(ctx, acp.RequestPermissionRequest{Options: []acp.PermissionOption{
 		{OptionId: "once", Kind: acp.PermissionOptionKindAllowOnce, Name: "Allow once"},
 	}})
-	if err != nil {
-		t.Fatalf("RequestPermission: %v", err)
+	if permErr != nil {
+		t.Fatalf("RequestPermission: %v", permErr)
 	}
 	if permission.Outcome.Selected == nil || permission.Outcome.Selected.OptionId != "once" {
 		t.Fatalf("permission = %#v", permission)
 	}
-	if err := conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: "s", Update: acp.UpdateAgentMessageText("hello")}); err != nil {
-		t.Fatalf("SessionUpdate: %v", err)
+	if err2 := conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: "s", Update: acp.UpdateAgentMessageText("hello")}); err2 != nil {
+		t.Fatalf("SessionUpdate: %v", err2)
 	}
-	if err := conn.NotifyExtension(ctx, "_hermes/test", map[string]any{"ok": true}); err != nil {
-		t.Fatalf("NotifyExtension: %v", err)
+	if err3 := conn.NotifyExtension(ctx, "_hermes/test", map[string]any{"ok": true}); err3 != nil {
+		t.Fatalf("NotifyExtension: %v", err3)
 	}
 	resp, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
@@ -376,6 +380,7 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 	if err != nil {
 		t.Fatalf("marshal %T: %v", value, err)
 	}
+
 	return data
 }
 
@@ -406,6 +411,7 @@ func (c *pipeACPClient) SessionUpdate(context.Context, acp.SessionNotification) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.updates++
+
 	return nil
 }
 
@@ -437,6 +443,7 @@ func (c *pipeACPClient) UnstableCreateElicitation(context.Context, acp.UnstableC
 	c.mu.Lock()
 	c.elicitations++
 	c.mu.Unlock()
+
 	return acp.UnstableCreateElicitationResponse{
 		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{}},
 	}, nil
@@ -454,5 +461,6 @@ func (c *pipeACPClient) HandleExtensionMethod(_ context.Context, method string, 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.extensions = append(c.extensions, method)
+
 	return map[string]any{"ok": true}, nil
 }

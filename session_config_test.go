@@ -44,9 +44,9 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 	if value.Value != "openai/gpt-test" {
 		t.Fatalf("value = %s", value.Value)
 	}
-	meta := value.Meta[hermesMetaKey].(map[string]any)
-	if meta["contextWindow"] != 1000 || meta["maxOutputTokens"] != 200 {
-		t.Fatalf("limits meta = %#v", meta)
+	meta, metaOK := value.Meta[hermesMetaKey].(map[string]any)
+	if !metaOK || meta["contextWindow"] != 1000 || meta["maxOutputTokens"] != 200 {
+		t.Fatalf("limits meta = %#v", value.Meta)
 	}
 	if got := meta["modelId"]; got != "openai/gpt-test" {
 		t.Fatalf("modelId = %#v", got)
@@ -183,5 +183,6 @@ func containsStringAny(value any, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }

@@ -22,16 +22,22 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Test
+      - name: Test and coverage gate
         run: make coverage-check
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
 
+      - name: Check Windows permission lock build
+        run: make test-cross-compile
+
       - name: Check module tidiness
         run: |
           go mod tidy -diff
           git diff --exit-code -- go.mod go.sum
+
+      - name: Check modernization drift
+        run: make modernize-check
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

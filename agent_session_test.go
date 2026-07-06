@@ -35,6 +35,7 @@ func (s *toggleReplaceStore) Replace(ctx context.Context, main SessionKey, repla
 	if fail {
 		return errors.New("replace failed")
 	}
+
 	return s.InMemorySessionStore.Replace(ctx, main, replacements)
 }
 
@@ -57,6 +58,7 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 				return nil, err
 			}
 			createClient.xdg = xdg
+
 			return createClient, nil
 		}
 	})
@@ -117,6 +119,7 @@ func TestForkSnapshotFailureLeavesNoOrphan(t *testing.T) {
 				}
 			}
 			client.xdg = xdg
+
 			return client, nil
 		}
 	})
@@ -185,6 +188,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 					}
 				}
 				client.xdg = xdg
+
 				return client, nil
 			}
 		},
@@ -202,15 +206,15 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	if newResp.SessionId == "" || len(newResp.ConfigOptions) != 1 {
 		t.Fatalf("new response = %#v", newResp)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetModelRequest(newResp.SessionId, "openai/gpt-other")); err != nil {
-		t.Fatalf("SetModel: %v", err)
+	if _, err2 := agent.SetSessionConfigOption(ctx, SetModelRequest(newResp.SessionId, "openai/gpt-other")); err2 != nil {
+		t.Fatalf("SetModel: %v", err2)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, acp.SessionConfigId("mode"), "plan")); err == nil {
+	if _, err3 := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, acp.SessionConfigId("mode"), "plan")); err3 == nil {
 		t.Fatal("mode config option unexpectedly accepted")
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+	if _, err4 := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: newResp.SessionId, ConfigId: configModel, Type: "boolean", Value: true},
-	}); err == nil {
+	}); err4 == nil {
 		t.Fatal("boolean config option unexpectedly accepted")
 	}
 	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
@@ -220,36 +224,11 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	if len(listResp.Sessions) != 1 {
 		t.Fatalf("list sessions = %#v", listResp.Sessions)
 	}
-	if err := os.WriteFile(filepath.Join(parent.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
-		t.Fatalf("seed parent state db: %v", err)
+	if err5 := os.WriteFile(filepath.Join(parent.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err5 != nil {
+		t.Fatalf("seed parent state db: %v", err5)
 	}
 
-	rawFork, err := json.Marshal(ForkSessionRequest(newResp.SessionId, cwd))
-	if err != nil {
-		t.Fatal(err)
-	}
-	forkAny, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, rawFork)
-	if err != nil {
-		t.Fatalf("fork extension: %v", err)
-	}
-	forkResp := forkAny.(acp.UnstableForkSessionResponse)
-	if forkResp.SessionId == "" || forkResp.SessionId == newResp.SessionId {
-		t.Fatalf("fork response = %#v", forkResp)
-	}
-	idEntries, err := store.Load(ctx, SessionKey{SessionID: string(forkResp.SessionId), Subpath: idmapSubpath})
-	if err != nil {
-		t.Fatalf("load child idmap: %v", err)
-	}
-	var idmap idmapRecord
-	if err := json.Unmarshal(idEntries[len(idEntries)-1], &idmap); err != nil {
-		t.Fatal(err)
-	}
-	if idmap.ParentSessionID != string(newResp.SessionId) || idmap.NativeParentSessionID != "native-parent" {
-		t.Fatalf("child idmap lineage = %#v", idmap)
-	}
-	if data, err := os.ReadFile(filepath.Join(child.xdg.Root, "state.db")); err != nil || string(data) != "parent-state" {
-		t.Fatalf("child state db clone = %q err=%v", data, err)
-	}
+	forkResp := forkSessionAndAssertLineage(ctx, t, agent, store, child, newResp.SessionId, cwd)
 
 	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId}); err != nil {
 		t.Fatalf("CloseSession: %v", err)
@@ -271,6 +250,39 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	}
 }
 
+func forkSessionAndAssertLineage(ctx context.Context, t *testing.T, agent *Agent, store *InMemorySessionStore, child *fakeHermesClient, parentID acp.SessionId, cwd string) acp.UnstableForkSessionResponse {
+	t.Helper()
+
+	rawFork, err := json.Marshal(ForkSessionRequest(parentID, cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkAny, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, rawFork)
+	if err != nil {
+		t.Fatalf("fork extension: %v", err)
+	}
+	forkResp, forkOK := forkAny.(acp.UnstableForkSessionResponse)
+	if !forkOK || forkResp.SessionId == "" || forkResp.SessionId == parentID {
+		t.Fatalf("fork response = %#v", forkAny)
+	}
+	idEntries, err := store.Load(ctx, SessionKey{SessionID: string(forkResp.SessionId), Subpath: idmapSubpath})
+	if err != nil {
+		t.Fatalf("load child idmap: %v", err)
+	}
+	var idmap idmapRecord
+	if err := json.Unmarshal(idEntries[len(idEntries)-1], &idmap); err != nil {
+		t.Fatal(err)
+	}
+	if idmap.ParentSessionID != string(parentID) || idmap.NativeParentSessionID != "native-parent" {
+		t.Fatalf("child idmap lineage = %#v", idmap)
+	}
+	if data, err := os.ReadFile(filepath.Join(child.xdg.Root, "state.db")); err != nil || string(data) != "parent-state" {
+		t.Fatalf("child state db clone = %q err=%v", data, err)
+	}
+
+	return forkResp
+}
+
 func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -284,16 +296,16 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	agent := NewAgent(WithHome(root), WithSessionStore(store))
 	session := testSession(agent, sourceClient)
 	session.cwd = root
-	if err := session.snapshotToStore(ctx); err != nil {
-		t.Fatalf("snapshotToStore: %v", err)
+	if err6 := session.snapshotToStore(ctx); err6 != nil {
+		t.Fatalf("snapshotToStore: %v", err6)
 	}
 
 	loadedClient := newFakeHermesClient()
 	loadedClient.getSession = testNativeSession("native-1")
 	loadedClient.providers = testProviders()
 	var replayPart nativePart
-	if err := json.Unmarshal([]byte(`{"id":"part-1","sessionID":"native-1","messageID":"user-1","type":"text","text":"hello"}`), &replayPart); err != nil {
-		t.Fatal(err)
+	if err7 := json.Unmarshal([]byte(`{"id":"part-1","sessionID":"native-1","messageID":"user-1","type":"text","text":"hello"}`), &replayPart); err7 != nil {
+		t.Fatal(err7)
 	}
 	loadedClient.messages = []nativeMessage{{
 		Info:  nativeMessageInfo{ID: "user-1", SessionID: "native-1", Role: "user"},
@@ -301,6 +313,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	}}
 	agent.options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 		loadedClient.xdg = opts.ExistingXDG
+
 		return loadedClient, nil
 	}
 	conn := newRecordingAgentClient()
@@ -322,6 +335,7 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 	client.sendMessage = func(ctx context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
 		close(started)
 		<-ctx.Done()
+
 		return nativeMessage{}, ctx.Err()
 	}
 	agent := NewAgent(WithSessionStore(store))
@@ -422,6 +436,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 				}
 			}
 			client.xdg = xdg
+
 			return client, nil
 		}
 	})
@@ -438,14 +453,14 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	}
 	active := agent.activeSession(id)
 
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(false))...)); err != nil {
-		t.Fatalf("active LoadSession: %v", err)
+	if _, err8 := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(false))...)); err8 != nil {
+		t.Fatalf("active LoadSession: %v", err8)
 	}
 	if active.snapshot().rawMessages.Enabled() {
 		t.Fatal("active LoadSession did not apply rawEvent=false")
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(true))...)); err != nil {
-		t.Fatalf("active ResumeSession: %v", err)
+	if _, err9 := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, append(startOptions, WithSessionRawEvents(true))...)); err9 != nil {
+		t.Fatalf("active ResumeSession: %v", err9)
 	}
 	if !active.snapshot().rawMessages.Enabled() {
 		t.Fatal("active ResumeSession did not apply rawEvent=true")
@@ -460,20 +475,20 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	// Validation runs before the active-session reuse: bad _meta, relative
 	// cwd, and SSE MCP all return the cold-path error without reuse.
 	badMeta := map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"unknown": "x"}}}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMeta(badMeta))); err == nil {
+	if _, err10 := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMeta(badMeta))); err10 == nil {
 		t.Fatal("active load accepted bad _meta")
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMeta(badMeta))); err == nil {
+	if _, err11 := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMeta(badMeta))); err11 == nil {
 		t.Fatal("active resume accepted bad _meta")
 	}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, "relative-cwd")); err == nil {
+	if _, err12 := agent.LoadSession(ctx, LoadSessionRequest(id, "relative-cwd")); err12 == nil {
 		t.Fatal("active load accepted relative cwd")
 	}
 	sse := acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}
-	if _, err := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMCPServers(sse))); err == nil {
+	if _, err13 := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionMCPServers(sse))); err13 == nil {
 		t.Fatal("active load accepted SSE MCP server")
 	}
-	if _, err := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMCPServers(sse))); err == nil {
+	if _, err14 := agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionMCPServers(sse))); err14 == nil {
 		t.Fatal("active resume accepted SSE MCP server")
 	}
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(id, filepath.Join(cwd, "other"), startOptions...))
@@ -552,6 +567,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 		agent := NewAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				createErrClient.xdg, _ = createXDGDirs(opts.Root, string(opts.ACPSessionID))
+
 				return createErrClient, nil
 			}
 		})
@@ -604,8 +620,8 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	seedAgent := NewAgent(WithHome(root), WithSessionStore(store))
 	seed := testSession(seedAgent, sourceClient)
 	seed.cwd = cwd
-	if err := seed.snapshotToStore(ctx); err != nil {
-		t.Fatalf("snapshotToStore: %v", err)
+	if err15 := seed.snapshotToStore(ctx); err15 != nil {
+		t.Fatalf("snapshotToStore: %v", err15)
 	}
 
 	loadedClient := newFakeHermesClient()
@@ -614,15 +630,16 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	loadAgent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 			loadedClient.xdg = opts.ExistingXDG
+
 			return loadedClient, nil
 		}
 	})
 	// Cold cwd mismatch (session not yet active) is rejected after hydrate.
-	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err == nil {
+	if _, err16 := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err16 == nil {
 		t.Fatal("cold cwd mismatch load succeeded")
 	}
-	if _, err := loadAgent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err != nil {
-		t.Fatalf("ResumeSession: %v", err)
+	if _, err17 := loadAgent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err17 != nil {
+		t.Fatalf("ResumeSession: %v", err17)
 	}
 	resumed := loadAgent.activeSession("session-1")
 	if resumed == nil {
@@ -631,22 +648,22 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	if got := resumed.snapshot().idmap.NativeSessionID; got != "native-rotated" {
 		t.Fatalf("rotated active idmap native id = %q", got)
 	}
-	if err := resumed.snapshotToStore(ctx); err != nil {
-		t.Fatalf("snapshot rotated resume: %v", err)
+	if err18 := resumed.snapshotToStore(ctx); err18 != nil {
+		t.Fatalf("snapshot rotated resume: %v", err18)
 	}
 	rotatedEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: idmapSubpath})
 	if err != nil {
 		t.Fatalf("load rotated idmap: %v", err)
 	}
 	var rotatedIDMap idmapRecord
-	if err := json.Unmarshal(rotatedEntries[len(rotatedEntries)-1], &rotatedIDMap); err != nil {
-		t.Fatal(err)
+	if err19 := json.Unmarshal(rotatedEntries[len(rotatedEntries)-1], &rotatedIDMap); err19 != nil {
+		t.Fatal(err19)
 	}
 	if rotatedIDMap.NativeSessionID != "native-rotated" {
 		t.Fatalf("persisted rotated idmap native id = %q", rotatedIDMap.NativeSessionID)
 	}
 	// Active cwd mismatch (session now active) is rejected before reuse.
-	if _, err := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err == nil {
+	if _, err20 := loadAgent.LoadSession(ctx, LoadSessionRequest("session-1", t.TempDir())); err20 == nil {
 		t.Fatal("active cwd mismatch load succeeded")
 	}
 
@@ -655,10 +672,11 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	getErrAgent := NewAgent(WithHome(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 			getErrClient.xdg = opts.ExistingXDG
+
 			return getErrClient, nil
 		}
 	})
-	if _, err := getErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err == nil {
+	if _, err21 := getErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err21 == nil {
 		t.Fatal("get error load succeeded")
 	}
 	if !getErrClient.closed {
@@ -673,8 +691,8 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 			CapturedAtUnixMilli: int64(10_000 - i),
 			Session:             stateSnapshotSession{SessionID: id, Cwd: cwd, Title: id},
 		})
-		if err := listStore.Replace(ctx, SessionKey{SessionID: id}, []SessionStoreReplacement{{Key: SessionKey{SessionID: id}, Entries: []SessionStoreEntry{entry}}}); err != nil {
-			t.Fatalf("replace list store: %v", err)
+		if err22 := listStore.Replace(ctx, SessionKey{SessionID: id}, []SessionStoreReplacement{{Key: SessionKey{SessionID: id}, Entries: []SessionStoreEntry{entry}}}); err22 != nil {
+			t.Fatalf("replace list store: %v", err22)
 		}
 	}
 	listAgent := NewAgent(WithSessionStore(listStore))
@@ -685,7 +703,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	if len(listResp.Sessions) != listSessionsPageSize || listResp.NextCursor == nil {
 		t.Fatalf("list resp len=%d next=%v", len(listResp.Sessions), listResp.NextCursor)
 	}
-	if _, err := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor("bad"))); err == nil {
+	if _, err23 := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor("bad"))); err23 == nil {
 		t.Fatal("bad cursor accepted")
 	}
 	cursor := "999"
@@ -802,6 +820,12 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 		t.Fatalf("empty split fallback = %q/%q", provider, model)
 	}
 
+	testAgentSnapshotAndForkFailureBranches(ctx, t, cwd, closed)
+}
+
+func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, cwd string, closed *Agent) {
+	t.Helper()
+
 	createClient := newFakeHermesClient()
 	createClient.createSession = testNativeSession("native-created")
 	snapshotErrAgent := NewAgent(
@@ -813,6 +837,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+
 				return createClient, nil
 			}
 		},
@@ -834,8 +859,8 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	seedAgent := NewAgent(WithSessionStore(store))
 	seed := testSession(seedAgent, sourceClient)
 	seed.cwd = cwd
-	if err := seed.snapshotToStore(ctx); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if err24 := seed.snapshotToStore(ctx); err24 != nil {
+		t.Fatalf("seed snapshot: %v", err24)
 	}
 	replayErrClient := newFakeHermesClient()
 	replayErrClient.getSession = testNativeSession("native-1")
@@ -843,20 +868,21 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	replayErrAgent := NewAgent(WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 			replayErrClient.xdg = opts.ExistingXDG
+
 			return replayErrClient, nil
 		}
 	})
-	if _, err := replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err == nil {
+	if _, err25 := replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err25 == nil {
 		t.Fatal("load replay error was ignored")
 	}
 
-	if _, err := closed.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err == nil {
+	if _, err26 := closed.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err26 == nil {
 		t.Fatal("closed agent resumed session")
 	}
-	if _, err := NewAgent(WithHome(string([]byte{0}))).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err == nil {
+	if _, err27 := NewAgent(WithHome(string([]byte{0}))).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err27 == nil {
 		t.Fatal("invalid home root did not fail load")
 	}
-	if _, err := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("load failed")})).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err == nil {
+	if _, err28 := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("load failed")})).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err28 == nil {
 		t.Fatal("hydrate store error was ignored")
 	}
 
@@ -865,16 +891,16 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	parent := testSession(NewAgent(WithHome(string([]byte{0}))), parentClient)
 	parentAgent := parent.agent
 	parentAgent.sessions[parent.id] = parent
-	if _, err := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err == nil {
+	if _, err29 := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err29 == nil {
 		t.Fatal("invalid fork home root did not fail")
 	}
-	if _, err := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))); err == nil {
+	if _, err30 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))); err30 == nil {
 		t.Fatal("unstable fork accepted SSE MCP")
 	}
-	if _, err := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}})))); err == nil {
+	if _, err31 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}})))); err31 == nil {
 		t.Fatal("unstable fork accepted ACP MCP")
 	}
-	if _, err := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"bad": true}})))); err == nil {
+	if _, err32 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"bad": true}})))); err32 == nil {
 		t.Fatal("unstable fork accepted invalid meta")
 	}
 
@@ -882,7 +908,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cloneHermesStateDB(xdgDirs{Root: string([]byte{0})}, validTarget); err == nil {
+	if err33 := cloneHermesStateDB(xdgDirs{Root: string([]byte{0})}, validTarget); err33 == nil {
 		t.Fatal("cloneHermesStateDB accepted invalid source")
 	}
 	restoreStateStoreSeams(t)
@@ -899,7 +925,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	}
 }
 
-func TestAgentRemainingLifecycleBranches(t *testing.T) {
+func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
@@ -915,6 +941,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+
 				return defaultClient, nil
 			}
 		})
@@ -946,6 +973,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+
 				return client, nil
 			}
 		})
@@ -957,6 +985,11 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			t.Fatal("storeStartedSession error did not close client")
 		}
 	})
+}
+
+func TestAgentRemainingLifecycleBranches(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
 
 	t.Run("load validation and startup errors", func(t *testing.T) {
 		agent := NewAgent()
@@ -985,6 +1018,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		limitAgent := NewAgent(WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				loadedClient.xdg = opts.ExistingXDG
+
 				return loadedClient, nil
 			}
 		})
@@ -1103,6 +1137,11 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
 
 	t.Run("deleted cleanup helper branches", func(t *testing.T) {
 		agent := NewAgent(WithHome(t.TempDir()))
@@ -1161,6 +1200,11 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			t.Fatal("invalid cleanup root returned nil")
 		}
 	})
+}
+
+func TestAgentForkErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
 
 	t.Run("fork errors", func(t *testing.T) {
 		oldReader := sessionIDRandReader
@@ -1201,6 +1245,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		getErrAgent := NewAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				getErrClient.xdg = opts.ExistingXDG
+
 				return getErrClient, nil
 			}
 		})
@@ -1218,6 +1263,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		limitAgent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				limitChild.xdg = opts.ExistingXDG
+
 				return limitChild, nil
 			}
 		})
@@ -1232,6 +1278,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		snapshotErrAgent := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("replace failed")}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				snapshotErrChild.xdg = opts.ExistingXDG
+
 				return snapshotErrChild, nil
 			}
 		})
@@ -1244,6 +1291,11 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			t.Fatal("fork snapshot error did not close child")
 		}
 	})
+}
+
+func TestAgentClientFactoryDefaultsAndEnvMerge(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
 
 	t.Run("client factory defaults and env merge", func(t *testing.T) {
 		defaultAgent := NewAgent()
@@ -1255,6 +1307,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		agent := NewAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
 				captured = opts
+
 				return newFakeHermesClient(), nil
 			}
 		})
