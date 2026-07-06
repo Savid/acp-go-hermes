@@ -38,10 +38,8 @@ dist/
 bin/
 .tmp/
 
-# Personal agent overrides
-CLAUDE.local.md
-CODEX.local.md
-OPENCODE.local.md
+# Personal agent overrides (per-developer, not shared)
+*.local.md
 .claude/settings.local.json
 
 # Mintlify local cache

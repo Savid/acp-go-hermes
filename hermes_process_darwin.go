@@ -31,18 +31,22 @@ func inspectHermesProcess(pid int) (processIdentity, error) {
 	if pid <= 0 {
 		return processIdentity{}, syscall.ESRCH
 	}
+
 	kinfo, err := darwinSysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return processIdentity{}, err
 	}
+
 	raw, err := darwinSysctlProcArgs(pid)
 	if err != nil {
 		return processIdentity{}, err
 	}
+
 	cmdline, env, err := parseProcArgs2(raw)
 	if err != nil {
 		return processIdentity{}, err
 	}
+
 	start := kinfo.Proc.P_starttime
 
 	return processIdentity{
@@ -59,37 +63,47 @@ func parseProcArgs2(data []byte) ([]string, map[string]string, error) {
 	if len(data) < 4 {
 		return nil, nil, errors.New("procargs2 buffer too short")
 	}
+
 	argc := int(binary.NativeEndian.Uint32(data[:4]))
 	rest := data[4:]
+
 	execEnd := bytes.IndexByte(rest, 0)
 	if execEnd < 0 {
 		return nil, nil, errors.New("procargs2 missing executable path terminator")
 	}
+
 	rest = rest[execEnd:]
 	for len(rest) > 0 && rest[0] == 0 {
 		rest = rest[1:]
 	}
+
 	cmdline := make([]string, 0, argc)
 	for len(cmdline) < argc {
 		end := bytes.IndexByte(rest, 0)
 		if end < 0 {
 			return nil, nil, errors.New("procargs2 truncated argv")
 		}
+
 		cmdline = append(cmdline, string(rest[:end]))
 		rest = rest[end+1:]
 	}
+
 	env := map[string]string{}
+
 	for len(rest) > 0 {
 		end := bytes.IndexByte(rest, 0)
+
 		var entry string
 		if end < 0 {
 			entry, rest = string(rest), nil
 		} else {
 			entry, rest = string(rest[:end]), rest[end+1:]
 		}
+
 		if entry == "" {
 			break
 		}
+
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && key != "" {
 			env[key] = value

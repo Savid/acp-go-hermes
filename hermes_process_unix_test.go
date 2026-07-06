@@ -46,14 +46,17 @@ func TestReapLeaseLadderSignalBranches(t *testing.T) {
 	hermesSyscallKill = func(_ int, sig syscall.Signal) error {
 		if sig == syscall.SIGKILL {
 			killed = true
+
 			return errors.New("kill boom")
 		}
+
 		return nil
 	}
 	hermesInspectProcess = func(int) (processIdentity, error) {
 		if killed {
 			return processIdentity{}, os.ErrNotExist
 		}
+
 		return processIdentity{StartTime: "start"}, nil
 	}
 	if !reapLeaseProcess(lease, log) {
@@ -100,8 +103,8 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	if err2 := cmd.Start(); err2 != nil {
+		t.Fatal(err2)
 	}
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
@@ -175,13 +178,13 @@ func TestDeleteCleanupKeepsSurvivingLeaseRecord(t *testing.T) {
 	hermesInspectProcess = func(int) (processIdentity, error) { return identity, nil }
 	hermesSyscallGetpgid = func(int) (int, error) { return pid, nil }
 	hermesSyscallKill = func(int, syscall.Signal) error { return errors.New("signal failed") }
-	if err := writeLease(xdg.State, serverLease{
+	if err3 := writeLease(xdg.State, serverLease{
 		PID:              pid,
 		TokenHash:        passwordHash(token),
 		XDGRoot:          xdg.Root,
 		ProcessStartTime: identity.StartTime,
-	}); err != nil {
-		t.Fatal(err)
+	}); err3 != nil {
+		t.Fatal(err3)
 	}
 
 	agent := NewAgent(WithHome(root))
@@ -252,6 +255,7 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 		if pid != 123 || signal != syscall.SIGTERM {
 			t.Fatalf("kill pid=%d signal=%v", pid, signal)
 		}
+
 		return nil
 	}
 	if err := terminateProcessGroupID(123); err != nil {

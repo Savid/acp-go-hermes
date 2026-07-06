@@ -36,16 +36,16 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	client.todos = []nativeTodo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
 	agent := NewAgent(WithSessionStore(store))
 	session := testSession(agent, client)
-	if err := session.snapshotToStore(ctx); err != nil {
-		t.Fatalf("snapshotToStore: %v", err)
+	if err2 := session.snapshotToStore(ctx); err2 != nil {
+		t.Fatalf("snapshotToStore: %v", err2)
 	}
 
 	if countSQLiteRows(t, dbPath, "account") != 1 || countSQLiteRows(t, dbPath, "credential") != 1 {
 		t.Fatal("snapshot modified live credential tables")
 	}
 
-	if err := os.RemoveAll(xdg.Root); err != nil {
-		t.Fatalf("remove original xdg: %v", err)
+	if err3 := os.RemoveAll(xdg.Root); err3 != nil {
+		t.Fatalf("remove original xdg: %v", err3)
 	}
 	restored, err := createXDGDirs(root, "session-1-restored")
 	if err != nil {
@@ -142,8 +142,8 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 		"state.db-shm": "shm",
 		"state.db-bak": "ignored",
 	} {
-		if err := os.WriteFile(filepath.Join(xdg.Root, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+		if err4 := os.WriteFile(filepath.Join(xdg.Root, name), []byte(body), 0o600); err4 != nil {
+			t.Fatalf("write %s: %v", name, err4)
 		}
 	}
 
@@ -151,8 +151,8 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	client := newFakeHermesClient()
 	client.xdg = xdg
 	session := testSession(NewAgent(WithSessionStore(store)), client)
-	if err := session.snapshotToStore(ctx); err != nil {
-		t.Fatalf("snapshotToStore: %v", err)
+	if err5 := session.snapshotToStore(ctx); err5 != nil {
+		t.Fatalf("snapshotToStore: %v", err5)
 	}
 
 	mainEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: SessionStoreMainSubpath})
@@ -160,8 +160,8 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snapshot stateSnapshot
-	if err := json.Unmarshal(mainEntries[len(mainEntries)-1], &snapshot); err != nil {
-		t.Fatal(err)
+	if err6 := json.Unmarshal(mainEntries[len(mainEntries)-1], &snapshot); err6 != nil {
+		t.Fatal(err6)
 	}
 	if snapshot.Archives["state-db"].Subpath != stateDBSubpath || len(snapshot.Archives) != 1 {
 		t.Fatalf("snapshot archives = %#v", snapshot.Archives)
@@ -171,8 +171,8 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 		t.Fatalf("state-db entries = %d err=%v", len(stateEntries), err)
 	}
 
-	if err := os.RemoveAll(xdg.Root); err != nil {
-		t.Fatal(err)
+	if err7 := os.RemoveAll(xdg.Root); err7 != nil {
+		t.Fatal(err7)
 	}
 	restored, err := createXDGDirs(root, "session-1-restored")
 	if err != nil {
@@ -204,6 +204,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			want: "turn",
 			set: func(s *session) func() {
 				s.beginTurn(ctx)
+
 				return s.finishTurn
 			},
 		},
@@ -212,6 +213,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			want: "permission",
 			set: func(s *session) func() {
 				s.pending["p"] = permissionRequest{ID: "p", SessionID: "native-1"}
+
 				return func() { s.pending = map[string]permissionRequest{} }
 			},
 		},
@@ -220,6 +222,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			want: "elicitation",
 			set: func(s *session) func() {
 				s.questions["q"] = questionRequest{ID: "q", SessionID: "native-1"}
+
 				return func() { s.questions = map[string]questionRequest{} }
 			},
 		},
@@ -228,6 +231,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			want: "generation",
 			set: func(s *session) func() {
 				s.activeMessageIDs["m"] = struct{}{}
+
 				return func() { s.activeMessageIDs = map[string]struct{}{} }
 			},
 		},
@@ -453,11 +457,11 @@ func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE regular (id TEXT PRIMARY KEY, body TEXT)`); err != nil {
-		t.Fatal(err)
+	if _, err8 := db.Exec(`CREATE TABLE regular (id TEXT PRIMARY KEY, body TEXT)`); err8 != nil {
+		t.Fatal(err8)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
+	if err9 := db.Close(); err9 != nil {
+		t.Fatal(err9)
 	}
 	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -534,6 +538,7 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 				if calls == tt.failAt {
 					return nil, errors.New("marshal failed")
 				}
+
 				return json.Marshal(value)
 			}
 			session := snapshotFaultSession(t)
@@ -622,6 +627,7 @@ func TestHydrateStateFromStoreFaults(t *testing.T) {
 					if _, _, _, err := hydrateStateFromStore(ctx, errStore, "s", xdg); err == nil {
 						t.Fatal("hydrate ignored archive load error")
 					}
+
 					return
 				}
 				mutate(store)
@@ -677,6 +683,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 				if path == stateDBPath && stateDBCalls == 3 {
 					return nil, errors.New("second lstat failed")
 				}
+
 				return originalLstat(path)
 			}
 		},
@@ -687,6 +694,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 				if path == walPath {
 					return nil, errors.New("candidate lstat failed")
 				}
+
 				return originalLstat(path)
 			}
 		},
@@ -778,6 +786,7 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 				if calls == 2 {
 					return "", errors.New("child abs failed")
 				}
+
 				return filepath.Clean(path), nil
 			}
 		}},
@@ -788,6 +797,7 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 				if calls == 2 {
 					return filepath.Join(string(os.PathSeparator), "elsewhere"), nil
 				}
+
 				return filepath.Clean(path), nil
 			}
 		}},
@@ -798,6 +808,7 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 				if calls == 2 {
 					return errors.New("dir mkdir failed")
 				}
+
 				return nil
 			}
 		}},
@@ -809,6 +820,7 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 				if calls == 2 {
 					return errors.New("parent mkdir failed")
 				}
+
 				return nil
 			}
 		}},
@@ -1029,6 +1041,7 @@ func snapshotFaultSession(t *testing.T) *session {
 	client := newFakeHermesClient()
 	client.xdg = xdg
 	agent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
+
 	return testSession(agent, client)
 }
 
@@ -1055,6 +1068,7 @@ func validHydrateStore(t *testing.T, ctx context.Context) *InMemorySessionStore 
 	if err := store.Replace(ctx, main, replacements); err != nil {
 		t.Fatal(err)
 	}
+
 	return store
 }
 
@@ -1079,6 +1093,7 @@ func validStateDBHydrateStore(t *testing.T, ctx context.Context, data []byte, sh
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	return store
 }
 
@@ -1139,6 +1154,7 @@ func replaceStateDBHydrateRecords(t *testing.T, ctx context.Context, store *InMe
 		{Key: main, Entries: []SessionStoreEntry{mustStateJSON(t, func() stateSnapshot {
 			snapshot := validHydrateSnapshot()
 			snapshot.Archives = map[string]archiveInfo{"state-db": {Subpath: stateDBSubpath}}
+
 			return snapshot
 		}())}},
 		{Key: SessionKey{SessionID: "s", Subpath: idmapSubpath}, Entries: []SessionStoreEntry{mustStateJSON(t, validHydrateIDMap())}},
@@ -1153,6 +1169,7 @@ func replaceStateDBHydrateRecords(t *testing.T, ctx context.Context, store *InMe
 
 func sha256Bytes(data []byte) []byte {
 	sum := sha256.Sum256(data)
+
 	return sum[:]
 }
 
@@ -1162,6 +1179,7 @@ func mustStateJSON(t *testing.T, value any) SessionStoreEntry {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return SessionStoreEntry(data)
 }
 
@@ -1175,6 +1193,7 @@ func (s selectiveLoadErrorStore) Load(ctx context.Context, key SessionKey) ([]Se
 	if key == s.key {
 		return nil, s.err
 	}
+
 	return s.SessionStore.Load(ctx, key)
 }
 
@@ -1192,6 +1211,7 @@ func (w fakeTarWriter) Write(p []byte) (int, error) {
 	if w.writeErr != nil {
 		return 0, w.writeErr
 	}
+
 	return len(p), nil
 }
 
@@ -1208,6 +1228,7 @@ func (w fakeZstdWriter) Write(p []byte) (int, error) {
 	if w.writeErr != nil {
 		return 0, w.writeErr
 	}
+
 	return len(p), nil
 }
 
@@ -1249,6 +1270,7 @@ func testZstdBytes(t *testing.T, data []byte) []byte {
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zstd close: %v", err)
 	}
+
 	return zbuf.Bytes()
 }
 
@@ -1259,6 +1281,7 @@ func testTarZstdPartial(t *testing.T, header tar.Header) []byte {
 	if err := tw.WriteHeader(&header); err != nil {
 		t.Fatalf("write partial header: %v", err)
 	}
+
 	return testZstdBytes(t, tarbuf.Bytes())
 }
 
@@ -1274,6 +1297,7 @@ func openFaultSQL(t *testing.T, scenario string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return db
 }
 
@@ -1381,6 +1405,7 @@ func (r *faultRows) Next(dest []driver.Value) error {
 	if r.nextErr != nil {
 		err := r.nextErr
 		r.nextErr = nil
+
 		return err
 	}
 	if r.index >= len(r.rows) {
@@ -1388,6 +1413,7 @@ func (r *faultRows) Next(dest []driver.Value) error {
 	}
 	copy(dest, r.rows[r.index])
 	r.index++
+
 	return nil
 }
 
@@ -1427,6 +1453,7 @@ func countSQLiteRows(t *testing.T, path string, table string) int {
 	if err := db.QueryRow("SELECT count(*) FROM " + quoteSQLiteIdent(table)).Scan(&count); err != nil {
 		t.Fatalf("count %s: %v", table, err)
 	}
+
 	return count
 }
 
@@ -1486,5 +1513,6 @@ func testTarZstd(t *testing.T, headers []tar.Header, bodies map[string]string) [
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zstd close: %v", err)
 	}
+
 	return zbuf.Bytes()
 }

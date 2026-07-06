@@ -14,7 +14,9 @@ linters:
     - durationcheck
     - errcheck
     - errname
+    - goconst
     - gocritic
+    - gocyclo
     - godot
     - goheader
     - goprintffuncname
@@ -25,10 +27,12 @@ linters:
     - nakedret
     - nilerr
     - nilnil
+    - nlreturn
     - nolintlint
     - nosprintfhostport
     - prealloc
     - predeclared
+    - promlinter
     - reassign
     - sloglint
     - staticcheck
@@ -38,9 +42,13 @@ linters:
     - unconvert
     - unused
     - whitespace
+    - wsl_v5
   settings:
     errcheck:
-      check-type-assertions: false
+      check-type-assertions: true
+    goconst:
+      min-len: 2
+      min-occurrences: 3
     gocritic:
       enabled-tags:
         - diagnostic
@@ -49,11 +57,16 @@ linters:
         - performance
         - style
       disabled-checks:
-        - rangeValCopy
+        # These are intentionally noisy for ACP/generated-style method
+        # signatures and local readability preferences. Keep gocritic enabled
+        # for bug-prone checks while avoiding mechanical churn.
         - hugeParam
         - paramTypeCombine
         - tooManyResultsChecker
         - unnamedResult
+    govet:
+      enable:
+        - shadow
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -64,6 +77,10 @@ linters:
       context: scope
       static-msg: true
       key-naming-case: snake
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
   exclusions:
     generated: lax
     presets:
@@ -74,8 +91,14 @@ linters:
     rules:
       - linters:
           - gocritic
+          - goconst
           - gosec
+          - wsl
+          - wsl_v5
         path: _test\.go
+      - linters:
+          - goconst
+        path: cmd/tools/
     paths:
       - third_party$
       - builtin$

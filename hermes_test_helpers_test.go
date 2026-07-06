@@ -82,6 +82,7 @@ func (c *fakeHermesClient) Close(context.Context) error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
+
 	return c.closeErr
 }
 
@@ -89,6 +90,7 @@ func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nat
 	if c.createSessionFunc != nil {
 		return c.createSessionFunc(ctx, title)
 	}
+
 	return c.createSession, c.createErr
 }
 
@@ -104,6 +106,7 @@ func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
 	c.mu.Lock()
 	c.deleted = append(c.deleted, id)
 	c.mu.Unlock()
+
 	return c.deleteErr
 }
 
@@ -111,6 +114,7 @@ func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req herme
 	if c.sendMessage != nil {
 		return c.sendMessage(ctx, id, req)
 	}
+
 	return nativeMessage{Info: nativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 }
 
@@ -122,6 +126,7 @@ func (c *fakeHermesClient) Abort(_ context.Context, id string) error {
 	c.mu.Lock()
 	c.aborts = append(c.aborts, id)
 	c.mu.Unlock()
+
 	return c.abortErr
 }
 
@@ -151,6 +156,7 @@ func (c *fakeHermesClient) ReplyPermission(_ context.Context, req permissionRequ
 		message:   message,
 	})
 	c.mu.Unlock()
+
 	return c.replyErr
 }
 
@@ -166,6 +172,7 @@ func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req questionRequest,
 	c.mu.Lock()
 	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, route: req.route(), answers: copied})
 	c.mu.Unlock()
+
 	return c.replyErr
 }
 
@@ -173,6 +180,7 @@ func (c *fakeHermesClient) RejectQuestion(_ context.Context, req questionRequest
 	c.mu.Lock()
 	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID, route: req.route()})
 	c.mu.Unlock()
+
 	return c.replyErr
 }
 
@@ -191,36 +199,42 @@ func (c *fakeHermesClient) XDGDirs() xdgDirs {
 func (c *fakeHermesClient) abortCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.aborts)
 }
 
 func (c *fakeHermesClient) permissionReply(index int) fakePermissionReply {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.permissionReplies[index]
 }
 
 func (c *fakeHermesClient) permissionReplyCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.permissionReplies)
 }
 
 func (c *fakeHermesClient) questionReply(index int) fakeQuestionReply {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.questionReplies[index]
 }
 
 func (c *fakeHermesClient) questionReplyCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.questionReplies)
 }
 
 func (c *fakeHermesClient) questionRejectCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.questionRejects)
 }
 
@@ -293,6 +307,7 @@ func (c *recordingAgentClient) CreateElicitation(
 	if release != nil {
 		if ignoreContext {
 			<-release
+
 			return resp, err
 		}
 		select {
@@ -301,6 +316,7 @@ func (c *recordingAgentClient) CreateElicitation(
 			return acp.UnstableCreateElicitationResponse{}, ctx.Err()
 		}
 	}
+
 	return resp, err
 }
 
@@ -317,6 +333,7 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 	if release != nil {
 		if ignoreContext {
 			<-release
+
 			return resp, err
 		}
 		select {
@@ -325,6 +342,7 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 			return acp.RequestPermissionResponse{}, ctx.Err()
 		}
 	}
+
 	return resp, err
 }
 
@@ -333,6 +351,7 @@ func (c *recordingAgentClient) SessionUpdate(_ context.Context, notification acp
 	c.updates = append(c.updates, notification)
 	err := c.updateErr
 	c.mu.Unlock()
+
 	return err
 }
 
@@ -341,18 +360,21 @@ func (c *recordingAgentClient) NotifyExtension(_ context.Context, method string,
 	c.extensions = append(c.extensions, extensionNotification{method: method, params: params})
 	err := c.notifyErr
 	c.mu.Unlock()
+
 	return err
 }
 
 func (c *recordingAgentClient) updateCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.updates)
 }
 
 func (c *recordingAgentClient) permissionRequestCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.permissions)
 }
 
@@ -371,6 +393,7 @@ func testNativeSession(id string) nativeSession {
 	native.Model.ProviderID = "openai"
 	native.Model.ModelID = "gpt-test"
 	native.Time.Updated = 1_700_000_000_000
+
 	return native
 }
 
@@ -381,6 +404,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 			client.xdg, _ = createXDGDirs(root, "session-1")
 		}
 	}
+
 	return newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
 		SessionID:       "session-1",
 		NativeSessionID: "native-1",

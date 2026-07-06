@@ -43,6 +43,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
 		return nil
 	}
 	if code := run(context.Background(), []string{
@@ -86,6 +87,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 			return err
 		}
 		<-ctx.Done()
+
 		return ctx.Err()
 	}
 	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, io.Discard); code != 143 {
@@ -149,6 +151,7 @@ func replaceGlobals(t *testing.T) func() {
 	oldServe := serve
 	oldVersion := agentVersion
 	oldExit := exit
+
 	return func() {
 		serve = oldServe
 		agentVersion = oldVersion

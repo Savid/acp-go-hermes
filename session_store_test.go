@@ -46,40 +46,7 @@ func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	cancel()
 	key := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
 	subkey := SessionKey{SessionID: "s1", Subpath: "idmap"}
-	var nilStore *InMemorySessionStore
-
-	for name, fn := range map[string]func(context.Context) error{
-		"append": func(ctx context.Context) error {
-			return nilStore.Append(ctx, key, []SessionStoreEntry{json.RawMessage(`{}`)})
-		},
-		"load": func(ctx context.Context) error {
-			_, err := nilStore.Load(ctx, key)
-			return err
-		},
-		"replace": func(ctx context.Context) error {
-			return nilStore.Replace(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{json.RawMessage(`{}`)}}})
-		},
-		"delete": func(ctx context.Context) error { return nilStore.Delete(ctx, key) },
-		"list": func(ctx context.Context) error {
-			_, err := nilStore.ListSessions(ctx)
-			return err
-		},
-		"subkeys": func(ctx context.Context) error {
-			_, err := nilStore.ListSubkeys(ctx, key)
-			return err
-		},
-	} {
-		t.Run(name+" canceled", func(t *testing.T) {
-			if err := fn(cancelled); !errors.Is(err, context.Canceled) {
-				t.Fatalf("canceled err = %v", err)
-			}
-		})
-		t.Run(name+" nil", func(t *testing.T) {
-			if err := fn(ctx); err == nil {
-				t.Fatal("nil store call succeeded")
-			}
-		})
-	}
+	testInMemoryStoreNilAndCanceledCalls(t, ctx, cancelled, key)
 
 	store := &InMemorySessionStore{}
 	if err := store.Append(ctx, key, nil); err != nil {
@@ -108,11 +75,11 @@ func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	if loadedAgain[0][0] == '[' {
 		t.Fatal("loaded entry was not cloned")
 	}
-	if err := store.Append(ctx, subkey, []SessionStoreEntry{json.RawMessage(`{"sub":true}`)}); err != nil {
-		t.Fatalf("append subkey: %v", err)
+	if err2 := store.Append(ctx, subkey, []SessionStoreEntry{json.RawMessage(`{"sub":true}`)}); err2 != nil {
+		t.Fatalf("append subkey: %v", err2)
 	}
-	if err := store.Append(ctx, SessionKey{SessionID: "s0", Subpath: SessionStoreMainSubpath}, []SessionStoreEntry{json.RawMessage(`{bad}`)}); err != nil {
-		t.Fatalf("append invalid summary: %v", err)
+	if err3 := store.Append(ctx, SessionKey{SessionID: "s0", Subpath: SessionStoreMainSubpath}, []SessionStoreEntry{json.RawMessage(`{bad}`)}); err3 != nil {
+		t.Fatalf("append invalid summary: %v", err3)
 	}
 	summaries, err := store.ListSessions(ctx)
 	if err != nil {
@@ -134,14 +101,63 @@ func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	if len(subkeys) != 1 || subkeys[0] != "idmap" {
 		t.Fatalf("subkeys = %#v", subkeys)
 	}
-	if err := store.Delete(ctx, SessionKey{SessionID: "missing", Subpath: "sub"}); err != nil {
-		t.Fatalf("delete missing: %v", err)
+	testInMemoryStoreTombstonedAppends(t, ctx, store, key, subkey)
+	testInMemoryStoreTieOrderingAndNilTombstones(t, ctx)
+}
+
+func testInMemoryStoreNilAndCanceledCalls(t *testing.T, ctx, cancelled context.Context, key SessionKey) {
+	t.Helper()
+
+	var nilStore *InMemorySessionStore
+
+	for name, fn := range map[string]func(context.Context) error{
+		"append": func(ctx context.Context) error {
+			return nilStore.Append(ctx, key, []SessionStoreEntry{json.RawMessage(`{}`)})
+		},
+		"load": func(ctx context.Context) error {
+			_, err := nilStore.Load(ctx, key)
+
+			return err
+		},
+		"replace": func(ctx context.Context) error {
+			return nilStore.Replace(ctx, key, []SessionStoreReplacement{{Key: key, Entries: []SessionStoreEntry{json.RawMessage(`{}`)}}})
+		},
+		"delete": func(ctx context.Context) error { return nilStore.Delete(ctx, key) },
+		"list": func(ctx context.Context) error {
+			_, err := nilStore.ListSessions(ctx)
+
+			return err
+		},
+		"subkeys": func(ctx context.Context) error {
+			_, err := nilStore.ListSubkeys(ctx, key)
+
+			return err
+		},
+	} {
+		t.Run(name+" canceled", func(t *testing.T) {
+			if err := fn(cancelled); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled err = %v", err)
+			}
+		})
+		t.Run(name+" nil", func(t *testing.T) {
+			if err := fn(ctx); err == nil {
+				t.Fatal("nil store call succeeded")
+			}
+		})
 	}
-	if err := store.Delete(ctx, subkey); err != nil {
-		t.Fatalf("delete subkey: %v", err)
+}
+
+func testInMemoryStoreTombstonedAppends(t *testing.T, ctx context.Context, store *InMemorySessionStore, key, subkey SessionKey) {
+	t.Helper()
+
+	if err4 := store.Delete(ctx, SessionKey{SessionID: "missing", Subpath: "sub"}); err4 != nil {
+		t.Fatalf("delete missing: %v", err4)
 	}
-	if err := store.Append(ctx, subkey, []SessionStoreEntry{json.RawMessage(`{"ignored":true}`)}); err != nil {
-		t.Fatalf("append tombstoned subkey: %v", err)
+	if err5 := store.Delete(ctx, subkey); err5 != nil {
+		t.Fatalf("delete subkey: %v", err5)
+	}
+	if err6 := store.Append(ctx, subkey, []SessionStoreEntry{json.RawMessage(`{"ignored":true}`)}); err6 != nil {
+		t.Fatalf("append tombstoned subkey: %v", err6)
 	}
 	loadedSubkey, err := store.Load(ctx, subkey)
 	if err != nil {
@@ -150,11 +166,11 @@ func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	if len(loadedSubkey) != 0 {
 		t.Fatalf("tombstoned subkey loaded entries: %#v", loadedSubkey)
 	}
-	if err := store.Delete(ctx, key); err != nil {
-		t.Fatalf("delete main: %v", err)
+	if err7 := store.Delete(ctx, key); err7 != nil {
+		t.Fatalf("delete main: %v", err7)
 	}
-	if err := store.Append(ctx, SessionKey{SessionID: "s1", Subpath: "other"}, []SessionStoreEntry{json.RawMessage(`{"ignored":true}`)}); err != nil {
-		t.Fatalf("append tombstoned main subkey: %v", err)
+	if err8 := store.Append(ctx, SessionKey{SessionID: "s1", Subpath: "other"}, []SessionStoreEntry{json.RawMessage(`{"ignored":true}`)}); err8 != nil {
+		t.Fatalf("append tombstoned main subkey: %v", err8)
 	}
 	loadedMain, err := store.Load(ctx, key)
 	if err != nil {
@@ -163,11 +179,15 @@ func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	if len(loadedMain) != 0 {
 		t.Fatalf("tombstoned main loaded entries: %#v", loadedMain)
 	}
+}
+
+func testInMemoryStoreTieOrderingAndNilTombstones(t *testing.T, ctx context.Context) {
+	t.Helper()
 
 	tieStore := NewInMemorySessionStore()
 	for _, id := range []string{"b", "a"} {
-		if err := tieStore.Append(ctx, SessionKey{SessionID: id, Subpath: SessionStoreMainSubpath}, []SessionStoreEntry{json.RawMessage(`{}`)}); err != nil {
-			t.Fatalf("append tie %s: %v", id, err)
+		if err9 := tieStore.Append(ctx, SessionKey{SessionID: id, Subpath: SessionStoreMainSubpath}, []SessionStoreEntry{json.RawMessage(`{}`)}); err9 != nil {
+			t.Fatalf("append tie %s: %v", id, err9)
 		}
 	}
 	tieStore.mu.Lock()

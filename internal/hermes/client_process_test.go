@@ -41,6 +41,7 @@ func newWSGateway(t *testing.T) *wsGateway {
 	gateway := &wsGateway{t: t}
 	gateway.server = httptest.NewServer(http.HandlerFunc(gateway.handle))
 	t.Cleanup(gateway.server.Close)
+
 	return gateway
 }
 
@@ -51,11 +52,13 @@ func (g *wsGateway) url() string {
 func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/ws" {
 		http.NotFound(w, r)
+
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		g.t.Errorf("accept websocket: %v", err)
+
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
@@ -97,6 +100,7 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 		case "hang":
 		case "close":
 			_ = conn.Close(websocket.StatusInternalError, "forced close")
+
 			return
 		case "empty-result":
 			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID})
@@ -167,6 +171,7 @@ func (g *wsGateway) writeRaw(ctx context.Context, conn *websocket.Conn, value an
 	data, err := json.Marshal(value)
 	if err != nil {
 		g.t.Errorf("marshal websocket value: %v", err)
+
 		return
 	}
 	_ = conn.Write(ctx, websocket.MessageText, data)
@@ -198,6 +203,7 @@ func gatewayCallCount(gateway *wsGateway, method string) int {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -237,12 +243,21 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	gateway := newWSGateway(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, gateway.url(), nil)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
+	client, dialErr := Dial(ctx, gateway.url(), nil)
+	if dialErr != nil {
+		t.Fatalf("Dial: %v", dialErr)
 	}
 
-	if event := <-client.Events(); event.Type != "gateway.ready" {
+	assertClientEventStream(t, client)
+	assertClientWrappers(t, ctx, client)
+	assertClientCallEdges(t, ctx, client)
+	assertClientCloseSemantics(t, ctx, client, gateway)
+}
+
+func assertClientEventStream(t *testing.T, client *Client) {
+	t.Helper()
+
+	if event := <-client.Events(); event.Type != eventGatewayReady {
 		t.Fatalf("first event = %#v", event)
 	}
 	if err := <-client.Errors(); err == nil {
@@ -257,6 +272,10 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if client.Events() == nil || client.Errors() == nil {
 		t.Fatal("event accessors returned nil")
 	}
+}
+
+func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
+	t.Helper()
 
 	if out, err := client.CreateSession(ctx, map[string]any{"cwd": "/repo"}); err != nil || out.SessionID != "live" {
 		t.Fatalf("CreateSession = %#v err=%v", out, err)
@@ -294,6 +313,11 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if out, err := client.ModelOptions(ctx, "live"); err != nil || len(out.Providers) != 2 {
 		t.Fatalf("ModelOptions = %#v err=%v", out, err)
 	}
+}
+
+func assertClientCallEdges(t *testing.T, ctx context.Context, client *Client) {
+	t.Helper()
+
 	if err := client.Call(ctx, "missing", nil, nil); !IsNotFound(err) {
 		t.Fatalf("missing error = %v", err)
 	}
@@ -312,13 +336,18 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if err := client.Call(shortBadRPC, "bad-rpc", nil, nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("bad rpc frame error = %v", err)
 	}
-	rawConn, resp, err := websocket.Dial(ctx, gateway.url(), nil)
+}
+
+func assertClientCloseSemantics(t *testing.T, ctx context.Context, client *Client, gateway *wsGateway) {
+	t.Helper()
+
+	rawConn, resp, rawErr := websocket.Dial(ctx, gateway.url(), nil)
 	if resp != nil && resp.Body != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
-	if err != nil {
-		t.Fatalf("dial raw write client: %v", err)
+	if rawErr != nil {
+		t.Fatalf("dial raw write client: %v", rawErr)
 	}
 	_ = rawConn.CloseNow()
 	writeClient := &Client{conn: rawConn, pending: map[int64]chan rpcResponse{}}
@@ -351,12 +380,12 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	if err := client.Call(ctx, "session.active_list", nil, nil); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("closed Call error = %v", err)
 	}
-	client, err = Dial(ctx, gateway.url(), nil)
-	if err != nil {
-		t.Fatalf("redial: %v", err)
+	reconnected, dialErr := Dial(ctx, gateway.url(), nil)
+	if dialErr != nil {
+		t.Fatalf("redial: %v", dialErr)
 	}
 	waitLoopDone := make(chan error, 1)
-	go func() { waitLoopDone <- client.Call(context.Background(), "close", nil, nil) }()
+	go func() { waitLoopDone <- reconnected.Call(context.Background(), "close", nil, nil) }()
 	if err := <-waitLoopDone; err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("read loop pending close error = %v", err)
 	}
@@ -437,11 +466,11 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	usedConfigure := false
-	proc, err := Start(ctx, ProcessOptions{
+	proc, startErr := Start(ctx, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
 		Home:           t.TempDir(),
 		Cwd:            t.TempDir(),
-		Env:            map[string]string{"BASE_ENV": "1"},
+		Env:            map[string]string{"BASE_ENV": "1", "HERMES_WEB_DIST": "1"},
 		Timeout:        5 * time.Second,
 		LogWriter:      io.Discard,
 		Configure: func(cmd *exec.Cmd) {
@@ -449,8 +478,8 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 			cmd.Env = append(cmd.Env, "CONFIGURED=1")
 		},
 	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
+	if startErr != nil {
+		t.Fatalf("Start: %v", startErr)
 	}
 	if !usedConfigure {
 		t.Fatal("Configure hook was not called")
@@ -461,24 +490,24 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	if err := proc.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	resumeDomainProc, err := Start(ctx, ProcessOptions{
+	resumeDomainProc, resumeErr := Start(ctx, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.resume"),
 		Home:           t.TempDir(),
 		Timeout:        5 * time.Second,
 	})
-	if err != nil {
-		t.Fatalf("Start with resume domain probe: %v", err)
+	if resumeErr != nil {
+		t.Fatalf("Start with resume domain probe: %v", resumeErr)
 	}
 	if err := resumeDomainProc.Close(ctx); err != nil {
 		t.Fatalf("Close resume domain proc: %v", err)
 	}
-	deleteDomainProc, err := Start(ctx, ProcessOptions{
+	deleteDomainProc, deleteErr := Start(ctx, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.delete"),
 		Home:           t.TempDir(),
 		Timeout:        5 * time.Second,
 	})
-	if err != nil {
-		t.Fatalf("Start with delete domain probe: %v", err)
+	if deleteErr != nil {
+		t.Fatalf("Start with delete domain probe: %v", deleteErr)
 	}
 	if err := deleteDomainProc.Close(ctx); err != nil {
 		t.Fatalf("Close delete domain proc: %v", err)
@@ -486,6 +515,14 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	if err := (&Process{}).Close(ctx); err != nil {
 		t.Fatalf("empty Close: %v", err)
 	}
+
+	assertProcessScalarHelpers(t, ctx)
+	assertProcessStartSeams(t, ctx)
+}
+
+func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
+	t.Helper()
+
 	if port, err := freePort(); err != nil || port <= 0 {
 		t.Fatalf("freePort = %d err=%v", port, err)
 	}
@@ -511,12 +548,17 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	if err := methodPresent("broken.method", errors.New("broken")); err == nil {
 		t.Fatal("methodPresent accepted ordinary error")
 	}
+}
+
+func assertProcessStartSeams(t *testing.T, ctx context.Context) {
+	t.Helper()
 
 	restoreProcessSeams(t)
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "hermes" {
 			t.Fatalf("default executable = %q", name)
 		}
+
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
 	}
 	if _, err := Start(ctx, ProcessOptions{Home: t.TempDir()}); err == nil {
@@ -528,6 +570,7 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 		if len(args) == 1 && args[0] == "--version" {
 			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.18.0\\n'")
 		}
+
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
 	}
 	if _, err := Start(ctx, ProcessOptions{ExecutablePath: "start-fails", Home: t.TempDir()}); err == nil {
@@ -537,6 +580,67 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 
 func TestProcessFaultBranches(t *testing.T) {
 	ctx := context.Background()
+
+	assertStartFaultModes(t, ctx)
+
+	restoreProcessSeams(t)
+	mkdirTemp = func(string, string) (string, error) { return "", errors.New("mktemp failed") }
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK)}); err == nil {
+		t.Fatal("mktemp error ignored")
+	}
+
+	restoreProcessSeams(t)
+	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("listen failed") }
+	if _, err := freePort(); err == nil {
+		t.Fatal("freePort listen error ignored")
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
+		t.Fatal("Start ignored freePort error")
+	}
+
+	resetProcessSeams()
+	restoreProcessSeams(t)
+	randReader = errorReader{err: errors.New("entropy failed")}
+	if _, err := randomToken(); err == nil {
+		t.Fatal("randomToken entropy error ignored")
+	}
+	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
+		t.Fatal("Start ignored randomToken error")
+	}
+
+	resetProcessSeams()
+	restoreProcessSeams(t)
+	userHomeDir = func() (string, error) { return "", errors.New("home failed") }
+	if defaultWebDistExists() {
+		t.Fatal("defaultWebDistExists ignored home error")
+	}
+	restoreProcessSeams(t)
+	home := t.TempDir()
+	userHomeDir = func() (string, error) { return home, nil }
+	statPath = func(string) (os.FileInfo, error) { return nil, errors.New("stat failed") }
+	if defaultWebDistExists() {
+		t.Fatal("defaultWebDistExists ignored stat error")
+	}
+	restoreProcessSeams(t)
+	userHomeDir = func() (string, error) { return home, nil }
+	statPath = func(string) (os.FileInfo, error) { return fakeFileInfo{dir: false}, nil }
+	if defaultWebDistExists() {
+		t.Fatal("defaultWebDistExists accepted file")
+	}
+	restoreProcessSeams(t)
+	userHomeDir = func() (string, error) { return home, nil }
+	statPath = func(string) (os.FileInfo, error) { return fakeFileInfo{dir: true}, nil }
+	if !defaultWebDistExists() {
+		t.Fatal("defaultWebDistExists rejected dir")
+	}
+
+	resetProcessSeams()
+	assertProcessWaitBranches(t, ctx)
+}
+
+func assertStartFaultModes(t *testing.T, ctx context.Context) {
+	t.Helper()
+
 	if _, err := Start(ctx, ProcessOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes"), Home: t.TempDir()}); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
@@ -592,59 +696,11 @@ func TestProcessFaultBranches(t *testing.T) {
 			}
 		})
 	}
+}
 
-	restoreProcessSeams(t)
-	mkdirTemp = func(string, string) (string, error) { return "", errors.New("mktemp failed") }
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK)}); err == nil {
-		t.Fatal("mktemp error ignored")
-	}
+func assertProcessWaitBranches(t *testing.T, ctx context.Context) {
+	t.Helper()
 
-	restoreProcessSeams(t)
-	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("listen failed") }
-	if _, err := freePort(); err == nil {
-		t.Fatal("freePort listen error ignored")
-	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
-		t.Fatal("Start ignored freePort error")
-	}
-
-	resetProcessSeams()
-	restoreProcessSeams(t)
-	randReader = errorReader{err: errors.New("entropy failed")}
-	if _, err := randomToken(); err == nil {
-		t.Fatal("randomToken entropy error ignored")
-	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
-		t.Fatal("Start ignored randomToken error")
-	}
-
-	resetProcessSeams()
-	restoreProcessSeams(t)
-	userHomeDir = func() (string, error) { return "", errors.New("home failed") }
-	if defaultWebDistExists() {
-		t.Fatal("defaultWebDistExists ignored home error")
-	}
-	restoreProcessSeams(t)
-	home := t.TempDir()
-	userHomeDir = func() (string, error) { return home, nil }
-	statPath = func(string) (os.FileInfo, error) { return nil, errors.New("stat failed") }
-	if defaultWebDistExists() {
-		t.Fatal("defaultWebDistExists ignored stat error")
-	}
-	restoreProcessSeams(t)
-	userHomeDir = func() (string, error) { return home, nil }
-	statPath = func(string) (os.FileInfo, error) { return fakeFileInfo{dir: false}, nil }
-	if defaultWebDistExists() {
-		t.Fatal("defaultWebDistExists accepted file")
-	}
-	restoreProcessSeams(t)
-	userHomeDir = func() (string, error) { return home, nil }
-	statPath = func(string) (os.FileInfo, error) { return fakeFileInfo{dir: true}, nil }
-	if !defaultWebDistExists() {
-		t.Fatal("defaultWebDistExists rejected dir")
-	}
-
-	resetProcessSeams()
 	if err := (&Process{StatusURL: ":// bad"}).waitReady(ctx); err == nil {
 		t.Fatal("waitReady accepted invalid status URL")
 	}
@@ -697,9 +753,11 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 		ch := make(chan time.Time, 1)
 		if firstTimer {
 			firstTimer = false
+
 			return ch
 		}
 		ch <- time.Now()
+
 		return ch
 	}
 	if err := (&Process{Cmd: fakeStartedCommand()}).Close(cancelled); !errors.Is(err, context.Canceled) {
@@ -713,6 +771,7 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 	releaseWait := make(chan struct{})
 	waitProcessCommand = func(*exec.Cmd) error {
 		<-releaseWait
+
 		return nil
 	}
 	firstTimerFired := false
@@ -727,6 +786,7 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			close(releaseWait)
 		}()
+
 		return ch
 	}
 	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
@@ -740,6 +800,7 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 	after = func(time.Duration) <-chan time.Time {
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
+
 		return ch
 	}
 	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
@@ -783,6 +844,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatalf("write fake executable: %v", err)
 	}
+
 	return path
 }
 
@@ -792,12 +854,15 @@ func runFakeHermesProcess(args []string, mode string) error {
 			switch mode {
 			case fakeProcessModeOldVersion:
 				_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.17.9 (test)")
+
 				return nil
 			case fakeProcessModeBadVersion:
 				_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent test build")
+
 				return nil
 			}
 			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (test)")
+
 			return nil
 		}
 	}
@@ -805,6 +870,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {
 			port = args[i+1]
+
 			break
 		}
 	}
@@ -815,6 +881,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
 		if mode == fakeProcessModeBadStatus {
 			w.WriteHeader(http.StatusServiceUnavailable)
+
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -866,6 +933,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
 	return server.ListenAndServe()
 }
 
@@ -922,6 +990,7 @@ func cloneExecutableProbeCache() map[string]struct{} {
 	for key, value := range executableProbed {
 		out[key] = value
 	}
+
 	return out
 }
 

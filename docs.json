@@ -7,13 +7,18 @@
     "light": "#3B82F6",
     "dark": "#1D4ED8"
   },
+  "icons": {
+    "library": "lucide"
+  },
   "navigation": {
     "tabs": [
       {
         "tab": "Guides",
+        "icon": "book-open",
         "groups": [
           {
             "group": "Get started",
+            "icon": "rocket",
             "pages": [
               "docs/overview",
               "docs/get-started/quickstart",
@@ -23,20 +28,22 @@
             ]
           },
           {
-            "group": "Core",
+            "group": "Core concepts",
+            "icon": "messages-square",
             "pages": [
               "docs/core/sessions",
               "docs/core/prompt-streaming"
             ]
           },
           {
-            "group": "Features",
+            "group": "Hermes features",
+            "icon": "terminal",
             "pages": [
               "docs/features/authentication",
-              "docs/features/mcp",
               "docs/features/models-config",
               "docs/features/permissions",
               "docs/features/elicitation",
+              "docs/features/mcp",
               "docs/features/session-store",
               "docs/features/raw-events"
             ]
@@ -45,9 +52,11 @@
       },
       {
         "tab": "Reference",
+        "icon": "square-code",
         "groups": [
           {
-            "group": "API",
+            "group": "API reference",
+            "icon": "code",
             "pages": [
               "docs/reference/go-api",
               "docs/reference/cli",
@@ -58,13 +67,37 @@
           },
           {
             "group": "Operations",
+            "icon": "shield",
             "pages": [
-              "docs/operations/security",
-              "docs/operations/observability"
+              "docs/operations/observability",
+              "docs/operations/security"
             ]
           }
         ]
       }
     ]
+  },
+  "navbar": {
+    "primary": {
+      "type": "button",
+      "label": "View source",
+      "href": "https://github.com/savid/acp-go-hermes"
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "claude",
+      "chatgpt",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/savid/acp-go-hermes"
+    }
   }
 }

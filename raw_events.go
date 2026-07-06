@@ -37,7 +37,9 @@ func rawMessageConfigFromMeta(meta map[string]any) rawMessageConfig {
 	if hermesMeta == nil {
 		return rawMessageConfig{}
 	}
+
 	rawEvent, _ := hermesMeta[rawEventKey].(map[string]any)
+
 	enabled, _ := rawEvent[rawEventEnabledKey].(bool)
 	if enabled {
 		return rawMessageConfig{enabled: true}
@@ -57,12 +59,12 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 	}
 
 	return map[string]any{
-		"sessionId": payload["sessionId"],
-		"sequence":  payload["sequence"],
-		"source":    payload["source"],
-		"event": map[string]any{
-			"truncated": true,
-			"error":     fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
+		jsonFieldSessionID: payload[jsonFieldSessionID],
+		keySequence:        payload[keySequence],
+		keySource:          payload[keySource],
+		keyEvent: map[string]any{
+			"truncated":    true,
+			jsonFieldError: fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
 		},
 	}
 }

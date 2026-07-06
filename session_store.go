@@ -66,22 +66,28 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
+
 	if len(entries) == 0 {
 		return nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.ensureLocked()
+
 	if s.isTombstonedLocked(key) {
 		return nil
 	}
+
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))
 	}
+
 	s.updatedAt[key] = time.Now().UnixMilli()
 
 	return nil
@@ -91,12 +97,14 @@ func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]Sess
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.isTombstonedLocked(key) {
 		return nil, nil
 	}
@@ -108,33 +116,42 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.ensureLocked()
+
 	if main.SessionID == "" {
 		return fmt.Errorf("main session id is required")
 	}
+
 	if main.Subpath != SessionStoreMainSubpath {
 		return fmt.Errorf("main subpath must be %q", SessionStoreMainSubpath)
 	}
+
 	mainCount := 0
+
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return fmt.Errorf("replacement key does not match main session")
 		}
+
 		if replacement.Key.Subpath == SessionStoreMainSubpath {
 			mainCount++
 		}
 	}
+
 	if mainCount != 1 {
 		return fmt.Errorf("replacements must include the main key exactly once")
 	}
 
 	now := time.Now().UnixMilli()
+
 	for candidate := range s.entries {
 		if candidate.SessionID == main.SessionID {
 			delete(s.entries, candidate)
@@ -142,13 +159,16 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			s.tombstones[candidate] = now
 		}
 	}
+
 	for _, replacement := range replacements {
 		if len(replacement.Entries) == 0 {
 			delete(s.entries, replacement.Key)
 			delete(s.updatedAt, replacement.Key)
 			s.tombstones[replacement.Key] = now
+
 			continue
 		}
+
 		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
 		s.updatedAt[replacement.Key] = now
 		delete(s.tombstones, replacement.Key)
@@ -161,30 +181,38 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.ensureLocked()
+
 	now := time.Now().UnixMilli()
 	matched := false
+
 	for candidate := range s.entries {
 		if candidate.SessionID != key.SessionID {
 			continue
 		}
+
 		if key.Subpath != SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
 			continue
 		}
+
 		delete(s.entries, candidate)
 		delete(s.updatedAt, candidate)
 		s.tombstones[candidate] = now
 		matched = true
 	}
+
 	if !matched {
 		s.tombstones[key] = now
 	}
+
 	if key.Subpath == SessionStoreMainSubpath {
 		s.tombstones[mainSessionKey(key.SessionID)] = now
 	}
@@ -196,17 +224,21 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	summaries := make([]SessionSummary, 0)
+
 	for key, entries := range s.entries {
 		if key.SessionID == "" || key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
 			continue
 		}
+
 		summary := SessionSummary{
 			SessionID:          key.SessionID,
 			UpdatedAtUnixMilli: s.updatedAt[key],
@@ -214,12 +246,15 @@ func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSumma
 		if len(entries) > 0 {
 			summary = summaryFromStoreEntry(summary, entries[len(entries)-1])
 		}
+
 		summaries = append(summaries, summary)
 	}
+
 	slices.SortFunc(summaries, func(left, right SessionSummary) int {
 		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
 			return byTime
 		}
+
 		return strings.Compare(left.SessionID, right.SessionID)
 	})
 
@@ -230,19 +265,24 @@ func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if s == nil {
 		return nil, fmt.Errorf("nil InMemorySessionStore")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	subpaths := make([]string, 0)
+
 	for candidate := range s.entries {
 		if candidate.SessionID != key.SessionID || candidate.Subpath == SessionStoreMainSubpath || s.isTombstonedLocked(candidate) {
 			continue
 		}
+
 		subpaths = append(subpaths, candidate.Subpath)
 	}
+
 	slices.Sort(subpaths)
 
 	return subpaths, nil
@@ -252,9 +292,11 @@ func (s *InMemorySessionStore) ensureLocked() {
 	if s.entries == nil {
 		s.entries = make(map[SessionKey][]SessionStoreEntry)
 	}
+
 	if s.updatedAt == nil {
 		s.updatedAt = make(map[SessionKey]int64)
 	}
+
 	if s.tombstones == nil {
 		s.tombstones = make(map[SessionKey]int64)
 	}
@@ -264,13 +306,17 @@ func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
 	if s.tombstones == nil {
 		return false
 	}
+
 	if _, ok := s.tombstones[key]; ok {
 		return true
 	}
+
 	if key.Subpath != SessionStoreMainSubpath {
 		_, ok := s.tombstones[mainSessionKey(key.SessionID)]
+
 		return ok
 	}
+
 	return false
 }
 
@@ -282,6 +328,7 @@ func cloneStoreEntries(entries []SessionStoreEntry) []SessionStoreEntry {
 	if len(entries) == 0 {
 		return nil
 	}
+
 	clone := make([]SessionStoreEntry, 0, len(entries))
 	for _, entry := range entries {
 		clone = append(clone, cloneStoreEntry(entry))
@@ -299,16 +346,18 @@ func summaryFromStoreEntry(summary SessionSummary, entry SessionStoreEntry) Sess
 	if err := json.Unmarshal(entry, &snapshot); err != nil {
 		return summary
 	}
+
 	if snapshot.CapturedAtUnixMilli > 0 {
 		summary.UpdatedAtUnixMilli = snapshot.CapturedAtUnixMilli
 	}
+
 	summary.Cwd = snapshot.Session.Cwd
 	summary.Title = snapshot.Session.Title
 	summary.Meta = map[string]any{
 		hermesMetaKey: map[string]any{
 			hermesNativeIDMetaKey: snapshot.Session.NativeSessionID,
 			"stored":              true,
-			"source":              "hermes-state",
+			keySource:             "hermes-state",
 		},
 	}
 

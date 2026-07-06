@@ -65,6 +65,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		if agent.close != nil {
 			agent.close()
 		}
+
 		if agent.wait != nil {
 			_ = agent.wait()
 		}
@@ -160,6 +161,7 @@ func (*client) RequestPermission(_ context.Context, params acp.RequestPermission
 			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId)}, nil
 		}
 	}
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 

@@ -17,7 +17,7 @@ import (
 const (
 	envRunIntegration = "ACP_GO_HERMES_RUN_INTEGRATION"
 	envRunLiveTokens  = "ACP_GO_HERMES_RUN_LIVE_TOKENS"
-	envHermesPath     = "ACP_GO_HERMES_HERMES_PATH"
+	envHermesPath     = "ACP_GO_HERMES_HARNESS_PATH"
 	envAgentBinary    = "ACP_GO_HERMES_AGENT_BINARY"
 )
 

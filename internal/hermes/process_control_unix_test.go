@@ -33,6 +33,7 @@ func TestProcessCloseKillsProcessGroupGrandchild(t *testing.T) {
 	after = func(time.Duration) <-chan time.Time {
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
+
 		return ch
 	}
 
@@ -66,6 +67,7 @@ func TestSignalProcessBranches(t *testing.T) {
 	processGetpgid = func(int) (int, error) { return 0, syscall.ESRCH }
 	processKill = func(int, syscall.Signal) error {
 		t.Fatal("processKill called after ESRCH getpgid")
+
 		return nil
 	}
 	if err := signalProcess(cmd, syscall.SIGTERM); err != nil {
@@ -76,6 +78,7 @@ func TestSignalProcessBranches(t *testing.T) {
 	processGetpgid = func(int) (int, error) { return 0, errors.New("pgid failed") }
 	processKill = func(pid int, _ syscall.Signal) error {
 		target = pid
+
 		return nil
 	}
 	if err := signalProcess(cmd, syscall.SIGTERM); err != nil || target != 123 {
@@ -105,6 +108,7 @@ func waitForPIDFile(t *testing.T, path string) int {
 			if parseErr != nil {
 				t.Fatalf("parse child pid %q: %v", data, parseErr)
 			}
+
 			return pid
 		}
 		select {
@@ -118,5 +122,6 @@ func waitForPIDFile(t *testing.T, path string) int {
 
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
+
 	return err == nil || errors.Is(err, syscall.EPERM)
 }

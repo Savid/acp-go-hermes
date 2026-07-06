@@ -45,8 +45,8 @@ type Options struct {
 
 func applyOptions(opts []Option) Options {
 	options := Options{
-		AgentName:               "acp-go-hermes",
-		AgentTitle:              "acp-go-hermes",
+		AgentName:               valACPGoHermes,
+		AgentTitle:              valACPGoHermes,
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
 		clientFactory:           startHermesServer,
