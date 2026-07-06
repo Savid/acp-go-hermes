@@ -96,22 +96,38 @@ func (c *localAgentConnection) Done() <-chan struct{} {
 }
 
 func (c *localAgentConnection) handle(ctx context.Context, method string, params json.RawMessage) (any, *acp.RequestError) {
+	ctx, finish := c.agent.observe.StartACPRequest(ctx, method)
+
+	var reqErr *acp.RequestError
+	defer func() {
+		if reqErr != nil {
+			finish(reqErr)
+		} else {
+			finish(nil)
+		}
+	}()
+
 	if method != acp.AgentMethodInitialize && !c.initialized.Load() {
-		return nil, acp.NewInvalidRequest(map[string]any{
+		reqErr = acp.NewInvalidRequest(map[string]any{
 			jsonFieldMethod: method,
 			jsonFieldError:  "initialize must be called before other ACP methods",
 		})
+
+		return nil, reqErr
 	}
 
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
+		reqErr = requestError(err)
 
-		return result, requestError(err)
+		return result, reqErr
 	}
 
 	handler, ok := localAgentHandlers[method]
 	if !ok {
-		return nil, acp.NewMethodNotFound(method)
+		reqErr = acp.NewMethodNotFound(method)
+
+		return nil, reqErr
 	}
 
 	result, reqErr := handler(ctx, c.agent, params)

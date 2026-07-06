@@ -38,11 +38,16 @@ const (
 	valUnsupported  = "unsupported"
 	valImage        = "image"
 	valSuccess      = "success"
+	valFile         = "file"
 
-	keyLimit = "limit"
-	keyMode  = "mode"
-	keyType  = "type"
-	keyTitle = "title"
+	defaultMimeType = "application/octet-stream"
+
+	keyLimit    = "limit"
+	keyMode     = "mode"
+	keyType     = "type"
+	keyTitle    = "title"
+	keyMime     = "mime"
+	keyFilename = "filename"
 
 	evtApprovalRequest    = "approval.request"
 	evtClarifyRequest     = "clarify.request"

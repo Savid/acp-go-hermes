@@ -161,14 +161,8 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	}
 
 	for _, replacement := range replacements {
-		if len(replacement.Entries) == 0 {
-			delete(s.entries, replacement.Key)
-			delete(s.updatedAt, replacement.Key)
-			s.tombstones[replacement.Key] = now
-
-			continue
-		}
-
+		// A listed key survives even when its entries are empty: exactly the
+		// listed keys stay live (present in Load/ListSessions/ListSubkeys).
 		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
 		s.updatedAt[replacement.Key] = now
 		delete(s.tombstones, replacement.Key)

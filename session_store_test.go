@@ -40,6 +40,51 @@ func TestInMemoryStoreReplaceTombstonesUnlistedSubpaths(t *testing.T) {
 	}
 }
 
+func TestInMemoryStoreReplaceEmptyEntryKeySurvives(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	sub := SessionKey{SessionID: "s1", Subpath: "idmap"}
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+		{Key: sub},
+	}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	if err != nil {
+		t.Fatalf("ListSubkeys: %v", err)
+	}
+	if len(subkeys) != 1 || subkeys[0] != "idmap" {
+		t.Fatalf("listed empty-entry subkey dropped: %#v", subkeys)
+	}
+
+	loaded, err := store.Load(ctx, sub)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("empty-entry subkey had entries: %#v", loaded)
+	}
+
+	if err = store.Append(ctx, sub, []SessionStoreEntry{json.RawMessage(`{"x":1}`)}); err != nil {
+		t.Fatalf("append to survived subkey: %v", err)
+	}
+	loaded, err = store.Load(ctx, sub)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("append after survive: %#v err=%v", loaded, err)
+	}
+
+	sessions, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "s1" {
+		t.Fatalf("main not listed after empty-entry replace: %#v", sessions)
+	}
+}
+
 func TestInMemoryStoreAppendLoadDeleteListAndErrors(t *testing.T) {
 	ctx := context.Background()
 	cancelled, cancel := context.WithCancel(ctx)

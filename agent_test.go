@@ -29,8 +29,8 @@ func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 	if resp.AgentCapabilities.McpCapabilities.Sse {
 		t.Fatal("SSE MCP capability advertised")
 	}
-	if resp.AgentCapabilities.PromptCapabilities.Image {
-		t.Fatal("image prompt capability advertised")
+	if !resp.AgentCapabilities.PromptCapabilities.Image {
+		t.Fatal("image prompt capability missing")
 	}
 	if !resp.AgentCapabilities.PromptCapabilities.EmbeddedContext {
 		t.Fatal("embedded context capability missing")
