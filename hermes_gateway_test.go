@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -656,15 +657,15 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if safePathName(" \t ") != "session" {
 		t.Fatal("safePathName did not default empty input")
 	}
-	if err := materializeHermesMCPConfig(t.TempDir(), nil); err != nil {
-		t.Fatalf("empty MCP config: %v", err)
+	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
+		t.Fatalf("empty config: %v", err)
 	}
 	originalMarshalIndent := hermesMarshalIndent
 	hermesMarshalIndent = func(any, string, string) ([]byte, error) {
 		return nil, errors.New("marshal failed")
 	}
-	if err := materializeHermesMCPConfig(t.TempDir(), []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}); err == nil {
-		t.Fatal("materializeHermesMCPConfig ignored marshal error")
+	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+		t.Fatal("materializeHermesConfig ignored marshal error")
 	}
 	if err := writeLease(t.TempDir(), serverLease{}); err == nil {
 		t.Fatal("writeLease ignored marshal error")
@@ -674,9 +675,341 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if err := os.WriteFile(homeFile, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := materializeHermesMCPConfig(homeFile, []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}); err == nil {
-		t.Fatal("materializeHermesMCPConfig accepted file home")
+	if err := materializeHermesConfig(homeFile, []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+		t.Fatal("materializeHermesConfig accepted file home")
 	}
+}
+
+func TestMaterializeHermesConfig(t *testing.T) {
+	t.Run("writes non-config seeds verbatim and seeds config.yaml as-is", func(t *testing.T) {
+		home := t.TempDir()
+		files := map[string]string{
+			"config.yaml":               "model:\n  provider: custom\n",
+			"providers/litellm.yaml":    "base_url: http://localhost:4000/v1\n",
+			filepath.FromSlash("a/b/c"): "nested",
+		}
+		if err := materializeHermesConfig(home, nil, files); err != nil {
+			t.Fatalf("materializeHermesConfig: %v", err)
+		}
+		for relative, want := range files {
+			got, err := os.ReadFile(filepath.Join(home, relative))
+			if err != nil {
+				t.Fatalf("read %q: %v", relative, err)
+			}
+			if string(got) != want {
+				t.Fatalf("seed %q = %q, want %q", relative, got, want)
+			}
+			info, err := os.Stat(filepath.Join(home, relative))
+			if err != nil {
+				t.Fatalf("stat %q: %v", relative, err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("seed %q mode = %v, want 0600", relative, info.Mode().Perm())
+			}
+		}
+	})
+
+	t.Run("merges wrapper mcp_servers on top of seeded config.yaml", func(t *testing.T) {
+		home := t.TempDir()
+		seed := "model:\n  provider: custom\n  base_url: http://localhost:4000/v1\n  key_env: LITELLM_API_KEY\n  default: gpt-4o\nmcp_servers:\n  seeded:\n    url: http://seed.example\n"
+		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		if err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": seed}); err != nil {
+			t.Fatalf("materializeHermesConfig merge: %v", err)
+		}
+		var config map[string]any
+		data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("merged config not valid: %v (%s)", err, data)
+		}
+		model, ok := config["model"].(map[string]any)
+		if !ok || model["provider"] != "custom" || model["default"] != "gpt-4o" || model["key_env"] != "LITELLM_API_KEY" {
+			t.Fatalf("seed model block lost after merge: %#v", config["model"])
+		}
+		mcp, ok := config["mcp_servers"].(map[string]any)
+		if !ok {
+			t.Fatalf("wrapper mcp_servers missing after merge: %#v", config)
+		}
+		if _, ok := mcp["wrapper"].(map[string]any); !ok {
+			t.Fatalf("wrapper mcp server missing after merge: %#v", mcp)
+		}
+		if _, ok := mcp["seeded"].(map[string]any); !ok {
+			t.Fatalf("seeded mcp server dropped after merge: %#v", mcp)
+		}
+	})
+
+	t.Run("writes wrapper mcp_servers without a seed", func(t *testing.T) {
+		home := t.TempDir()
+		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		if err := materializeHermesConfig(home, servers, nil); err != nil {
+			t.Fatalf("materializeHermesConfig mcp-only: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config map[string]any
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("mcp-only config not valid: %v", err)
+		}
+		if _, ok := config["mcp_servers"].(map[string]any); !ok {
+			t.Fatalf("mcp_servers missing: %#v", config)
+		}
+	})
+
+	t.Run("rejects invalid seeded config.yaml when merging", func(t *testing.T) {
+		home := t.TempDir()
+		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": "model: [unterminated"})
+		if err == nil {
+			t.Fatal("invalid seeded config.yaml accepted")
+		}
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("invalid seed error = %T, want *acp.RequestError", err)
+		}
+	})
+
+	t.Run("rejects unsupported mcp server", func(t *testing.T) {
+		home := t.TempDir()
+		servers := []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}}
+		if err := materializeHermesConfig(home, servers, nil); err == nil {
+			t.Fatal("unsupported mcp server accepted")
+		}
+	})
+
+	t.Run("empty is a no-op", func(t *testing.T) {
+		if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
+			t.Fatalf("nil seed files: %v", err)
+		}
+		if err := materializeHermesConfig(t.TempDir(), nil, map[string]string{}); err != nil {
+			t.Fatalf("empty seed files: %v", err)
+		}
+	})
+
+	t.Run("rejects confinement escapes", func(t *testing.T) {
+		absolute := filepath.Join(t.TempDir(), "abs")
+		for name, relative := range map[string]string{
+			"empty":           "",
+			"absolute":        absolute,
+			"parent":          "..",
+			"parent-prefix":   filepath.FromSlash("../escape"),
+			"parent-embedded": filepath.FromSlash("nested/../../escape"),
+			"parent-trailing": filepath.FromSlash("nested/.."),
+		} {
+			t.Run(name, func(t *testing.T) {
+				home := t.TempDir()
+				err := materializeHermesConfig(home, nil, map[string]string{relative: "x"})
+				if err == nil {
+					t.Fatalf("seed path %q accepted", relative)
+				}
+				var reqErr *acp.RequestError
+				if !errors.As(err, &reqErr) {
+					t.Fatalf("seed path %q error = %T, want *acp.RequestError", relative, err)
+				}
+			})
+		}
+	})
+
+	t.Run("propagates mkdir errors", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("dir-block"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// "config.yaml/child" cannot create a parent dir over an existing file.
+		if err := materializeHermesConfig(home, nil, map[string]string{
+			filepath.FromSlash("config.yaml/child"): "x",
+		}); err == nil {
+			t.Fatal("materializeHermesConfig ignored mkdir error")
+		}
+	})
+
+	t.Run("seed into empty root records a sorted manifest", func(t *testing.T) {
+		home := t.TempDir()
+		files := map[string]string{
+			"config.yaml":                   "model: {}\n",
+			filepath.FromSlash("a/b.json"):  "{}",
+			filepath.FromSlash("providers"): "p",
+		}
+		if err := materializeHermesConfig(home, nil, files); err != nil {
+			t.Fatalf("materializeHermesConfig: %v", err)
+		}
+		manifest := readHermesSeedManifest(t, home)
+		want := []string{"a/b.json", "config.yaml", "providers"}
+		if !reflect.DeepEqual(manifest, want) {
+			t.Fatalf("manifest = %#v, want %#v", manifest, want)
+		}
+		for relative := range files {
+			if _, err := os.Stat(filepath.Join(home, relative)); err != nil {
+				t.Fatalf("seed %q not written: %v", relative, err)
+			}
+		}
+	})
+
+	t.Run("re-seed identical content is idempotent", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "same"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "same"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, "foo"+hermesSeedBackupSuffix)); !os.IsNotExist(err) {
+			t.Fatalf("identical re-seed created a .wagie.bak (err=%v)", err)
+		}
+	})
+
+	t.Run("re-seed changed content backs up prior bytes", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v2"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(home, "foo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "v2" {
+			t.Fatalf("foo = %q, want v2", got)
+		}
+		backup, err := os.ReadFile(filepath.Join(home, "foo"+hermesSeedBackupSuffix))
+		if err != nil {
+			t.Fatalf("read backup: %v", err)
+		}
+		if string(backup) != "v1" {
+			t.Fatalf("backup = %q, want v1", backup)
+		}
+	})
+
+	t.Run("fails closed on a pre-existing unmanaged file", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("operator"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := materializeHermesConfig(home, nil, map[string]string{
+			"config.yaml": "model: {}\n",
+			"other.txt":   "data",
+		})
+		if err == nil {
+			t.Fatal("seed over unmanaged config.yaml accepted")
+		}
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("unmanaged seed error = %T, want *acp.RequestError", err)
+		}
+		if !strings.Contains(err.Error(), "config.yaml") {
+			t.Fatalf("error %q does not name config.yaml", err.Error())
+		}
+		// Nothing was written or changed: operator file intact, sibling absent,
+		// no manifest.
+		got, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil || string(got) != "operator" {
+			t.Fatalf("operator config.yaml mutated: got=%q err=%v", got, err)
+		}
+		if _, err := os.Stat(filepath.Join(home, "other.txt")); !os.IsNotExist(err) {
+			t.Fatalf("sibling seed written despite fail-closed (err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, hermesSeedManifestName)); !os.IsNotExist(err) {
+			t.Fatalf("manifest written despite fail-closed (err=%v)", err)
+		}
+	})
+
+	t.Run("manifest survives across passes", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		// A second pass loads the persisted manifest and treats foo as managed,
+		// so re-seeding does not fail closed.
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v2"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		if want := []string{"foo"}; !reflect.DeepEqual(readHermesSeedManifest(t, home), want) {
+			t.Fatalf("manifest = %#v, want %#v", readHermesSeedManifest(t, home), want)
+		}
+	})
+
+	t.Run("rejects a corrupt manifest", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("corrupt manifest accepted")
+		}
+	})
+
+	t.Run("propagates a manifest read error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.Mkdir(filepath.Join(home, hermesSeedManifestName), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored manifest read error")
+		}
+	})
+
+	t.Run("propagates a manifest write error", func(t *testing.T) {
+		home := t.TempDir()
+		original := hermesMarshalIndent
+		hermesMarshalIndent = func(any, string, string) ([]byte, error) {
+			return nil, errors.New("marshal failed")
+		}
+		defer func() { hermesMarshalIndent = original }()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored manifest marshal error")
+		}
+	})
+
+	t.Run("propagates a backup write error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "foo"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte(`["foo"]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// A directory at the backup path blocks the backup copy.
+		if err := os.Mkdir(filepath.Join(home, "foo"+hermesSeedBackupSuffix), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "new"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored backup write error")
+		}
+	})
+
+	t.Run("propagates a read error for a managed directory target", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte(`["mdir"]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(home, "mdir"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// mdir is managed, so the guard proceeds and the read of a directory fails.
+		if err := materializeHermesConfig(home, nil, map[string]string{"mdir": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored managed-target read error")
+		}
+	})
+}
+
+// readHermesSeedManifest decodes the ownership manifest under home for tests.
+func readHermesSeedManifest(t *testing.T, home string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, hermesSeedManifestName))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var entries []string
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	return entries
 }
 
 func TestHermesGatewayServerEdgeBranches(t *testing.T) {

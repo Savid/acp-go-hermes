@@ -483,6 +483,7 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 		Logger:         a.log,
 		ExistingXDG:    existing,
 		MCPServers:     servers,
+		SeedFiles:      cloneStringMap(a.options.SeedFiles),
 	})
 }
 

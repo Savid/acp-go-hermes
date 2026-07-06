@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 
 	hermesacp "github.com/savid/acp-go-hermes"
 )
@@ -31,6 +32,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
+	var seedFiles seedFileFlag
+	flags.Var(&seedFiles, "seed-file", "seed a file into the session config root as <relpath>=<hostpath> (repeatable)")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -38,6 +41,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	if *printVersion {
 		_, _ = fmt.Fprintln(stdout, agentVersion())
 		return 0
+	}
+	seeded, err := seedFiles.contents()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: %v\n", err)
+		return 2
 	}
 
 	logger := slog.New(slog.DiscardHandler)
@@ -59,8 +67,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
 	}
+	if len(seeded) > 0 {
+		opts = append(opts, hermesacp.WithSeedFiles(seeded))
+	}
 
-	err := serve(ctx, stdin, stdout, opts...)
+	err = serve(ctx, stdin, stdout, opts...)
 	if err != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: %v\n", err)
 		return 1
@@ -69,6 +80,47 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return signalCode(sig)
 	}
 	return 0
+}
+
+// seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> pairs. The
+// relative path is confined to the Hermes session config root by the adapter;
+// the host path is read into file contents passed to WithSeedFiles.
+type seedFileFlag struct {
+	pairs []seedFilePair
+}
+
+type seedFilePair struct {
+	relative string
+	hostPath string
+}
+
+func (f *seedFileFlag) String() string {
+	return ""
+}
+
+func (f *seedFileFlag) Set(value string) error {
+	relative, hostPath, ok := strings.Cut(value, "=")
+	if !ok || relative == "" || hostPath == "" {
+		return fmt.Errorf("invalid -seed-file %q, want <relpath>=<hostpath>", value)
+	}
+	f.pairs = append(f.pairs, seedFilePair{relative: relative, hostPath: hostPath})
+
+	return nil
+}
+
+// contents reads each host file into the relative-path keyed map consumed by
+// hermesacp.WithSeedFiles.
+func (f *seedFileFlag) contents() (map[string]string, error) {
+	seeded := make(map[string]string, len(f.pairs))
+	for _, pair := range f.pairs {
+		data, err := os.ReadFile(pair.hostPath)
+		if err != nil {
+			return nil, fmt.Errorf("read seed file %q: %w", pair.hostPath, err)
+		}
+		seeded[pair.relative] = string(data)
+	}
+
+	return seeded, nil
 }
 
 func pendingSignal(signals <-chan os.Signal) os.Signal {

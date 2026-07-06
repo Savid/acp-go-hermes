@@ -2,6 +2,7 @@
 package hermesacp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,11 +14,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"gopkg.in/yaml.v3"
+
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
@@ -66,6 +70,7 @@ type hermesStartOptions struct {
 	Logger         *slog.Logger
 	ExistingXDG    xdgDirs
 	MCPServers     []acp.McpServer
+	SeedFiles      map[string]string
 }
 
 type acpSessionIDString string
@@ -360,6 +365,7 @@ type processIdentity struct {
 
 var (
 	hermesMarshalIndent  = json.MarshalIndent
+	hermesUnmarshalYAML  = yaml.Unmarshal
 	hermesWriteLease     = writeLease
 	hermesInspectProcess = inspectHermesProcess
 )
@@ -386,7 +392,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 	if err := ensureXDGDirs(xdg); err != nil {
 		return nil, err
 	}
-	if err := materializeHermesMCPConfig(xdg.Root, options.MCPServers); err != nil {
+	if err := materializeHermesConfig(xdg.Root, options.MCPServers, options.SeedFiles); err != nil {
 		return nil, err
 	}
 	proc, err := nativehermes.Start(ctx, nativehermes.ProcessOptions{
@@ -1225,12 +1231,212 @@ func ensureXDGDirs(dirs xdgDirs) error {
 	return nil
 }
 
-func materializeHermesMCPConfig(home string, servers []acp.McpServer) error {
-	if len(servers) == 0 {
+const (
+	hermesConfigFileName   = "config.yaml"
+	hermesSeedManifestName = ".wagie-seed-manifest.json"
+	hermesSeedBackupSuffix = ".wagie.bak"
+)
+
+// seedWrite is a single planned write under the session config root: the
+// slash-form cleaned relative path (the ownership-manifest key and .wagie.bak
+// base) and the final bytes to author.
+type seedWrite struct {
+	relative string
+	target   string
+	bytes    []byte
+}
+
+// materializeHermesConfig authors the per-session Hermes config under home. The
+// wrapper also owns config.yaml (it writes the mcp_servers block hermes reads),
+// so a seeded config.yaml must not silently clobber it: the wrapper's managed
+// mcp_servers block is deep-merged on top of any seeded config.yaml (the
+// wrapper wins for mcp_servers; the seed supplies everything else, e.g. a model
+// block). Every other seed file is written verbatim. Seed paths are confined to
+// home so absolute paths, ".." segments, and empty keys are rejected with the
+// uniform unsupported error. Every final write is routed through the ownership
+// manifest so a seed can never clobber an operator-authored file.
+func materializeHermesConfig(home string, servers []acp.McpServer, files map[string]string) error {
+	var managed map[string]any
+	if len(servers) > 0 {
+		built, err := hermesMCPServersConfig(servers)
+		if err != nil {
+			return err
+		}
+		managed = built
+	}
+
+	writes, seededConfig, haveSeededConfig, err := buildHermesSeedWrites(home, files)
+	if err != nil {
+		return err
+	}
+
+	// config.yaml is authored last: verbatim when only the seed owns it, or the
+	// seed deep-merged under the wrapper's managed mcp_servers block.
+	if managed != nil || haveSeededConfig {
+		configBytes, err := hermesConfigBytes(managed, seededConfig, haveSeededConfig)
+		if err != nil {
+			return err
+		}
+		writes = append(writes, seedWrite{
+			relative: hermesConfigFileName,
+			target:   filepath.Join(home, hermesConfigFileName),
+			bytes:    configBytes,
+		})
+	}
+
+	return applyHermesSeedGuard(home, writes)
+}
+
+// hermesConfigBytes returns the final config.yaml bytes: the seeded contents
+// verbatim when the wrapper manages nothing, otherwise the seed deep-merged
+// under the wrapper's managed keys.
+func hermesConfigBytes(managed map[string]any, seededConfig string, haveSeededConfig bool) ([]byte, error) {
+	if managed == nil {
+		return []byte(seededConfig), nil
+	}
+	base := map[string]any{}
+	if haveSeededConfig {
+		if err := hermesUnmarshalYAML([]byte(seededConfig), &base); err != nil {
+			return nil, seedFileInvalid(hermesConfigFileName)
+		}
+	}
+	merged := deepMergeYAML(base, managed)
+	data, err := hermesMarshalIndent(merged, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	return append(data, '\n'), nil
+}
+
+// applyHermesSeedGuard writes each planned seed file under home behind an
+// ownership manifest so a seed can never clobber a file the wrapper did not
+// author. It pre-flights every target: if any target already exists and is not
+// recorded in the manifest it fails closed with the uniform unsupported error,
+// writing nothing. Recorded targets are overwritten (keeping a .wagie.bak copy
+// of the prior bytes when they differ), and first writes are recorded in the
+// manifest. The isolation harness gives each session a fresh root, so the
+// manifest is normally absent and every write is a first write.
+func applyHermesSeedGuard(home string, writes []seedWrite) error {
+	if len(writes) == 0 {
 		return nil
 	}
-	config := map[string]any{"mcp_servers": map[string]any{}}
-	mcpServers := config["mcp_servers"].(map[string]any)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	manifest, err := loadHermesSeedManifest(home)
+	if err != nil {
+		return err
+	}
+
+	// Pre-flight: reject before touching disk if any target is an existing
+	// operator file, so a rejected pass leaves every file untouched.
+	for _, write := range writes {
+		if _, err := os.Lstat(write.target); err != nil {
+			// Absent (or a non-directory parent): not a managed clobber; the
+			// write step surfaces any real I/O error.
+			continue
+		}
+		if !manifest[write.relative] {
+			return seedFileInvalid(write.relative)
+		}
+	}
+
+	changed := false
+	for _, write := range writes {
+		if err := writeManagedSeedFile(write.target, write.bytes); err != nil {
+			return err
+		}
+		if !manifest[write.relative] {
+			manifest[write.relative] = true
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	return saveHermesSeedManifest(home, manifest)
+}
+
+// writeManagedSeedFile writes data to target, first copying the current on-disk
+// bytes to <target>.wagie.bak when they differ from data. An identical existing
+// file is left untouched (no backup, no rewrite).
+func writeManagedSeedFile(target string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return err
+	}
+	current, err := os.ReadFile(target)
+	switch {
+	case err == nil:
+		if bytes.Equal(current, data) {
+			return nil
+		}
+		//nolint:gosec // backup path is target (confined under home by resolveSeedFilePath) plus a constant suffix.
+		if err := os.WriteFile(target+hermesSeedBackupSuffix, current, 0o600); err != nil {
+			return err
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// First write; fall through.
+	default:
+		return err
+	}
+
+	return os.WriteFile(target, data, 0o600)
+}
+
+// loadHermesSeedManifest reads the ownership manifest under home into a set of
+// managed relative paths. An absent manifest yields an empty set.
+func loadHermesSeedManifest(home string) (map[string]bool, error) {
+	data, err := os.ReadFile(filepath.Join(home, hermesSeedManifestName))
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		return make(map[string]bool), nil
+	default:
+		return nil, err
+	}
+	var entries []string
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	manifest := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		manifest[entry] = true
+	}
+
+	return manifest, nil
+}
+
+// saveHermesSeedManifest writes the sorted, deterministic ownership manifest
+// under home.
+func saveHermesSeedManifest(home string, manifest map[string]bool) error {
+	entries := make([]string, 0, len(manifest))
+	for entry := range manifest {
+		entries = append(entries, entry)
+	}
+	sort.Strings(entries)
+	data, err := hermesMarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(home, hermesSeedManifestName), append(data, '\n'), 0o600)
+}
+
+// seedFileInvalid is the uniform unsupported-field error naming an offending
+// seed relative path.
+func seedFileInvalid(relative string) error {
+	return acp.NewInvalidParams(map[string]any{
+		"error": "unsupported",
+		"field": fmt.Sprintf("seedFiles[%q]", relative),
+	})
+}
+
+// hermesMCPServersConfig builds the wrapper-managed config block that hermes
+// reads for MCP servers. Callers pass a non-empty server list.
+func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
+	mcpServers := map[string]any{}
 	for index, server := range servers {
 		switch {
 		case server.Stdio != nil:
@@ -1259,18 +1465,87 @@ func materializeHermesMCPConfig(home string, servers []acp.McpServer) error {
 			}
 			mcpServers[name] = entry
 		default:
-			return acp.NewInvalidParams(map[string]any{"field": fmt.Sprintf("mcpServers[%d]", index)})
+			return nil, acp.NewInvalidParams(map[string]any{"field": fmt.Sprintf("mcpServers[%d]", index)})
 		}
 	}
-	data, err := hermesMarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
+
+	return map[string]any{"mcp_servers": mcpServers}, nil
+}
+
+// buildHermesSeedWrites resolves each seeded file into a planned write under
+// home, confining paths to that root. The seeded config.yaml is not planned
+// here: its raw contents are returned so the caller can deep-merge the wrapper's
+// managed keys on top before authoring the final file.
+func buildHermesSeedWrites(home string, files map[string]string) ([]seedWrite, string, bool, error) {
+	writes := make([]seedWrite, 0, len(files))
+	var seededConfig string
+	haveSeededConfig := false
+	for relative, contents := range files {
+		clean, target, err := resolveSeedFilePath(home, relative)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if clean == hermesConfigFileName {
+			seededConfig = contents
+			haveSeededConfig = true
+
+			continue
+		}
+		writes = append(writes, seedWrite{
+			relative: filepath.ToSlash(clean),
+			target:   target,
+			bytes:    []byte(contents),
+		})
 	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return err
+
+	return writes, seededConfig, haveSeededConfig, nil
+}
+
+// resolveSeedFilePath validates a relative seed path and joins it under home,
+// failing closed with the uniform unsupported error on absolute paths, ".."
+// segments, or empty keys. It returns the cleaned relative path and the
+// absolute target.
+func resolveSeedFilePath(home string, relative string) (string, string, error) {
+	invalid := func() error {
+		return acp.NewInvalidParams(map[string]any{
+			"error": "unsupported",
+			"field": fmt.Sprintf("seedFiles[%q]", relative),
+		})
 	}
-	return os.WriteFile(filepath.Join(home, "config.yaml"), data, 0o600)
+	if relative == "" || filepath.IsAbs(relative) {
+		return "", "", invalid()
+	}
+	// Reject any ".." segment so the cleaned join can never escape home; a
+	// relative path without ".." segments always stays confined under home.
+	for _, segment := range strings.Split(filepath.ToSlash(relative), "/") {
+		if segment == ".." {
+			return "", "", invalid()
+		}
+	}
+	clean := filepath.Clean(filepath.FromSlash(relative))
+
+	return clean, filepath.Join(home, clean), nil
+}
+
+// deepMergeYAML returns base with override applied on top: nested maps are
+// merged recursively, and override wins for every conflicting key.
+func deepMergeYAML(base, override map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		if existing, ok := merged[key].(map[string]any); ok {
+			if next, ok := value.(map[string]any); ok {
+				merged[key] = deepMergeYAML(existing, next)
+
+				continue
+			}
+		}
+		merged[key] = value
+	}
+
+	return merged
 }
 
 func passwordHash(password string) string {

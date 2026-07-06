@@ -10,3 +10,43 @@ programmatic per-session agent/mode enumeration surface for this adapter.
 Structured output is not advertised for Hermes. Supplying
 `_meta.hermes.options.outputSchema` returns the uniform unsupported-field
 error.
+
+## Seeding native config
+
+Use `WithSeedFiles` (or the `-seed-file` CLI flag) to write hermes' own config
+into each session's isolated config root before hermes launches. This is how you
+point hermes at a gateway such as LiteLLM without touching the caller's real
+Hermes home. Every session is seeded fresh and paths are confined to the config
+root.
+
+Most seeded files are written verbatim. `config.yaml` is the exception: the
+adapter also authors it to carry the `mcp_servers` block for session MCP
+servers, so a seeded `config.yaml` is deep-merged with the adapter's managed
+`mcp_servers` on top. The adapter wins for `mcp_servers`; your seed supplies the
+`model` block and everything else. This means a session can use both a seeded
+`model` gateway and wrapper-provided MCP servers at once.
+
+Keep the API key in the environment (`WithEnv`) and reference it from the seeded
+file by env-var indirection with hermes `key_env`; never write the secret into
+the seeded file.
+
+```go
+agent := hermesacp.NewAgent(
+	hermesacp.WithEnv(map[string]string{
+		"LITELLM_API_KEY": os.Getenv("LITELLM_API_KEY"),
+	}),
+	hermesacp.WithSeedFiles(map[string]string{
+		"config.yaml": `model:
+  provider: custom
+  base_url: http://localhost:4000/v1
+  key_env: LITELLM_API_KEY
+  default: gpt-4o
+`,
+	}),
+)
+```
+
+The seeded `config.yaml` lands at `config.yaml` under the session's resolved
+native config root, so hermes reads it as its own configuration and routes the
+`default` model through the LiteLLM gateway at `base_url`, authenticating with
+the key named by `key_env`.

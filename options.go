@@ -39,6 +39,7 @@ type Options struct {
 	SessionStore            SessionStore
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
+	SeedFiles               map[string]string
 
 	clientFactory func(context.Context, hermesStartOptions) (hermesClient, error)
 }
@@ -141,5 +142,18 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithSeedFiles maps relative paths to file contents that the adapter writes
+// into each session's isolated Hermes config root before launching hermes, so
+// hermes reads them as its own config (for example config.yaml). Paths are
+// confined to that root: absolute paths, ".." segments, and empty keys are
+// rejected at session start. Contents are written verbatim, so secrets belong
+// in WithEnv and are referenced from seeded files by env-var indirection (for
+// example hermes key_env), never written into a seeded file.
+func WithSeedFiles(files map[string]string) Option {
+	return func(options *Options) {
+		options.SeedFiles = cloneStringMap(files)
 	}
 }

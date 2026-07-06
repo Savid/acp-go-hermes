@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -90,6 +91,79 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	}
 	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, io.Discard); code != 143 {
 		t.Fatalf("signalled serve code = %d", code)
+	}
+}
+
+func TestSeedFileFlag(t *testing.T) {
+	var flag seedFileFlag
+	if err := flag.Set("config.yaml=/host/config.yaml"); err != nil {
+		t.Fatalf("Set valid: %v", err)
+	}
+	for _, value := range []string{"", "noequals", "=missing-rel", "missing-host="} {
+		if err := (&seedFileFlag{}).Set(value); err == nil {
+			t.Fatalf("Set(%q) accepted invalid value", value)
+		}
+	}
+
+	dir := t.TempDir()
+	hostPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(hostPath, []byte("model: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok := seedFileFlag{pairs: []seedFilePair{{relative: "config.yaml", hostPath: hostPath}}}
+	seeded, err := ok.contents()
+	if err != nil {
+		t.Fatalf("contents: %v", err)
+	}
+	if seeded["config.yaml"] != "model: {}\n" {
+		t.Fatalf("contents = %#v", seeded)
+	}
+	missing := seedFileFlag{pairs: []seedFilePair{{relative: "config.yaml", hostPath: filepath.Join(dir, "absent")}}}
+	if _, err := missing.contents(); err == nil {
+		t.Fatal("contents accepted missing host file")
+	}
+}
+
+func TestRunSeedFileFlag(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+	agentVersion = func() string { return "v-test" }
+
+	dir := t.TempDir()
+	hostPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(hostPath, []byte("model: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotOptions []hermesacp.Option
+	serve = func(_ context.Context, input io.Reader, _ io.Writer, opts ...hermesacp.Option) error {
+		gotOptions = append([]hermesacp.Option(nil), opts...)
+		_, _ = io.Copy(io.Discard, input)
+		return nil
+	}
+	if code := run(context.Background(), []string{
+		"-seed-file", "config.yaml=" + hostPath,
+	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed-file run code = %d", code)
+	}
+	if len(gotOptions) == 0 {
+		t.Fatal("serve received no options")
+	}
+
+	if code := run(context.Background(), []string{
+		"-seed-file", "invalid",
+	}, strings.NewReader(""), io.Discard, io.Discard); code != 2 {
+		t.Fatalf("invalid seed-file code = %d, want 2", code)
+	}
+
+	var stderr bytes.Buffer
+	if code := run(context.Background(), []string{
+		"-seed-file", "config.yaml=" + filepath.Join(dir, "absent"),
+	}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
+		t.Fatalf("missing host file code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "seed file") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
