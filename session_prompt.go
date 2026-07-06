@@ -6,21 +6,58 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
 var errPromptCancelled = errors.New("prompt cancelled")
 
-func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 
-	return session.Prompt(ctx, params)
+	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, session.currentModel())
+	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
+
+	resp, err = session.Prompt(ctx, params)
+
+	return resp, err
+}
+
+func promptResultForObserver(resp acp.PromptResponse, err error, model string) observer.PromptResult {
+	result := observer.PromptResult{
+		Err:        err,
+		Model:      model,
+		StopReason: string(resp.StopReason),
+	}
+	if resp.Usage == nil {
+		return result
+	}
+
+	result.InputTokens = resp.Usage.InputTokens
+	result.OutputTokens = resp.Usage.OutputTokens
+	result.TotalTokens = resp.Usage.TotalTokens
+
+	if resp.Usage.CachedReadTokens != nil {
+		result.CachedReadTokens = *resp.Usage.CachedReadTokens
+	}
+
+	if resp.Usage.CachedWriteTokens != nil {
+		result.CachedWriteTokens = *resp.Usage.CachedWriteTokens
+	}
+
+	if resp.Usage.ThoughtTokens != nil {
+		result.ThoughtTokens = *resp.Usage.ThoughtTokens
+	}
+
+	return result
 }
 
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
@@ -148,6 +185,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			}
 		case err := <-s.client.EventErrors():
 			s.markStreamFailed(streamErrorEpoch(err))
+			s.cancelTurn()
 			abortTurn()
 
 			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: err.Error()})
@@ -210,7 +248,12 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 				parts = append(parts, map[string]any{keyType: valText, valText: text})
 			}
 		case block.Image != nil:
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "prompt.image"})
+			part, err := imageHermesPart(block.Image)
+			if err != nil {
+				return nil, err
+			}
+
+			parts = append(parts, part)
 		default:
 			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "prompt"})
 		}
@@ -221,6 +264,49 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 	}
 
 	return parts, nil
+}
+
+func imageHermesPart(image *acp.ContentBlockImage) (map[string]any, error) {
+	mimeType := image.MimeType
+	if mimeType == "" {
+		mimeType = defaultMimeType
+	}
+
+	part := map[string]any{
+		keyType: valFile,
+		keyMime: mimeType,
+	}
+
+	switch {
+	case image.Data != "":
+		part[valURL] = "data:" + mimeType + ";base64," + image.Data
+	case image.Uri != nil && *image.Uri != "":
+		part[valURL] = *image.Uri
+	default:
+		return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.image", jsonFieldError: "missing image data or uri"})
+	}
+
+	if image.Uri != nil && *image.Uri != "" {
+		if filename := filenameFromURI(*image.Uri); filename != "" {
+			part[keyFilename] = filename
+		}
+	}
+
+	return part, nil
+}
+
+func filenameFromURI(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+
+	name := filepath.Base(parsed.Path)
+	if name == "." || name == "/" {
+		return ""
+	}
+
+	return name
 }
 
 func embeddedResourceText(resource acp.EmbeddedResourceResource) string {
@@ -929,6 +1015,8 @@ func (s *session) emitUpdate(ctx context.Context, update acp.SessionUpdate) erro
 	if conn == nil {
 		return nil
 	}
+
+	s.agent.observe.ObserveFirstPromptUpdate(ctx)
 
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }

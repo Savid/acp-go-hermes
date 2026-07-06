@@ -63,10 +63,6 @@ func validateLifecycleMeta(meta map[string]any) error {
 		return nil
 	}
 
-	if _, ok := meta["github.com/savid/acp-go-hermes"]; ok {
-		return unsupportedField("_meta.github.com/savid/acp-go-hermes")
-	}
-
 	hermesMeta, ok := meta[hermesMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[hermesMetaKey]; exists {

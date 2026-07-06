@@ -1373,6 +1373,41 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 	})
 }
 
+func TestPromptImageParts(t *testing.T) {
+	imageData, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}}})
+	if err != nil {
+		t.Fatalf("image data prompt: %v", err)
+	}
+	if len(imageData) != 1 || imageData[0]["type"] != "file" || imageData[0]["mime"] != "image/png" || imageData[0]["url"] != "data:image/png;base64,AA==" {
+		t.Fatalf("image data part = %#v", imageData[0])
+	}
+
+	imageURI := "file:///tmp/pic.png"
+	imageURL, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &imageURI}}})
+	if err != nil {
+		t.Fatalf("image uri prompt: %v", err)
+	}
+	if len(imageURL) != 1 || imageURL[0]["mime"] != defaultMimeType || imageURL[0]["url"] != imageURI || imageURL[0]["filename"] != "pic.png" {
+		t.Fatalf("image uri part = %#v", imageURL[0])
+	}
+
+	if _, err = promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}}); err == nil {
+		t.Fatal("image without data or uri accepted")
+	}
+
+	invalidURI := "%"
+	imageInvalid, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &invalidURI}}})
+	if err != nil || imageInvalid[0]["filename"] != nil || imageInvalid[0]["mime"] != defaultMimeType || imageInvalid[0]["url"] != invalidURI {
+		t.Fatalf("invalid uri image part = %#v err=%v", imageInvalid, err)
+	}
+
+	rootURI := "https://example.com"
+	imageRoot, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &rootURI}}})
+	if err != nil || imageRoot[0]["filename"] != nil || imageRoot[0]["url"] != rootURI {
+		t.Fatalf("root uri image part = %#v err=%v", imageRoot, err)
+	}
+}
+
 func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	parts, err := promptToHermesParts([]acp.ContentBlock{
 		acp.TextBlock("hello"),
@@ -1396,9 +1431,6 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	}
 	if _, err := promptToHermesParts([]acp.ContentBlock{{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}}}); err == nil {
 		t.Fatal("audio prompt accepted")
-	}
-	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Data: "AA==", MimeType: "image/png"}}}); err == nil {
-		t.Fatal("image prompt accepted")
 	}
 	req, ids := questionElicitationRequest(questionRequest{ID: "q", SessionID: "s"})
 	if req.Form == nil || req.Form.Message != "Hermes needs input" || !reflect.DeepEqual(ids, []string{"question_1"}) {

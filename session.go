@@ -501,6 +501,13 @@ func (s *session) setModel(value string) {
 	s.mu.Unlock()
 }
 
+func (s *session) currentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return joinModelValue(s.providerID, s.modelID)
+}
+
 func (s *session) modelSelector() *hermesModelSelector {
 	s.mu.Lock()
 	defer s.mu.Unlock()

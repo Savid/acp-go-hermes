@@ -17,8 +17,8 @@ import (
 func TestRunConversation(t *testing.T) {
 	conn := &fakeAgentConnection{}
 	var stdout bytes.Buffer
-
-	if err := runConversation(context.Background(), conn, "hello", "/repo", &stdout); err != nil {
+	err := runConversation(context.Background(), conn, "hello", "/repo", &stdout)
+	if err != nil {
 		t.Fatalf("runConversation returned error: %v", err)
 	}
 	if !conn.initialized || conn.prompt != "hello" || !conn.closed {
@@ -39,9 +39,17 @@ func TestRunConversation(t *testing.T) {
 	}
 }
 
-func TestRunUsesInjectedAgentAndMain(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
+func TestRunUsesInjectedAgent(t *testing.T) {
+	originalStart := startAgent
+	originalGetwd := getwd
+	originalExit := exit
+	originalArgs := os.Args
+	t.Cleanup(func() {
+		startAgent = originalStart
+		getwd = originalGetwd
+		exit = originalExit
+		os.Args = originalArgs
+	})
 
 	conn := &fakeAgentConnection{}
 	startAgent = func(context.Context, io.Writer, io.Writer) (*startedAgent, error) {
@@ -75,8 +83,12 @@ func TestRunUsesInjectedAgentAndMain(t *testing.T) {
 }
 
 func TestRunErrors(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
+	originalStart := startAgent
+	originalGetwd := getwd
+	t.Cleanup(func() {
+		startAgent = originalStart
+		getwd = originalGetwd
+	})
 
 	getwd = func() (string, error) { return "", errors.New("cwd failed") }
 	var stdout, stderr bytes.Buffer
@@ -108,13 +120,14 @@ func TestClientHelpers(t *testing.T) {
 	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.UpdateAgentMessageText("hello")}); err != nil {
 		t.Fatalf("SessionUpdate returned error: %v", err)
 	}
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.UpdateAgentThoughtText("think")}); err != nil {
+		t.Fatalf("thought SessionUpdate returned error: %v", err)
+	}
 	if !strings.Contains(out.String(), "hello") {
 		t.Fatalf("output = %q", out.String())
 	}
 
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{Options: []acp.PermissionOption{
-		{OptionId: "allow", Kind: acp.PermissionOptionKindAllowOnce},
-	}})
+	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{Options: []acp.PermissionOption{{OptionId: "allow", Kind: acp.PermissionOptionKindAllowOnce}}})
 	if err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != "allow" {
 		t.Fatalf("permission resp=%#v err=%v", resp, err)
 	}
@@ -148,11 +161,24 @@ func TestClientHelpers(t *testing.T) {
 	if _, err := c.WriteTextFile(context.Background(), acp.WriteTextFileRequest{Path: filepath.Join(notDir, "child.txt"), Content: "body"}); err == nil {
 		t.Fatal("WriteTextFile under file path succeeded")
 	}
-
 	nilWriterClient := &client{}
-	if err := nilWriterClient.SessionUpdate(context.Background(), acp.SessionNotification{}); err != nil {
-		t.Fatalf("nil writer SessionUpdate returned error: %v", err)
+	if nilWriterClient.writer() == nil {
+		t.Fatal("nil writer client returned nil writer")
 	}
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.StartToolCall("tool", "Run")}); err != nil {
+		t.Fatalf("tool SessionUpdate returned error: %v", err)
+	}
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.UpdateToolCall("tool")}); err != nil {
+		t.Fatalf("tool update without status returned error: %v", err)
+	}
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{Update: acp.UpdateToolCall("tool", acp.WithUpdateStatus(acp.ToolCallStatusCompleted))}); err != nil {
+		t.Fatalf("tool update with status returned error: %v", err)
+	}
+}
+
+func TestClientTerminalAndDisplay(t *testing.T) {
+	var out bytes.Buffer
+	c := &client{output: &out}
 	if terminal, err := c.CreateTerminal(context.Background(), acp.CreateTerminalRequest{}); err != nil || terminal.TerminalId == "" {
 		t.Fatalf("CreateTerminal = %#v err=%v", terminal, err)
 	}
@@ -168,11 +194,24 @@ func TestClientHelpers(t *testing.T) {
 	if _, err := c.WaitForTerminalExit(context.Background(), acp.WaitForTerminalExitRequest{}); err != nil {
 		t.Fatalf("WaitForTerminalExit returned error: %v", err)
 	}
+	var display messageDisplay
+	display.writeText(&out, "")
+	display.writeText(&out, "x")
+	display.writeText(&out, "x")
+	display.writeText(&out, "xy")
+	display.writeText(&out, "z")
+	if got := c.messageDisplay(nil); got == nil {
+		t.Fatal("nil message display missing")
+	}
+	messageID := "id"
+	if got := c.messageDisplay(&messageID); got == nil || c.messageDisplay(&messageID) != got {
+		t.Fatal("message display was not cached")
+	}
 }
 
 func TestStartAgentProcess(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
+	originalCommand := commandContext
+	t.Cleanup(func() { commandContext = originalCommand })
 
 	script := filepath.Join(t.TempDir(), "fake-agent")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
@@ -200,7 +239,6 @@ func TestStartAgentProcess(t *testing.T) {
 	if _, err := startAgentProcess(context.Background(), io.Discard, io.Discard); err == nil {
 		t.Fatal("startAgentProcess accepted StdinPipe failure")
 	}
-
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, script)
 		cmd.Stdout = io.Discard
@@ -210,29 +248,11 @@ func TestStartAgentProcess(t *testing.T) {
 	if _, err := startAgentProcess(context.Background(), io.Discard, io.Discard); err == nil {
 		t.Fatal("startAgentProcess accepted StdoutPipe failure")
 	}
-
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-agent"))
 	}
 	if _, err := startAgentProcess(context.Background(), io.Discard, io.Discard); err == nil {
 		t.Fatal("startAgentProcess accepted Start failure")
-	}
-}
-
-func replaceGlobals(t *testing.T) func() {
-	t.Helper()
-	originalStart := startAgent
-	originalGetwd := getwd
-	originalExit := exit
-	originalArgs := os.Args
-	originalCommand := commandContext
-
-	return func() {
-		startAgent = originalStart
-		getwd = originalGetwd
-		exit = originalExit
-		os.Args = originalArgs
-		commandContext = originalCommand
 	}
 }
 
@@ -248,21 +268,31 @@ type fakeAgentConnection struct {
 }
 
 func (c *fakeAgentConnection) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
+	if c.initErr != nil {
+		return acp.InitializeResponse{}, c.initErr
+	}
 	c.initialized = true
 
-	return acp.InitializeResponse{}, c.initErr
+	return acp.InitializeResponse{}, nil
 }
 
 func (c *fakeAgentConnection) NewSession(context.Context, acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	return acp.NewSessionResponse{SessionId: "session-1"}, c.newErr
+	if c.newErr != nil {
+		return acp.NewSessionResponse{}, c.newErr
+	}
+
+	return acp.NewSessionResponse{SessionId: "s"}, nil
 }
 
 func (c *fakeAgentConnection) Prompt(_ context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	if c.promptErr != nil {
+		return acp.PromptResponse{}, c.promptErr
+	}
 	if len(params.Prompt) > 0 && params.Prompt[0].Text != nil {
 		c.prompt = params.Prompt[0].Text.Text
 	}
 
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, c.promptErr
+	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
 func (c *fakeAgentConnection) CloseSession(context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {

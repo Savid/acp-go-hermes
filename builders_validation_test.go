@@ -174,8 +174,8 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: "bad"}); err == nil {
 		t.Fatal("bad hermes meta accepted")
 	}
-	if err := validateLifecycleMeta(map[string]any{"github.com/savid/acp-go-hermes": map[string]any{}}); err == nil {
-		t.Fatal("old full package meta accepted")
+	if err := validateLifecycleMeta(map[string]any{"github.com/savid/acp-go-hermes": map[string]any{}}); err != nil {
+		t.Fatalf("foreign module-path meta must be ignored, got %v", err)
 	}
 	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: "bad"}}); err == nil {
 		t.Fatal("bad options meta accepted")

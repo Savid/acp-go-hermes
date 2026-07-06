@@ -21,6 +21,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
+	ctx = a.observe.Extract(ctx, params.Meta)
+
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -89,7 +91,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 // XDG root and lease. The store is the durability boundary, so a failed initial
 // or fork Replace must leave no orphan process or listable session behind.
 func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *session) {
-	a.removeSessionIf(session.id, session)
+	if a.removeSessionIf(session.id, session) {
+		a.observe.AddActiveSession(ctx, -1)
+	}
+
 	record := a.deleteCleanupRecord(session.id, session)
 	closeCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	err := session.DeleteNativeAndClose(closeCtx)
@@ -145,6 +150,8 @@ func (a *Agent) loadOrResumeSession(
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
+
+	ctx = a.observe.Extract(ctx, metaMap)
 
 	if id == "" {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
@@ -418,12 +425,16 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		snapshotErr = session.snapshotToStore(context.WithoutCancel(ctx))
 	}
 
-	a.removeSessionIf(params.SessionId, session)
+	if a.removeSessionIf(params.SessionId, session) {
+		a.observe.AddActiveSession(ctx, -1)
+	}
 
 	return acp.CloseSessionResponse{}, errors.Join(snapshotErr, closeErr)
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+	ctx = a.observe.Extract(ctx, params.Meta)
+
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
@@ -463,6 +474,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		err = session.DeleteNativeAndClose(closeCtx)
 
 		closeCancel()
+		a.observe.AddActiveSession(ctx, -1)
 	}
 
 	cleanupErr := a.cleanupDeletedSession(record)
@@ -472,6 +484,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 }
 
 func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	ctx = a.observe.Extract(ctx, params.Meta)
+
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -577,13 +591,15 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 		servers = cloneMCPServers(mcpServers[0])
 	}
 
+	a.observe.RecordHermesProcessStart(ctx)
+
 	return factory(ctx, hermesStartOptions{
 		ACPSessionID:   acpSessionIDString(id),
 		Root:           a.homeRoot(),
 		Cwd:            cwd,
 		ExecutablePath: a.options.ExecutablePath,
 		DefaultModel:   firstNonEmpty(meta.Model, a.options.DefaultModel),
-		Env:            env,
+		Env:            a.observe.InjectTraceEnv(ctx, env),
 		Logger:         a.log,
 		ExistingXDG:    existing,
 		MCPServers:     servers,

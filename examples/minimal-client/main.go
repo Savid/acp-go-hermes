@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -80,6 +81,58 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	return 0
 }
 
+func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer) (*startedAgent, error) {
+	cmd := commandContext(ctx, "go", "run", agentPackage)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	agentStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	agentOutputGate := newConnectionInputGate(agentStdout)
+	conn := acp.NewClientSideConnection(&client{output: output}, stdin, agentOutputGate)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+	agentOutputGate.open()
+
+	return &startedAgent{
+		conn: conn,
+		close: func() {
+			_ = stdin.Close()
+		},
+		wait: cmd.Wait,
+	}, nil
+}
+
+type connectionInputGate struct {
+	reader io.Reader
+	ready  chan struct{}
+	once   sync.Once
+}
+
+func newConnectionInputGate(reader io.Reader) *connectionInputGate {
+	return &connectionInputGate{reader: reader, ready: make(chan struct{})}
+}
+
+func (g *connectionInputGate) open() {
+	g.once.Do(func() { close(g.ready) })
+}
+
+func (g *connectionInputGate) Read(p []byte) (int, error) {
+	<-g.ready
+
+	return g.reader.Read(p)
+}
+
 func runConversation(ctx context.Context, conn agentConnection, prompt string, cwd string, stdout io.Writer) error {
 	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
 		return err
@@ -103,35 +156,26 @@ func runConversation(ctx context.Context, conn agentConnection, prompt string, c
 	return nil
 }
 
-func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer) (*startedAgent, error) {
-	cmd := commandContext(ctx, "go", "run", agentPackage)
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	agentStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	conn := acp.NewClientSideConnection(&client{output: output}, stdin, agentStdout)
-
-	return &startedAgent{conn: conn, close: func() { _ = stdin.Close() }, wait: cmd.Wait}, nil
+func printError(stderr io.Writer, err error) {
+	_, _ = fmt.Fprintf(stderr, "minimal-client: %v\n", err)
 }
 
 type client struct {
-	output io.Writer
-	mu     sync.Mutex
+	output   io.Writer
+	mu       sync.Mutex
+	messages map[string]*messageDisplay
+	fallback messageDisplay
 }
 
 var _ acp.Client = (*client)(nil)
+
+func (c *client) writer() io.Writer {
+	if c.output != nil {
+		return c.output
+	}
+
+	return os.Stdout
+}
 
 func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
 	if !filepath.IsAbs(params.Path) {
@@ -139,8 +183,11 @@ func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (
 	}
 
 	data, err := os.ReadFile(params.Path)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, err
+	}
 
-	return acp.ReadTextFileResponse{Content: string(data)}, err
+	return acp.ReadTextFileResponse{Content: string(data)}, nil
 }
 
 func (*client) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
@@ -169,33 +216,82 @@ func (c *client) SessionUpdate(_ context.Context, params acp.SessionNotification
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.output == nil {
-		c.output = os.Stdout
-	}
+	update := params.Update
+	output := c.writer()
 
-	if update := params.Update.AgentMessageChunk; update != nil && update.Content.Text != nil {
-		fmt.Fprint(c.output, update.Content.Text.Text)
+	switch {
+	case update.AgentMessageChunk != nil && update.AgentMessageChunk.Content.Text != nil:
+		chunk := update.AgentMessageChunk
+		c.messageDisplay(chunk.MessageId).writeText(output, chunk.Content.Text.Text)
+	case update.AgentThoughtChunk != nil && update.AgentThoughtChunk.Content.Text != nil:
+		fmt.Fprintf(output, "\n[thought] %s\n", update.AgentThoughtChunk.Content.Text.Text)
+	case update.ToolCall != nil:
+		fmt.Fprintf(output, "\n[tool] %s %s\n", update.ToolCall.ToolCallId, update.ToolCall.Title)
+	case update.ToolCallUpdate != nil:
+		status := any(nil)
+		if update.ToolCallUpdate.Status != nil {
+			status = *update.ToolCallUpdate.Status
+		}
+
+		fmt.Fprintf(output, "\n[tool] %s %v\n", update.ToolCallUpdate.ToolCallId, status)
 	}
 
 	return nil
 }
 
-func printError(stderr io.Writer, err error) {
-	_, _ = fmt.Fprintf(stderr, "minimal-client: %v\n", err)
-}
-
 func (*client) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
 	return acp.CreateTerminalResponse{TerminalId: "terminal-1"}, nil
 }
+
 func (*client) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
 	return acp.KillTerminalResponse{}, nil
 }
+
 func (*client) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
 	return acp.TerminalOutputResponse{Output: "", Truncated: false}, nil
 }
+
 func (*client) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
 	return acp.ReleaseTerminalResponse{}, nil
 }
+
 func (*client) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
 	return acp.WaitForTerminalExitResponse{}, nil
+}
+
+type messageDisplay struct {
+	text string
+}
+
+func (m *messageDisplay) writeText(output io.Writer, text string) {
+	switch {
+	case text == "":
+		return
+	case m.text == text:
+		return
+	case strings.HasPrefix(text, m.text):
+		fmt.Fprint(output, text[len(m.text):])
+		m.text = text
+	default:
+		fmt.Fprint(output, text)
+		m.text += text
+	}
+}
+
+func (c *client) messageDisplay(messageID *string) *messageDisplay {
+	if messageID == nil || *messageID == "" {
+		return &c.fallback
+	}
+
+	if c.messages == nil {
+		c.messages = make(map[string]*messageDisplay)
+	}
+
+	display := c.messages[*messageID]
+	if display == nil {
+		display = &messageDisplay{}
+		c.messages[*messageID] = display
+	}
+
+	return display
 }
