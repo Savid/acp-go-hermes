@@ -141,6 +141,7 @@ func TestRunSeedFileFlag(t *testing.T) {
 	serve = func(_ context.Context, input io.Reader, _ io.Writer, opts ...hermesacp.Option) error {
 		gotOptions = append([]hermesacp.Option(nil), opts...)
 		_, _ = io.Copy(io.Discard, input)
+
 		return nil
 	}
 	if code := run(context.Background(), []string{

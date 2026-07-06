@@ -842,7 +842,9 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			})
 		}
 	})
+}
 
+func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	t.Run("propagates mkdir errors", func(t *testing.T) {
 		home := t.TempDir()
 		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("dir-block"), 0o600); err != nil {
@@ -962,7 +964,9 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			t.Fatalf("manifest = %#v, want %#v", readHermesSeedManifest(t, home), want)
 		}
 	})
+}
 
+func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	t.Run("rejects a corrupt manifest", func(t *testing.T) {
 		home := t.TempDir()
 		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte("{not json"), 0o600); err != nil {

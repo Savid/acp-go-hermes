@@ -407,6 +407,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 	if err := ensureXDGDirs(xdg); err != nil {
 		return nil, err
 	}
+
 	if err := materializeHermesConfig(xdg.Root, options.MCPServers, options.SeedFiles); err != nil {
 		return nil, err
 	}
@@ -1404,11 +1405,13 @@ type seedWrite struct {
 // manifest so a seed can never clobber an operator-authored file.
 func materializeHermesConfig(home string, servers []acp.McpServer, files map[string]string) error {
 	var managed map[string]any
+
 	if len(servers) > 0 {
 		built, err := hermesMCPServersConfig(servers)
 		if err != nil {
 			return err
 		}
+
 		managed = built
 	}
 
@@ -1424,6 +1427,7 @@ func materializeHermesConfig(home string, servers []acp.McpServer, files map[str
 		if err != nil {
 			return err
 		}
+
 		writes = append(writes, seedWrite{
 			relative: hermesConfigFileName,
 			target:   filepath.Join(home, hermesConfigFileName),
@@ -1441,13 +1445,16 @@ func hermesConfigBytes(managed map[string]any, seededConfig string, haveSeededCo
 	if managed == nil {
 		return []byte(seededConfig), nil
 	}
+
 	base := map[string]any{}
 	if haveSeededConfig {
 		if err := hermesUnmarshalYAML([]byte(seededConfig), &base); err != nil {
 			return nil, seedFileInvalid(hermesConfigFileName)
 		}
 	}
+
 	merged := deepMergeYAML(base, managed)
+
 	data, err := hermesMarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, err
@@ -1468,9 +1475,11 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 	if len(writes) == 0 {
 		return nil
 	}
+
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
+
 	manifest, err := loadHermesSeedManifest(home)
 	if err != nil {
 		return err
@@ -1484,21 +1493,25 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 			// write step surfaces any real I/O error.
 			continue
 		}
+
 		if !manifest[write.relative] {
 			return seedFileInvalid(write.relative)
 		}
 	}
 
 	changed := false
+
 	for _, write := range writes {
 		if err := writeManagedSeedFile(write.target, write.bytes); err != nil {
 			return err
 		}
+
 		if !manifest[write.relative] {
 			manifest[write.relative] = true
 			changed = true
 		}
 	}
+
 	if !changed {
 		return nil
 	}
@@ -1513,6 +1526,7 @@ func writeManagedSeedFile(target string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
+
 	current, err := os.ReadFile(target)
 	switch {
 	case err == nil:
@@ -1520,8 +1534,8 @@ func writeManagedSeedFile(target string, data []byte) error {
 			return nil
 		}
 		//nolint:gosec // backup path is target (confined under home by resolveSeedFilePath) plus a constant suffix.
-		if err := os.WriteFile(target+hermesSeedBackupSuffix, current, 0o600); err != nil {
-			return err
+		if writeErr := os.WriteFile(target+hermesSeedBackupSuffix, current, 0o600); writeErr != nil {
+			return writeErr
 		}
 	case errors.Is(err, os.ErrNotExist):
 		// First write; fall through.
@@ -1543,10 +1557,13 @@ func loadHermesSeedManifest(home string) (map[string]bool, error) {
 	default:
 		return nil, err
 	}
+
 	var entries []string
+
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, err
 	}
+
 	manifest := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		manifest[entry] = true
@@ -1562,7 +1579,9 @@ func saveHermesSeedManifest(home string, manifest map[string]bool) error {
 	for entry := range manifest {
 		entries = append(entries, entry)
 	}
+
 	sort.Strings(entries)
+
 	data, err := hermesMarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
@@ -1575,8 +1594,8 @@ func saveHermesSeedManifest(home string, manifest map[string]bool) error {
 // seed relative path.
 func seedFileInvalid(relative string) error {
 	return acp.NewInvalidParams(map[string]any{
-		"error":  valUnsupported,
-		keyField: fmt.Sprintf("seedFiles[%q]", relative),
+		jsonFieldError: valUnsupported,
+		keyField:       fmt.Sprintf("seedFiles[%q]", relative),
 	})
 }
 
@@ -1584,6 +1603,7 @@ func seedFileInvalid(relative string) error {
 // reads for MCP servers. Callers pass a non-empty server list.
 func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
 	mcpServers := map[string]any{}
+
 	for index, server := range servers {
 		switch {
 		case server.Stdio != nil:
@@ -1631,19 +1651,24 @@ func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
 // managed keys on top before authoring the final file.
 func buildHermesSeedWrites(home string, files map[string]string) ([]seedWrite, string, bool, error) {
 	writes := make([]seedWrite, 0, len(files))
+
 	var seededConfig string
+
 	haveSeededConfig := false
+
 	for relative, contents := range files {
 		clean, target, err := resolveSeedFilePath(home, relative)
 		if err != nil {
 			return nil, "", false, err
 		}
+
 		if clean == hermesConfigFileName {
 			seededConfig = contents
 			haveSeededConfig = true
 
 			continue
 		}
+
 		writes = append(writes, seedWrite{
 			relative: filepath.ToSlash(clean),
 			target:   target,
@@ -1661,8 +1686,8 @@ func buildHermesSeedWrites(home string, files map[string]string) ([]seedWrite, s
 func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	invalid := func() error {
 		return acp.NewInvalidParams(map[string]any{
-			"error":  valUnsupported,
-			keyField: fmt.Sprintf("seedFiles[%q]", relative),
+			jsonFieldError: valUnsupported,
+			keyField:       fmt.Sprintf("seedFiles[%q]", relative),
 		})
 	}
 	if relative == "" || filepath.IsAbs(relative) {
@@ -1675,6 +1700,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 			return "", "", invalid()
 		}
 	}
+
 	clean := filepath.Clean(filepath.FromSlash(relative))
 
 	return clean, filepath.Join(home, clean), nil
@@ -1687,6 +1713,7 @@ func deepMergeYAML(base, override map[string]any) map[string]any {
 	for key, value := range base {
 		merged[key] = value
 	}
+
 	for key, value := range override {
 		if existing, ok := merged[key].(map[string]any); ok {
 			if next, ok := value.(map[string]any); ok {
@@ -1695,6 +1722,7 @@ func deepMergeYAML(base, override map[string]any) map[string]any {
 				continue
 			}
 		}
+
 		merged[key] = value
 	}
 

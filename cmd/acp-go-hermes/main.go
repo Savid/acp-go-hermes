@@ -33,7 +33,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
+
 	var seedFiles seedFileFlag
+
 	flags.Var(&seedFiles, "seed-file", "seed a file into the session config root as <relpath>=<hostpath> (repeatable)")
 
 	if err := flags.Parse(args); err != nil {
@@ -45,9 +47,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 		return 0
 	}
+
 	seeded, err := seedFiles.contents()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: %v\n", err)
+
 		return 2
 	}
 
@@ -77,6 +81,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	logger = telemetry.logger
 
 	opts := make([]hermesacp.Option, 0, 5+len(telemetry.options))
+
 	opts = append(opts,
 		hermesacp.WithAgentVersion(version),
 		hermesacp.WithExecutablePath(*hermesPath),
@@ -87,6 +92,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	if len(seeded) > 0 {
 		opts = append(opts, hermesacp.WithSeedFiles(seeded))
 	}
+
 	opts = append(opts, telemetry.options...)
 
 	err = serve(ctx, stdin, stdout, opts...)
@@ -132,6 +138,7 @@ func (f *seedFileFlag) Set(value string) error {
 	if !ok || relative == "" || hostPath == "" {
 		return fmt.Errorf("invalid -seed-file %q, want <relpath>=<hostpath>", value)
 	}
+
 	f.pairs = append(f.pairs, seedFilePair{relative: relative, hostPath: hostPath})
 
 	return nil
@@ -146,6 +153,7 @@ func (f *seedFileFlag) contents() (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read seed file %q: %w", pair.hostPath, err)
 		}
+
 		seeded[pair.relative] = string(data)
 	}
 
