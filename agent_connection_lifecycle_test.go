@@ -84,7 +84,7 @@ func (r *signalBlockingReader) Read([]byte) (int, error) {
 
 func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 1, MaxConcurrentClientCalls: 1}))
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
 	conn := &localAgentConnection{agent: agent}
 
 	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionList, json.RawMessage(`{}`)); reqErr == nil {
@@ -150,7 +150,7 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 }
 
 func TestLocalAgentConnectionClientCallErrors(t *testing.T) {
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 1, MaxConcurrentClientCalls: 1}))
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
 	conn := &localAgentConnection{agent: agent}
 
 	if err := conn.NotifyExtension(context.Background(), "bad/method", nil); err == nil {
@@ -213,6 +213,9 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 	}
 	if selectPositionEncoding(nil) != acp.PositionEncodingKindUtf16 {
 		t.Fatal("default position encoding mismatch")
+	}
+	if got := selectPositionEncoding([]acp.PositionEncodingKind{"bad", acp.PositionEncodingKindUtf32}); got != acp.PositionEncodingKindUtf16 {
+		t.Fatalf("utf32 must never be selected, got %q", got)
 	}
 
 	for _, tt := range []struct {

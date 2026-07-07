@@ -64,16 +64,12 @@ func validateMCPServers(servers []acp.McpServer) error {
 }
 
 func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, error) {
-	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentPrompts < 0 || limits.MaxConcurrentClientCalls < 0 {
+	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentClientCalls < 0 {
 		return limits, fmt.Errorf("concurrency limits must be non-negative")
 	}
 
 	if limits.MaxActiveSessions == 0 {
 		limits.MaxActiveSessions = defaultMaxActiveSessions
-	}
-
-	if limits.MaxConcurrentPrompts == 0 {
-		limits.MaxConcurrentPrompts = defaultMaxConcurrentPrompts
 	}
 
 	if limits.MaxConcurrentClientCalls == 0 {

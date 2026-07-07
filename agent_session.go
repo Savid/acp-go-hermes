@@ -160,7 +160,7 @@ func (a *Agent) loadOrResumeSession(
 	if a.isDeleted(id) {
 		_ = a.retryDeletedSessionCleanup(ctx)
 
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: valDeleted})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
 	}
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
@@ -207,7 +207,7 @@ func (a *Agent) loadOrResumeSession(
 	}
 
 	if !ok {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: valUnknown})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
 	}
 
 	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {

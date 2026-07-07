@@ -34,7 +34,7 @@ func TestOptionsAndRequestBuilders(t *testing.T) {
 		WithTextMapPropagator(propagation.TraceContext{}),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
-		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentPrompts: 2, MaxConcurrentClientCalls: 3}),
+		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 3}),
 		WithSeedFiles(seed),
 	})
 	if opts.AgentName != "name" || opts.AgentTitle != "title" || opts.ExecutablePath != "hermes" ||
@@ -163,7 +163,15 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 		t.Fatal("unsupported ACP MCP server accepted")
 	}
 	if _, err := normalizeConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}); err == nil {
-		t.Fatal("negative concurrency accepted")
+		t.Fatal("negative active-session limit accepted")
+	}
+	if _, err := normalizeConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}); err == nil {
+		t.Fatal("negative client-call limit accepted")
+	}
+	if limits, err := normalizeConcurrencyLimits(ConcurrencyLimits{}); err != nil ||
+		limits.MaxActiveSessions != defaultMaxActiveSessions ||
+		limits.MaxConcurrentClientCalls != defaultMaxConcurrentClientCalls {
+		t.Fatalf("default concurrency limits = %#v err=%v", limits, err)
 	}
 	if _, err := stringMapFromMeta(map[string]any{"A": 1}); err == nil {
 		t.Fatal("non-string env accepted")
@@ -256,7 +264,7 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if got := embeddedResourceText(resource); got == "" {
 		t.Fatalf("embeddedResourceText = %q", got)
 	}
-	if update := usageUpdateFromTokens("m", nativeTokens{}); update != nil {
+	if update := usageUpdateFromTokens("m", nativeTokens{}, 0); update != nil {
 		t.Fatalf("empty usage update = %#v", update)
 	}
 	usage := usageFromTokens(nativeTokens{Input: 1, Output: 2, Reasoning: 3})

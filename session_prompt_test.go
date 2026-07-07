@@ -302,6 +302,88 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 	}
 }
 
+func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("advertised context window populates size", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.providers = providersResponse{Providers: []providerInfo{{
+			ID: "openai",
+			Models: map[string]providerModel{
+				"gpt-test": {ID: "gpt-test", Limit: map[string]any{"context": float64(200000)}},
+			},
+		}}}
+		conn := newRecordingAgentClient()
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+
+		if err := session.emitMessage(ctx, nativeMessage{
+			Info: nativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: "assistant", Tokens: nativeTokens{Total: 1000}},
+		}, false); err != nil {
+			t.Fatalf("emitMessage: %v", err)
+		}
+		if conn.updateCount() != 1 {
+			t.Fatalf("updates = %d, want 1: %#v", conn.updateCount(), conn.updates)
+		}
+		usage := conn.updates[0].Update.UsageUpdate
+		if usage == nil {
+			t.Fatalf("missing usage update: %#v", conn.updates[0].Update)
+		}
+		if usage.Used != 1000 || usage.Size != 200000 {
+			t.Fatalf("usage used=%d size=%d, want used=1000 size=200000", usage.Used, usage.Size)
+		}
+	})
+
+	t.Run("unknown context window emits size zero", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.providers = providersResponse{Providers: []providerInfo{{
+			ID:     "openai",
+			Models: map[string]providerModel{"gpt-test": {ID: "gpt-test"}},
+		}}}
+		conn := newRecordingAgentClient()
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+
+		if err := session.emitMessage(ctx, nativeMessage{
+			Info: nativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: "assistant", Tokens: nativeTokens{Total: 1000}},
+		}, false); err != nil {
+			t.Fatalf("emitMessage: %v", err)
+		}
+		usage := conn.updates[0].Update.UsageUpdate
+		if usage == nil {
+			t.Fatalf("missing usage update: %#v", conn.updates[0].Update)
+		}
+		if usage.Used != 1000 || usage.Size != 0 {
+			t.Fatalf("usage used=%d size=%d, want used=1000 size=0", usage.Used, usage.Size)
+		}
+	})
+}
+
+func TestSessionContextWindowFallbacks(t *testing.T) {
+	ctx := context.Background()
+
+	if got := (&session{}).contextWindow(ctx); got != 0 {
+		t.Fatalf("nil client window = %d, want 0", got)
+	}
+
+	errClient := newFakeHermesClient()
+	errClient.providersErr = errors.New("boom")
+	if got := testSession(NewAgent(), errClient).contextWindow(ctx); got != 0 {
+		t.Fatalf("provider error window = %d, want 0", got)
+	}
+
+	mismatchClient := newFakeHermesClient()
+	mismatchClient.providers = providersResponse{Providers: []providerInfo{
+		{ID: "other", Models: map[string]providerModel{"x": {ID: "x", Limit: map[string]any{"context": float64(10)}}}},
+		{ID: "openai", Models: map[string]providerModel{"different": {ID: "different", Limit: map[string]any{"context": float64(20)}}}},
+	}}
+	if got := testSession(NewAgent(), mismatchClient).contextWindow(ctx); got != 0 {
+		t.Fatalf("provider/model mismatch window = %d, want 0", got)
+	}
+}
+
 func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	started := make(chan struct{})
@@ -1613,8 +1695,20 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 
 	t.Run("unknown agent prompt and cancel", func(t *testing.T) {
 		agent := NewAgent()
-		if _, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: "missing"}); err == nil {
+		_, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: "missing"})
+		if err == nil {
 			t.Fatal("unknown agent prompt succeeded")
+		}
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("unknown session error type = %T", err)
+		}
+		if reqErr.Code != -32602 {
+			t.Fatalf("unknown session code = %d, want -32602", reqErr.Code)
+		}
+		data, ok := reqErr.Data.(map[string]any)
+		if !ok || data["error"] != "unknown session" || data["field"] != "sessionId" {
+			t.Fatalf("unknown session data = %#v", reqErr.Data)
 		}
 		if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: "missing"}); err == nil {
 			t.Fatal("unknown agent cancel succeeded")

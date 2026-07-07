@@ -533,6 +533,54 @@ func requireLifecycleMismatch(t *testing.T, err error, field string) {
 	}
 }
 
+func requireUnknownSession(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected unknown-session error")
+	}
+	var reqErr *acp.RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("unknown-session error type = %T", err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("unknown-session code = %d, want -32602", reqErr.Code)
+	}
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok || data["error"] != "unknown session" || data["field"] != "sessionId" {
+		t.Fatalf("unknown-session data = %#v", reqErr.Data)
+	}
+}
+
+func TestUnknownSessionErrorShape(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	t.Run("load not in store", func(t *testing.T) {
+		_, err := NewAgent().LoadSession(ctx, LoadSessionRequest("missing", cwd))
+		requireUnknownSession(t, err)
+	})
+	t.Run("resume not in store", func(t *testing.T) {
+		_, err := NewAgent().ResumeSession(ctx, ResumeSessionRequest("missing", cwd))
+		requireUnknownSession(t, err)
+	})
+	t.Run("load tombstoned", func(t *testing.T) {
+		agent := NewAgent()
+		agent.deleted["gone"] = struct{}{}
+		_, err := agent.LoadSession(ctx, LoadSessionRequest("gone", cwd))
+		requireUnknownSession(t, err)
+	})
+	t.Run("resume tombstoned", func(t *testing.T) {
+		agent := NewAgent()
+		agent.deleted["gone"] = struct{}{}
+		_, err := agent.ResumeSession(ctx, ResumeSessionRequest("gone", cwd))
+		requireUnknownSession(t, err)
+	})
+	t.Run("close unknown", func(t *testing.T) {
+		_, err := NewAgent().CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
+		requireUnknownSession(t, err)
+	})
+}
+
 func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()

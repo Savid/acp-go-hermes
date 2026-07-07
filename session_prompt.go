@@ -355,6 +355,17 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 		return nil
 	}
 
+	// Resolve the context window at most once per message, and only when a
+	// usage update is actually emitted.
+	window := -1
+	resolveWindow := func() int {
+		if window < 0 {
+			window = s.contextWindow(ctx)
+		}
+
+		return window
+	}
+
 	for i := range message.Parts {
 		part := &message.Parts[i]
 		if !s.markPart(*part) {
@@ -368,7 +379,7 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 		}
 
 		if part.Type == valStepFinish {
-			if update := usageUpdateFromTokens(part.MessageID, part.Tokens); update != nil {
+			if update := usageUpdateFromTokens(part.MessageID, part.Tokens, resolveWindow()); update != nil {
 				if err := s.emitUpdate(ctx, *update); err != nil {
 					return err
 				}
@@ -377,7 +388,7 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 	}
 
 	if message.Info.Tokens.Total > 0 {
-		if update := usageUpdateFromTokens(message.Info.ID, message.Info.Tokens); update != nil {
+		if update := usageUpdateFromTokens(message.Info.ID, message.Info.Tokens, resolveWindow()); update != nil {
 			return s.emitUpdate(ctx, *update)
 		}
 	}
@@ -1046,7 +1057,9 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event hermesEvent) err
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
 }
 
-func usageUpdateFromTokens(messageID string, tokens nativeTokens) *acp.SessionUpdate {
+// usageUpdateFromTokens builds a usage_update. size is the model's true context
+// window in tokens, or 0 when unknown; it is never fabricated from used.
+func usageUpdateFromTokens(messageID string, tokens nativeTokens, size int) *acp.SessionUpdate {
 	used := int(tokens.Total)
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)
@@ -1056,7 +1069,6 @@ func usageUpdateFromTokens(messageID string, tokens nativeTokens) *acp.SessionUp
 		return nil
 	}
 
-	size := used
 	meta := map[string]any{hermesMetaKey: map[string]any{keyMessageID: messageID}}
 
 	return &acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{

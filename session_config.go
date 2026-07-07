@@ -96,6 +96,39 @@ func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {
 	return options
 }
 
+// contextWindow resolves the true context-window size in tokens for the
+// session's current model, or 0 when the harness does not advertise it.
+func (s *session) contextWindow(ctx context.Context) int {
+	snapshot := s.snapshot()
+	if snapshot.client == nil {
+		return 0
+	}
+
+	providers, err := snapshot.client.ConfigProviders(ctx)
+	if err != nil {
+		return 0
+	}
+
+	for _, provider := range providers.Providers {
+		if provider.ID != snapshot.providerID {
+			continue
+		}
+
+		for key := range provider.Models {
+			model := provider.Models[key]
+			if firstNonEmpty(model.ID, key) != snapshot.modelID {
+				continue
+			}
+
+			if n, ok := intFromNumber(model.Limit["context"]); ok {
+				return n
+			}
+		}
+	}
+
+	return 0
+}
+
 func modelConfigOption(snapshot sessionSnapshot, providers providersResponse) acp.SessionConfigOption {
 	category := acp.SessionConfigOptionCategoryModel
 	current := snapshot.modelValue()
