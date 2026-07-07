@@ -34,6 +34,7 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 				if strings.HasSuffix(path, "/stat") {
 					return nil, errors.New("stat failed")
 				}
+
 				return nil, nil
 			},
 			err: true,
@@ -44,6 +45,7 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 				if strings.HasSuffix(path, "/stat") {
 					return []byte("malformed"), nil
 				}
+
 				return nil, nil
 			},
 			err: true,
@@ -101,6 +103,7 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 				if err == nil {
 					t.Fatal("inspect succeeded unexpectedly")
 				}
+
 				return
 			}
 			if err != nil || identity.StartTime != "123" || len(identity.Cmdline) != 2 || identity.Env["HERMES_HOME"] != "/tmp/home" {
@@ -117,5 +120,6 @@ func procStatWithStart(start string) string {
 	}
 	fields[0] = "S"
 	fields[19] = start
+
 	return "1 (hermes) " + strings.Join(fields, " ")
 }
