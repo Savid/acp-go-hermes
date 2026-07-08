@@ -519,10 +519,9 @@ func isGatewayDisconnect(err error) bool {
 type turnFailureCause string
 
 const (
-	causeProcessExit turnFailureCause = "process_exit"
-	causeTransport   turnFailureCause = "transport"
-	causeProvider    turnFailureCause = "provider"
-	causeTimeout     turnFailureCause = "timeout"
+	causeTransport turnFailureCause = "transport"
+	causeProvider  turnFailureCause = "provider"
+	causeTimeout   turnFailureCause = "timeout"
 )
 
 // turnFailureError is a classified native turn failure. The prompt loop maps it

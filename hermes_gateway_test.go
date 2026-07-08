@@ -37,6 +37,7 @@ type fakeGatewayServer struct {
 	closeNowAfterResult string
 	failMethods         map[string]struct{}
 	promptEvents        *[]nativehermes.Event
+	promptEventDelay    time.Duration
 	promptRawFrames     []string
 	branchNotFound      int
 	branchCreated       bool
@@ -222,7 +223,15 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		for _, frame := range s.promptRawFrameScript() {
 			_ = conn.Write(ctx, websocket.MessageText, []byte(frame))
 		}
-		for _, event := range s.promptEventScript(live) {
+		script := s.promptEventScript(live)
+		for index, event := range script {
+			// An optional inter-event gap lets a test hold back a later frame
+			// (e.g. message.complete) until the client has drained an earlier
+			// one, making streaming-vs-completion ordering deterministic.
+			if delay := s.promptEventDelayValue(); delay > 0 && index > 0 {
+				time.Sleep(delay)
+			}
+
 			s.writeEvent(ctx, conn, event)
 		}
 	case "approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond", "session.interrupt", "session.close":
@@ -454,6 +463,22 @@ func (s *fakeGatewayServer) setPromptEvents(events ...nativehermes.Event) {
 	copied := append([]nativehermes.Event(nil), events...)
 	s.promptEvents = &copied
 	s.mu.Unlock()
+}
+
+// setPromptEventDelay inserts a gap before every prompt event after the first,
+// so a test can hold back a terminal frame until an earlier streamed frame has
+// been consumed by the session.
+func (s *fakeGatewayServer) setPromptEventDelay(delay time.Duration) {
+	s.mu.Lock()
+	s.promptEventDelay = delay
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) promptEventDelayValue() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.promptEventDelay
 }
 
 // setPromptRawFrames queues raw text frames written verbatim (bypassing the

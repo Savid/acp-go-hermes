@@ -18,6 +18,13 @@ const (
 	jsonrpcVersion = "2.0"
 	methodEvent    = "event"
 	fieldSessionID = "session_id"
+
+	// readLimitBytes caps a single inbound gateway frame. It must comfortably
+	// exceed the advertised rawEvent maxBytes (64 KiB) so an oversize native
+	// event is fully read and surfaced as the truncation marker rather than
+	// killing the turn on a short read; it stays bounded (16 MiB) so a hostile
+	// or wedged gateway cannot drive us out of memory with one giant frame.
+	readLimitBytes = 16 * 1024 * 1024
 )
 
 type Client struct {
@@ -84,6 +91,11 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	// Raise the read limit above coder/websocket's 32 KiB default so a native
+	// event larger than the advertised rawEvent cap is read in full and mapped
+	// to the oversize marker instead of failing the read (and the turn).
+	conn.SetReadLimit(readLimitBytes)
 
 	client := &Client{
 		conn:    conn,

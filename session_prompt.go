@@ -283,6 +283,16 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 
 			return acp.PromptResponse{StopReason: stopReason, Usage: usage, UserMessageId: params.MessageId}, nil
 		case <-timeout:
+			// The cancel guard runs before all failure mapping, including the
+			// turn deadline: when a user cancel and the timeout fire together the
+			// result is deterministically cancelled, never cause "timeout".
+			if s.wasCancelled() || turnCtx.Err() != nil {
+				s.cancelTurn()
+				abortTurn()
+
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+			}
+
 			// A turn deadline is a failure, not a user cancel: abort the native
 			// turn and surface cause "timeout", never StopReason cancelled.
 			abortTurn()

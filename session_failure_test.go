@@ -354,8 +354,9 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	})
 }
 
-// T3 — a native failure leaves the session addressable and retriable, and a
-// process_exit cause maps to the uniform error.
+// T3 — a native failure leaves the session addressable and retriable: the
+// classified failure maps to the uniform error, yet the session is neither
+// poisoned nor removed and a follow-up prompt re-drives the turn.
 func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 	client := newFakeHermesClient()
 	attempt := 0
@@ -363,8 +364,8 @@ func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 		attempt++
 		if attempt == 1 {
 			return nativeMessage{}, &turnFailureError{
-				cause:   causeProcessExit,
-				message: "hermes serve exited: signal: killed (out of memory)",
+				cause:   causeTransport,
+				message: "hermes gateway disconnected: unexpected EOF",
 			}
 		}
 
@@ -380,7 +381,7 @@ func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 	session := testSession(agent, client)
 
 	_, err := promptOnce(context.Background(), session, "first")
-	requireTurnFailure(t, err, causeProcessExit, "signal: killed")
+	requireTurnFailure(t, err, causeTransport, "unexpected EOF")
 
 	// The session is neither poisoned nor removed: a follow-up prompt re-drives
 	// the turn and succeeds, never returning the unknown-session error.
@@ -416,6 +417,71 @@ func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
 
 	if message.Info.Finish != valStop || message.Info.Tokens.Total != 3 {
 		t.Fatalf("turn did not complete cleanly after malformed line: %#v", message.Info)
+	}
+}
+
+// T4b — a native event larger than the advertised rawEvent cap (64 KiB) is read
+// in full through the real websocket rig, because the socket read limit sits far
+// above the cap. The turn SUCCEEDS and the oversize frame yields exactly one
+// _hermes/rawEvent oversize marker (with the observed sizeBytes) instead of a
+// short read that would fail the turn.
+func TestRawEventOversizeThroughLiveGatewaySucceeds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(
+		nativehermes.Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"` + strings.Repeat("x", 70000) + `"}`)},
+		nativehermes.Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"usage":{"total_tokens":7}}`)},
+	)
+	// Hold the completion frame back until the oversize delta has been drained by
+	// the session, so the marker is emitted before the turn resolves and the
+	// "exactly one marker" assertion is deterministic.
+	fake.setPromptEventDelay(100 * time.Millisecond)
+
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	server.rememberGatewaySession("native-1", "live-native-1")
+
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := newSession(agent, "session-1", "/repo", nil, nil, testNativeSession("native-1"), server, sessionMeta{}, idmapRecord{
+		SessionID:       "session-1",
+		NativeSessionID: "native-1",
+		Format:          SessionStoreFormat,
+	})
+	session.rawMessages = rawMessageConfig{enabled: true}
+
+	resp, err := promptOnce(ctx, session, "hello")
+	if err != nil {
+		t.Fatalf("oversize native event killed the turn: %v", err)
+	}
+
+	if resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("stop reason = %q, want end_turn", resp.StopReason)
+	}
+
+	exts := conn.extensionsFor(RawEventMethod)
+	if len(exts) != 1 {
+		t.Fatalf("rawEvent notifications = %d, want exactly 1", len(exts))
+	}
+
+	event, ok := rawEventPayload(t, exts[0])[keyEvent].(map[string]any)
+	if !ok {
+		t.Fatalf("marker event = %#v, want map", rawEventPayload(t, exts[0])[keyEvent])
+	}
+
+	if event[rawEventKeyTruncated] != true || event[rawEventKeyReason] != rawEventReasonOversize {
+		t.Fatalf("marker = %#v, want oversize", event)
+	}
+
+	if event[rawEventKeyMaxBytes] != rawEventMaxBytes {
+		t.Fatalf("marker maxBytes = %v, want %d", event[rawEventKeyMaxBytes], rawEventMaxBytes)
+	}
+
+	size, ok := event[rawEventKeySizeBytes].(int)
+	if !ok || size <= rawEventMaxBytes {
+		t.Fatalf("marker sizeBytes = %v, want int > %d", event[rawEventKeySizeBytes], rawEventMaxBytes)
 	}
 }
 
@@ -503,6 +569,69 @@ func TestTurnFailureTimeout(t *testing.T) {
 
 	if client.abortCount() == 0 {
 		t.Fatal("timeout did not abort the native turn")
+	}
+}
+
+// T6b — when a user cancel and the WithTurnTimeout expiry coincide, the cancel
+// guard wins deterministically: the result is StopReason cancelled, never cause
+// timeout, and the native turn is aborted exactly once (no double-send).
+func TestTurnTimeoutCoincidesWithCancelYieldsCancelled(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativeMessage{}, ctx.Err()
+	}
+
+	conn := newRecordingAgentClient()
+	agent := NewAgent(WithTurnTimeout(40 * time.Millisecond))
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := promptOnce(ctx, session, "hang")
+		done <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp, err}
+	}()
+
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("prompt did not start")
+	}
+
+	// Mark the turn cancelled without cancelling the turn context, so when the
+	// deadline fires only the timeout branch is ready and it observes an active
+	// cancel — the coincident case the cancel guard must resolve to cancelled.
+	session.mu.Lock()
+	session.cancelled = true
+	session.mu.Unlock()
+
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("coincident cancel+timeout returned a failure: %v", out.err)
+		}
+
+		if out.resp.StopReason != acp.StopReasonCancelled {
+			t.Fatalf("stop reason = %q, want cancelled", out.resp.StopReason)
+		}
+	case <-ctx.Done():
+		t.Fatal("prompt did not return")
+	}
+
+	if got := client.abortCount(); got != 1 {
+		t.Fatalf("native turn abort count = %d, want exactly 1 (no double-send)", got)
 	}
 }
 
