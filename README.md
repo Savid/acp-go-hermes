@@ -41,6 +41,12 @@ subprocess rather than a human-facing chat UI.
 
 ## Quickstart
 
+The example programs run from a checkout of this repo, so clone it first:
+
+```sh
+git clone https://github.com/savid/acp-go-hermes && cd acp-go-hermes
+```
+
 Run a tiny local client that launches the agent, sends one prompt, and prints
 the reply (the prompt argument is optional):
 
