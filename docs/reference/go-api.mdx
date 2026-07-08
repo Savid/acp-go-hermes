@@ -26,7 +26,7 @@ unsupported error. Keep secrets in `WithEnv` and reference them from seeded
 files by env-var indirection (hermes `key_env`), never inline.
 
 `config.yaml` is the one file the adapter itself authors, because it writes the
-`mcp_servers` block hermes reads from session MCP servers. Per the family merge
+`mcp_servers` block hermes reads from session MCP servers. Per the merge
 rule, a seeded `config.yaml` is deep-merged with the adapter's managed
 `mcp_servers` on top: the adapter wins for `mcp_servers`, and the seed supplies
 everything else (for example a `model` block). All other seeded files are
