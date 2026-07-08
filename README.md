@@ -6,6 +6,10 @@ process per ACP session, speaks
 streams, and is built on
 [`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-hermes.svg)](https://pkg.go.dev/github.com/savid/acp-go-hermes)
+[![CI](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 Use it as either:
 
 - a standalone ACP subprocess: `acp-go-hermes`
@@ -13,38 +17,48 @@ Use it as either:
 
 ## Install
 
+Library:
+
+```sh
+go get github.com/savid/acp-go-hermes
+```
+
+CLI:
+
 ```sh
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-For local development:
+For local development, run the command straight from a checkout:
 
 ```sh
 go run ./cmd/acp-go-hermes -path "$(command -v hermes)"
 ```
 
-The process speaks ACP over stdin/stdout and reserves stdout for ACP JSON-RPC.
-Diagnostics go to stderr. In normal use, an editor or ACP host launches it as a
+The process speaks ACP over stdin/stdout and reserves stdout for ACP JSON-RPC;
+diagnostics go to stderr. In normal use an editor or ACP host launches it as a
 subprocess rather than a human-facing chat UI.
 
 ## Quickstart
 
-Run a tiny local client against the agent:
+Run a tiny local client that launches the agent, sends one prompt, and prints
+the reply (the prompt argument is optional):
 
 ```sh
 go run ./examples/minimal-client "Reply with hello from ACP"
 ```
 
-Or try the interactive example:
+Or drive the agent from an interactive client session:
 
 ```sh
 go run ./examples/interactive-chat
 ```
 
-Load and resume a stored session from its transcript file:
+Load a stored session from a Hermes transcript you captured, and send one
+follow-up prompt against it:
 
 ```sh
-go run ./examples/resume-from-file -session-id <id> < transcript.jsonl
+go run ./examples/resume-from-file -file ./transcript.jsonl -session <session-id>
 ```
 
 ## Embedded Go
@@ -80,26 +94,23 @@ storage, concurrency limits, and OpenTelemetry providers.
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
   delete, and fork.
-- One isolated `hermes serve` subprocess per session with a dedicated
-  per-session `HERMES_HOME`.
-- Authenticated loopback WebSocket JSON-RPC event mapping into ACP methods and
+- One isolated `hermes serve` subprocess per session, each with a dedicated
+  `HERMES_HOME`.
+- Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session
   metadata.
-- Command, file, and generic permission prompts plus MCP elicitation bridging.
+- Command, file, and generic permission prompts, plus MCP elicitation bridging.
 - MCP stdio and streamable HTTP server configuration through the session
   request builders.
-- Native Hermes message replay for `session/load`, replay-free
-  `session/resume`, and `session/delete` store tombstones.
-- Forking through `_hermes/session/fork` and optional raw gateway events
+- Native message replay on `session/load`, replay-free `session/resume`, and
+  store tombstones on `session/delete`.
+- Forking through `_hermes/session/fork`, and optional raw gateway events
   through `_hermes/rawEvent` after per-session opt-in.
-- Durable mirroring through a host-provided `SessionStore`; the store format is
-  `hermes-state-db-v1`.
-- OpenTelemetry adapter telemetry through injected tracer, meter, and
-  propagator providers without recording prompt or tool secrets by default.
-
-The root package exports `NewAgent`, `Serve`, the process and session options,
-the request builders, and the `SessionStore` API.
+- Durable mirroring through a host-provided `SessionStore` in the
+  `hermes-state-db-v1` format.
+- OpenTelemetry telemetry through injected tracer, meter, and propagator
+  providers, recording no prompt or tool secrets by default.
 
 ## Docs
 
@@ -108,6 +119,7 @@ the request builders, and the `SessionStore` API.
 - [Go API](docs/reference/go-api.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
 - [Observability](docs/operations/observability.mdx)
+- [Go package reference](https://pkg.go.dev/github.com/savid/acp-go-hermes)
 
 ## Development
 
@@ -124,3 +136,7 @@ target sets `ACP_GO_HERMES_RUN_INTEGRATION=1` and
 `ACP_GO_HERMES_MODEL` to override the model used by live tests. Live tests
 always launch Hermes with an isolated temp `HERMES_HOME` and never touch the
 user's real Hermes home.
+
+## License
+
+[GNU General Public License v3.0](LICENSE).
