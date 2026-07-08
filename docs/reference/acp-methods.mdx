@@ -1,23 +1,31 @@
-# ACP Methods
+---
+title: ACP Methods
+description: The ACP methods the adapter implements and the one native extension.
+---
 
-Stable methods:
+## Stable methods
 
-- `initialize`
-- `authenticate`
-- `logout`
-- `session/new`
-- `session/load`
-- `session/resume`
-- `session/list`
-- `session/prompt`
-- `session/cancel`
-- `session/close`
-- `session/delete`
-- `session/set_config_option`
+| Method | Behavior |
+|---|---|
+| `initialize` | Advertises capabilities; records client capabilities. |
+| `authenticate` | Rejected — no auth methods advertised. |
+| `logout` | No-op. |
+| `session/new` | Start a session with a fresh isolated home. |
+| `session/load` | Hydrate, resume, and replay `session.history`. |
+| `session/resume` | Hydrate and resume without replay. |
+| `session/list` | List stored sessions. |
+| `session/prompt` | Run one native turn and stream updates. |
+| `session/cancel` | Cancel the in-flight turn. |
+| `session/close` | Close the session and stop its process. |
+| `session/delete` | Tombstone the store, then best-effort native delete. |
+| `session/set_config_option` | Apply a config option such as `model`. |
 
-`session/set_mode` returns method-not-found. Fork is only
-`_hermes/session/fork`.
+## Extensions and unsupported methods
 
-Command listing is intentionally silent in v1. MCP accepts stdio and HTTP
-server definitions; SSE and ACP MCP definitions are rejected during session
-start.
+`session/set_mode` returns method-not-found. The only native extension method is
+`_hermes/session/fork`; the only native notification is `_hermes/rawEvent` (see
+[Raw events](/docs/features/raw-events)).
+
+Command listing is intentionally silent in v1. MCP accepts `stdio` and `http`
+server definitions; `sse` and ACP-transport definitions are rejected during
+session start.

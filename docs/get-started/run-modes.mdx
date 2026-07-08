@@ -1,8 +1,16 @@
-# Run Modes
+---
+title: Run Modes
+description: Choose between the standalone ACP subprocess and the embedded Serve entry point.
+---
 
-## Command
+The adapter runs the same core two ways: as a standalone process an ACP host
+launches, or embedded in your own Go program through `Serve`. The native gateway
+behavior is identical in both.
 
-`acp-go-hermes` is intended to be launched by an ACP client.
+## Standalone command
+
+An ACP client launches `acp-go-hermes` as a subprocess and speaks ACP over its
+stdin/stdout. Stdout carries ACP JSON-RPC only; diagnostics go to stderr.
 
 ```sh
 acp-go-hermes -path /usr/bin/hermes -home /tmp/acp-hermes
@@ -10,22 +18,27 @@ acp-go-hermes -path /usr/bin/hermes -home /tmp/acp-hermes
 
 ## Embedded
 
-```go
+Construct an `Agent` for full control, or call `Serve` to run the ACP loop over
+a reader/writer pair:
+
+<CodeGroup>
+```go NewAgent
 agent := hermesacp.NewAgent(hermesacp.WithHome(home))
 ```
 
-or:
-
-```go
+```go Serve
 err := hermesacp.Serve(ctx, input, output, hermesacp.WithHome(home))
 ```
+</CodeGroup>
 
-## Native Gateway
+See the [Go API](/docs/reference/go-api) for the full option set.
 
-For each ACP session, the adapter starts `hermes serve --host 127.0.0.1` with
-an isolated `HERMES_HOME` and connects to `/api/ws`. `--skip-build` is passed
-only when `HERMES_WEB_DIST` is configured or the default Hermes web dist exists;
+## Native gateway
+
+For each ACP session, the adapter starts `hermes serve --host 127.0.0.1` with an
+isolated `HERMES_HOME` and connects to `/api/ws`. `--skip-build` is passed only
+when `HERMES_WEB_DIST` is configured or the default Hermes web dist exists;
 otherwise Hermes builds or locates its web assets normally.
 
-The adapter wraps the dashboard gateway directly, not Hermes' native ACP
-server mode.
+The adapter wraps the dashboard gateway directly, not Hermes' native ACP server
+mode.

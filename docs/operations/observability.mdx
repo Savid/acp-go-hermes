@@ -1,13 +1,23 @@
-# Observability
+---
+title: Observability
+description: Wire logs, metrics, and traces for the adapter without leaking prompt content.
+---
 
-Use `WithLogger` for adapter diagnostics. The CLI `-debug` flag writes
+The adapter emits structured logs and OpenTelemetry signals for operators, and
+keeps the ACP protocol stream clean.
+
+## Logs
+
+Use `WithLogger` for adapter diagnostics, or the CLI `-debug` flag to write
 structured logs to stderr. Stdout stays reserved for ACP JSON-RPC frames, so
 diagnostics never mix into the protocol stream.
+
+## Traces and metrics
 
 Embedded hosts supply OpenTelemetry providers with `WithTracerProvider`,
 `WithMeterProvider`, and `WithTextMapPropagator`. The package never installs
 global providers and never shuts down caller-supplied providers. The standalone
-binary configures adapter exporters from standard `OTEL_*` environment
+binary configures adapter exporters from the standard `OTEL_*` environment
 variables.
 
 Telemetry records ACP request outcomes, prompt-turn timing, token usage, active
@@ -15,5 +25,7 @@ sessions, and `hermes serve` process starts. Inbound ACP `_meta` W3C trace
 context is extracted for adapter spans and injected into each launched
 `hermes serve` process as `TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
 
+<Note>
 Telemetry avoids recording prompt text, tool inputs, tool outputs, and raw
 Hermes gateway event bodies by default.
+</Note>

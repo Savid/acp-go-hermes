@@ -1,13 +1,30 @@
-# Examples
+---
+title: Examples
+description: The three runnable reference clients and what each one demonstrates.
+---
 
-The repository includes:
+The repository ships three runnable ACP clients. Each is a real client, not a
+stub, and each runs from a checkout of this repo.
 
-- `examples/minimal-client`
-- `examples/interactive-chat`
-- `examples/resume-from-file`
+## The reference clients
 
-Run:
+| Example | What it shows |
+|---|---|
+| `examples/minimal-client` | Launch the agent, open a session, send one prompt, print the reply. |
+| `examples/interactive-chat` | A read-eval loop that keeps one session open for multiple turns. |
+| `examples/resume-from-file` | Load a captured Hermes transcript into a store and prompt against it. |
+
+## Run one
 
 ```sh
 go run ./examples/minimal-client "Say hello"
 ```
+
+The resume client reads a JSONL transcript and takes `-file` and `-session`
+flags; the session id is inferred from the transcript when omitted:
+
+```sh
+go run ./examples/resume-from-file -file ./transcript.jsonl -session <session-id>
+```
+
+Each example directory has its own `README.md` with the full flag list.

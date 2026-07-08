@@ -1,24 +1,32 @@
-# CLI
+---
+title: CLI
+description: Every flag the acp-go-hermes command accepts.
+---
 
 ```sh
 acp-go-hermes [flags]
 ```
 
-Flags:
+## Flags
 
-- `-path`: Hermes executable path; defaults to `hermes`
-- `-home`: parent directory for isolated per-session Hermes homes
-- `-model`: default model value passed as `provider/model`
-- `-seed-file`: seed a file into each session's Hermes config root as
-  `<relpath>=<hostpath>` (repeatable). The host file is read at startup and its
-  contents are written to `<relpath>` under the isolated config root before
-  hermes launches. Relative paths are confined to that root; absolute paths,
-  `..` segments, and empty keys are rejected. Keep secrets out of seeded files
-  and reference them by env-var indirection (hermes `key_env`) instead.
-- `-debug`: enable debug logging on stderr
-- `-version`: print the wrapper version and exit
+| Flag | Meaning |
+|---|---|
+| `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
+| `-home` | Parent directory for isolated per-session Hermes homes. |
+| `-model` | Default model value passed as `provider/model`. |
+| `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
+| `-debug` | Enable debug logging on stderr. |
+| `-version` | Print the adapter version and exit. |
 
-Example, pointing hermes at a LiteLLM gateway:
+`-seed-file` reads the host file at startup and writes its contents to
+`<relpath>` under the isolated config root before Hermes launches. Relative paths
+are confined to that root; absolute paths, `..` segments, and empty keys are
+rejected. Keep secrets out of seeded files and reference them by env-var
+indirection (Hermes `key_env`) instead.
+
+## Example
+
+Pointing Hermes at a LiteLLM gateway:
 
 ```sh
 acp-go-hermes -seed-file config.yaml=./hermes-config.yaml

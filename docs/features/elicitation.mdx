@@ -1,15 +1,30 @@
-# Elicitation
+---
+title: Elicitation
+description: How Hermes clarification questions become capability-gated ACP elicitation requests.
+---
 
-Hermes question events are reserved for ACP elicitation. The adapter records
-client capabilities during initialize and must only send elicitation requests
-when the client advertises the matching capability.
+When Hermes needs more input mid-turn, the adapter can forward the question to
+the ACP host as an elicitation request — but only when the host advertised
+support for it.
 
+## Capability gating
+
+The adapter records client capabilities during `initialize` and sends
+elicitation requests only when the client advertises the matching capability.
 When `hermes serve` emits `clarify.request`, the adapter maps it to ACP
-`elicitation/create` using the unstable form elicitation shape. If the ACP
-client did not advertise form elicitation support, or if the client declines or
-cancels the request, the adapter rejects the native Hermes question
-deterministically.
+`elicitation/create` using the unstable form elicitation shape.
 
-`terminal.read.request`, `sudo.request`, and `secret.request` are not
-forwarded as elicitation in v1. They are answered with deterministic empty
-native responses and secrets are never persisted.
+If the client did not advertise form elicitation support, or if it declines or
+cancels the request, the adapter rejects the native Hermes question
+deterministically rather than hanging the turn.
+
+## Non-elicitation native questions
+
+`terminal.read.request`, `sudo.request`, and `secret.request` are not forwarded
+as elicitation in v1. They are answered with deterministic empty native
+responses, and secrets are never persisted.
+
+<Note>
+Form elicitation uses an unstable ACP shape; a host must advertise the matching
+capability at `initialize` for any Hermes clarification to reach the user.
+</Note>

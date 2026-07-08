@@ -1,15 +1,49 @@
-# Prompt Streaming
+---
+title: Prompt Streaming
+description: How native gateway events map to ACP updates, and how turn failures and timeouts surface.
+---
 
 Prompt turns call native `prompt.submit` over the Hermes WebSocket gateway and
-consume gateway events until `message.complete`. `message.delta` events become
-ACP text chunks, `thinking.delta` events become reasoning chunks, and token
-data from completion payloads becomes `usage_update`.
+consume gateway events until the turn completes. `message.delta` events become
+ACP text chunks, `thinking.delta` events become reasoning chunks, and token data
+from completion payloads becomes `usage_update`.
 
-Hermes v0.18.0 does not expose a proven image payload on `prompt.submit`.
-This adapter advertises text and embedded-resource prompts only and rejects ACP
-image blocks with `invalid_params`.
+## Prompt content
 
-If the WebSocket stream fails during a turn, the adapter aborts the native turn
-and returns one terminal ACP error for that prompt. Idle disconnects are
-treated as a gateway lifecycle failure and future session operations reconnect
-through normal session hydration.
+The adapter advertises `promptCapabilities` with both embedded context and image
+support enabled, so a prompt may carry text, resource links, embedded resources,
+and image blocks. Text and resource content is forwarded as native text parts;
+an image block (inline base64 `data` or a `uri`) is converted to a native file
+part with its MIME type. A prompt with no usable parts is rejected with
+`invalid_params`.
+
+## Turn failure contract
+
+A failed turn is never an ACP stop reason. When a native turn fails, the adapter
+aborts it and returns one terminal `hermes_turn_failed` JSON-RPC error
+(`-32603`, Internal error — the adapter never uses `-32000`). The error `data`
+carries a machine-readable `cause`:
+
+| `cause` | Meaning |
+|---|---|
+| `transport` | Gateway/connection failure, including a mid-turn WebSocket disconnect and any unclassified error. |
+| `provider` | The model provider rejected or failed the turn. |
+| `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/reference/go-api). |
+
+`data.message` carries the real native cause, never a fixed placeholder;
+`data.statusCode` and `data.providerCode` appear only when the gateway supplies
+them.
+
+<Note>
+A timeout is a failure, not a user cancel, so it surfaces as
+`hermes_turn_failed` with `cause: "timeout"` — never the `cancelled` stop
+reason. A turn cancelled by the client returns the `cancelled` stop reason
+instead.
+</Note>
+
+## Stream death and reconnect
+
+If the WebSocket stream dies during a turn, the adapter fences that turn with the
+terminal `hermes_turn_failed` error (cause `transport`) and marks the stream
+failed. Subsequent session operations reconnect through normal session
+hydration, so a dropped gateway does not orphan the session.

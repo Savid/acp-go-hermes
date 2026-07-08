@@ -1,6 +1,43 @@
-# MCP
+---
+title: MCP
+description: Attach MCP servers to a session and how the adapter forwards them to Hermes.
+---
 
-ACP lifecycle requests accept stdio and HTTP MCP server definitions. SSE and
-ACP-transport MCP server definitions are rejected during session start.
+Attach Model Context Protocol servers to a session so Hermes can call their
+tools. Servers are supplied by the host per session; the adapter forwards them to
+Hermes and never exposes a public MCP route of its own.
 
-The adapter does not expose a public MCP transport route.
+## Supported transports
+
+Session lifecycle requests accept `stdio` and streamable `http` MCP server
+definitions. `sse` and ACP-transport MCP server definitions are rejected during
+session start.
+
+| Transport | Accepted | Builder |
+|---|---|---|
+| stdio | yes | `StdioMCPServer` |
+| http (streamable) | yes | `HTTPMCPServer` |
+| sse | no (rejected at session start) | — |
+| acp | no (rejected at session start) | — |
+
+## How servers reach Hermes
+
+The adapter authors the session's `config.yaml` `mcp_servers` block from the
+accepted server definitions and writes it into the session's isolated config
+root before `hermes serve` launches. When a `config.yaml` is also seeded, the
+adapter's managed `mcp_servers` block wins on deep-merge while the seed supplies
+the `model` block and everything else — see
+[Models and config](/docs/features/models-config).
+
+```go
+req := hermesacp.NewSessionRequest(cwd,
+	hermesacp.WithSessionMCPServers(
+		hermesacp.StdioMCPServer("files", "mcp-files", []string{"--root", "/work"}, nil),
+	),
+)
+```
+
+<Note>
+MCP servers are host-provided and session-scoped. The adapter exposes no public
+MCP transport route and never proxies servers between sessions.
+</Note>

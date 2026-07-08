@@ -1,10 +1,17 @@
-# Sessions
+---
+title: Sessions
+description: The per-session process model, adapter-owned IDs, and the load/resume/delete semantics.
+---
 
 Each ACP session owns one `hermes serve` process and one isolated per-session
-`HERMES_HOME` under the configured home parent. The adapter talks to the
-native dashboard gateway over loopback WebSocket JSON-RPC.
+`HERMES_HOME` under the configured home parent. The adapter talks to the native
+dashboard gateway over loopback WebSocket JSON-RPC. Sessions are independent:
+one crashing or ending never touches another's home or process.
 
-Lifecycle support:
+## Lifecycle
+
+The adapter implements the full ACP session lifecycle plus a native fork
+extension:
 
 - `session/new`
 - `session/load`
@@ -14,12 +21,23 @@ Lifecycle support:
 - `session/delete`
 - `_hermes/session/fork`
 
-ACP session IDs are adapter-owned. The native durable Hermes session key is
-stored in the `idmap` store subpath, while live gateway session IDs are runtime
-only.
+## Identity mapping
+
+ACP session IDs are adapter-owned and stable across restarts. The native durable
+Hermes session key is recorded in the `idmap` store subpath so a stored session
+can be rehydrated later, while live gateway session IDs are runtime-only and are
+never persisted.
+
+## Load, resume, and delete
 
 `session/load` hydrates native state, resumes the stored Hermes session, and
-replays `session.history` to the ACP client. `session/resume` hydrates and
-resumes without replay. `session/delete` tombstones the ACP store first, then
-best-effort deletes native state; native missing-session responses count as
-success.
+replays `session.history` to the ACP client so the host rebuilds the
+conversation. `session/resume` hydrates and resumes the same way but skips the
+replay, for hosts that only need to continue the turn stream.
+
+`session/delete` tombstones the ACP store first, then best-effort deletes native
+state; a native missing-session response counts as success, so delete is
+idempotent.
+
+Durable rehydration depends on a configured store — see
+[Session store](/docs/features/session-store).

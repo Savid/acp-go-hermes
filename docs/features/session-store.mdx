@@ -1,20 +1,54 @@
-# Session Store
+---
+title: Session Store
+description: Wire a durable store to persist sessions and how the hermes-state-db-v1 snapshot is shaped.
+---
 
-`SessionStoreFormat` is `hermes-state-db-v1`.
+Persist sessions across adapter restarts by wiring a `SessionStore`. Without one,
+the adapter keeps sessions in memory only; with one, completed turns are
+snapshotted so a session can be reloaded or resumed later.
 
-The store writes a complete snapshot after completed turns:
+## Wiring a store
 
-- main snapshot entry
+Pass a store with `WithSessionStore`. The adapter ships an in-memory
+implementation for tests and single-process use, and the `SessionStore`
+interface lets a host supply durable backing:
+
+```go
+store := hermesacp.NewInMemorySessionStore()
+
+agent := hermesacp.NewAgent(
+	hermesacp.WithSessionStore(store),
+	hermesacp.WithSessionStoreLoadTimeout(10*time.Second),
+)
+```
+
+`WithSessionStoreLoadTimeout` bounds each store load; it defaults to 10 seconds.
+The `SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`,
+`ListSessions`, `ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
+
+## Snapshot shape
+
+`SessionStoreFormat` is `hermes-state-db-v1`. The store writes a complete
+snapshot after each completed turn:
+
+- the main snapshot entry
 - `idmap`
 - `state-db`
 
 The `state-db` archive contains `state.db`, `state.db-wal`, and `state.db-shm`
-when present. Archive entries are `tar+zstd+base64` and are restored into a
-fresh per-session `HERMES_HOME`.
+when present. Archive entries are `tar+zstd+base64` and are restored into a fresh
+per-session `HERMES_HOME`.
 
 The `idmap` subpath records the ACP session ID, durable Hermes session key, and
 fork lineage. Live gateway session IDs and auth tokens are not persisted.
 
-Restore after native deletion is supported by hydrating `state-db` into a fresh
-home, calling native `session.resume`, and then replaying `session.history` for
-`session/load`.
+## Restore
+
+Restore after native deletion hydrates `state-db` into a fresh home, calls native
+`session.resume`, and — for `session/load` — replays `session.history` to the ACP
+client.
+
+<Note>
+Snapshots exclude credential-bearing files and scrub credential tables from the
+SQLite archive, so a store never captures provider secrets.
+</Note>

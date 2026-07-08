@@ -1,10 +1,33 @@
-# Security
+---
+title: Security
+description: The trust boundaries an operator relies on — loopback gating, stdout discipline, and credential exclusion.
+---
 
-Each Hermes server binds to `127.0.0.1` and gates the dashboard WebSocket with
-a per-session random `HERMES_DASHBOARD_SESSION_TOKEN`. Child stdout and stderr
-are never connected to the ACP stdout stream.
+The adapter is built so that running it does not widen your attack surface: the
+gateway stays on loopback, the protocol stream stays clean, and stored snapshots
+never carry secrets.
 
-Session snapshots store only the Hermes state database archive plus adapter
+## Loopback gateway
+
+Each `hermes serve` process binds to `127.0.0.1` and gates the dashboard
+WebSocket with a per-session random `HERMES_DASHBOARD_SESSION_TOKEN`. Nothing
+listens off-host.
+
+## Stdout discipline
+
+Stdout is reserved exclusively for ACP JSON-RPC frames. Child process stdout and
+stderr are never connected to the ACP stdout stream, so a chatty harness cannot
+corrupt the protocol.
+
+<Warning>
+Never print to stdout from an embedding host — it is the ACP JSON-RPC channel.
+Send all diagnostics to stderr or a logger.
+</Warning>
+
+## Credentials never leave the process
+
+Session snapshots store only the Hermes state-database archive plus adapter
 metadata. They exclude obvious credential-bearing files such as `auth.json`,
-credential-named files, logs, caches, checkpoints, and backups; credential
-tables in SQLite archives are scrubbed.
+credential-named files, logs, caches, checkpoints, and backups; credential tables
+in SQLite archives are scrubbed. Provider keys stay in the environment and are
+never written into seeded files or the store.

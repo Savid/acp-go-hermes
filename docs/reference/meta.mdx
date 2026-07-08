@@ -1,4 +1,12 @@
-# Metadata
+---
+title: Metadata
+description: The _meta.hermes vocabulary accepted on requests and emitted on responses.
+---
+
+The adapter reads and writes vendor metadata under the `_meta.hermes` namespace.
+Unknown keys under `_meta.hermes` are rejected; foreign namespaces are ignored.
+
+## Request metadata
 
 Lifecycle requests accept:
 
@@ -18,10 +26,18 @@ Lifecycle requests accept:
 }
 ```
 
-Unknown keys under `_meta.hermes` are rejected. Foreign namespaces are
-ignored.
+| Field | Meaning |
+|---|---|
+| `options.model` | Selects the `provider/model` pair for the session. |
+| `options.env` | Per-session environment variables injected into Hermes. |
+| `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
 
-`_meta.hermes.options.model` selects the provider/model pair. `env` injects
-per-session environment variables. No other option keys are accepted; any
-unsupported field fails with an invalid-params `{"error":"unsupported"}`
-response.
+No other option keys are accepted; any unsupported field fails with an
+invalid-params `{"error":"unsupported"}` response.
+
+## Response metadata
+
+Advertised model config options carry per-model `_meta.hermes` metadata:
+`contextWindow`, `maxOutputTokens`, `capabilities` (for example `tools`,
+`image`, `audio`), and `supportedEffortLevels` where the model exposes them.
+Usage updates may carry `_meta.hermes.messageId`.

@@ -1,34 +1,43 @@
-# Models And Config
+---
+title: Models And Config
+description: Select the session model and seed Hermes' own config to route through a gateway.
+---
 
-The model selector is an ACP config option with id `model` and category
-`model`. Values are built from native gateway `model.options` results as
-`provider/model`.
+Pick the model for a session and, when you need it, hand Hermes its own config so
+it routes prompts through a gateway of your choice — without touching the
+caller's real Hermes home.
 
-No mode selector is advertised in v1 because Hermes has no approved
-programmatic per-session agent/mode enumeration surface for this adapter.
+## Model selector
 
-Structured output is not advertised for Hermes. Supplying
-`_meta.hermes.options.outputSchema` returns the uniform unsupported-field
-error.
+The model selector is an ACP config option with id `model` and category `model`.
+Values are built from native gateway `model.options` results as `provider/model`.
+Each advertised option carries per-model `_meta.hermes` metadata — see
+[Metadata](/docs/reference/meta).
+
+No mode selector is advertised: Hermes exposes no approved programmatic
+per-session agent/mode enumeration surface for this adapter. Structured output is
+also not advertised; supplying `_meta.hermes.options.outputSchema` returns the
+uniform unsupported-field error.
 
 ## Seeding native config
 
-Use `WithSeedFiles` (or the `-seed-file` CLI flag) to write hermes' own config
-into each session's isolated config root before hermes launches. This is how you
-point hermes at a gateway such as LiteLLM without touching the caller's real
-Hermes home. Every session is seeded fresh and paths are confined to the config
-root.
+Use `WithSeedFiles` (or the `-seed-file` CLI flag) to write Hermes' own config
+into each session's isolated config root before Hermes launches. This is how you
+point Hermes at a gateway such as LiteLLM. Every session is seeded fresh and
+paths are confined to the config root.
 
 Most seeded files are written verbatim. `config.yaml` is the exception: the
-adapter also authors it to carry the `mcp_servers` block for session MCP
-servers, so a seeded `config.yaml` is deep-merged with the adapter's managed
-`mcp_servers` on top. The adapter wins for `mcp_servers`; your seed supplies the
-`model` block and everything else. This means a session can use both a seeded
-`model` gateway and wrapper-provided MCP servers at once.
+adapter also authors it to carry the `mcp_servers` block for session MCP servers,
+so a seeded `config.yaml` is deep-merged with the adapter's managed `mcp_servers`
+on top. The adapter wins for `mcp_servers`; your seed supplies the `model` block
+and everything else. A session can therefore use a seeded `model` gateway and
+wrapper-provided MCP servers at once.
 
+<Warning>
 Keep the API key in the environment (`WithEnv`) and reference it from the seeded
-file by env-var indirection with hermes `key_env`; never write the secret into
-the seeded file.
+file by env-var indirection with Hermes' `key_env`. Never write the secret into
+the seeded file — seeded files may be captured in snapshots.
+</Warning>
 
 ```go
 agent := hermesacp.NewAgent(
@@ -47,6 +56,6 @@ agent := hermesacp.NewAgent(
 ```
 
 The seeded `config.yaml` lands at `config.yaml` under the session's resolved
-native config root, so hermes reads it as its own configuration and routes the
+native config root, so Hermes reads it as its own configuration and routes the
 `default` model through the LiteLLM gateway at `base_url`, authenticating with
 the key named by `key_env`.

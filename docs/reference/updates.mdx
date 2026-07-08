@@ -1,12 +1,22 @@
-# Updates
+---
+title: Updates
+description: The session/update notification variants the adapter emits during a turn.
+---
 
-The adapter emits ACP `session/update` notifications for:
+During a turn the adapter maps native gateway events to ACP `session/update`
+notifications.
 
-- user and agent message chunks
-- thought chunks
-- tool calls
-- plan updates
-- config option updates
-- usage updates
+## Update variants
 
-Usage metadata may include `_meta.hermes.messageId`.
+| Update | Source |
+|---|---|
+| User and agent message chunks | `message.delta` and echoed user content. |
+| Thought chunks | `thinking.delta` reasoning events. |
+| Tool calls | Native tool-call events. |
+| Plan updates | Native plan events. |
+| Config option updates | Model/config option changes. |
+| Usage updates | Token data from completion payloads. |
+
+Usage metadata may include `_meta.hermes.messageId`. Text chunks originate from
+`message.delta`; reasoning chunks from `thinking.delta` — see
+[Prompt streaming](/docs/core/prompt-streaming).

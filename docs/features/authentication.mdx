@@ -1,14 +1,27 @@
-# Authentication
+---
+title: Authentication
+description: Why the adapter advertises no ACP auth methods and keeps Hermes credentials native.
+---
 
-Hermes/provider authentication remains native to Hermes. The ACP agent
-advertises `authMethods: []`, rejects every `authenticate` request, and treats
-`logout` as a no-op.
+Hermes and provider authentication stay native to Hermes. The adapter does not
+own or manage your real Hermes login state.
 
-Every per-session `hermes serve` process runs with an isolated `HERMES_HOME`
-and a random `HERMES_DASHBOARD_SESSION_TOKEN` for the loopback dashboard
-gateway. The token hash is written to the lease file only for stale-process
-identity checks.
+## No ACP auth methods
+
+The agent advertises `authMethods: []`. It rejects every `authenticate` request
+and treats `logout` as a no-op. Hosts do not authenticate through ACP; they
+supply credentials to Hermes through its own environment and configuration.
+
+## Per-session isolation
+
+Every per-session `hermes serve` process runs with an isolated `HERMES_HOME` and
+a random `HERMES_DASHBOARD_SESSION_TOKEN` for the loopback dashboard gateway. The
+token hash is written to the lease file only for stale-process identity checks.
+
+## Credentials never reach the store
 
 Auth material is never persisted to the ACP session store. Credential-bearing
 native files and SQLite credential tables are excluded or scrubbed from store
-snapshots.
+snapshots. Keep provider keys in the environment (`WithEnv`) and reference them
+from seeded config by env-var indirection — see
+[Models and config](/docs/features/models-config).

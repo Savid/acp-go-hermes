@@ -1,8 +1,35 @@
-# Permissions
+---
+title: Permissions
+description: How native Hermes approval requests become ACP permission prompts and how answers flow back.
+---
 
-Hermes `approval.request` gateway events are mapped to ACP
-`session/request_permission`. ACP replies are sent back through native
-`approval.respond` with `once`, `always`, or `deny`.
+When Hermes needs approval to act, the adapter surfaces it to the ACP host as a
+permission prompt and relays the host's answer back to Hermes. The flow is
+load-bearing for user trust and is never silently auto-approved.
 
-On cancellation, pending native permission requests are rejected with a
-cancelled explanation and the ACP prompt returns `cancelled`.
+## Request mapping
+
+A native `approval.request` gateway event maps to an ACP
+`session/request_permission` request. The adapter presents three options:
+
+| Option id | ACP kind | Native reply |
+|---|---|---|
+| `once` | `allow_once` | `once` |
+| `always` | `allow_always` | `always` |
+| `reject` | `reject_once` | `reject` |
+
+The host's selected option is relayed to Hermes through native
+`approval.respond`.
+
+## Cancellation
+
+On cancellation, pending native permission requests are answered with `reject`
+carrying a cancelled explanation, and the ACP prompt returns the `cancelled`
+stop reason. If the client is unavailable when a request arrives, the adapter
+also replies `reject` so Hermes never blocks on a missing host.
+
+<Note>
+Permission decisions are session-scoped. `always` grants persist only within the
+session that made them; they are copied to a new session only through explicit
+fork behavior.
+</Note>

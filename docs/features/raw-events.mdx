@@ -1,6 +1,15 @@
-# Raw Events
+---
+title: Raw Events
+description: Opt a session into receiving raw native gateway events and the truncation-marker shape.
+---
 
-Raw native events are emitted only after opt-in:
+For debugging or mirroring, a session can opt in to receive the raw native Hermes
+gateway events as ACP notifications. This is off by default and scoped to the
+session that enabled it.
+
+## Opting in
+
+Set the flag in the session's `_meta.hermes.rawEvent` block:
 
 ```json
 {
@@ -14,4 +23,21 @@ Raw native events are emitted only after opt-in:
 }
 ```
 
-Events are sent as `_hermes/rawEvent` notifications and capped at 64 KiB.
+Events are then delivered as `_hermes/rawEvent` notifications, each carrying
+`sessionId`, `sequence`, `source`, and the native `event` payload.
+
+## Size cap and truncation
+
+Each event is capped at 64 KiB. Rather than drop an oversize event and leave a
+gap in the sequence, the adapter replaces the `event` payload with a fixed
+truncation marker and keeps the `sessionId`, `sequence`, and `source` envelope:
+
+| Field | Meaning |
+|---|---|
+| `truncated` | Always `true` on a marker. |
+| `reason` | `oversize` (exceeded the cap) or `unserializable` (marshal failure). |
+| `maxBytes` | The 64 KiB cap. |
+| `sizeBytes` | The event's encoded size (present only for `oversize`). |
+
+The marker is always valid JSON, so a consumer never receives an invalid payload
+and never sees an unexplained gap in the sequence.
