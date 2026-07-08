@@ -24,9 +24,9 @@ fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
 	$(GOLANGCI_LINT) fmt ./...
 
-## test: run unit tests with the race detector
+## test: run unit tests with race detector and shuffled order
 test:
-	go test -race ./...
+	go test -race -shuffle=on ./...
 
 ## test-cross-compile: compile platform-specific test branches
 test-cross-compile:
@@ -69,7 +69,7 @@ docs-audit:
 
 ## clean: remove build artifacts
 clean:
-	rm -rf .tmp coverage.out coverage-integration.out
+	rm -rf .tmp coverage.out coverage-integration.out coverage-summary.txt
 
 ## tidy: verify module files are tidy
 tidy:
