@@ -42,6 +42,8 @@ func validateOptionalAbsolutePath(field string, value *string) error {
 }
 
 func validateMCPServers(servers []acp.McpServer) error {
+	seen := make(map[string]struct{}, len(servers))
+
 	for index, server := range servers {
 		if server.Sse != nil {
 			return acp.NewInvalidParams(map[string]any{
@@ -58,9 +60,47 @@ func validateMCPServers(servers []acp.McpServer) error {
 				valServer:      server.Acp.Name,
 			})
 		}
+
+		name, err := mcpServerName(server, index)
+		if err != nil {
+			return err
+		}
+
+		if _, exists := seen[name]; exists {
+			return acp.NewInvalidParams(map[string]any{
+				fmt.Sprintf("mcpServers[%d].name", index): validationDuplicate,
+			})
+		}
+
+		seen[name] = struct{}{}
 	}
 
 	return nil
+}
+
+// mcpServerName returns the declared name of a supported (stdio or http) MCP
+// server. Names are host-supplied identity: every accepted declaration MUST
+// carry a non-empty name, so an empty name is rejected as invalid params. The
+// wrapper never fabricates, rewrites, or deduplicates names.
+func mcpServerName(server acp.McpServer, index int) (string, error) {
+	var name string
+
+	switch {
+	case server.Stdio != nil:
+		name = server.Stdio.Name
+	case server.Http != nil:
+		name = server.Http.Name
+	default:
+		return "", acp.NewInvalidParams(map[string]any{keyField: fmt.Sprintf("mcpServers[%d]", index)})
+	}
+
+	if name == "" {
+		return "", acp.NewInvalidParams(map[string]any{
+			fmt.Sprintf("mcpServers[%d].name", index): validationRequired,
+		})
+	}
+
+	return name, nil
 }
 
 func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, error) {

@@ -710,18 +710,13 @@ func (a *Agent) homeRoot() string {
 	return filepath.Join(os.TempDir(), valACPGoHermes)
 }
 
+// validateUnstableMCPServers applies the same acceptance rules as
+// validateMCPServers to the unstable fork variant: reject unsupported
+// transports and require a non-empty, request-unique name on every accepted
+// (stdio or http) declaration. Indices are preserved by the conversion, so the
+// offending-field paths match the wire request.
 func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
-	for index, server := range servers {
-		if server.Sse != nil {
-			return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: fmt.Sprintf("mcpServers[%d]", index), valServer: server.Sse.Name})
-		}
-
-		if server.Acp != nil {
-			return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: fmt.Sprintf("mcpServers[%d]", index), valServer: server.Acp.Name})
-		}
-	}
-
-	return nil
+	return validateMCPServers(stableMCPServersFromUnstable(servers))
 }
 
 func cloneHermesStateDB(source xdgDirs, target xdgDirs) error {

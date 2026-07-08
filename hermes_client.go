@@ -1529,12 +1529,7 @@ func materializeHermesConfig(home string, servers []acp.McpServer, files map[str
 	var managed map[string]any
 
 	if len(servers) > 0 {
-		built, err := hermesMCPServersConfig(servers)
-		if err != nil {
-			return err
-		}
-
-		managed = built
+		managed = hermesMCPServersConfig(servers)
 	}
 
 	writes, seededConfig, haveSeededConfig, err := buildHermesSeedWrites(home, files)
@@ -1722,15 +1717,16 @@ func seedFileInvalid(relative string) error {
 }
 
 // hermesMCPServersConfig builds the wrapper-managed config block that hermes
-// reads for MCP servers. Callers pass a non-empty server list.
-func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
-	mcpServers := map[string]any{}
+// reads for MCP servers. Callers pass a non-empty server list that has already
+// passed validateMCPServers, so every entry is stdio or http and carries a
+// non-empty name unique within the request; names are used verbatim as the
+// config keys with no fabrication or deduplication.
+func hermesMCPServersConfig(servers []acp.McpServer) map[string]any {
+	mcpServers := make(map[string]any, len(servers))
 
-	for index, server := range servers {
+	for _, server := range servers {
 		switch {
 		case server.Stdio != nil:
-			name := firstNonEmpty(server.Stdio.Name, fmt.Sprintf("server_%d", index+1))
-
 			env := map[string]string{}
 			for _, item := range server.Stdio.Env {
 				env[item.Name] = item.Value
@@ -1744,10 +1740,8 @@ func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
 				entry["env"] = env
 			}
 
-			mcpServers[name] = entry
+			mcpServers[server.Stdio.Name] = entry
 		case server.Http != nil:
-			name := firstNonEmpty(server.Http.Name, fmt.Sprintf("server_%d", index+1))
-
 			headers := map[string]string{}
 			for _, item := range server.Http.Headers {
 				headers[item.Name] = item.Value
@@ -1758,13 +1752,11 @@ func hermesMCPServersConfig(servers []acp.McpServer) (map[string]any, error) {
 				entry["headers"] = headers
 			}
 
-			mcpServers[name] = entry
-		default:
-			return nil, acp.NewInvalidParams(map[string]any{keyField: fmt.Sprintf("mcpServers[%d]", index)})
+			mcpServers[server.Http.Name] = entry
 		}
 	}
 
-	return map[string]any{"mcp_servers": mcpServers}, nil
+	return map[string]any{"mcp_servers": mcpServers}
 }
 
 // buildHermesSeedWrites resolves each seeded file into a planned write under

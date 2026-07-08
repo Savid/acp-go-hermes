@@ -863,10 +863,12 @@ func TestMaterializeHermesConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects unsupported mcp server", func(t *testing.T) {
-		home := t.TempDir()
+	t.Run("unsupported mcp server rejected at the ACP boundary", func(t *testing.T) {
+		// materializeHermesConfig only ever sees servers that already passed
+		// validateMCPServers, so the unsupported-transport rejection lives at
+		// the boundary rather than in the renderer.
 		servers := []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}}
-		if err := materializeHermesConfig(home, servers, nil); err == nil {
+		if err := validateMCPServers(servers); err == nil {
 			t.Fatal("unsupported mcp server accepted")
 		}
 	})
@@ -1608,12 +1610,6 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 	if _, err := startHermesServer(ctx, hermesStartOptions{ExistingXDG: xdgDirs{Root: filepath.Join(t.TempDir(), "root")}}); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")
-	}
-	if _, err := startHermesServer(ctx, hermesStartOptions{
-		ExistingXDG: testXDGDirs(t),
-		MCPServers:  []acp.McpServer{{}},
-	}); err == nil {
-		t.Fatal("invalid mcp server unexpectedly started")
 	}
 
 	restoreHermesClientSeams(t)

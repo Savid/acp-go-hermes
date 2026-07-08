@@ -25,6 +25,7 @@ const (
 	jsonFieldSessionID    = "sessionId"
 	jsonFieldCwd          = "cwd"
 	validationRequired    = "required"
+	validationDuplicate   = "duplicate"
 )
 
 type rawMessageConfig struct {
