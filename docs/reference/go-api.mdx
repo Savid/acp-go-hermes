@@ -71,6 +71,8 @@ implementation. Supporting types: `SessionKey`, `SessionSummary`,
 
 ## Session Hermes options
 
-`HermesOptions` carries `WithHermesModel`, `WithHermesEnv`, and
-`WithHermesOutputSchema`. `WithHermesOutputSchema` is accepted for API symmetry
-but fails session start with the uniform unsupported structured-output error.
+`HermesOptions` carries the `Model`, `Env`, and `OutputSchema` fields;
+`NewHermesOptions` builds one from the `WithHermesModel`, `WithHermesEnv`, and
+`WithHermesOutputSchema` constructor options. Setting a schema — through the
+field or `WithHermesOutputSchema` — is accepted for API symmetry but fails
+session start with the uniform unsupported-field error.
