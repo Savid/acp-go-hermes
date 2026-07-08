@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -80,8 +81,9 @@ func validateMCPServers(servers []acp.McpServer) error {
 
 // mcpServerName returns the declared name of a supported (stdio or http) MCP
 // server. Names are host-supplied identity: every accepted declaration MUST
-// carry a non-empty name, so an empty name is rejected as invalid params. The
-// wrapper never fabricates, rewrites, or deduplicates names.
+// carry a non-empty name, so an empty or whitespace-only name is rejected as
+// invalid params. The name is returned verbatim (untrimmed); the wrapper never
+// fabricates, rewrites, trims, or deduplicates names.
 func mcpServerName(server acp.McpServer, index int) (string, error) {
 	var name string
 
@@ -94,7 +96,7 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 		return "", acp.NewInvalidParams(map[string]any{keyField: fmt.Sprintf("mcpServers[%d]", index)})
 	}
 
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return "", acp.NewInvalidParams(map[string]any{
 			fmt.Sprintf("mcpServers[%d].name", index): validationRequired,
 		})

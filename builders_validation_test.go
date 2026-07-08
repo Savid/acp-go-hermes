@@ -523,8 +523,10 @@ func mustErr(_ sessionMeta, err error) error {
 func TestValidateMCPServerNames(t *testing.T) {
 	t.Run("rejects empty name", func(t *testing.T) {
 		cases := map[string][]acp.McpServer{
-			"stdio": {StdioMCPServer("", "cmd", nil, nil)},
-			"http":  {HTTPMCPServer("", "https://example.test/mcp", nil)},
+			"stdio":            {StdioMCPServer("", "cmd", nil, nil)},
+			"http":             {HTTPMCPServer("", "https://example.test/mcp", nil)},
+			"stdio-whitespace": {StdioMCPServer("   ", "cmd", nil, nil)},
+			"http-whitespace":  {HTTPMCPServer("   ", "https://example.test/mcp", nil)},
 		}
 		for name, servers := range cases {
 			t.Run(name, func(t *testing.T) {
