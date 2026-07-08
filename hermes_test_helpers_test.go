@@ -371,6 +371,27 @@ func (c *recordingAgentClient) updateCount() int {
 	return len(c.updates)
 }
 
+func (c *recordingAgentClient) extensionCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.extensions)
+}
+
+func (c *recordingAgentClient) extensionsFor(method string) []extensionNotification {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]extensionNotification, 0, len(c.extensions))
+	for _, ext := range c.extensions {
+		if ext.method == method {
+			out = append(out, ext)
+		}
+	}
+
+	return out
+}
+
 func (c *recordingAgentClient) permissionRequestCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

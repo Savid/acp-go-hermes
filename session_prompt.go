@@ -10,12 +10,69 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
 var errPromptCancelled = errors.New("prompt cancelled")
+
+// mapTurnFailure maps a classified native turn failure to the uniform
+// hermes_turn_failed JSON-RPC error. hermes advertises no auth methods, so every
+// turn failure is an Internal error (-32603). An unclassified error is surfaced
+// as a transport failure carrying its real cause, never a fixed placeholder.
+func mapTurnFailure(err error) error {
+	data := map[string]any{jsonFieldError: valHermesTurnFailed}
+
+	var failure *turnFailureError
+	if errors.As(err, &failure) {
+		data[jsonFieldCause] = string(failure.cause)
+		data[jsonFieldMessage] = firstNonEmpty(failure.message, err.Error())
+
+		if failure.statusCode != 0 {
+			data[jsonFieldStatusCode] = failure.statusCode
+		}
+
+		if failure.providerCode != "" {
+			data[jsonFieldProviderCode] = failure.providerCode
+		}
+	} else {
+		data[jsonFieldCause] = string(causeTransport)
+		data[jsonFieldMessage] = err.Error()
+	}
+
+	return acp.NewInternalError(data)
+}
+
+// reconcileConnected drives the reconnect reconciliation for a turn: pending
+// permissions first, then pending questions.
+func (s *session) reconcileConnected(ctx context.Context) error {
+	if err := s.reconcilePermissions(ctx); err != nil {
+		return err
+	}
+
+	return s.reconcileQuestions(ctx)
+}
+
+// failedTurnResult maps a native SendMessage error to the turn outcome. The
+// cancel guard runs before all failure mapping: an error observed while the turn
+// is cancelled stays cancelled; otherwise the native turn is aborted and the
+// error becomes the uniform hermes_turn_failed error.
+func (s *session) failedTurnResult(turnCtx context.Context, sendErr error, messageID *string, abortTurn func()) (acp.PromptResponse, error) {
+	cancelled := s.wasCancelled() || turnCtx.Err() != nil
+	if cancelled {
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: messageID}, nil
+	}
+
+	abortTurn()
+
+	if isGatewayDisconnect(sendErr) {
+		s.markStreamFailed(0)
+	}
+
+	return acp.PromptResponse{}, mapTurnFailure(sendErr)
+}
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
 	session, err := a.session(params.SessionId)
@@ -140,11 +197,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 
 		return acp.PromptResponse{}, err
 	}
-	if err := s.reconcilePermissions(turnCtx); err != nil {
-		return failTurn(err)
-	}
-
-	if err := s.reconcileQuestions(turnCtx); err != nil {
+	if err := s.reconcileConnected(turnCtx); err != nil {
 		return failTurn(err)
 	}
 
@@ -160,6 +213,17 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		done <- result{message: message, err: err}
 	}()
 
+	turnTimeout := s.agent.turnTimeout()
+
+	var timeout <-chan time.Time
+
+	if turnTimeout > 0 {
+		timer := time.NewTimer(turnTimeout)
+		defer timer.Stop()
+
+		timeout = timer.C
+	}
+
 	var (
 		final nativeMessage
 		usage *acp.Usage
@@ -169,11 +233,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		select {
 		case event := <-s.client.Events():
 			if event.Type == evtServerConnected {
-				if err := s.reconcilePermissions(turnCtx); err != nil {
-					return failTurn(err)
-				}
-
-				if err := s.reconcileQuestions(turnCtx); err != nil {
+				if err := s.reconcileConnected(turnCtx); err != nil {
 					return failTurn(err)
 				}
 
@@ -184,25 +244,21 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return failTurn(err)
 			}
 		case err := <-s.client.EventErrors():
+			// Cancel guard runs before all failure mapping: a stream error
+			// observed while the turn is cancelled stays cancelled.
+			cancelled := s.wasCancelled() || turnCtx.Err() != nil
 			s.markStreamFailed(streamErrorEpoch(err))
 			s.cancelTurn()
 			abortTurn()
 
-			return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: err.Error()})
+			if cancelled {
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+			}
+
+			return acp.PromptResponse{}, mapTurnFailure(&turnFailureError{cause: causeTransport, message: err.Error()})
 		case result := <-done:
 			if result.err != nil {
-				if isGatewayDisconnect(result.err) {
-					s.markStreamFailed(0)
-					abortTurn()
-
-					return acp.PromptResponse{}, acp.NewInternalError(map[string]any{jsonFieldError: "hermes_ws_disconnect", jsonFieldMessage: result.err.Error()})
-				}
-
-				if s.wasCancelled() || turnCtx.Err() != nil {
-					return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
-				}
-
-				return acp.PromptResponse{}, result.err
+				return s.failedTurnResult(turnCtx, result.err, params.MessageId, abortTurn)
 			}
 
 			final = result.message
@@ -226,6 +282,15 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			}
 
 			return acp.PromptResponse{StopReason: stopReason, Usage: usage, UserMessageId: params.MessageId}, nil
+		case <-timeout:
+			// A turn deadline is a failure, not a user cancel: abort the native
+			// turn and surface cause "timeout", never StopReason cancelled.
+			abortTurn()
+
+			return acp.PromptResponse{}, mapTurnFailure(&turnFailureError{
+				cause:   causeTimeout,
+				message: fmt.Sprintf("hermes turn exceeded %s deadline", turnTimeout),
+			})
 		case <-turnCtx.Done():
 			abortTurn()
 
@@ -488,8 +553,10 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 		return nil
 	}
 
+	// Raw events are non-authoritative debug output: a failed emit is recorded
+	// on the internal observer hook and never aborts the authoritative turn.
 	if err := s.emitRawHermesEvent(ctx, event); err != nil {
-		return err
+		s.agent.observe.RecordRawEventEmitFailure(ctx)
 	}
 
 	switch event.Type {
@@ -1050,7 +1117,7 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event hermesEvent) err
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
 		keySequence:        s.nextRawEventSequence(),
-		keySource:          "hermes-serve",
+		keySource:          valHermesServeSource,
 		keyEvent:           raw,
 	}
 

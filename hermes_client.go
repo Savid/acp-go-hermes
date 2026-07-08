@@ -148,9 +148,11 @@ type nativeMessageInfo struct {
 }
 
 type nativeError struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Message string `json:"message"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	Message      string `json:"message"`
+	StatusCode   int    `json:"statusCode,omitempty"`
+	ProviderCode string `json:"providerCode,omitempty"`
 }
 
 type nativePart struct {
@@ -501,7 +503,7 @@ func (s *hermesServer) XDGDirs() xdgDirs {
 }
 
 // errGatewayDisconnected marks a mid-turn WebSocket disconnect so the prompt
-// loop can fence the turn with a single terminal hermes_ws_disconnect error.
+// loop can fence the turn with a single terminal hermes_turn_failed error.
 var errGatewayDisconnected = errors.New("hermes gateway disconnected")
 
 // errGatewayStreamClosed is the disconnect cause when the gateway error channel
@@ -510,6 +512,114 @@ var errGatewayStreamClosed = errors.New("hermes gateway event stream closed")
 
 func isGatewayDisconnect(err error) bool {
 	return errors.Is(err, errGatewayDisconnected)
+}
+
+// turnFailureCause is the machine-readable class of a native turn failure,
+// surfaced verbatim as data.cause in the uniform hermes_turn_failed error.
+type turnFailureCause string
+
+const (
+	causeProcessExit turnFailureCause = "process_exit"
+	causeTransport   turnFailureCause = "transport"
+	causeProvider    turnFailureCause = "provider"
+	causeTimeout     turnFailureCause = "timeout"
+)
+
+// turnFailureError is a classified native turn failure. The prompt loop maps it
+// to the uniform hermes_turn_failed JSON-RPC error; a failed turn is never a
+// stop reason. message carries the real native cause (never a fixed
+// placeholder); statusCode/providerCode appear only when the gateway supplies
+// them.
+type turnFailureError struct {
+	cause        turnFailureCause
+	message      string
+	statusCode   int
+	providerCode string
+	wrapped      error
+}
+
+func (e *turnFailureError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+
+	return string(e.cause) + " turn failure"
+}
+
+func (e *turnFailureError) Unwrap() error {
+	return e.wrapped
+}
+
+// gatewayCompleteFailure inspects a message.complete payload and returns a
+// provider turn failure when the native turn finished in error, wiring
+// assistantMessageError into the gateway submit path. It returns nil for a
+// clean completion (or a payload that fails to decode).
+func gatewayCompleteFailure(payload json.RawMessage) *turnFailureError {
+	var info struct {
+		Finish string       `json:"finish"`
+		Error  *nativeError `json:"error"`
+	}
+
+	_ = json.Unmarshal(payload, &info)
+
+	failErr := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Finish: info.Finish, Error: info.Error}})
+	if failErr == nil {
+		return nil
+	}
+
+	failure := &turnFailureError{cause: causeProvider, message: failErr.Error()}
+	if info.Error != nil {
+		failure.statusCode = info.Error.StatusCode
+		failure.providerCode = info.Error.ProviderCode
+	}
+
+	return failure
+}
+
+// gatewayEventFailure maps a session.error gateway event to a provider turn
+// failure, accepting either a nested {error:{…}} object or flat error fields.
+func gatewayEventFailure(payload json.RawMessage) *turnFailureError {
+	var body struct {
+		Error        *nativeError `json:"error"`
+		Message      string       `json:"message"`
+		Name         string       `json:"name"`
+		StatusCode   int          `json:"statusCode"`
+		ProviderCode string       `json:"providerCode"`
+	}
+
+	_ = json.Unmarshal(payload, &body)
+
+	failure := &turnFailureError{cause: causeProvider}
+	if body.Error != nil {
+		failure.message = firstNonEmpty(body.Error.Message, body.Error.Name, body.Error.Type)
+		failure.statusCode = body.Error.StatusCode
+		failure.providerCode = body.Error.ProviderCode
+	}
+
+	failure.message = firstNonEmpty(failure.message, body.Message, body.Name, "hermes provider error")
+	if failure.statusCode == 0 {
+		failure.statusCode = body.StatusCode
+	}
+
+	failure.providerCode = firstNonEmpty(failure.providerCode, body.ProviderCode)
+
+	return failure
+}
+
+// gatewayDisconnectCause recovers the real transport error the read loop parked
+// on the gateway error channel before it closed. It falls back to the stream
+// closed sentinel when the connection ended without a specific error (a clean
+// close), so the turn never surfaces a bare or generic disconnect string.
+func gatewayDisconnectCause(gw *nativehermes.Client) error {
+	select {
+	case err, ok := <-gw.Errors():
+		if ok && err != nil {
+			return err
+		}
+	default:
+	}
+
+	return errGatewayStreamClosed
 }
 
 // gatewayClient returns the current live gateway client. A reconnect can swap
@@ -893,8 +1003,9 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 		case event, ok := <-gw.Events():
 			if !ok {
 				// The event channel closes when the gateway connection
-				// terminates; fence the turn as a disconnect.
-				return nativeMessage{}, s.reportGatewayDisconnect(errGatewayStreamClosed)
+				// terminates; fence the turn as a disconnect carrying the real
+				// transport cause the read loop parked before closing.
+				return nativeMessage{}, s.reportGatewayDisconnect(gatewayDisconnectCause(gw))
 			}
 
 			if event.SessionID != "" && event.SessionID != live {
@@ -908,6 +1019,8 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				s.forwardGatewayQuestion(stored, live, event)
 			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
 				s.declineGatewayQuestion(ctx, live, event.Type)
+			case evtSessionError:
+				return nativeMessage{}, gatewayEventFailure(event.Payload)
 			case evtMessageDelta, evtThinkingDelta:
 				chunk := gatewayEventText(event.Payload)
 				if chunk == "" {
@@ -919,7 +1032,11 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				}
 
 				s.forwardGatewayPart(stored, messageID, event, chunk)
-			case "message.complete":
+			case evtMessageComplete:
+				if failure := gatewayCompleteFailure(event.Payload); failure != nil {
+					return nativeMessage{}, failure
+				}
+
 				tokens := gatewayUsageTokens(event.Payload)
 
 				return nativeMessage{
@@ -945,16 +1062,22 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 	}
 }
 
-// reportGatewayDisconnect feeds a mid-turn disconnect into the server error
-// channel that the prompt loop watches via EventErrors and returns the
-// disconnect sentinel so the turn is fenced exactly once.
+// reportGatewayDisconnect feeds the real mid-turn disconnect cause into the
+// server error channel that the prompt loop watches via EventErrors and returns
+// a transport turn failure carrying that same cause. The failure unwraps to
+// errGatewayDisconnected so the prompt loop fences the stream exactly once,
+// while data.message reports the real cause instead of a generic string.
 func (s *hermesServer) reportGatewayDisconnect(cause error) error {
+	if cause == nil {
+		cause = errGatewayStreamClosed
+	}
+
 	select {
 	case s.errs <- streamError{err: cause}:
 	default:
 	}
 
-	return errGatewayDisconnected
+	return &turnFailureError{cause: causeTransport, message: cause.Error(), wrapped: errGatewayDisconnected}
 }
 
 func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event nativehermes.Event, text string) {

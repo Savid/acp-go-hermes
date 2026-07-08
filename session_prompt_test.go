@@ -414,9 +414,7 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	client.errs <- errors.New("stream closed")
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
-			t.Fatalf("Prompt error = %v", err)
-		}
+		requireTurnFailure(t, err, causeTransport, "stream closed")
 	case <-ctx.Done():
 		t.Fatal("Prompt did not return")
 	}
@@ -425,14 +423,19 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	}
 }
 
-// TestPromptGatewayDisconnectSentinelFences proves HW4: when SendMessage itself
-// returns the gateway-disconnect sentinel (the read loop wired the disconnect
-// into the error channel), the turn is fenced with exactly one
-// hermes_ws_disconnect terminal error and one native abort.
+// TestPromptGatewayDisconnectSentinelFences proves that when SendMessage returns
+// the transport turn failure carrying the disconnect sentinel (the read loop
+// recovered the real cause), the turn is fenced with exactly one uniform
+// hermes_turn_failed error (cause transport, real cause in message) and one
+// native abort.
 func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 	client := newFakeHermesClient()
 	client.sendMessage = func(_ context.Context, _ string, _ hermesMessageRequest) (nativeMessage, error) {
-		return nativeMessage{}, errGatewayDisconnected
+		return nativeMessage{}, &turnFailureError{
+			cause:   causeTransport,
+			message: "read tcp 127.0.0.1: connection reset by peer",
+			wrapped: errGatewayDisconnected,
+		}
 	}
 	conn := newRecordingAgentClient()
 	agent := NewAgent()
@@ -440,9 +443,7 @@ func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 	session := testSession(agent, client)
 
 	_, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-	if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
-		t.Fatalf("Prompt error = %v", err)
-	}
+	requireTurnFailure(t, err, causeTransport, "connection reset by peer")
 	if client.abortCount() != 1 {
 		t.Fatalf("abort count = %d, want 1", client.abortCount())
 	}
@@ -518,9 +519,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	client.errs <- streamError{epoch: 7, err: errors.New("stream failed")}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
-			t.Fatalf("Prompt error = %v", err)
-		}
+		requireTurnFailure(t, err, causeTransport, "stream failed")
 	case <-ctx.Done():
 		t.Fatal("Prompt did not fail on stream error")
 	}
@@ -568,9 +567,7 @@ func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	client.errs <- streamError{epoch: 11, err: errors.New("websocket closed")}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "hermes_ws_disconnect") {
-			t.Fatalf("Prompt error = %v", err)
-		}
+		requireTurnFailure(t, err, causeTransport, "websocket closed")
 	case <-ctx.Done():
 		t.Fatal("Prompt did not fail on clean EOF disconnect")
 	}
@@ -2213,10 +2210,12 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		if err := session.emitMessage(ctx, nativeMessage{Info: nativeMessageInfo{ID: "assistant", Role: "assistant"}, Parts: []nativePart{part, part}}, false); err != nil {
 			t.Fatalf("duplicate emitMessage: %v", err)
 		}
+		// A raw-event emit failure is non-authoritative: it is recorded on the
+		// observer hook and must NOT abort the turn (handleEvent returns nil).
 		conn.notifyErr = errors.New("notify failed")
 		session.rawMessages = rawMessageConfig{enabled: true}
-		if err := session.handleEvent(ctx, hermesEvent{Type: "unknown", Raw: json.RawMessage(`{"type":"unknown"}`)}); err == nil {
-			t.Fatal("handleEvent ignored raw notify error")
+		if err := session.handleEvent(ctx, hermesEvent{Type: "unknown", Raw: json.RawMessage(`{"type":"unknown"}`)}); err != nil {
+			t.Fatalf("raw notify error aborted the turn: %v", err)
 		}
 	})
 

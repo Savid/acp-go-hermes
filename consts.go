@@ -52,9 +52,11 @@ const (
 	evtClarifyRequest     = "clarify.request"
 	evtSecretRequest      = "secret.request"
 	evtMessageDelta       = "message.delta"
+	evtMessageComplete    = "message.complete"
 	evtMessagePartUpdated = "message.part.updated"
 	evtMessagePartCreated = "message.part.created"
 	evtServerConnected    = "server.connected"
+	evtSessionError       = "session.error"
 	evtSudoRequest        = "sudo.request"
 	evtThinkingDelta      = "thinking.delta"
 	evtTerminalReadReq    = "terminal.read.request"
@@ -67,6 +69,19 @@ const (
 	keyEvent          = "event"
 	keyQuestion       = "question"
 	keyMessageID      = "messageId"
+
+	jsonFieldCause        = "cause"
+	jsonFieldStatusCode   = "statusCode"
+	jsonFieldProviderCode = "providerCode"
+	valHermesTurnFailed   = "hermes_turn_failed"
+	valHermesServeSource  = "hermes-serve"
+
+	rawEventReasonOversize     = "oversize"
+	rawEventReasonUnserialized = "unserializable"
+	rawEventKeyTruncated       = "truncated"
+	rawEventKeyReason          = "reason"
+	rawEventKeyMaxBytes        = "maxBytes"
+	rawEventKeySizeBytes       = "sizeBytes"
 
 	msgHermesNeedsInput = "Hermes needs input"
 

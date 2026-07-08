@@ -66,16 +66,17 @@ type Observer struct {
 	propagator propagation.TextMapPropagator
 	tracer     trace.Tracer
 
-	acpRequestCount    metric.Int64Counter
-	acpRequestDuration metric.Float64Histogram
-	genAIDuration      metric.Float64Histogram
-	genAITokenUsage    metric.Int64Histogram
-	firstPromptChunk   metric.Float64Histogram
-	promptCancelCount  metric.Int64Counter
-	promptCount        metric.Int64Counter
-	promptDuration     metric.Float64Histogram
-	processStartCount  metric.Int64Counter
-	sessionActive      metric.Int64UpDownCounter
+	acpRequestCount     metric.Int64Counter
+	acpRequestDuration  metric.Float64Histogram
+	genAIDuration       metric.Float64Histogram
+	genAITokenUsage     metric.Int64Histogram
+	firstPromptChunk    metric.Float64Histogram
+	promptCancelCount   metric.Int64Counter
+	promptCount         metric.Int64Counter
+	promptDuration      metric.Float64Histogram
+	processStartCount   metric.Int64Counter
+	sessionActive       metric.Int64UpDownCounter
+	rawEventEmitFailure metric.Int64Counter
 }
 
 type PromptResult struct {
@@ -144,6 +145,7 @@ func New(config Config) *Observer {
 	observer.promptDuration = mustFloat64Histogram(meter, "acp_go_hermes.session.prompt.duration", "Prompt turn duration.")
 	observer.processStartCount = mustInt64Counter(meter, "acp_go_hermes.hermes.process.start.count", "Hermes serve process starts.")
 	observer.sessionActive = mustInt64UpDownCounter(meter, "acp_go_hermes.session.active", "Active Hermes sessions.")
+	observer.rawEventEmitFailure = mustInt64Counter(meter, "acp_go_hermes.session.raw_event.emit_failure.count", "Raw event notification emit failures.")
 
 	return observer
 }
@@ -340,6 +342,17 @@ func (o *Observer) AddActiveSession(ctx context.Context, delta int64) {
 	}
 
 	o.sessionActive.Add(ctx, delta)
+}
+
+// RecordRawEventEmitFailure counts a failed raw-event notification emit. Raw
+// events are non-authoritative, so the failure is recorded here rather than
+// aborting the prompt turn.
+func (o *Observer) RecordRawEventEmitFailure(ctx context.Context) {
+	if o == nil {
+		return
+	}
+
+	o.rawEventEmitFailure.Add(ctx, 1)
 }
 
 func (o *Observer) recordTokenUsage(ctx context.Context, result PromptResult, attrs []attribute.KeyValue) {

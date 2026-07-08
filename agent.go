@@ -16,7 +16,7 @@ import (
 const (
 	listSessionsPageSize            = 50
 	defaultMaxActiveSessions        = 32
-	maxConcurrentPromptsPerSession  = 1
+	sessionTurnCapacity             = 1
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
 )
@@ -117,6 +117,11 @@ func (a *Agent) connection() agentClient {
 	defer a.mu.Unlock()
 
 	return a.conn
+}
+
+// turnTimeout is the per-turn native deadline, or 0 when no deadline applies.
+func (a *Agent) turnTimeout() time.Duration {
+	return a.options.TurnTimeout
 }
 
 func (a *Agent) Close() error {

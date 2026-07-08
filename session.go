@@ -167,7 +167,7 @@ func (s *session) turnQueue() chan struct{} {
 
 	if s.turn == nil {
 		// Hermes serializes prompts per session; admission capacity is fixed at 1.
-		s.turn = make(chan struct{}, maxConcurrentPromptsPerSession)
+		s.turn = make(chan struct{}, sessionTurnCapacity)
 	}
 
 	return s.turn

@@ -31,23 +31,25 @@ type fakeGatewayServer struct {
 	t      *testing.T
 	server *httptest.Server
 
-	mu               sync.Mutex
-	calls            []gatewayRPCCall
-	closeAfterResult string
-	failMethods      map[string]struct{}
-	promptEvents     *[]nativehermes.Event
-	branchNotFound   int
-	branchCreated    bool
-	branchNoSession  bool
-	branchNoActive   bool
-	branchNoKey      bool
-	createNoLive     bool
-	createNoStored   bool
-	resumeNoLive     bool
-	resumeNoKey      bool
-	resumeKey        string
-	activeNoID       bool
-	activeNoKey      bool
+	mu                  sync.Mutex
+	calls               []gatewayRPCCall
+	closeAfterResult    string
+	closeNowAfterResult string
+	failMethods         map[string]struct{}
+	promptEvents        *[]nativehermes.Event
+	promptRawFrames     []string
+	branchNotFound      int
+	branchCreated       bool
+	branchNoSession     bool
+	branchNoActive      bool
+	branchNoKey         bool
+	createNoLive        bool
+	createNoStored      bool
+	resumeNoLive        bool
+	resumeNoKey         bool
+	resumeKey           string
+	activeNoID          bool
+	activeNoKey         bool
 }
 
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
@@ -108,6 +110,7 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.calls = append(s.calls, gatewayRPCCall{Method: req.Method, Params: params})
 		closeAfterResult := s.closeAfterResult == req.Method
+		closeNowAfterResult := s.closeNowAfterResult == req.Method
 		_, fail := s.failMethods[req.Method]
 		s.mu.Unlock()
 		if fail {
@@ -116,6 +119,13 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.respond(r.Context(), conn, req.ID, req.Method, params)
+		if closeNowAfterResult {
+			// Abrupt TCP close (no close frame): the client read loop parks the
+			// real transport error before closing its channels.
+			_ = conn.CloseNow()
+
+			return
+		}
 		if closeAfterResult {
 			_ = conn.Close(websocket.StatusNormalClosure, "forced close")
 
@@ -209,6 +219,9 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		s.writeResult(ctx, conn, id, map[string]any{})
+		for _, frame := range s.promptRawFrameScript() {
+			_ = conn.Write(ctx, websocket.MessageText, []byte(frame))
+		}
 		for _, event := range s.promptEventScript(live) {
 			s.writeEvent(ctx, conn, event)
 		}
@@ -372,6 +385,12 @@ func (s *fakeGatewayServer) setCloseAfterResult(method string) {
 	s.mu.Unlock()
 }
 
+func (s *fakeGatewayServer) setCloseNowAfterResult(method string) {
+	s.mu.Lock()
+	s.closeNowAfterResult = method
+	s.mu.Unlock()
+}
+
 func (s *fakeGatewayServer) setFail(method string) {
 	s.mu.Lock()
 	s.failMethods[method] = struct{}{}
@@ -435,6 +454,23 @@ func (s *fakeGatewayServer) setPromptEvents(events ...nativehermes.Event) {
 	copied := append([]nativehermes.Event(nil), events...)
 	s.promptEvents = &copied
 	s.mu.Unlock()
+}
+
+// setPromptRawFrames queues raw text frames written verbatim (bypassing the
+// event envelope) right after the prompt.submit result, letting a test inject a
+// malformed gateway line the internal client must skip without tearing down the
+// turn.
+func (s *fakeGatewayServer) setPromptRawFrames(frames ...string) {
+	s.mu.Lock()
+	s.promptRawFrames = append([]string(nil), frames...)
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) promptRawFrameScript() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.promptRawFrames...)
 }
 
 func (s *fakeGatewayServer) callsFor(method string) []gatewayRPCCall {
@@ -1452,7 +1488,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 			t.Fatalf("mid-turn close error = %v", err)
 		}
 		// The disconnect is wired into the server error channel so the prompt
-		// loop can fence the turn with hermes_ws_disconnect.
+		// loop can fence the turn with the uniform hermes_turn_failed error.
 		select {
 		case fed := <-server.EventErrors():
 			if fed == nil {

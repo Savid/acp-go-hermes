@@ -9,7 +9,13 @@ err := hermesacp.Serve(ctx, input, output)
 
 Common options include `WithExecutablePath`, `WithHome`, `WithDefaultModel`,
 `WithEnv`, OpenTelemetry provider options, `WithSessionStore`,
-`WithConcurrencyLimits`, and `WithSeedFiles`.
+`WithConcurrencyLimits`, `WithSeedFiles`, and `WithTurnTimeout`.
+
+`WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
+before the adapter aborts it and fails the prompt with the uniform
+`hermes_turn_failed` error whose `cause` is `timeout`. The default of `0`
+disables the deadline. A timeout is a failure, not a user cancel, so it is never
+reported as the `cancelled` stop reason.
 
 `WithSeedFiles(map[string]string)` maps relative paths to file contents that the
 adapter writes into each session's isolated Hermes config root before hermes

@@ -39,6 +39,7 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
 	SeedFiles               map[string]string
+	TurnTimeout             time.Duration
 
 	clientFactory func(context.Context, hermesStartOptions) (hermesClient, error)
 }
@@ -141,6 +142,16 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithTurnTimeout bounds how long a single native turn may run before the
+// wrapper aborts it and fails the prompt with a hermes_turn_failed error whose
+// cause is "timeout". The default of 0 disables the deadline. A timeout is a
+// failure, not a user cancel, so it is never reported as StopReason cancelled.
+func WithTurnTimeout(timeout time.Duration) Option {
+	return func(options *Options) {
+		options.TurnTimeout = timeout
 	}
 }
 

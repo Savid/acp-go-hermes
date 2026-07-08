@@ -118,6 +118,7 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	finishPrompt(PromptResult{Err: context.Canceled, StopReason: "cancelled"})
 	observer.AddActiveSession(ctx, 1)
 	observer.AddActiveSession(ctx, -1)
+	observer.RecordRawEventEmitFailure(ctx)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {
@@ -169,6 +170,7 @@ func TestObserverRecordsACPRequestsAndProcessStarts(t *testing.T) {
 	finishPrompt(PromptResult{Err: errors.New("ignored")})
 	nilObserver.ObserveFirstPromptUpdate(ctx)
 	nilObserver.AddActiveSession(ctx, 1)
+	nilObserver.RecordRawEventEmitFailure(ctx)
 }
 
 func TestObserverHelpers(t *testing.T) {

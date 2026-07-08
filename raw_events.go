@@ -2,7 +2,6 @@ package hermesacp
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 const (
@@ -52,19 +51,33 @@ func (c rawMessageConfig) Enabled() bool {
 	return c.enabled
 }
 
+// capRawEventPayload returns the payload unchanged when it marshals within the
+// size limit. Otherwise it replaces the event with the fixed family truncation
+// marker, consuming the sequence rather than dropping the notification: an
+// oversize event keeps its byte size, a marshal failure is reported as
+// unserializable. The marker is always valid JSON, so a consumer never receives
+// an invalid payload and never sees an unexplained gap in the sequence.
 func capRawEventPayload(payload map[string]any) map[string]any {
 	encoded, err := json.Marshal(payload)
 	if err == nil && len(encoded) <= rawEventMaxBytes {
 		return payload
 	}
 
+	marker := map[string]any{
+		rawEventKeyTruncated: true,
+		rawEventKeyMaxBytes:  rawEventMaxBytes,
+	}
+	if err != nil {
+		marker[rawEventKeyReason] = rawEventReasonUnserialized
+	} else {
+		marker[rawEventKeyReason] = rawEventReasonOversize
+		marker[rawEventKeySizeBytes] = len(encoded)
+	}
+
 	return map[string]any{
 		jsonFieldSessionID: payload[jsonFieldSessionID],
 		keySequence:        payload[keySequence],
 		keySource:          payload[keySource],
-		keyEvent: map[string]any{
-			"truncated":    true,
-			jsonFieldError: fmt.Sprintf("raw event exceeded %d bytes", rawEventMaxBytes),
-		},
+		keyEvent:           marker,
 	}
 }
