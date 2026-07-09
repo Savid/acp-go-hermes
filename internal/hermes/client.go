@@ -520,7 +520,7 @@ func (c *Client) Branch(ctx context.Context, liveSessionID string, name string) 
 }
 
 func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text string) error {
-	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, "text": text}, nil)
+	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, nil)
 }
 
 func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {

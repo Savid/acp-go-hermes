@@ -1,6 +1,6 @@
 //go:build !unix
 
-package hermesacp
+package hermes
 
 import (
 	"errors"
@@ -42,6 +42,6 @@ func killProcessGroupID(pid int) error {
 	return proc.Kill()
 }
 
-func inspectHermesProcess(int) (processIdentity, error) {
-	return processIdentity{}, os.ErrNotExist
+func inspectHermesProcess(int) (ProcessIdentity, error) {
+	return ProcessIdentity{}, os.ErrNotExist
 }

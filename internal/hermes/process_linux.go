@@ -1,6 +1,6 @@
 //go:build linux
 
-package hermesacp
+package hermes
 
 import (
 	"errors"
@@ -17,32 +17,32 @@ func configureHermesProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
-func inspectHermesProcess(pid int) (processIdentity, error) {
+func inspectHermesProcess(pid int) (ProcessIdentity, error) {
 	if pid <= 0 {
-		return processIdentity{}, syscall.ESRCH
+		return ProcessIdentity{}, syscall.ESRCH
 	}
 
 	stat, err := procReadFile(procPath(pid, "stat"))
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	startTime, err := procStartTime(string(stat))
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	cmdlineData, err := procReadFile(procPath(pid, "cmdline"))
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	envData, err := procReadFile(procPath(pid, "environ"))
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
-	return processIdentity{
+	return ProcessIdentity{
 		StartTime: startTime,
 		Cmdline:   splitProcNUL(cmdlineData),
 		Env:       splitProcEnv(envData),

@@ -5,35 +5,37 @@ import (
 	"os"
 	"sync"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
 type fakeHermesClient struct {
 	mu sync.Mutex
 
-	xdg xdgDirs
+	xdg nativehermes.XDGDirs
 
-	createSession nativeSession
-	getSession    nativeSession
-	listSessions  []nativeSession
-	forkSession   nativeSession
-	messages      []nativeMessage
-	todos         []nativeTodo
-	providers     providersResponse
+	createSession nativehermes.Session
+	getSession    nativehermes.Session
+	listSessions  []nativehermes.Session
+	forkSession   nativehermes.Session
+	messages      []nativehermes.NativeMessage
+	todos         []nativehermes.Todo
+	providers     nativehermes.ProvidersResponse
 
-	pendingPermissions []permissionRequest
+	pendingPermissions []nativehermes.PermissionRequest
 	permissionReplies  []fakePermissionReply
-	pendingQuestions   []questionRequest
+	pendingQuestions   []nativehermes.QuestionRequest
 	questionReplies    []fakeQuestionReply
 	questionRejects    []fakeQuestionReject
 
-	createSessionFunc func(context.Context, string) (nativeSession, error)
-	sendMessage       func(context.Context, string, hermesMessageRequest) (nativeMessage, error)
+	createSessionFunc func(context.Context, string) (nativehermes.Session, error)
+	sendMessage       func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error)
 
 	aborts         []string
 	deleted        []string
 	closed         bool
-	events         chan hermesEvent
+	events         chan nativehermes.TurnEvent
 	errs           chan error
 	createErr      error
 	getErr         error
@@ -53,7 +55,7 @@ type fakeHermesClient struct {
 type fakePermissionReply struct {
 	sessionID string
 	requestID string
-	route     permissionRoute
+	route     nativehermes.PermissionRoute
 	reply     string
 	message   string
 }
@@ -61,19 +63,19 @@ type fakePermissionReply struct {
 type fakeQuestionReply struct {
 	sessionID string
 	requestID string
-	route     questionRoute
+	route     nativehermes.QuestionRoute
 	answers   [][]string
 }
 
 type fakeQuestionReject struct {
 	sessionID string
 	requestID string
-	route     questionRoute
+	route     nativehermes.QuestionRoute
 }
 
 func newFakeHermesClient() *fakeHermesClient {
 	return &fakeHermesClient{
-		events: make(chan hermesEvent, 16),
+		events: make(chan nativehermes.TurnEvent, 16),
 		errs:   make(chan error, 16),
 	}
 }
@@ -86,7 +88,7 @@ func (c *fakeHermesClient) Close(context.Context) error {
 	return c.closeErr
 }
 
-func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nativeSession, error) {
+func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nativehermes.Session, error) {
 	if c.createSessionFunc != nil {
 		return c.createSessionFunc(ctx, title)
 	}
@@ -94,12 +96,12 @@ func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nat
 	return c.createSession, c.createErr
 }
 
-func (c *fakeHermesClient) GetSession(context.Context, string) (nativeSession, error) {
+func (c *fakeHermesClient) GetSession(context.Context, string) (nativehermes.Session, error) {
 	return c.getSession, c.getErr
 }
 
-func (c *fakeHermesClient) ListSessions(context.Context, string) ([]nativeSession, error) {
-	return append([]nativeSession(nil), c.listSessions...), c.listErr
+func (c *fakeHermesClient) ListSessions(context.Context, string) ([]nativehermes.Session, error) {
+	return append([]nativehermes.Session(nil), c.listSessions...), c.listErr
 }
 
 func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
@@ -110,16 +112,16 @@ func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
 	return c.deleteErr
 }
 
-func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
+func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 	if c.sendMessage != nil {
 		return c.sendMessage(ctx, id, req)
 	}
 
-	return nativeMessage{Info: nativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
+	return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 }
 
-func (c *fakeHermesClient) Messages(context.Context, string) ([]nativeMessage, error) {
-	return append([]nativeMessage(nil), c.messages...), c.messagesErr
+func (c *fakeHermesClient) Messages(context.Context, string) ([]nativehermes.NativeMessage, error) {
+	return append([]nativehermes.NativeMessage(nil), c.messages...), c.messagesErr
 }
 
 func (c *fakeHermesClient) Abort(_ context.Context, id string) error {
@@ -130,28 +132,28 @@ func (c *fakeHermesClient) Abort(_ context.Context, id string) error {
 	return c.abortErr
 }
 
-func (c *fakeHermesClient) Fork(context.Context, string, string) (nativeSession, error) {
+func (c *fakeHermesClient) Fork(context.Context, string, string) (nativehermes.Session, error) {
 	return c.forkSession, c.forkErr
 }
 
-func (c *fakeHermesClient) Todos(context.Context, string) ([]nativeTodo, error) {
-	return append([]nativeTodo(nil), c.todos...), c.todosErr
+func (c *fakeHermesClient) Todos(context.Context, string) ([]nativehermes.Todo, error) {
+	return append([]nativehermes.Todo(nil), c.todos...), c.todosErr
 }
 
-func (c *fakeHermesClient) ConfigProviders(context.Context) (providersResponse, error) {
+func (c *fakeHermesClient) ConfigProviders(context.Context) (nativehermes.ProvidersResponse, error) {
 	return c.providers, c.providersErr
 }
 
-func (c *fakeHermesClient) PendingPermissions(context.Context) ([]permissionRequest, error) {
-	return append([]permissionRequest(nil), c.pendingPermissions...), c.permissionsErr
+func (c *fakeHermesClient) PendingPermissions(context.Context) ([]nativehermes.PermissionRequest, error) {
+	return append([]nativehermes.PermissionRequest(nil), c.pendingPermissions...), c.permissionsErr
 }
 
-func (c *fakeHermesClient) ReplyPermission(_ context.Context, req permissionRequest, reply string, message string) error {
+func (c *fakeHermesClient) ReplyPermission(_ context.Context, req nativehermes.PermissionRequest, reply string, message string) error {
 	c.mu.Lock()
 	c.permissionReplies = append(c.permissionReplies, fakePermissionReply{
 		sessionID: req.SessionID,
 		requestID: req.ID,
-		route:     req.route(),
+		route:     req.Route(),
 		reply:     reply,
 		message:   message,
 	})
@@ -160,31 +162,31 @@ func (c *fakeHermesClient) ReplyPermission(_ context.Context, req permissionRequ
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) PendingQuestions(context.Context) ([]questionRequest, error) {
-	return append([]questionRequest(nil), c.pendingQuestions...), c.questionsErr
+func (c *fakeHermesClient) PendingQuestions(context.Context) ([]nativehermes.QuestionRequest, error) {
+	return append([]nativehermes.QuestionRequest(nil), c.pendingQuestions...), c.questionsErr
 }
 
-func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req questionRequest, answers [][]string) error {
+func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req nativehermes.QuestionRequest, answers [][]string) error {
 	copied := make([][]string, len(answers))
 	for i := range answers {
 		copied[i] = append([]string(nil), answers[i]...)
 	}
 	c.mu.Lock()
-	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, route: req.route(), answers: copied})
+	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, route: req.Route(), answers: copied})
 	c.mu.Unlock()
 
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) RejectQuestion(_ context.Context, req questionRequest) error {
+func (c *fakeHermesClient) RejectQuestion(_ context.Context, req nativehermes.QuestionRequest) error {
 	c.mu.Lock()
-	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID, route: req.route()})
+	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID, route: req.Route()})
 	c.mu.Unlock()
 
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) Events() <-chan hermesEvent {
+func (c *fakeHermesClient) Events() <-chan nativehermes.TurnEvent {
 	return c.events
 }
 
@@ -192,7 +194,7 @@ func (c *fakeHermesClient) EventErrors() <-chan error {
 	return c.errs
 }
 
-func (c *fakeHermesClient) XDGDirs() xdgDirs {
+func (c *fakeHermesClient) XDGDirs() nativehermes.XDGDirs {
 	return c.xdg
 }
 
@@ -409,8 +411,8 @@ func signalTestHook(ch chan struct{}) {
 	}
 }
 
-func testNativeSession(id string) nativeSession {
-	native := nativeSession{ID: id, Title: "Test", Agent: "build"}
+func testNativeSession(id string) nativehermes.Session {
+	native := nativehermes.Session{ID: id, Title: "Test", Agent: "build"}
 	native.Model.ProviderID = "openai"
 	native.Model.ModelID = "gpt-test"
 	native.Time.Updated = 1_700_000_000_000
@@ -422,7 +424,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 	if client.xdg.Root == "" {
 		root, err := os.MkdirTemp("", "acp-go-hermes-test-*")
 		if err == nil {
-			client.xdg, _ = createXDGDirs(root, "session-1")
+			client.xdg, _ = nativehermes.CreateXDGDirs(root, "session-1")
 		}
 	}
 
@@ -431,4 +433,24 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,
 	})
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (r errorReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r errorReadCloser) Close() error {
+	return nil
 }

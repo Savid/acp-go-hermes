@@ -53,7 +53,7 @@ func (c rawMessageConfig) Enabled() bool {
 }
 
 // capRawEventPayload returns the payload unchanged when it marshals within the
-// size limit. Otherwise it replaces the event with the fixed family truncation
+// size limit. Otherwise it replaces the event with the fixed truncation
 // marker, consuming the sequence rather than dropping the notification: an
 // oversize event keeps its byte size, a marshal failure is reported as
 // unserializable. The marker is always valid JSON, so a consumer never receives

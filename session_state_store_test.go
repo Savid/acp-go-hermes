@@ -17,15 +17,17 @@ import (
 	"strings"
 	"testing"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/klauspost/compress/zstd"
 )
 
 func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := createXDGDirs(root, "session-1")
+	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
 	if err != nil {
-		t.Fatalf("createXDGDirs: %v", err)
+		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
 	}
 	dbPath := filepath.Join(xdg.Root, "state.db")
 	seedSQLiteStore(t, dbPath)
@@ -33,7 +35,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	client.todos = []nativeTodo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
+	client.todos = []nativehermes.Todo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
 	agent := NewAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err2 := session.snapshotToStore(ctx); err2 != nil {
@@ -47,7 +49,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	if err3 := os.RemoveAll(xdg.Root); err3 != nil {
 		t.Fatalf("remove original xdg: %v", err3)
 	}
-	restored, err := createXDGDirs(root, "session-1-restored")
+	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
 	if err != nil {
 		t.Fatalf("create restored xdg: %v", err)
 	}
@@ -86,7 +88,7 @@ func TestHydrateStateDBArchiveRejectsTraversalAndBadChecksum(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	_, _, ok, err := hydrateStateFromStore(ctx, store, "s", xdgDirs{
+	_, _, ok, err := hydrateStateFromStore(ctx, store, "s", nativehermes.XDGDirs{
 		Root:   filepath.Join(t.TempDir(), "root"),
 		Data:   filepath.Join(t.TempDir(), "data"),
 		Config: filepath.Join(t.TempDir(), "config"),
@@ -132,9 +134,9 @@ func TestDecodeArchiveRoundTripAndHelpers(t *testing.T) {
 func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := createXDGDirs(root, "session-1")
+	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
 	if err != nil {
-		t.Fatalf("createXDGDirs: %v", err)
+		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
 	}
 	for name, body := range map[string]string{
 		"state.db":     "main",
@@ -174,7 +176,7 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	if err7 := os.RemoveAll(xdg.Root); err7 != nil {
 		t.Fatal(err7)
 	}
-	restored, err := createXDGDirs(root, "session-1-restored")
+	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,18 +214,18 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			name: "permission",
 			want: "permission",
 			set: func(s *session) func() {
-				s.pending["p"] = permissionRequest{ID: "p", SessionID: "native-1"}
+				s.pending["p"] = nativehermes.PermissionRequest{ID: "p", SessionID: "native-1"}
 
-				return func() { s.pending = map[string]permissionRequest{} }
+				return func() { s.pending = map[string]nativehermes.PermissionRequest{} }
 			},
 		},
 		{
 			name: "elicitation",
 			want: "elicitation",
 			set: func(s *session) func() {
-				s.questions["q"] = questionRequest{ID: "q", SessionID: "native-1"}
+				s.questions["q"] = nativehermes.QuestionRequest{ID: "q", SessionID: "native-1"}
 
-				return func() { s.questions = map[string]questionRequest{} }
+				return func() { s.questions = map[string]nativehermes.QuestionRequest{} }
 			},
 		},
 		{
@@ -249,7 +251,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 
 func TestHydrateStateFromStoreErrors(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +293,7 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +366,7 @@ func TestHydrateStateDBArchiveFaults(t *testing.T) {
 
 func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +558,7 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 
 func TestHydrateStateFromStoreFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := createXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1034,7 +1036,7 @@ func restoreStateStoreSeams(t *testing.T) {
 func snapshotFaultSession(t *testing.T) *session {
 	t.Helper()
 	root := t.TempDir()
-	xdg, err := createXDGDirs(root, "session-1")
+	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}

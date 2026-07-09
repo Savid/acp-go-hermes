@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"testing"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
 func TestModelConfigOptionMetadataMapping(t *testing.T) {
-	providers := providersResponse{Providers: []providerInfo{{
+	providers := nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
 		ID:   "openai",
 		Name: "OpenAI",
-		Models: map[string]providerModel{
+		Models: map[string]nativehermes.ProviderModel{
 			"gpt-test": {
 				ID:   "gpt-test",
 				Name: "GPT Test",
@@ -22,7 +24,7 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 				},
 				Reasoning:  true,
 				ToolCall:   true,
-				Modalities: providerModelModalities{Input: []string{"image", "pdf"}},
+				Modalities: nativehermes.ProviderModelModalities{Input: []string{"image", "pdf"}},
 				Options: map[string]any{
 					"reasoningEffort": map[string]any{"options": []any{"low", "medium"}},
 				},
@@ -63,12 +65,12 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
-	client.providers = providersResponse{Providers: []providerInfo{
-		{ID: "", Models: map[string]providerModel{"skip": {}}},
-		{ID: "p", Models: map[string]providerModel{
+	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{
+		{ID: "", Models: map[string]nativehermes.ProviderModel{"skip": {}}},
+		{ID: "p", Models: map[string]nativehermes.ProviderModel{
 			"m": {
 				Limit:      map[string]any{"context": int(42), "output": json.Number("7")},
-				Modalities: providerModelModalities{Input: []string{"audio", "video"}},
+				Modalities: nativehermes.ProviderModelModalities{Input: []string{"audio", "video"}},
 				Options:    map[string]any{"reasoningEffort": []any{"medium"}},
 			},
 		}},
@@ -109,18 +111,18 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 		t.Fatal("set model did not emit config update")
 	}
 
-	fallback := modelConfigOption(sessionSnapshot{providerID: "p", modelID: "m"}, providersResponse{})
+	fallback := modelConfigOption(sessionSnapshot{providerID: "p", modelID: "m"}, nativehermes.ProvidersResponse{})
 	if fallback.Select == nil || fallback.Select.Options.Ungrouped == nil || fallback.Select.CurrentValue != "p/m" {
 		t.Fatalf("fallback model option = %#v", fallback)
 	}
-	if empty := modelConfigOption(sessionSnapshot{}, providersResponse{}); empty.Select != nil {
+	if empty := modelConfigOption(sessionSnapshot{}, nativehermes.ProvidersResponse{}); empty.Select != nil {
 		t.Fatalf("empty model option = %#v", empty)
 	}
 	efforts := supportedEfforts(client.providers.Providers[1].Models["m"])
 	if len(efforts) != 1 || efforts[0] != "medium" {
 		t.Fatalf("supportedEfforts = %#v", efforts)
 	}
-	efforts = supportedEfforts(providerModel{Options: map[string]any{
+	efforts = supportedEfforts(nativehermes.ProviderModel{Options: map[string]any{
 		"temperature":     []any{"ignored"},
 		"reasoningEffort": []string{"low", "", "high"},
 		"effortOptions":   map[string]any{"values": []any{"medium"}},

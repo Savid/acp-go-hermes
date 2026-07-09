@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -47,7 +49,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	id := acp.SessionId(idValue)
 
-	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, xdgDirs{}, params.McpServers)
+	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, nativehermes.XDGDirs{}, params.McpServers)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -192,7 +194,7 @@ func (a *Agent) loadOrResumeSession(
 		return existing, nil
 	}
 
-	xdg, err := createXDGDirs(a.homeRoot(), string(id))
+	xdg, err := nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +520,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	id := acp.SessionId(idValue)
 
-	xdg, err := createXDGDirs(a.homeRoot(), string(id))
+	xdg, err := nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -571,10 +573,10 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}, nil
 }
 
-func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing xdgDirs, mcpServers ...[]acp.McpServer) (hermesClient, error) {
+func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, mcpServers ...[]acp.McpServer) (nativehermes.Server, error) {
 	factory := a.options.clientFactory
 	if factory == nil {
-		factory = startHermesServer
+		factory = nativehermes.StartServer
 	}
 
 	env := cloneStringMap(a.options.Env)
@@ -593,8 +595,8 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 
 	a.observe.RecordHermesProcessStart(ctx)
 
-	return factory(ctx, hermesStartOptions{
-		ACPSessionID:   acpSessionIDString(id),
+	return factory(ctx, nativehermes.StartOptions{
+		ACPSessionID:   nativehermes.ACPSessionIDString(id),
 		Root:           a.homeRoot(),
 		Cwd:            cwd,
 		ExecutablePath: a.options.ExecutablePath,
@@ -616,7 +618,7 @@ type deleteCleanupRecord struct {
 func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCleanupRecord {
 	record := deleteCleanupRecord{
 		SessionID: id,
-		XDGRoot:   filepath.Join(a.homeRoot(), safePathName(string(id))),
+		XDGRoot:   filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id))),
 	}
 	if session == nil {
 		return record
@@ -695,7 +697,7 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 		return nil
 	}
 
-	if reapLeaseFile(filepath.Join(record.XDGRoot, "state", leaseFileName), a.log) {
+	if nativehermes.ReapLeaseFile(filepath.Join(record.XDGRoot, "state", nativehermes.LeaseFileName), a.log) {
 		return fmt.Errorf("hermes delete cleanup kept live lease for session %q", record.SessionID)
 	}
 
@@ -719,7 +721,7 @@ func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
 	return validateMCPServers(stableMCPServersFromUnstable(servers))
 }
 
-func cloneHermesStateDB(source xdgDirs, target xdgDirs) error {
+func cloneHermesStateDB(source nativehermes.XDGDirs, target nativehermes.XDGDirs) error {
 	data, _, ok, err := encodeHermesStateDBArchive(source.Root)
 	if err != nil {
 		return err

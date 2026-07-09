@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
@@ -25,20 +27,20 @@ var errPromptCancelled = errors.New("prompt cancelled")
 func mapTurnFailure(err error) error {
 	data := map[string]any{jsonFieldError: valHermesTurnFailed}
 
-	var failure *turnFailureError
+	var failure *nativehermes.TurnFailureError
 	if errors.As(err, &failure) {
-		data[jsonFieldCause] = string(failure.cause)
-		data[jsonFieldMessage] = firstNonEmpty(failure.message, err.Error())
+		data[jsonFieldCause] = string(failure.Cause())
+		data[jsonFieldMessage] = firstNonEmpty(failure.Message(), err.Error())
 
-		if failure.statusCode != 0 {
-			data[jsonFieldStatusCode] = failure.statusCode
+		if failure.StatusCode() != 0 {
+			data[jsonFieldStatusCode] = failure.StatusCode()
 		}
 
-		if failure.providerCode != "" {
-			data[jsonFieldProviderCode] = failure.providerCode
+		if failure.ProviderCode() != "" {
+			data[jsonFieldProviderCode] = failure.ProviderCode()
 		}
 	} else {
-		data[jsonFieldCause] = string(causeTransport)
+		data[jsonFieldCause] = string(nativehermes.CauseTransport)
 		data[jsonFieldMessage] = err.Error()
 	}
 
@@ -67,7 +69,7 @@ func (s *session) failedTurnResult(turnCtx context.Context, sendErr error, messa
 
 	abortTurn()
 
-	if isGatewayDisconnect(sendErr) {
+	if nativehermes.IsGatewayDisconnect(sendErr) {
 		s.markStreamFailed(0)
 	}
 
@@ -151,7 +153,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 
-	req := hermesMessageRequest{
+	req := nativehermes.MessageRequest{
 		Parts: parts,
 		Model: s.modelSelector(),
 		Agent: s.currentMode(),
@@ -202,7 +204,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 
 	type result struct {
-		message nativeMessage
+		message nativehermes.NativeMessage
 		err     error
 	}
 
@@ -225,7 +227,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 
 	var (
-		final nativeMessage
+		final nativehermes.NativeMessage
 		usage *acp.Usage
 	)
 
@@ -247,7 +249,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			// Cancel guard runs before all failure mapping: a stream error
 			// observed while the turn is cancelled stays cancelled.
 			cancelled := s.wasCancelled() || turnCtx.Err() != nil
-			s.markStreamFailed(streamErrorEpoch(err))
+			s.markStreamFailed(nativehermes.StreamErrorEpoch(err))
 			s.cancelTurn()
 			abortTurn()
 
@@ -255,7 +257,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 			}
 
-			return acp.PromptResponse{}, mapTurnFailure(&turnFailureError{cause: causeTransport, message: err.Error()})
+			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error()))
 		case result := <-done:
 			if result.err != nil {
 				return s.failedTurnResult(turnCtx, result.err, params.MessageId, abortTurn)
@@ -297,10 +299,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			// turn and surface cause "timeout", never StopReason cancelled.
 			abortTurn()
 
-			return acp.PromptResponse{}, mapTurnFailure(&turnFailureError{
-				cause:   causeTimeout,
-				message: fmt.Sprintf("hermes turn exceeded %s deadline", turnTimeout),
-			})
+			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTimeout, fmt.Sprintf("hermes turn exceeded %s deadline", turnTimeout)))
 		case <-turnCtx.Done():
 			abortTurn()
 
@@ -420,7 +419,7 @@ func (s *session) replayMessages(ctx context.Context) error {
 	return nil
 }
 
-func (s *session) emitMessage(ctx context.Context, message nativeMessage, includeUser bool) error {
+func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMessage, includeUser bool) error {
 	if err := s.validateNativeMessageSession(ctx, message); err != nil {
 		return err
 	}
@@ -471,7 +470,7 @@ func (s *session) emitMessage(ctx context.Context, message nativeMessage, includ
 	return nil
 }
 
-func (s *session) validateNativeMessageSession(ctx context.Context, message nativeMessage) error {
+func (s *session) validateNativeMessageSession(ctx context.Context, message nativehermes.NativeMessage) error {
 	expected := s.idmap.NativeSessionID
 	if expected == "" {
 		return nil
@@ -493,7 +492,7 @@ func (s *session) validateNativeMessageSession(ctx context.Context, message nati
 	return nil
 }
 
-func partUpdates(role string, part nativePart) []acp.SessionUpdate {
+func partUpdates(role string, part nativehermes.Part) []acp.SessionUpdate {
 	messageID := part.MessageID
 	switch part.Type {
 	case valText:
@@ -531,7 +530,7 @@ func partUpdates(role string, part nativePart) []acp.SessionUpdate {
 	}
 }
 
-func toolPartUpdates(part nativePart) []acp.SessionUpdate {
+func toolPartUpdates(part nativehermes.Part) []acp.SessionUpdate {
 	id := acp.ToolCallId(firstNonEmpty(part.CallID, part.ID, "hermes-tool"))
 	title := firstNonEmpty(part.Tool, string(id))
 	status := acp.ToolCallStatusInProgress
@@ -558,7 +557,7 @@ func toolPartUpdates(part nativePart) []acp.SessionUpdate {
 	)}
 }
 
-func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
+func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent) error {
 	if s.shouldSuppressEvent(event) {
 		return nil
 	}
@@ -571,19 +570,19 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 
 	switch event.Type {
 	case evtApprovalRequest:
-		var req permissionRequest
+		var req nativehermes.PermissionRequest
 		if err := json.Unmarshal(event.Properties, &req); err != nil {
 			return err
 		}
 
-		req.ReplyRoute = permissionRouteAPI
+		req.ReplyRoute = nativehermes.PermissionRouteAPI
 		if req.SessionID == s.idmap.NativeSessionID {
 			return s.handlePermission(ctx, req)
 		}
 	case "todo.updated":
 		var payload struct {
-			SessionID string       `json:"sessionID"`
-			Todos     []nativeTodo `json:"todos"`
+			SessionID string              `json:"sessionID"`
+			Todos     []nativehermes.Todo `json:"todos"`
 		}
 		if err := json.Unmarshal(event.Properties, &payload); err == nil && payload.SessionID == s.idmap.NativeSessionID {
 			return s.emitPlan(ctx, payload.Todos)
@@ -602,7 +601,7 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 	case evtClarifyRequest:
 		req, ok := eventQuestion(event.Properties)
 		if ok && req.SessionID == s.idmap.NativeSessionID {
-			req.ReplyRoute = questionRouteAPI
+			req.ReplyRoute = nativehermes.QuestionRouteAPI
 
 			return s.handleQuestion(ctx, req)
 		}
@@ -611,24 +610,24 @@ func (s *session) handleEvent(ctx context.Context, event hermesEvent) error {
 	return nil
 }
 
-func eventPart(data json.RawMessage) (nativePart, bool) {
-	var part nativePart
+func eventPart(data json.RawMessage) (nativehermes.Part, bool) {
+	var part nativehermes.Part
 	if err := json.Unmarshal(data, &part); err == nil && part.Type != "" {
 		return part, true
 	}
 
 	var wrapper struct {
-		Part nativePart `json:"part"`
+		Part nativehermes.Part `json:"part"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Part.Type != "" {
 		return wrapper.Part, true
 	}
 
-	return nativePart{}, false
+	return nativehermes.Part{}, false
 }
 
-func eventQuestion(data json.RawMessage) (questionRequest, bool) {
-	var req questionRequest
+func eventQuestion(data json.RawMessage) (nativehermes.QuestionRequest, bool) {
+	var req nativehermes.QuestionRequest
 	if err := json.Unmarshal(data, &req); err == nil && req.ID != "" {
 		return req, true
 	}
@@ -649,7 +648,7 @@ func eventQuestion(data json.RawMessage) (questionRequest, bool) {
 		}
 	}
 
-	return questionRequest{}, false
+	return nativehermes.QuestionRequest{}, false
 }
 
 func (s *session) reconcilePermissions(ctx context.Context) error {
@@ -687,7 +686,7 @@ func (s *session) reconcileQuestions(ctx context.Context) error {
 	return nil
 }
 
-func (s *session) handlePermission(ctx context.Context, req permissionRequest) error {
+func (s *session) handlePermission(ctx context.Context, req nativehermes.PermissionRequest) error {
 	if req.ID == "" || req.SessionID == "" {
 		return nil
 	}
@@ -713,7 +712,7 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, "client unavailable"))
 	}
 
-	title := req.actionName()
+	title := req.ActionName()
 	if title == "" {
 		title = "Hermes permission"
 	}
@@ -729,8 +728,8 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 			Kind:       &kind,
 			Status:     &status,
 			RawInput: map[string]any{
-				"action":     req.actionName(),
-				"resources":  req.resourceList(),
+				"action":     req.ActionName(),
+				"resources":  req.ResourceList(),
 				"metadata":   req.Metadata,
 				keySource:    req.Source,
 				"save":       req.Save,
@@ -805,7 +804,7 @@ func (s *session) handlePermission(ctx context.Context, req permissionRequest) e
 	return s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyPermission(ctx, req, reply, ""))
 }
 
-func (s *session) handleQuestion(ctx context.Context, req questionRequest) error {
+func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionRequest) error {
 	if req.ID == "" || req.SessionID == "" {
 		return nil
 	}
@@ -930,7 +929,7 @@ func (s *session) drainClientBacklog(ctx context.Context) error {
 	}
 }
 
-func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitationRequest, []string) {
+func questionElicitationRequest(req nativehermes.QuestionRequest) (acp.UnstableCreateElicitationRequest, []string) {
 	properties := make(map[string]any, len(req.Questions))
 	required := make([]string, 0, len(req.Questions))
 
@@ -972,7 +971,7 @@ func questionElicitationRequest(req questionRequest) (acp.UnstableCreateElicitat
 	}, propertyIDs
 }
 
-func questionPropertySchema(index int, question questionInfo) map[string]any {
+func questionPropertySchema(index int, question nativehermes.QuestionInfo) map[string]any {
 	title := firstNonEmpty(question.Header, fmt.Sprintf("Question %d", index+1))
 
 	description := question.Question
@@ -1008,7 +1007,7 @@ func questionPropertySchema(index int, question questionInfo) map[string]any {
 	return property
 }
 
-func questionOptionSchemas(options []questionOption) []map[string]any {
+func questionOptionSchemas(options []nativehermes.QuestionOption) []map[string]any {
 	out := make([]map[string]any, 0, len(options))
 	for _, option := range options {
 		label := strings.TrimSpace(option.Label)
@@ -1030,7 +1029,7 @@ func questionOptionSchemas(options []questionOption) []map[string]any {
 	return out
 }
 
-func questionElicitationMessage(questions []questionInfo) string {
+func questionElicitationMessage(questions []nativehermes.QuestionInfo) string {
 	if len(questions) == 1 && questions[0].Question != "" {
 		return questions[0].Question
 	}
@@ -1077,7 +1076,7 @@ func stringAnswersFromAny(value any) []string {
 	}
 }
 
-func (s *session) emitPlan(ctx context.Context, todos []nativeTodo) error {
+func (s *session) emitPlan(ctx context.Context, todos []nativehermes.Todo) error {
 	entries := make([]acp.PlanEntry, 0, len(todos))
 	for _, todo := range todos {
 		if todo.Content == "" {
@@ -1109,7 +1108,7 @@ func (s *session) emitUpdate(ctx context.Context, update acp.SessionUpdate) erro
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
 }
 
-func (s *session) emitRawHermesEvent(ctx context.Context, event hermesEvent) error {
+func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.TurnEvent) error {
 	if !s.rawMessages.Enabled() {
 		return nil
 	}
@@ -1136,7 +1135,7 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event hermesEvent) err
 
 // usageUpdateFromTokens builds a usage_update. size is the model's true context
 // window in tokens, or 0 when unknown; it is never fabricated from used.
-func usageUpdateFromTokens(messageID string, tokens nativeTokens, size int) *acp.SessionUpdate {
+func usageUpdateFromTokens(messageID string, tokens nativehermes.Tokens, size int) *acp.SessionUpdate {
 	used := int(tokens.Total)
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)
@@ -1156,7 +1155,7 @@ func usageUpdateFromTokens(messageID string, tokens nativeTokens, size int) *acp
 	}}
 }
 
-func usageFromTokens(tokens nativeTokens) *acp.Usage {
+func usageFromTokens(tokens nativehermes.Tokens) *acp.Usage {
 	used := int(tokens.Total)
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)

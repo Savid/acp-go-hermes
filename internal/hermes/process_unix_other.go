@@ -1,6 +1,6 @@
 //go:build unix && !linux && !freebsd && !darwin
 
-package hermesacp
+package hermes
 
 import (
 	"errors"
@@ -15,6 +15,6 @@ func configureHermesProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func inspectHermesProcess(int) (processIdentity, error) {
-	return processIdentity{}, errors.ErrUnsupported
+func inspectHermesProcess(int) (ProcessIdentity, error) {
+	return ProcessIdentity{}, errors.ErrUnsupported
 }

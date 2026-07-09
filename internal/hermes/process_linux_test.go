@@ -1,6 +1,6 @@
 //go:build linux
 
-package hermesacp
+package hermes
 
 import (
 	"errors"

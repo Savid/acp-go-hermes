@@ -1,4 +1,4 @@
-package hermesacp
+package hermes
 
 import (
 	"context"
@@ -19,7 +19,6 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 type gatewayRPCCall struct {
@@ -36,7 +35,7 @@ type fakeGatewayServer struct {
 	closeAfterResult    string
 	closeNowAfterResult string
 	failMethods         map[string]struct{}
-	promptEvents        *[]nativehermes.Event
+	promptEvents        *[]Event
 	promptEventDelay    time.Duration
 	promptRawFrames     []string
 	branchNotFound      int
@@ -62,11 +61,11 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	return fake
 }
 
-func (s *fakeGatewayServer) dialClient(t *testing.T) *nativehermes.Client {
+func (s *fakeGatewayServer) dialClient(t *testing.T) *Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	client, err := nativehermes.Dial(ctx, "ws"+strings.TrimPrefix(s.server.URL, "http")+"/api/ws", nil)
+	client, err := Dial(ctx, "ws"+strings.TrimPrefix(s.server.URL, "http")+"/api/ws", nil)
 	if err != nil {
 		t.Fatalf("dial fake gateway: %v", err)
 	}
@@ -87,7 +86,7 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
-	s.writeEvent(r.Context(), conn, nativehermes.Event{Type: "gateway.ready"})
+	s.writeEvent(r.Context(), conn, Event{Type: "gateway.ready"})
 	for {
 		typ, data, err := conn.Read(r.Context())
 		if err != nil {
@@ -312,11 +311,11 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 	}
 }
 
-func (s *fakeGatewayServer) promptEventScript(live string) []nativehermes.Event {
+func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.promptEvents != nil {
-		events := append([]nativehermes.Event(nil), (*s.promptEvents)...)
+		events := append([]Event(nil), (*s.promptEvents)...)
 		for index := range events {
 			if events[index].SessionID == "" {
 				events[index].SessionID = live
@@ -326,7 +325,7 @@ func (s *fakeGatewayServer) promptEventScript(live string) []nativehermes.Event 
 		return events
 	}
 
-	return []nativehermes.Event{
+	return []Event{
 		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"id":"approval-1","title":"Edit file","command":"write"}`)},
 		{Type: "clarify.request", SessionID: live, Payload: json.RawMessage(`{"id":"clarify-1","question":"Continue?"}`)},
 		{Type: "terminal.read.request", SessionID: live, Payload: json.RawMessage(`{}`)},
@@ -365,7 +364,7 @@ func (s *fakeGatewayServer) writeError(ctx context.Context, conn *websocket.Conn
 	}
 }
 
-func (s *fakeGatewayServer) writeEvent(ctx context.Context, conn *websocket.Conn, event nativehermes.Event) {
+func (s *fakeGatewayServer) writeEvent(ctx context.Context, conn *websocket.Conn, event Event) {
 	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": event})
 	if err != nil {
 		s.t.Errorf("marshal event: %v", err)
@@ -458,19 +457,10 @@ func (s *fakeGatewayServer) setActiveNoID() {
 	s.mu.Unlock()
 }
 
-func (s *fakeGatewayServer) setPromptEvents(events ...nativehermes.Event) {
+func (s *fakeGatewayServer) setPromptEvents(events ...Event) {
 	s.mu.Lock()
-	copied := append([]nativehermes.Event(nil), events...)
+	copied := append([]Event(nil), events...)
 	s.promptEvents = &copied
-	s.mu.Unlock()
-}
-
-// setPromptEventDelay inserts a gap before every prompt event after the first,
-// so a test can hold back a terminal frame until an earlier streamed frame has
-// been consumed by the session.
-func (s *fakeGatewayServer) setPromptEventDelay(delay time.Duration) {
-	s.mu.Lock()
-	s.promptEventDelay = delay
 	s.mu.Unlock()
 }
 
@@ -518,7 +508,7 @@ func newGatewayBackedHermesServer(t *testing.T, fake *fakeGatewayServer, default
 		cmd:          &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 		xdg:          testXDGDirs(t),
 		log:          slog.New(slog.DiscardHandler),
-		events:       make(chan hermesEvent, 32),
+		events:       make(chan TurnEvent, 32),
 		errs:         make(chan error, 16),
 		closed:       make(chan struct{}),
 		gateway:      fake.dialClient(t),
@@ -536,7 +526,7 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 		cmd:          &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 		xdg:          testXDGDirs(t),
 		log:          slog.New(slog.DiscardHandler),
-		events:       make(chan hermesEvent, 16),
+		events:       make(chan TurnEvent, 16),
 		errs:         make(chan error, 16),
 		closed:       make(chan struct{}),
 		gateway:      client,
@@ -587,7 +577,7 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
 	t.Helper()
 
-	message, err := server.SendMessage(ctx, "stored-1", hermesMessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
+	message, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -602,16 +592,16 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 			t.Fatalf("missing forwarded event %q", want)
 		}
 	}
-	if err9 := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "always", "ignored"); err9 != nil {
+	if err9 := server.ReplyPermission(ctx, PermissionRequest{SessionID: "stored-1"}, "always", "ignored"); err9 != nil {
 		t.Fatalf("ReplyPermission: %v", err9)
 	}
-	if err10 := server.ReplyPermission(ctx, permissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err10 != nil {
+	if err10 := server.ReplyPermission(ctx, PermissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err10 != nil {
 		t.Fatalf("ReplyPermission reject: %v", err10)
 	}
-	if err11 := server.ReplyQuestion(ctx, questionRequest{SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
+	if err11 := server.ReplyQuestion(ctx, QuestionRequest{SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
 		t.Fatalf("ReplyQuestion: %v", err11)
 	}
-	if err12 := server.RejectQuestion(ctx, questionRequest{SessionID: "stored-1"}); err12 != nil {
+	if err12 := server.RejectQuestion(ctx, QuestionRequest{SessionID: "stored-1"}); err12 != nil {
 		t.Fatalf("RejectQuestion: %v", err12)
 	}
 	if err13 := server.Abort(ctx, "missing-live"); err13 != nil {
@@ -657,7 +647,7 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	}
 }
 
-func drainHermesEventType(ch <-chan hermesEvent, want string) bool {
+func drainHermesEventType(ch <-chan TurnEvent, want string) bool {
 	for {
 		select {
 		case event := <-ch:
@@ -686,20 +676,20 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if tokens.Total != 1 || tokens.Input != 2 || tokens.Output != 3 || tokens.Reasoning != 4 {
 		t.Fatalf("fallback usage tokens = %#v", tokens)
 	}
-	if err := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Finish: "error"}}); err == nil {
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "error"}}); err == nil {
 		t.Fatal("assistant finish error accepted")
 	}
-	err := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Error: &nativeError{Message: "provider failed"}}})
+	err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Error: &nativeError{Message: "provider failed"}}})
 	if err == nil || !strings.Contains(err.Error(), "provider failed") {
 		t.Fatalf("assistant message error = %v", err)
 	}
-	if err := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Error: &nativeError{}}}); err == nil {
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Error: &nativeError{}}}); err == nil {
 		t.Fatal("empty assistant error accepted")
 	}
-	if err := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Finish: "stop"}}); err != nil {
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "stop"}}); err != nil {
 		t.Fatalf("assistant stop rejected: %v", err)
 	}
-	messages := nativeMessagesFromGateway("stored", []nativehermes.Message{{Role: "assistant", Content: json.RawMessage(`{"text":"mapped"}`)}})
+	messages := nativeMessagesFromGateway("stored", []Message{{Role: "assistant", Content: json.RawMessage(`{"text":"mapped"}`)}})
 	if messages[0].Info.SessionID != "stored" || messages[0].Parts[0].Text != "mapped" {
 		t.Fatalf("nativeMessagesFromGateway = %#v", messages)
 	}
@@ -718,10 +708,10 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if got := numberValue(json.Number("12.5")); got != 12.5 {
 		t.Fatalf("numberValue json = %v", got)
 	}
-	if got := gatewayMessageText(nativehermes.Message{}); got != "" {
+	if got := gatewayMessageText(Message{}); got != "" {
 		t.Fatalf("empty gateway message text = %q", got)
 	}
-	if got := gatewayMessageText(nativehermes.Message{Content: json.RawMessage(`not-json`)}); got != "not-json" {
+	if got := gatewayMessageText(Message{Content: json.RawMessage(`not-json`)}); got != "not-json" {
 		t.Fatalf("fallback gateway message text = %q", got)
 	}
 	testGatewayProvidersAndConfigHelpers(t)
@@ -730,23 +720,23 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 	t.Helper()
 
-	if got := errors.Unwrap(streamError{epoch: 7, err: errors.New("wrapped")}); got == nil || got.Error() != "wrapped" {
+	if got := errors.Unwrap(StreamError{epoch: 7, err: errors.New("wrapped")}); got == nil || got.Error() != "wrapped" {
 		t.Fatalf("stream error unwrap = %v", got)
 	}
-	var providers providersResponse
+	var providers ProvidersResponse
 	if err := json.Unmarshal([]byte(`{"providers":[]}`), &providers); err != nil || len(providers.Raw) == 0 {
-		t.Fatalf("providersResponse valid = %#v err=%v", providers, err)
+		t.Fatalf("ProvidersResponse valid = %#v err=%v", providers, err)
 	}
-	mapped := providersFromGateway(nativehermes.ModelOptionsResult{Providers: []nativehermes.Provider{{
+	mapped := providersFromGateway(ModelOptionsResult{Providers: []Provider{{
 		Slug:         "p",
 		Models:       []string{"", "named"},
-		Capabilities: map[string]nativehermes.ProviderModelCapability{"named": {Reasoning: true}},
+		Capabilities: map[string]ProviderModelCapability{"named": {Reasoning: true}},
 	}}})
 	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || !model.Reasoning {
 		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
 	}
-	if safePathName(" \t ") != "session" {
-		t.Fatal("safePathName did not default empty input")
+	if SafePathName(" \t ") != "session" {
+		t.Fatal("SafePathName did not default empty input")
 	}
 	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
 		t.Fatalf("empty config: %v", err)
@@ -755,18 +745,18 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 	hermesMarshalIndent = func(any, string, string) ([]byte, error) {
 		return nil, errors.New("marshal failed")
 	}
-	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
 		t.Fatal("materializeHermesConfig ignored marshal error")
 	}
-	if err := writeLease(t.TempDir(), serverLease{}); err == nil {
-		t.Fatal("writeLease ignored marshal error")
+	if err := WriteLease(t.TempDir(), ServerLease{}); err == nil {
+		t.Fatal("WriteLease ignored marshal error")
 	}
 	hermesMarshalIndent = originalMarshalIndent
 	homeFile := filepath.Join(t.TempDir(), "home-file")
 	if err := os.WriteFile(homeFile, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := materializeHermesConfig(homeFile, []acp.McpServer{StdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+	if err := materializeHermesConfig(homeFile, []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
 		t.Fatal("materializeHermesConfig accepted file home")
 	}
 }
@@ -803,7 +793,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	t.Run("merges wrapper mcp_servers on top of seeded config.yaml", func(t *testing.T) {
 		home := t.TempDir()
 		seed := "model:\n  provider: custom\n  base_url: http://localhost:4000/v1\n  key_env: LITELLM_API_KEY\n  default: gpt-4o\nmcp_servers:\n  seeded:\n    url: http://seed.example\n"
-		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		if err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": seed}); err != nil {
 			t.Fatalf("materializeHermesConfig merge: %v", err)
 		}
@@ -833,7 +823,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 
 	t.Run("writes wrapper mcp_servers without a seed", func(t *testing.T) {
 		home := t.TempDir()
-		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		if err := materializeHermesConfig(home, servers, nil); err != nil {
 			t.Fatalf("materializeHermesConfig mcp-only: %v", err)
 		}
@@ -852,7 +842,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 
 	t.Run("rejects invalid seeded config.yaml when merging", func(t *testing.T) {
 		home := t.TempDir()
-		servers := []acp.McpServer{HTTPMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": "model: [unterminated"})
 		if err == nil {
 			t.Fatal("invalid seeded config.yaml accepted")
@@ -860,16 +850,6 @@ func TestMaterializeHermesConfig(t *testing.T) {
 		var reqErr *acp.RequestError
 		if !errors.As(err, &reqErr) {
 			t.Fatalf("invalid seed error = %T, want *acp.RequestError", err)
-		}
-	})
-
-	t.Run("unsupported mcp server rejected at the ACP boundary", func(t *testing.T) {
-		// materializeHermesConfig only ever sees servers that already passed
-		// validateMCPServers, so the unsupported-transport rejection lives at
-		// the boundary rather than in the renderer.
-		servers := []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}}
-		if err := validateMCPServers(servers); err == nil {
-			t.Fatal("unsupported mcp server accepted")
 		}
 	})
 
@@ -1306,13 +1286,13 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 		if list, err := server.ListSessions(ctx, "/other"); err != nil || len(list) != 0 {
 			t.Fatalf("ListSessions cwd mismatch = %#v err=%v", list, err)
 		}
-		if err := server.ReplyPermission(ctx, permissionRequest{SessionID: "unmapped"}, "once", "ignored"); err == nil {
+		if err := server.ReplyPermission(ctx, PermissionRequest{SessionID: "unmapped"}, "once", "ignored"); err == nil {
 			t.Fatal("ReplyPermission accepted missing live mapping")
 		}
-		if err := server.ReplyQuestion(ctx, questionRequest{SessionID: "unmapped"}, [][]string{{"a"}}); err == nil {
+		if err := server.ReplyQuestion(ctx, QuestionRequest{SessionID: "unmapped"}, [][]string{{"a"}}); err == nil {
 			t.Fatal("ReplyQuestion accepted missing live mapping")
 		}
-		if err := server.RejectQuestion(ctx, questionRequest{SessionID: "unmapped"}); err == nil {
+		if err := server.RejectQuestion(ctx, QuestionRequest{SessionID: "unmapped"}); err == nil {
 			t.Fatal("RejectQuestion accepted missing live mapping")
 		}
 		for _, method := range []string{"approval.respond", "clarify.respond"} {
@@ -1324,11 +1304,11 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 	})
 
 	t.Run("nonblocking event drops", func(t *testing.T) {
-		server := &hermesServer{events: make(chan hermesEvent, 1)}
-		server.events <- hermesEvent{Type: "filled"}
-		server.forwardGatewayPart("stored", "message", nativehermes.Event{Type: "message.delta"}, "text")
-		server.forwardGatewayPermission("stored", "live", nativehermes.Event{Payload: json.RawMessage(`{}`)})
-		server.forwardGatewayQuestion("stored", "live", nativehermes.Event{Payload: json.RawMessage(`{}`)})
+		server := &hermesServer{events: make(chan TurnEvent, 1)}
+		server.events <- TurnEvent{Type: "filled"}
+		server.forwardGatewayPart("stored", "message", Event{Type: "message.delta"}, "text")
+		server.forwardGatewayPermission("stored", "live", Event{Payload: json.RawMessage(`{}`)})
+		server.forwardGatewayQuestion("stored", "live", Event{Payload: json.RawMessage(`{}`)})
 		if got := len(server.events); got != 1 {
 			t.Fatalf("event channel len = %d", got)
 		}
@@ -1372,7 +1352,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 			name:   "ensure live",
 			method: "session.resume",
 			call: func(ctx context.Context, server *hermesServer) error {
-				_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+				_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
 
 				return err
 			},
@@ -1382,7 +1362,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 			method: "prompt.submit",
 			call: func(ctx context.Context, server *hermesServer) error {
 				server.rememberGatewaySession("stored", "live-stored")
-				_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+				_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
 
 				return err
 			},
@@ -1510,8 +1490,8 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 		server.rememberGatewaySession("stored", "live-stored")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
-		if !errors.Is(err, errGatewayDisconnected) {
+		_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+		if !errors.Is(err, ErrGatewayDisconnected) {
 			t.Fatalf("mid-turn close error = %v", err)
 		}
 		// The disconnect is wired into the server error channel so the prompt
@@ -1533,7 +1513,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 		server.rememberGatewaySession("stored", "live-stored")
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 		defer cancel()
-		_, err := server.SendMessage(ctx, "stored", hermesMessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+		_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("deadline error = %v", err)
 		}
@@ -1547,7 +1527,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := startHermesServer(ctx, hermesStartOptions{
+	client, err := StartServer(ctx, StartOptions{
 		ACPSessionID:   "session/one",
 		Root:           root,
 		Cwd:            cwd,
@@ -1557,12 +1537,12 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 		HealthTimeout:  5 * time.Second,
 		Logger:         slog.New(slog.DiscardHandler),
 		MCPServers: []acp.McpServer{
-			StdioMCPServer("stdio", "cmd", []string{"arg"}, map[string]string{"A": "1"}),
-			HTTPMCPServer("http", "https://example.test/mcp", map[string]string{"Authorization": "token"}),
+			stdioMCPServer("stdio", "cmd", []string{"arg"}, map[string]string{"A": "1"}),
+			httpMCPServer("http", "https://example.test/mcp", map[string]string{"Authorization": "token"}),
 		},
 	})
 	if err != nil {
-		t.Fatalf("startHermesServer: %v", err)
+		t.Fatalf("StartServer: %v", err)
 	}
 	server, serverOK := client.(*hermesServer)
 	if !serverOK {
@@ -1571,12 +1551,12 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if server.xdg.Root == "" || !strings.Contains(filepath.Base(server.xdg.Root), "session_one") {
 		t.Fatalf("xdg dirs = %#v", server.xdg)
 	}
-	leasePath := filepath.Join(server.xdg.State, leaseFileName)
+	leasePath := filepath.Join(server.xdg.State, LeaseFileName)
 	leaseData, err := os.ReadFile(leasePath)
 	if err != nil {
 		t.Fatalf("read lease: %v", err)
 	}
-	if !strings.Contains(string(leaseData), `"tokenHash"`) || strings.Contains(string(leaseData), "passwordHash") {
+	if !strings.Contains(string(leaseData), `"tokenHash"`) || strings.Contains(string(leaseData), "PasswordHash") {
 		t.Fatalf("lease = %s", leaseData)
 	}
 	configData, err := os.ReadFile(filepath.Join(server.xdg.Root, "config.yaml"))
@@ -1599,24 +1579,24 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 
 func TestStartHermesServerGatewayFaults(t *testing.T) {
 	ctx := context.Background()
-	if _, err := startHermesServer(ctx, hermesStartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")}); err == nil {
+	if _, err := StartServer(ctx, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")}); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
-	if _, err := startHermesServer(ctx, hermesStartOptions{Root: "["}); err == nil {
+	if _, err := StartServer(ctx, StartOptions{Root: "["}); err == nil {
 		t.Fatal("invalid reap glob unexpectedly succeeded")
 	}
-	if _, err := startHermesServer(ctx, hermesStartOptions{Root: t.TempDir(), ACPSessionID: acpSessionIDString(string([]byte{0}))}); err == nil {
+	if _, err := StartServer(ctx, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))}); err == nil {
 		t.Fatal("invalid session path unexpectedly succeeded")
 	}
-	if _, err := startHermesServer(ctx, hermesStartOptions{ExistingXDG: xdgDirs{Root: filepath.Join(t.TempDir(), "root")}}); err == nil {
+	if _, err := StartServer(ctx, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}}); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")
 	}
 
 	restoreHermesClientSeams(t)
-	hermesWriteLease = func(string, serverLease) error {
+	hermesWriteLease = func(string, ServerLease) error {
 		return errors.New("lease failed")
 	}
-	if _, err := startHermesServer(ctx, hermesStartOptions{
+	if _, err := StartServer(ctx, StartOptions{
 		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeOK),
 		ExistingXDG:    testXDGDirs(t),
 		HealthTimeout:  5 * time.Second,
@@ -1624,7 +1604,7 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 		t.Fatalf("lease failure error = %v", err)
 	}
 
-	if _, err := startHermesServer(ctx, hermesStartOptions{
+	if _, err := StartServer(ctx, StartOptions{
 		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeStatusOnly),
 		ExistingXDG:    testXDGDirs(t),
 		HealthTimeout:  500 * time.Millisecond,
@@ -1640,7 +1620,7 @@ func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	redialed := make(chan struct{}, 2)
-	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+	server.enableReconnect(func(context.Context) (*Client, error) {
 		client := fake.dialClient(t)
 		redialed <- struct{}{}
 
@@ -1680,7 +1660,7 @@ func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	reconnies := make(chan struct{}, 4)
-	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+	server.enableReconnect(func(context.Context) (*Client, error) {
 		client := fake.dialClient(t)
 		reconnies <- struct{}{}
 
@@ -1711,7 +1691,7 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	reconnied := make(chan struct{}, 1)
-	server.enableReconnect(func(context.Context) (*nativehermes.Client, error) {
+	server.enableReconnect(func(context.Context) (*Client, error) {
 		reconnied <- struct{}{}
 
 		return fake.dialClient(t), nil
@@ -1740,7 +1720,7 @@ func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 	server := newGatewayBackedHermesServer(t, fake, "")
 	server.turnIdle = sync.NewCond(&server.connMu)
 	original := server.gatewayClient()
-	server.redial = func(context.Context) (*nativehermes.Client, error) {
+	server.redial = func(context.Context) (*Client, error) {
 		return nil, errors.New("no dial")
 	}
 	// Redial error with the server still open: logs and backs off.
@@ -1749,7 +1729,7 @@ func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 	// Redial succeeds but the server has since closed: the new connection is
 	// discarded instead of being installed.
 	close(server.closed)
-	server.redial = func(context.Context) (*nativehermes.Client, error) {
+	server.redial = func(context.Context) (*Client, error) {
 		return fake.dialClient(t), nil
 	}
 	server.reconnectGateway()
@@ -1765,27 +1745,27 @@ func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 
 func TestXDGLeaseAndHelpers(t *testing.T) {
 	root := t.TempDir()
-	xdg, err := createXDGDirs(root, "")
+	xdg, err := CreateXDGDirs(root, "")
 	if err != nil {
-		t.Fatalf("createXDGDirs: %v", err)
+		t.Fatalf("CreateXDGDirs: %v", err)
 	}
 	if filepath.Base(xdg.Root) != "session" {
 		t.Fatalf("default xdg root = %#v", xdg)
 	}
-	if err := ensureXDGDirs(xdgDirs{Root: "", Data: "x", Config: "x", Cache: "x", State: "x"}); err == nil {
+	if err := ensureXDGDirs(XDGDirs{Root: "", Data: "x", Config: "x", Cache: "x", State: "x"}); err == nil {
 		t.Fatal("ensureXDGDirs accepted empty root")
 	}
-	if err := writeLease(xdg.State, serverLease{PID: 0, Port: 1, TokenHash: passwordHash("token")}); err != nil {
-		t.Fatalf("writeLease: %v", err)
+	if err := WriteLease(xdg.State, ServerLease{PID: 0, Port: 1, TokenHash: PasswordHash("token")}); err != nil {
+		t.Fatalf("WriteLease: %v", err)
 	}
 	badRoot := string([]byte{0})
-	if err := writeLease(badRoot, serverLease{}); err == nil {
-		t.Fatal("writeLease accepted invalid path")
+	if err := WriteLease(badRoot, ServerLease{}); err == nil {
+		t.Fatal("WriteLease accepted invalid path")
 	}
 	if err := os.MkdirAll(filepath.Join(root, "bad", "state"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "bad", "state", leaseFileName), []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "bad", "state", LeaseFileName), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := reapStaleLeases(root, slog.New(slog.DiscardHandler)); err != nil {
@@ -1794,27 +1774,27 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	if err := reapStaleLeases("", nil); err != nil {
 		t.Fatalf("empty reapStaleLeases: %v", err)
 	}
-	if got := safePathName("../a:b"); got != "__a_b" {
-		t.Fatalf("safePathName = %q", got)
+	if got := SafePathName("../a:b"); got != "__a_b" {
+		t.Fatalf("SafePathName = %q", got)
 	}
 	for _, value := range []any{float64(-1), int(-1), json.Number("bad")} {
-		if got, ok := intFromNumber(value); ok || got != 0 {
-			t.Fatalf("intFromNumber(%#v) = %d, %v", value, got, ok)
+		if got, ok := IntFromNumber(value); ok || got != 0 {
+			t.Fatalf("IntFromNumber(%#v) = %d, %v", value, got, ok)
 		}
 	}
-	if got, ok := intFromNumber(json.Number("12")); !ok || got != 12 {
-		t.Fatalf("intFromNumber json number = %d, %v", got, ok)
+	if got, ok := IntFromNumber(json.Number("12")); !ok || got != 12 {
+		t.Fatalf("IntFromNumber json number = %d, %v", got, ok)
 	}
 }
 
 func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	root := t.TempDir()
-	xdg, err := createXDGDirs(root, "lease")
+	xdg, err := CreateXDGDirs(root, "lease")
 	if err != nil {
 		t.Fatal(err)
 	}
-	leasePath := filepath.Join(xdg.State, leaseFileName)
-	baseIdentity := processIdentity{
+	leasePath := filepath.Join(xdg.State, LeaseFileName)
+	baseIdentity := ProcessIdentity{
 		StartTime: "start",
 		Cmdline:   []string{"/usr/bin/hermes", "serve"},
 		Env: map[string]string{
@@ -1822,15 +1802,15 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 			"HERMES_DASHBOARD_SESSION_TOKEN": "token",
 		},
 	}
-	baseLease := serverLease{
+	baseLease := ServerLease{
 		PID:              999999,
-		TokenHash:        passwordHash("token"),
+		TokenHash:        PasswordHash("token"),
 		XDGRoot:          xdg.Root,
 		ProcessStartTime: "start",
 	}
 
 	restoreHermesClientSeams(t)
-	hermesInspectProcess = func(int) (processIdentity, error) {
+	InspectProcess = func(int) (ProcessIdentity, error) {
 		return baseIdentity, nil
 	}
 	if !leaseMatchesProcess(leasePath, baseLease) {
@@ -1839,28 +1819,28 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	if !cmdlineLooksLikeHermesServe([]string{"/tmp/hermes"}) || cmdlineLooksLikeHermesServe([]string{"node"}) {
 		t.Fatal("cmdline Hermes detection mismatch")
 	}
-	if leaseMatchesProcess(leasePath, serverLease{PID: 0, ProcessStartTime: "start"}) {
+	if leaseMatchesProcess(leasePath, ServerLease{PID: 0, ProcessStartTime: "start"}) {
 		t.Fatal("zero pid lease matched")
 	}
-	if leaseMatchesProcess(leasePath, serverLease{PID: 1}) {
+	if leaseMatchesProcess(leasePath, ServerLease{PID: 1}) {
 		t.Fatal("missing start time lease matched")
 	}
 
 	for _, tt := range []struct {
 		name     string
-		identity processIdentity
-		lease    serverLease
+		identity ProcessIdentity
+		lease    ServerLease
 		err      error
 	}{
 		{name: "inspect error", identity: baseIdentity, lease: baseLease, err: errors.New("inspect failed")},
-		{name: "start mismatch", identity: processIdentity{StartTime: "other", Cmdline: baseIdentity.Cmdline, Env: baseIdentity.Env}, lease: baseLease},
-		{name: "home mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
-		{name: "token mismatch", identity: processIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
-		{name: "root mismatch", identity: baseIdentity, lease: serverLease{PID: baseLease.PID, TokenHash: baseLease.TokenHash, XDGRoot: t.TempDir(), ProcessStartTime: baseLease.ProcessStartTime}},
-		{name: "cmdline mismatch", identity: processIdentity{StartTime: "start", Cmdline: []string{"node"}, Env: baseIdentity.Env}, lease: baseLease},
+		{name: "start mismatch", identity: ProcessIdentity{StartTime: "other", Cmdline: baseIdentity.Cmdline, Env: baseIdentity.Env}, lease: baseLease},
+		{name: "home mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
+		{name: "token mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
+		{name: "root mismatch", identity: baseIdentity, lease: ServerLease{PID: baseLease.PID, TokenHash: baseLease.TokenHash, XDGRoot: t.TempDir(), ProcessStartTime: baseLease.ProcessStartTime}},
+		{name: "cmdline mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: []string{"node"}, Env: baseIdentity.Env}, lease: baseLease},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			hermesInspectProcess = func(int) (processIdentity, error) {
+			InspectProcess = func(int) (ProcessIdentity, error) {
 				return tt.identity, tt.err
 			}
 			if leaseMatchesProcess(leasePath, tt.lease) {
@@ -1870,56 +1850,56 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	}
 
 	restoreLeaseReapSeams(t)
-	leaseReapTimeout = 40 * time.Millisecond
-	leaseReapPollInterval = time.Millisecond
+	LeaseReapTimeout = 40 * time.Millisecond
+	LeaseReapPollInterval = time.Millisecond
 
 	// Confirmed dead: the process matches for identity but is gone when the
 	// ladder verifies it, so the lease is removed.
 	inspectCalls := 0
-	hermesInspectProcess = func(int) (processIdentity, error) {
+	InspectProcess = func(int) (ProcessIdentity, error) {
 		inspectCalls++
 		if inspectCalls == 1 {
 			return baseIdentity, nil
 		}
 
-		return processIdentity{}, os.ErrNotExist
+		return ProcessIdentity{}, os.ErrNotExist
 	}
-	if err := writeLease(xdg.State, baseLease); err != nil {
+	if err := WriteLease(xdg.State, baseLease); err != nil {
 		t.Fatal(err)
 	}
-	reapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
+	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
 	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lease after reap of dead process = %v", err)
 	}
 
 	// Survives termination: the process stays alive and identity-matched, so
 	// the lease is KEPT for the next startup retry.
-	hermesInspectProcess = func(int) (processIdentity, error) {
+	InspectProcess = func(int) (ProcessIdentity, error) {
 		return baseIdentity, nil
 	}
-	if err := writeLease(xdg.State, baseLease); err != nil {
+	if err := WriteLease(xdg.State, baseLease); err != nil {
 		t.Fatal(err)
 	}
-	reapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
+	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
 	if _, err := os.Stat(leasePath); err != nil {
 		t.Fatalf("lease of surviving process was removed: %v", err)
 	}
 	_ = os.Remove(leasePath)
-	reapLeaseFile(t.TempDir(), nil)
+	ReapLeaseFile(t.TempDir(), nil)
 }
 
 func TestNativeUnmarshalErrors(t *testing.T) {
-	var part nativePart
+	var part Part
 	if err := part.UnmarshalJSON([]byte("{")); err == nil {
-		t.Fatal("nativePart accepted malformed JSON")
+		t.Fatal("Part accepted malformed JSON")
 	}
-	var event hermesEvent
+	var event TurnEvent
 	if err := event.UnmarshalJSON([]byte("{")); err == nil {
-		t.Fatal("hermesEvent accepted malformed JSON")
+		t.Fatal("TurnEvent accepted malformed JSON")
 	}
-	var providers providersResponse
+	var providers ProvidersResponse
 	if err := providers.UnmarshalJSON([]byte("{")); err == nil {
-		t.Fatal("providersResponse accepted malformed JSON")
+		t.Fatal("ProvidersResponse accepted malformed JSON")
 	}
 }
 
@@ -1993,7 +1973,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 				return
 			}
 			defer conn.Close(websocket.StatusNormalClosure, "done")
-			writeGatewayEvent(r.Context(), conn, nativehermes.Event{Type: "gateway.ready"})
+			writeGatewayEvent(r.Context(), conn, Event{Type: "gateway.ready"})
 			for {
 				typ, data, err := conn.Read(r.Context())
 				if err != nil {
@@ -2052,7 +2032,7 @@ func writeGatewayResult(ctx context.Context, conn *websocket.Conn, id int64, res
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
-func writeGatewayEvent(ctx context.Context, conn *websocket.Conn, event nativehermes.Event) {
+func writeGatewayEvent(ctx context.Context, conn *websocket.Conn, event Event) {
 	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": event})
 	_ = conn.Write(ctx, websocket.MessageText, data)
 }
@@ -2061,59 +2041,39 @@ func restoreHermesClientSeams(t *testing.T) {
 	t.Helper()
 	marshalIndent := hermesMarshalIndent
 	writeLease2 := hermesWriteLease
-	inspectProcess := hermesInspectProcess
+	inspectProcess := InspectProcess
 	t.Cleanup(func() {
 		hermesMarshalIndent = marshalIndent
 		hermesWriteLease = writeLease2
-		hermesInspectProcess = inspectProcess
+		InspectProcess = inspectProcess
 	})
 }
 
 func restoreLeaseReapSeams(t *testing.T) {
 	t.Helper()
-	timeout := leaseReapTimeout
-	interval := leaseReapPollInterval
+	timeout := LeaseReapTimeout
+	interval := LeaseReapPollInterval
 	sleep := leaseReapSleep
 	now := leaseReapNow
 	t.Cleanup(func() {
-		leaseReapTimeout = timeout
-		leaseReapPollInterval = interval
+		LeaseReapTimeout = timeout
+		LeaseReapPollInterval = interval
 		leaseReapSleep = sleep
 		leaseReapNow = now
 	})
 }
 
-func testXDGDirs(t *testing.T) xdgDirs {
+func testXDGDirs(t *testing.T) XDGDirs {
 	t.Helper()
 	root := t.TempDir()
 
-	return xdgDirs{
+	return XDGDirs{
 		Root:   root,
 		Data:   filepath.Join(root, "data"),
 		Config: filepath.Join(root, "config"),
 		Cache:  filepath.Join(root, "cache"),
 		State:  filepath.Join(root, "state"),
 	}
-}
-
-type errorReader struct {
-	err error
-}
-
-func (r errorReader) Read([]byte) (int, error) {
-	return 0, r.err
-}
-
-type errorReadCloser struct {
-	err error
-}
-
-func (r errorReadCloser) Read([]byte) (int, error) {
-	return 0, r.err
-}
-
-func (r errorReadCloser) Close() error {
-	return nil
 }
 
 func containsString(values []string, want string) bool {
@@ -2124,4 +2084,208 @@ func containsString(values []string, want string) bool {
 	}
 
 	return false
+}
+
+func stdioMCPServer(name string, command string, args []string, env map[string]string) acp.McpServer {
+	variables := make([]acp.EnvVariable, 0, len(env))
+	for key, value := range env {
+		variables = append(variables, acp.EnvVariable{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Stdio: &acp.McpServerStdio{
+		Name:    name,
+		Command: command,
+		Args:    append([]string(nil), args...),
+		Env:     variables,
+	}}
+}
+
+func httpMCPServer(name string, url string, headers map[string]string) acp.McpServer {
+	values := make([]acp.HttpHeader, 0, len(headers))
+	for key, value := range headers {
+		values = append(values, acp.HttpHeader{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Http: &acp.McpServerHttpInline{
+		Name:    name,
+		Url:     url,
+		Headers: values,
+	}}
+}
+
+// T1 — provider error → structured failure (native boundary = fake gateway).
+func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	for _, tt := range []struct {
+		name     string
+		events   []Event
+		message  string
+		status   int
+		provider string
+	}{
+		{
+			name: "message.complete finish error (rate limit)",
+			events: []Event{{
+				Type:    evtMessageComplete,
+				Payload: json.RawMessage(`{"finish":"error","error":{"message":"rate limited by upstream","statusCode":429,"providerCode":"rate_limit"}}`),
+			}},
+			message:  "rate limited by upstream",
+			status:   429,
+			provider: "rate_limit",
+		},
+		{
+			name: "session.error event (auth)",
+			events: []Event{{
+				Type:    evtSessionError,
+				Payload: json.RawMessage(`{"error":{"message":"invalid api key","statusCode":401,"providerCode":"auth_error"}}`),
+			}},
+			message:  "invalid api key",
+			status:   401,
+			provider: "auth_error",
+		},
+		{
+			name: "session.error event (flat fields)",
+			events: []Event{{
+				Type:    evtSessionError,
+				Payload: json.RawMessage(`{"message":"gateway exploded","statusCode":500,"providerCode":"explode"}`),
+			}},
+			message:  "gateway exploded",
+			status:   500,
+			provider: "explode",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			fake.setPromptEvents(tt.events...)
+			server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+			server.rememberGatewaySession("stored", "live-stored")
+
+			_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
+			var failure *TurnFailureError
+			if !errors.As(err, &failure) {
+				t.Fatalf("SendMessage error = %v (%T), want *TurnFailureError", err, err)
+			}
+
+			if failure.cause != CauseProvider {
+				t.Fatalf("cause = %q, want provider", failure.cause)
+			}
+
+			if !strings.Contains(failure.message, tt.message) {
+				t.Fatalf("message = %q, want substring %q", failure.message, tt.message)
+			}
+
+			if failure.statusCode != tt.status {
+				t.Fatalf("statusCode = %d, want %d", failure.statusCode, tt.status)
+			}
+
+			if failure.providerCode != tt.provider {
+				t.Fatalf("providerCode = %q, want %q", failure.providerCode, tt.provider)
+			}
+		})
+	}
+}
+
+// reportGatewayDisconnect substitutes the stream-closed sentinel when the read
+// loop closed without a specific error (a clean close).
+func TestReportGatewayDisconnectNilCause(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+
+	err := server.reportGatewayDisconnect(nil)
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("nil-cause disconnect = %v, want transport", err)
+	}
+
+	if failure.message != errGatewayStreamClosed.Error() {
+		t.Fatalf("nil-cause message = %q, want %q", failure.message, errGatewayStreamClosed.Error())
+	}
+}
+
+// An abrupt (frameless) disconnect surfaces the real transport read error the
+// gateway read loop parked, not the clean stream-closed sentinel.
+func TestTurnFailureAbruptDisconnectRecoversRealCause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents() // no completion: the turn waits, then the peer drops
+	fake.setCloseNowAfterResult("prompt.submit")
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if !IsGatewayDisconnect(err) {
+		t.Fatalf("abrupt-close error = %v, want a disconnect", err)
+	}
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("abrupt-close failure = %v, want transport TurnFailureError", err)
+	}
+
+	if failure.message == errGatewayStreamClosed.Error() {
+		t.Fatalf("abrupt disconnect surfaced the sentinel instead of the real read error")
+	}
+}
+
+// T4 — one malformed gateway line is skipped without hanging or misreporting the
+// turn: the internal client records it and the turn completes normally.
+func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptRawFrames("this is not json{")
+	fake.setPromptEvents(Event{
+		Type:    evtMessageComplete,
+		Payload: json.RawMessage(`{"usage":{"total_tokens":3}}`),
+	})
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if err != nil {
+		t.Fatalf("malformed line was fatal to the turn: %v", err)
+	}
+
+	if message.Info.Finish != valStop || message.Info.Tokens.Total != 3 {
+		t.Fatalf("turn did not complete cleanly after malformed line: %#v", message.Info)
+	}
+}
+
+// TestReportGatewayDisconnectCarriesRealCause proves a transport disconnect
+// carries the real cause (never a bare EOF / generic string) at the gateway
+// boundary: reportGatewayDisconnect classifies it as a transport turn failure
+// and feeds the real cause into EventErrors.
+func TestReportGatewayDisconnectCarriesRealCause(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+
+	err := server.reportGatewayDisconnect(errors.New("read tcp 127.0.0.1: connection reset by peer"))
+	if !IsGatewayDisconnect(err) {
+		t.Fatalf("reportGatewayDisconnect error is not a disconnect: %v", err)
+	}
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("disconnect failure = %v, want transport TurnFailureError", err)
+	}
+
+	if !strings.Contains(failure.message, "connection reset by peer") {
+		t.Fatalf("disconnect message = %q, want real cause", failure.message)
+	}
+
+	select {
+	case fed := <-server.EventErrors():
+		if !strings.Contains(fed.Error(), "connection reset by peer") {
+			t.Fatalf("fed error = %v, want real cause", fed)
+		}
+	default:
+		t.Fatal("disconnect cause not fed into EventErrors")
+	}
 }

@@ -1,6 +1,6 @@
 //go:build unix
 
-package hermesacp
+package hermes
 
 import (
 	"errors"
@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	hermesSyscallGetpgid = syscall.Getpgid
-	hermesSyscallKill    = syscall.Kill
+	SyscallGetpgid = syscall.Getpgid
+	SyscallKill    = syscall.Kill
 )
 
 func terminateHermesProcess(cmd *exec.Cmd) error {
@@ -26,7 +26,7 @@ func signalHermesProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
 		return nil
 	}
 
-	pgid, err := hermesSyscallGetpgid(cmd.Process.Pid)
+	pgid, err := SyscallGetpgid(cmd.Process.Pid)
 	if err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
@@ -35,7 +35,7 @@ func signalHermesProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
 		return err
 	}
 
-	if err := hermesSyscallKill(-pgid, signal); err != nil {
+	if err := SyscallKill(-pgid, signal); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
@@ -60,11 +60,11 @@ func signalLeaseGroup(pid int, signal syscall.Signal) error {
 	}
 
 	target := pid
-	if pgid, err := hermesSyscallGetpgid(pid); err == nil {
+	if pgid, err := SyscallGetpgid(pid); err == nil {
 		target = -pgid
 	}
 
-	if err := hermesSyscallKill(target, signal); err != nil {
+	if err := SyscallKill(target, signal); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}

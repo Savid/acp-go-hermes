@@ -72,7 +72,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	executable := opts.ExecutablePath
 	if executable == "" {
-		executable = "hermes"
+		executable = valHermes
 	}
 
 	home := opts.Home
@@ -110,7 +110,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	processCtx, cancel := context.WithCancel(context.Background())
 
-	args := []string{"serve", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
+	args := []string{valServe, "--host", "127.0.0.1", argPort, strconv.Itoa(port)}
 	if opts.Env["HERMES_WEB_DIST"] != "" || defaultWebDistExists() {
 		args = append(args, "--skip-build")
 	}

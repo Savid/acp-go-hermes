@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -41,7 +43,7 @@ type Options struct {
 	SeedFiles               map[string]string
 	TurnTimeout             time.Duration
 
-	clientFactory func(context.Context, hermesStartOptions) (hermesClient, error)
+	clientFactory func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
 }
 
 func applyOptions(opts []Option) Options {
@@ -50,7 +52,7 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              valACPGoHermes,
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
-		clientFactory:           startHermesServer,
+		clientFactory:           nativehermes.StartServer,
 	}
 	for _, opt := range opts {
 		opt(&options)

@@ -1,6 +1,6 @@
 //go:build darwin
 
-package hermesacp
+package hermes
 
 import (
 	"bytes"
@@ -27,29 +27,29 @@ func configureHermesProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func inspectHermesProcess(pid int) (processIdentity, error) {
+func inspectHermesProcess(pid int) (ProcessIdentity, error) {
 	if pid <= 0 {
-		return processIdentity{}, syscall.ESRCH
+		return ProcessIdentity{}, syscall.ESRCH
 	}
 
 	kinfo, err := darwinSysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	raw, err := darwinSysctlProcArgs(pid)
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	cmdline, env, err := parseProcArgs2(raw)
 	if err != nil {
-		return processIdentity{}, err
+		return ProcessIdentity{}, err
 	}
 
 	start := kinfo.Proc.P_starttime
 
-	return processIdentity{
+	return ProcessIdentity{
 		StartTime: strconv.FormatInt(start.Sec, 10) + "." + strconv.FormatInt(int64(start.Usec), 10),
 		Cmdline:   cmdline,
 		Env:       env,

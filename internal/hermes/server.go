@@ -1,5 +1,5 @@
 //nolint:tagliatelle // Hermes native JSON fields use modelID/sessionID/providerID spellings.
-package hermesacp
+package hermes
 
 import (
 	"bytes"
@@ -21,46 +21,111 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"gopkg.in/yaml.v3"
-
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
-	leaseFileName = "server.lease"
+	LeaseFileName = "server.lease"
+
+	// closeTimeout bounds gateway redial and shutdown handshakes.
+	closeTimeout = 5 * time.Second
 )
 
-type missingLiveSessionMappingError struct {
+// Native gateway field, value, and event-type constants. These mirror the ACP
+// adapter's shared constants; the native gateway layer keeps its own copies so
+// it stays self-contained under internal/hermes.
+const (
+	valURL              = "url"
+	valACPGoHermes      = "acp-go-hermes"
+	valAssistant        = "assistant"
+	valStop             = "stop"
+	valText             = "text"
+	valReasoning        = "reasoning"
+	valAlways           = "always"
+	valServe            = "serve"
+	valHermes           = "hermes"
+	argPort             = "--port"
+	valOnce             = "once"
+	valUnsupported      = "unsupported"
+	keyTitle            = "title"
+	keySessionIDSnake   = "session_id"
+	keyValue            = "value"
+	keyField            = "field"
+	keySource           = "source"
+	keyQuestion         = "question"
+	jsonFieldError      = "error"
+	jsonFieldCwd        = "cwd"
+	msgHermesNeedsInput = "Hermes needs input"
+
+	evtApprovalRequest    = "approval.request"
+	evtClarifyRequest     = "clarify.request"
+	evtSecretRequest      = "secret.request"
+	evtMessageDelta       = "message.delta"
+	evtMessageComplete    = "message.complete"
+	evtMessagePartUpdated = "message.part.updated"
+	evtSessionError       = "session.error"
+	evtSudoRequest        = "sudo.request"
+	evtThinkingDelta      = "thinking.delta"
+	evtTerminalReadReq    = "terminal.read.request"
+)
+
+// firstNonEmpty returns the first non-empty string in values.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+// splitModelValue splits a "provider/model" identifier, applying fallbacks when
+// the value is empty or unqualified.
+func splitModelValue(value string, fallbackProvider string, fallbackModel string) (string, string) {
+	if value == "" {
+		return fallbackProvider, fallbackModel
+	}
+
+	provider, model, ok := strings.Cut(value, "/")
+	if !ok || provider == "" || model == "" {
+		return fallbackProvider, value
+	}
+
+	return provider, model
+}
+
+type MissingLiveSessionMappingError struct {
 	StoredSessionID string
 }
 
-func (e missingLiveSessionMappingError) Error() string {
+func (e MissingLiveSessionMappingError) Error() string {
 	return fmt.Sprintf("hermes live session id mapping missing for stored session %q", e.StoredSessionID)
 }
 
-type hermesClient interface {
+type Server interface {
 	Close(context.Context) error
-	CreateSession(context.Context, string) (nativeSession, error)
-	GetSession(context.Context, string) (nativeSession, error)
-	ListSessions(context.Context, string) ([]nativeSession, error)
+	CreateSession(context.Context, string) (Session, error)
+	GetSession(context.Context, string) (Session, error)
+	ListSessions(context.Context, string) ([]Session, error)
 	DeleteSession(context.Context, string) error
-	SendMessage(context.Context, string, hermesMessageRequest) (nativeMessage, error)
-	Messages(context.Context, string) ([]nativeMessage, error)
+	SendMessage(context.Context, string, MessageRequest) (NativeMessage, error)
+	Messages(context.Context, string) ([]NativeMessage, error)
 	Abort(context.Context, string) error
-	Fork(context.Context, string, string) (nativeSession, error)
-	Todos(context.Context, string) ([]nativeTodo, error)
-	ConfigProviders(context.Context) (providersResponse, error)
-	PendingPermissions(context.Context) ([]permissionRequest, error)
-	ReplyPermission(context.Context, permissionRequest, string, string) error
-	PendingQuestions(context.Context) ([]questionRequest, error)
-	ReplyQuestion(context.Context, questionRequest, [][]string) error
-	RejectQuestion(context.Context, questionRequest) error
-	Events() <-chan hermesEvent
+	Fork(context.Context, string, string) (Session, error)
+	Todos(context.Context, string) ([]Todo, error)
+	ConfigProviders(context.Context) (ProvidersResponse, error)
+	PendingPermissions(context.Context) ([]PermissionRequest, error)
+	ReplyPermission(context.Context, PermissionRequest, string, string) error
+	PendingQuestions(context.Context) ([]QuestionRequest, error)
+	ReplyQuestion(context.Context, QuestionRequest, [][]string) error
+	RejectQuestion(context.Context, QuestionRequest) error
+	Events() <-chan TurnEvent
 	EventErrors() <-chan error
-	XDGDirs() xdgDirs
+	XDGDirs() XDGDirs
 }
 
-type hermesStartOptions struct {
-	ACPSessionID   acpSessionIDString
+type StartOptions struct {
+	ACPSessionID   ACPSessionIDString
 	Root           string
 	Cwd            string
 	ExecutablePath string
@@ -68,14 +133,14 @@ type hermesStartOptions struct {
 	Env            map[string]string
 	HealthTimeout  time.Duration
 	Logger         *slog.Logger
-	ExistingXDG    xdgDirs
+	ExistingXDG    XDGDirs
 	MCPServers     []acp.McpServer
 	SeedFiles      map[string]string
 }
 
-type acpSessionIDString string
+type ACPSessionIDString string
 
-type xdgDirs struct {
+type XDGDirs struct {
 	Root   string
 	Data   string
 	Config string
@@ -85,16 +150,16 @@ type xdgDirs struct {
 
 type hermesServer struct {
 	cmd *exec.Cmd
-	xdg xdgDirs
+	xdg XDGDirs
 	log *slog.Logger
 
-	events chan hermesEvent
+	events chan TurnEvent
 	errs   chan error
 	closed chan struct{}
 	once   sync.Once
 
-	gateway      *nativehermes.Client
-	process      *nativehermes.Process
+	gateway      *Client
+	process      *Process
 	gatewayMu    sync.Mutex
 	liveByStored map[string]string
 	storedByLive map[string]string
@@ -104,10 +169,10 @@ type hermesServer struct {
 	connMu   sync.Mutex
 	turnBusy int
 	turnIdle *sync.Cond
-	redial   func(context.Context) (*nativehermes.Client, error)
+	redial   func(context.Context) (*Client, error)
 }
 
-type nativeSession struct {
+type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
@@ -123,12 +188,12 @@ type nativeSession struct {
 	} `json:"time"`
 }
 
-type nativeMessage struct {
-	Info  nativeMessageInfo `json:"info"`
-	Parts []nativePart      `json:"parts"`
+type NativeMessage struct {
+	Info  NativeMessageInfo `json:"info"`
+	Parts []Part            `json:"parts"`
 }
 
-type nativeMessageInfo struct {
+type NativeMessageInfo struct {
 	ID         string       `json:"id"`
 	SessionID  string       `json:"sessionID"`
 	Role       string       `json:"role"`
@@ -139,7 +204,7 @@ type nativeMessageInfo struct {
 	Agent      string       `json:"agent"`
 	Finish     string       `json:"finish"`
 	Cost       float64      `json:"cost"`
-	Tokens     nativeTokens `json:"tokens"`
+	Tokens     Tokens       `json:"tokens"`
 	Error      *nativeError `json:"error,omitempty"`
 	Time       struct {
 		Created   int64 `json:"created"`
@@ -155,7 +220,7 @@ type nativeError struct {
 	ProviderCode string `json:"providerCode,omitempty"`
 }
 
-type nativePart struct {
+type Part struct {
 	ID        string          `json:"id"`
 	SessionID string          `json:"sessionID"`
 	MessageID string          `json:"messageID"`
@@ -166,25 +231,25 @@ type nativePart struct {
 	State     json.RawMessage `json:"state"`
 	Reason    string          `json:"reason"`
 	Cost      float64         `json:"cost"`
-	Tokens    nativeTokens    `json:"tokens"`
+	Tokens    Tokens          `json:"tokens"`
 	Raw       json.RawMessage `json:"-"`
 }
 
-func (p *nativePart) UnmarshalJSON(data []byte) error {
-	type alias nativePart
+func (p *Part) UnmarshalJSON(data []byte) error {
+	type alias Part
 
 	var value alias
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
 
-	*p = nativePart(value)
+	*p = Part(value)
 	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
 }
 
-type nativeTokens struct {
+type Tokens struct {
 	Total     float64 `json:"total"`
 	Input     float64 `json:"input"`
 	Output    float64 `json:"output"`
@@ -195,14 +260,14 @@ type nativeTokens struct {
 	} `json:"cache"`
 }
 
-type nativeTodo struct {
+type Todo struct {
 	ID       string `json:"id"`
 	Content  string `json:"content"`
 	Status   string `json:"status"`
 	Priority string `json:"priority"`
 }
 
-type hermesEvent struct {
+type TurnEvent struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`
 	Properties  json.RawMessage `json:"properties"`
@@ -210,21 +275,21 @@ type hermesEvent struct {
 	StreamEpoch uint64          `json:"-"`
 }
 
-func (e *hermesEvent) UnmarshalJSON(data []byte) error {
-	type alias hermesEvent
+func (e *TurnEvent) UnmarshalJSON(data []byte) error {
+	type alias TurnEvent
 
 	var value alias
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
 
-	*e = hermesEvent(value)
+	*e = TurnEvent(value)
 	e.Raw = append(e.Raw[:0], data...)
 
 	return nil
 }
 
-type permissionRequest struct {
+type PermissionRequest struct {
 	ID         string          `json:"id"`
 	SessionID  string          `json:"sessionID"`
 	Action     string          `json:"action"`
@@ -236,7 +301,7 @@ type permissionRequest struct {
 	Metadata   map[string]any  `json:"metadata"`
 	Source     map[string]any  `json:"source"`
 	Tool       permissionTool  `json:"tool"`
-	ReplyRoute permissionRoute `json:"-"`
+	ReplyRoute PermissionRoute `json:"-"`
 }
 
 type permissionTool struct {
@@ -244,30 +309,30 @@ type permissionTool struct {
 	CallID    string `json:"callID"`
 }
 
-type permissionRoute string
+type PermissionRoute string
 
 const (
-	permissionRouteSession permissionRoute = "session"
-	permissionRouteAPI     permissionRoute = "api"
+	PermissionRouteSession PermissionRoute = "session"
+	PermissionRouteAPI     PermissionRoute = "api"
 )
 
-func (r permissionRequest) route() permissionRoute {
+func (r PermissionRequest) Route() PermissionRoute {
 	if r.ReplyRoute != "" {
 		return r.ReplyRoute
 	}
 
 	if r.Action != "" {
-		return permissionRouteAPI
+		return PermissionRouteAPI
 	}
 
-	return permissionRouteSession
+	return PermissionRouteSession
 }
 
-func (r permissionRequest) actionName() string {
+func (r PermissionRequest) ActionName() string {
 	return firstNonEmpty(r.Action, r.Permission)
 }
 
-func (r permissionRequest) resourceList() []string {
+func (r PermissionRequest) ResourceList() []string {
 	if len(r.Resources) > 0 {
 		return append([]string(nil), r.Resources...)
 	}
@@ -275,114 +340,114 @@ func (r permissionRequest) resourceList() []string {
 	return append([]string(nil), r.Patterns...)
 }
 
-type questionRequest struct {
+type QuestionRequest struct {
 	ID         string         `json:"id"`
 	SessionID  string         `json:"sessionID"`
-	Questions  []questionInfo `json:"questions"`
-	Tool       questionTool   `json:"tool"`
-	ReplyRoute questionRoute  `json:"-"`
+	Questions  []QuestionInfo `json:"questions"`
+	Tool       QuestionTool   `json:"tool"`
+	ReplyRoute QuestionRoute  `json:"-"`
 }
 
-type questionRoute string
+type QuestionRoute string
 
 const (
-	questionRouteSession questionRoute = "session"
-	questionRouteAPI     questionRoute = "api"
+	QuestionRouteSession QuestionRoute = "session"
+	QuestionRouteAPI     QuestionRoute = "api"
 )
 
-func (r questionRequest) route() questionRoute {
+func (r QuestionRequest) Route() QuestionRoute {
 	if r.ReplyRoute != "" {
 		return r.ReplyRoute
 	}
 
-	return questionRouteSession
+	return QuestionRouteSession
 }
 
-type questionInfo struct {
+type QuestionInfo struct {
 	Question string           `json:"question"`
 	Header   string           `json:"header"`
-	Options  []questionOption `json:"options"`
+	Options  []QuestionOption `json:"options"`
 	Multiple bool             `json:"multiple"`
 	Custom   bool             `json:"custom"`
 }
 
-type questionOption struct {
+type QuestionOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
 }
 
-type questionTool struct {
+type QuestionTool struct {
 	MessageID string `json:"messageID"`
 	CallID    string `json:"callID"`
 }
 
-type hermesMessageRequest struct {
-	MessageID string               `json:"messageID,omitempty"`
-	Model     *hermesModelSelector `json:"model,omitempty"`
-	Agent     string               `json:"agent,omitempty"`
-	NoReply   bool                 `json:"noReply,omitempty"`
-	Parts     []map[string]any     `json:"parts"`
+type MessageRequest struct {
+	MessageID string           `json:"messageID,omitempty"`
+	Model     *ModelSelector   `json:"model,omitempty"`
+	Agent     string           `json:"agent,omitempty"`
+	NoReply   bool             `json:"noReply,omitempty"`
+	Parts     []map[string]any `json:"parts"`
 }
 
-type hermesModelSelector struct {
+type ModelSelector struct {
 	ProviderID string `json:"providerID"`
 	ModelID    string `json:"modelID"`
 }
 
-type providersResponse struct {
-	Providers []providerInfo    `json:"providers"`
+type ProvidersResponse struct {
+	Providers []ProviderInfo    `json:"providers"`
 	Default   map[string]string `json:"default"`
 	Raw       json.RawMessage   `json:"-"`
 }
 
-func (p *providersResponse) UnmarshalJSON(data []byte) error {
-	type alias providersResponse
+func (p *ProvidersResponse) UnmarshalJSON(data []byte) error {
+	type alias ProvidersResponse
 
 	var value alias
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
 
-	*p = providersResponse(value)
+	*p = ProvidersResponse(value)
 	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
 }
 
-type providerInfo struct {
+type ProviderInfo struct {
 	ID     string                   `json:"id"`
 	Name   string                   `json:"name"`
-	Models map[string]providerModel `json:"models"`
+	Models map[string]ProviderModel `json:"models"`
 }
 
-type providerModel struct {
+type ProviderModel struct {
 	ID         string                  `json:"id"`
 	Name       string                  `json:"name"`
 	Limit      map[string]any          `json:"limit"`
 	Reasoning  bool                    `json:"reasoning"`
 	ToolCall   bool                    `json:"tool_call"`
-	Modalities providerModelModalities `json:"modalities"`
+	Modalities ProviderModelModalities `json:"modalities"`
 	Options    map[string]any          `json:"options"`
 }
 
-type providerModelModalities struct {
+type ProviderModelModalities struct {
 	Input []string `json:"input"`
 }
 
-type processIdentity struct {
+type ProcessIdentity struct {
 	StartTime string
 	Cmdline   []string
 	Env       map[string]string
 }
 
 var (
-	hermesMarshalIndent  = json.MarshalIndent
-	hermesUnmarshalYAML  = yaml.Unmarshal
-	hermesWriteLease     = writeLease
-	hermesInspectProcess = inspectHermesProcess
+	hermesMarshalIndent = json.MarshalIndent
+	hermesUnmarshalYAML = yaml.Unmarshal
+	hermesWriteLease    = WriteLease
+	InspectProcess      = inspectHermesProcess
 )
 
-func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesClient, error) {
+func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
@@ -400,7 +465,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 	if xdg.Root == "" {
 		var err error
 
-		xdg, err = createXDGDirs(root, string(options.ACPSessionID))
+		xdg, err = CreateXDGDirs(root, string(options.ACPSessionID))
 		if err != nil {
 			return nil, err
 		}
@@ -414,7 +479,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 		return nil, err
 	}
 
-	proc, err := nativehermes.Start(ctx, nativehermes.ProcessOptions{
+	proc, err := Start(ctx, ProcessOptions{
 		ExecutablePath: options.ExecutablePath,
 		Home:           xdg.Root,
 		Cwd:            options.Cwd,
@@ -426,14 +491,14 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 		return nil, err
 	}
 
-	lease := serverLease{
+	lease := ServerLease{
 		PID:       proc.Cmd.Process.Pid,
 		Port:      proc.Port,
 		StartedAt: time.Now().UnixMilli(),
-		TokenHash: passwordHash(proc.Token),
+		TokenHash: PasswordHash(proc.Token),
 		XDGRoot:   xdg.Root,
 	}
-	if identity, err := hermesInspectProcess(proc.Cmd.Process.Pid); err == nil {
+	if identity, err := InspectProcess(proc.Cmd.Process.Pid); err == nil {
 		lease.ProcessStartTime = identity.StartTime
 	}
 
@@ -447,7 +512,7 @@ func startHermesServer(ctx context.Context, options hermesStartOptions) (hermesC
 		cmd:          proc.Cmd,
 		xdg:          xdg,
 		log:          options.Logger,
-		events:       make(chan hermesEvent, 256),
+		events:       make(chan TurnEvent, 256),
 		errs:         make(chan error, 8),
 		closed:       make(chan struct{}),
 		gateway:      proc.Client,
@@ -479,7 +544,7 @@ func (s *hermesServer) Close(ctx context.Context) error {
 			err = s.process.Close(ctx)
 		}
 
-		removeErr := os.Remove(filepath.Join(s.xdg.State, leaseFileName))
+		removeErr := os.Remove(filepath.Join(s.xdg.State, LeaseFileName))
 		if errors.Is(removeErr, os.ErrNotExist) {
 			removeErr = nil
 		}
@@ -490,7 +555,7 @@ func (s *hermesServer) Close(ctx context.Context) error {
 	return err
 }
 
-func (s *hermesServer) Events() <-chan hermesEvent {
+func (s *hermesServer) Events() <-chan TurnEvent {
 	return s.events
 }
 
@@ -498,46 +563,46 @@ func (s *hermesServer) EventErrors() <-chan error {
 	return s.errs
 }
 
-func (s *hermesServer) XDGDirs() xdgDirs {
+func (s *hermesServer) XDGDirs() XDGDirs {
 	return s.xdg
 }
 
-// errGatewayDisconnected marks a mid-turn WebSocket disconnect so the prompt
+// ErrGatewayDisconnected marks a mid-turn WebSocket disconnect so the prompt
 // loop can fence the turn with a single terminal hermes_turn_failed error.
-var errGatewayDisconnected = errors.New("hermes gateway disconnected")
+var ErrGatewayDisconnected = errors.New("hermes gateway disconnected")
 
 // errGatewayStreamClosed is the disconnect cause when the gateway error channel
 // closes without a specific native error.
 var errGatewayStreamClosed = errors.New("hermes gateway event stream closed")
 
-func isGatewayDisconnect(err error) bool {
-	return errors.Is(err, errGatewayDisconnected)
+func IsGatewayDisconnect(err error) bool {
+	return errors.Is(err, ErrGatewayDisconnected)
 }
 
-// turnFailureCause is the machine-readable class of a native turn failure,
+// TurnFailureCause is the machine-readable class of a native turn failure,
 // surfaced verbatim as data.cause in the uniform hermes_turn_failed error.
-type turnFailureCause string
+type TurnFailureCause string
 
 const (
-	causeTransport turnFailureCause = "transport"
-	causeProvider  turnFailureCause = "provider"
-	causeTimeout   turnFailureCause = "timeout"
+	CauseTransport TurnFailureCause = "transport"
+	CauseProvider  TurnFailureCause = "provider"
+	CauseTimeout   TurnFailureCause = "timeout"
 )
 
-// turnFailureError is a classified native turn failure. The prompt loop maps it
+// TurnFailureError is a classified native turn failure. The prompt loop maps it
 // to the uniform hermes_turn_failed JSON-RPC error; a failed turn is never a
 // stop reason. message carries the real native cause (never a fixed
 // placeholder); statusCode/providerCode appear only when the gateway supplies
 // them.
-type turnFailureError struct {
-	cause        turnFailureCause
+type TurnFailureError struct {
+	cause        TurnFailureCause
 	message      string
 	statusCode   int
 	providerCode string
 	wrapped      error
 }
 
-func (e *turnFailureError) Error() string {
+func (e *TurnFailureError) Error() string {
 	if e.message != "" {
 		return e.message
 	}
@@ -545,15 +610,44 @@ func (e *turnFailureError) Error() string {
 	return string(e.cause) + " turn failure"
 }
 
-func (e *turnFailureError) Unwrap() error {
+func (e *TurnFailureError) Unwrap() error {
 	return e.wrapped
 }
+
+// NewTurnFailure builds a classified turn failure for the ACP adapter to map to
+// the uniform hermes_turn_failed wire error.
+func NewTurnFailure(cause TurnFailureCause, message string) *TurnFailureError {
+	return &TurnFailureError{cause: cause, message: message}
+}
+
+// NewProviderTurnFailure builds a provider-classified turn failure carrying the
+// native statusCode/providerCode the gateway reported.
+func NewProviderTurnFailure(message string, statusCode int, providerCode string) *TurnFailureError {
+	return &TurnFailureError{
+		cause:        CauseProvider,
+		message:      message,
+		statusCode:   statusCode,
+		providerCode: providerCode,
+	}
+}
+
+// Cause reports the classified failure cause.
+func (e *TurnFailureError) Cause() TurnFailureCause { return e.cause }
+
+// Message reports the raw native failure message, if any.
+func (e *TurnFailureError) Message() string { return e.message }
+
+// StatusCode reports the native HTTP status code, if the gateway supplied one.
+func (e *TurnFailureError) StatusCode() int { return e.statusCode }
+
+// ProviderCode reports the native provider error code, if the gateway supplied one.
+func (e *TurnFailureError) ProviderCode() string { return e.providerCode }
 
 // gatewayCompleteFailure inspects a message.complete payload and returns a
 // provider turn failure when the native turn finished in error, wiring
 // assistantMessageError into the gateway submit path. It returns nil for a
 // clean completion (or a payload that fails to decode).
-func gatewayCompleteFailure(payload json.RawMessage) *turnFailureError {
+func gatewayCompleteFailure(payload json.RawMessage) *TurnFailureError {
 	var info struct {
 		Finish string       `json:"finish"`
 		Error  *nativeError `json:"error"`
@@ -561,12 +655,12 @@ func gatewayCompleteFailure(payload json.RawMessage) *turnFailureError {
 
 	_ = json.Unmarshal(payload, &info)
 
-	failErr := assistantMessageError(nativeMessage{Info: nativeMessageInfo{Finish: info.Finish, Error: info.Error}})
+	failErr := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: info.Finish, Error: info.Error}})
 	if failErr == nil {
 		return nil
 	}
 
-	failure := &turnFailureError{cause: causeProvider, message: failErr.Error()}
+	failure := &TurnFailureError{cause: CauseProvider, message: failErr.Error()}
 	if info.Error != nil {
 		failure.statusCode = info.Error.StatusCode
 		failure.providerCode = info.Error.ProviderCode
@@ -577,7 +671,7 @@ func gatewayCompleteFailure(payload json.RawMessage) *turnFailureError {
 
 // gatewayEventFailure maps a session.error gateway event to a provider turn
 // failure, accepting either a nested {error:{…}} object or flat error fields.
-func gatewayEventFailure(payload json.RawMessage) *turnFailureError {
+func gatewayEventFailure(payload json.RawMessage) *TurnFailureError {
 	var body struct {
 		Error        *nativeError `json:"error"`
 		Message      string       `json:"message"`
@@ -588,7 +682,7 @@ func gatewayEventFailure(payload json.RawMessage) *turnFailureError {
 
 	_ = json.Unmarshal(payload, &body)
 
-	failure := &turnFailureError{cause: causeProvider}
+	failure := &TurnFailureError{cause: CauseProvider}
 	if body.Error != nil {
 		failure.message = firstNonEmpty(body.Error.Message, body.Error.Name, body.Error.Type)
 		failure.statusCode = body.Error.StatusCode
@@ -609,7 +703,7 @@ func gatewayEventFailure(payload json.RawMessage) *turnFailureError {
 // on the gateway error channel before it closed. It falls back to the stream
 // closed sentinel when the connection ended without a specific error (a clean
 // close), so the turn never surfaces a bare or generic disconnect string.
-func gatewayDisconnectCause(gw *nativehermes.Client) error {
+func gatewayDisconnectCause(gw *Client) error {
 	select {
 	case err, ok := <-gw.Errors():
 		if ok && err != nil {
@@ -623,7 +717,7 @@ func gatewayDisconnectCause(gw *nativehermes.Client) error {
 
 // gatewayClient returns the current live gateway client. A reconnect can swap
 // it, so all callers read it through this accessor under connMu.
-func (s *hermesServer) gatewayClient() *nativehermes.Client {
+func (s *hermesServer) gatewayClient() *Client {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 
@@ -633,7 +727,7 @@ func (s *hermesServer) gatewayClient() *nativehermes.Client {
 // enableReconnect wires the idle-reconnect supervisor: it records the redial
 // function and starts a goroutine that watches the connection and redials while
 // no turn is in progress.
-func (s *hermesServer) enableReconnect(redial func(context.Context) (*nativehermes.Client, error)) {
+func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, error)) {
 	s.connMu.Lock()
 
 	s.redial = redial
@@ -712,7 +806,7 @@ func (s *hermesServer) reconnectGateway() {
 			s.log.Debug("reconnect hermes gateway failed", slog.String(jsonFieldError, err.Error()))
 		}
 
-		leaseReapSleep(leaseReapPollInterval)
+		leaseReapSleep(LeaseReapPollInterval)
 
 		return
 	}
@@ -739,7 +833,7 @@ func (s *hermesServer) reconnectGateway() {
 	s.gatewayMu.Unlock()
 }
 
-func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeSession, error) {
+func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session, error) {
 	params := map[string]any{jsonFieldCwd: s.cwd, keySource: valACPGoHermes}
 	if title != "" {
 		params[keyTitle] = title
@@ -754,15 +848,15 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 
 	result, err := s.gatewayClient().CreateSession(ctx, params)
 	if err != nil {
-		return nativeSession{}, err
+		return Session{}, err
 	}
 
 	if result.SessionID == "" {
-		return nativeSession{}, fmt.Errorf("hermes session.create response missing session_id")
+		return Session{}, fmt.Errorf("hermes session.create response missing session_id")
 	}
 
 	if result.StoredSessionID == "" {
-		return nativeSession{}, fmt.Errorf("hermes session.create response missing stored_session_id")
+		return Session{}, fmt.Errorf("hermes session.create response missing stored_session_id")
 	}
 
 	s.rememberGatewaySession(result.StoredSessionID, result.SessionID)
@@ -770,18 +864,18 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (nativeS
 	return s.nativeSessionFromGateway(result.StoredSessionID, title), nil
 }
 
-func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession, error) {
+func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, error) {
 	storedID := id
 	if s.liveSessionID(id) == "" {
 		active, err := s.gatewayClient().ActiveList(ctx)
 		if err == nil {
 			for _, item := range active.Sessions {
 				if item.SessionID == "" {
-					return nativeSession{}, fmt.Errorf("hermes active_list response missing id")
+					return Session{}, fmt.Errorf("hermes active_list response missing id")
 				}
 
 				if item.SessionKey == "" {
-					return nativeSession{}, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
+					return Session{}, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
 				}
 
 				s.rememberGatewaySession(item.SessionKey, item.SessionID)
@@ -794,12 +888,12 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession
 
 		result, err := s.gatewayClient().ResumeSession(ctx, id, map[string]any{})
 		if err != nil {
-			return nativeSession{}, err
+			return Session{}, err
 		}
 
 		stored, err := s.storedSessionIDFromResume(result)
 		if err != nil {
-			return nativeSession{}, err
+			return Session{}, err
 		}
 
 		s.rememberGatewaySession(stored, result.SessionID)
@@ -809,13 +903,13 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (nativeSession
 	return s.nativeSessionFromGateway(storedID, ""), nil
 }
 
-func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSession, error) {
+func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]Session, error) {
 	active, err := s.gatewayClient().ActiveList(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]nativeSession, 0, len(active.Sessions))
+	out := make([]Session, 0, len(active.Sessions))
 	for _, item := range active.Sessions {
 		if item.SessionID == "" {
 			return nil, fmt.Errorf("hermes active_list response missing id")
@@ -839,7 +933,7 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]nativeSe
 
 func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 	err := s.gatewayClient().DeleteSession(ctx, id)
-	if nativehermes.IsNotFound(err) {
+	if IsNotFound(err) {
 		err = nil
 	}
 
@@ -848,11 +942,11 @@ func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *hermesServer) SendMessage(ctx context.Context, id string, req hermesMessageRequest) (nativeMessage, error) {
+func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {
 	return s.submitGatewayText(ctx, id, textFromHermesParts(req.Parts))
 }
 
-func assistantMessageError(message nativeMessage) error {
+func assistantMessageError(message NativeMessage) error {
 	if !strings.EqualFold(message.Info.Finish, jsonFieldError) && message.Info.Error == nil {
 		return nil
 	}
@@ -931,7 +1025,7 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	return result.SessionID, nil
 }
 
-func (s *hermesServer) storedSessionIDFromResume(result nativehermes.SessionResumeResult) (string, error) {
+func (s *hermesServer) storedSessionIDFromResume(result SessionResumeResult) (string, error) {
 	if result.SessionID == "" {
 		return "", fmt.Errorf("hermes session.resume response missing session_id")
 	}
@@ -943,11 +1037,11 @@ func (s *hermesServer) storedSessionIDFromResume(result nativehermes.SessionResu
 	return result.SessionKey, nil
 }
 
-func (s *hermesServer) nativeSessionFromGateway(stored string, title string) nativeSession {
+func (s *hermesServer) nativeSessionFromGateway(stored string, title string) Session {
 	provider, model := splitModelValue(s.defaultModel, "", s.defaultModel)
 	now := time.Now().UnixMilli()
 
-	return nativeSession{
+	return Session{
 		ID:        stored,
 		Title:     firstNonEmpty(title, "Hermes session"),
 		Directory: s.cwd,
@@ -979,10 +1073,10 @@ func textFromHermesParts(parts []map[string]any) string {
 	return builder.String()
 }
 
-func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, text string) (nativeMessage, error) {
+func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, text string) (NativeMessage, error) {
 	live, err := s.ensureLiveGatewaySession(ctx, stored)
 	if err != nil {
-		return nativeMessage{}, err
+		return NativeMessage{}, err
 	}
 
 	s.beginGatewayTurn()
@@ -992,7 +1086,7 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 
 	messageID := "hermes-" + live
 	if err := gw.SubmitPrompt(ctx, live, text); err != nil {
-		return nativeMessage{}, err
+		return NativeMessage{}, err
 	}
 
 	var textBuilder strings.Builder
@@ -1004,7 +1098,7 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				// The event channel closes when the gateway connection
 				// terminates; fence the turn as a disconnect carrying the real
 				// transport cause the read loop parked before closing.
-				return nativeMessage{}, s.reportGatewayDisconnect(gatewayDisconnectCause(gw))
+				return NativeMessage{}, s.reportGatewayDisconnect(gatewayDisconnectCause(gw))
 			}
 
 			if event.SessionID != "" && event.SessionID != live {
@@ -1019,7 +1113,7 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
 				s.declineGatewayQuestion(ctx, live, event.Type)
 			case evtSessionError:
-				return nativeMessage{}, gatewayEventFailure(event.Payload)
+				return NativeMessage{}, gatewayEventFailure(event.Payload)
 			case evtMessageDelta, evtThinkingDelta:
 				chunk := gatewayEventText(event.Payload)
 				if chunk == "" {
@@ -1033,20 +1127,20 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				s.forwardGatewayPart(stored, messageID, event, chunk)
 			case evtMessageComplete:
 				if failure := gatewayCompleteFailure(event.Payload); failure != nil {
-					return nativeMessage{}, failure
+					return NativeMessage{}, failure
 				}
 
 				tokens := gatewayUsageTokens(event.Payload)
 
-				return nativeMessage{
-					Info: nativeMessageInfo{
+				return NativeMessage{
+					Info: NativeMessageInfo{
 						ID:        messageID,
 						SessionID: stored,
 						Role:      valAssistant,
 						Finish:    valStop,
 						Tokens:    tokens,
 					},
-					Parts: []nativePart{{
+					Parts: []Part{{
 						ID:        messageID + "-text",
 						SessionID: stored,
 						MessageID: messageID,
@@ -1056,7 +1150,7 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				}, nil
 			}
 		case <-ctx.Done():
-			return nativeMessage{}, ctx.Err()
+			return NativeMessage{}, ctx.Err()
 		}
 	}
 }
@@ -1064,7 +1158,7 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 // reportGatewayDisconnect feeds the real mid-turn disconnect cause into the
 // server error channel that the prompt loop watches via EventErrors and returns
 // a transport turn failure carrying that same cause. The failure unwraps to
-// errGatewayDisconnected so the prompt loop fences the stream exactly once,
+// ErrGatewayDisconnected so the prompt loop fences the stream exactly once,
 // while data.message reports the real cause instead of a generic string.
 func (s *hermesServer) reportGatewayDisconnect(cause error) error {
 	if cause == nil {
@@ -1072,20 +1166,20 @@ func (s *hermesServer) reportGatewayDisconnect(cause error) error {
 	}
 
 	select {
-	case s.errs <- streamError{err: cause}:
+	case s.errs <- StreamError{err: cause}:
 	default:
 	}
 
-	return &turnFailureError{cause: causeTransport, message: cause.Error(), wrapped: errGatewayDisconnected}
+	return &TurnFailureError{cause: CauseTransport, message: cause.Error(), wrapped: ErrGatewayDisconnected}
 }
 
-func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event nativehermes.Event, text string) {
+func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event Event, text string) {
 	partType := valText
 	if event.Type == evtThinkingDelta {
 		partType = valReasoning
 	}
 
-	part := nativePart{
+	part := Part{
 		ID:        messageID + "-" + partType,
 		SessionID: stored,
 		MessageID: messageID,
@@ -1096,43 +1190,43 @@ func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event
 
 	data, _ := json.Marshal(part)
 	select {
-	case s.events <- hermesEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
+	case s.events <- TurnEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
 	default:
 	}
 }
 
-func (s *hermesServer) forwardGatewayPermission(stored string, live string, event nativehermes.Event) {
-	req := permissionRequest{
+func (s *hermesServer) forwardGatewayPermission(stored string, live string, event Event) {
+	req := PermissionRequest{
 		ID:         firstNonEmpty(gatewayPayloadString(event.Payload, "id"), gatewayPayloadString(event.Payload, "request_id"), "approval"),
 		SessionID:  stored,
 		Action:     firstNonEmpty(gatewayPayloadString(event.Payload, keyTitle), gatewayPayloadString(event.Payload, "command"), "approval"),
 		Metadata:   map[string]any{"liveSessionId": live},
-		ReplyRoute: permissionRouteAPI,
+		ReplyRoute: PermissionRouteAPI,
 	}
 
 	data, _ := json.Marshal(req)
 	select {
-	case s.events <- hermesEvent{Type: evtApprovalRequest, Properties: data, Raw: event.Raw}:
+	case s.events <- TurnEvent{Type: evtApprovalRequest, Properties: data, Raw: event.Raw}:
 	default:
 	}
 }
 
-func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event nativehermes.Event) {
+func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event Event) {
 	question := firstNonEmpty(gatewayPayloadString(event.Payload, keyQuestion), gatewayPayloadString(event.Payload, "prompt"), msgHermesNeedsInput)
-	req := questionRequest{
+	req := QuestionRequest{
 		ID:        firstNonEmpty(gatewayPayloadString(event.Payload, "id"), gatewayPayloadString(event.Payload, "request_id"), "clarify"),
 		SessionID: stored,
-		Questions: []questionInfo{{
+		Questions: []QuestionInfo{{
 			Question: question,
 			Header:   "Hermes question",
 			Custom:   true,
 		}},
-		ReplyRoute: questionRouteAPI,
+		ReplyRoute: QuestionRouteAPI,
 	}
 
 	data, _ := json.Marshal(req)
 	select {
-	case s.events <- hermesEvent{Type: evtClarifyRequest, Properties: data, Raw: event.Raw}:
+	case s.events <- TurnEvent{Type: evtClarifyRequest, Properties: data, Raw: event.Raw}:
 	default:
 	}
 
@@ -1199,13 +1293,13 @@ func firstPayloadString(value any, keys ...string) string {
 	return ""
 }
 
-func gatewayUsageTokens(raw json.RawMessage) nativeTokens {
+func gatewayUsageTokens(raw json.RawMessage) Tokens {
 	var payload map[string]any
 
 	_ = json.Unmarshal(raw, &payload)
 	usage, _ := payload["usage"].(map[string]any)
 
-	return nativeTokens{
+	return Tokens{
 		Total:     numberValue(usage["total_tokens"], usage["total"]),
 		Input:     numberValue(usage["input_tokens"], usage["prompt_tokens"], usage["input"]),
 		Output:    numberValue(usage["output_tokens"], usage["completion_tokens"], usage["output"]),
@@ -1230,20 +1324,20 @@ func numberValue(values ...any) float64 {
 	return 0
 }
 
-func nativeMessagesFromGateway(stored string, messages []nativehermes.Message) []nativeMessage {
-	out := make([]nativeMessage, 0, len(messages))
+func nativeMessagesFromGateway(stored string, messages []Message) []NativeMessage {
+	out := make([]NativeMessage, 0, len(messages))
 	for index := range messages {
 		message := &messages[index]
 		messageID := fmt.Sprintf("history-%d", index+1)
 		text := gatewayMessageText(*message)
-		out = append(out, nativeMessage{
-			Info: nativeMessageInfo{
+		out = append(out, NativeMessage{
+			Info: NativeMessageInfo{
 				ID:        messageID,
 				SessionID: stored,
 				Role:      firstNonEmpty(message.Role, valAssistant),
 				Finish:    valStop,
 			},
-			Parts: []nativePart{{
+			Parts: []Part{{
 				ID:        messageID + "-text",
 				SessionID: stored,
 				MessageID: messageID,
@@ -1257,7 +1351,7 @@ func nativeMessagesFromGateway(stored string, messages []nativehermes.Message) [
 	return out
 }
 
-func gatewayMessageText(message nativehermes.Message) string {
+func gatewayMessageText(message Message) string {
 	if len(message.Content) == 0 {
 		return ""
 	}
@@ -1269,15 +1363,15 @@ func gatewayMessageText(message nativehermes.Message) string {
 	return string(message.Content)
 }
 
-func providersFromGateway(result nativehermes.ModelOptionsResult) providersResponse {
-	providers := make([]providerInfo, 0, len(result.Providers))
+func providersFromGateway(result ModelOptionsResult) ProvidersResponse {
+	providers := make([]ProviderInfo, 0, len(result.Providers))
 	for index := range result.Providers {
 		provider := &result.Providers[index]
 
-		info := providerInfo{
+		info := ProviderInfo{
 			ID:     provider.Slug,
 			Name:   firstNonEmpty(provider.Name, provider.Slug),
-			Models: map[string]providerModel{},
+			Models: map[string]ProviderModel{},
 		}
 		for _, modelID := range provider.Models {
 			if modelID == "" {
@@ -1285,7 +1379,7 @@ func providersFromGateway(result nativehermes.ModelOptionsResult) providersRespo
 			}
 
 			capability := provider.Capabilities[modelID]
-			info.Models[modelID] = providerModel{
+			info.Models[modelID] = ProviderModel{
 				ID:        modelID,
 				Name:      modelID,
 				Reasoning: capability.Reasoning,
@@ -1295,10 +1389,10 @@ func providersFromGateway(result nativehermes.ModelOptionsResult) providersRespo
 		providers = append(providers, info)
 	}
 
-	return providersResponse{Providers: providers, Raw: result.Raw}
+	return ProvidersResponse{Providers: providers, Raw: result.Raw}
 }
 
-func (s *hermesServer) Messages(ctx context.Context, id string) ([]nativeMessage, error) {
+func (s *hermesServer) Messages(ctx context.Context, id string) ([]NativeMessage, error) {
 	live, err := s.ensureLiveGatewaySession(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1321,37 +1415,37 @@ func (s *hermesServer) Abort(ctx context.Context, id string) error {
 	return s.gatewayClient().Interrupt(ctx, live)
 }
 
-func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (nativeSession, error) {
+func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (Session, error) {
 	_ = messageID
 
 	live, err := s.ensureLiveGatewaySession(ctx, id)
 	if err != nil {
-		return nativeSession{}, err
+		return Session{}, err
 	}
 
 	result, err := s.gatewayClient().Branch(ctx, live, "")
-	if nativehermes.IsNotFound(err) {
+	if IsNotFound(err) {
 		s.forgetGatewaySession(id)
 
 		live, err = s.ensureLiveGatewaySession(ctx, id)
 		if err != nil {
-			return nativeSession{}, err
+			return Session{}, err
 		}
 
 		result, err = s.gatewayClient().Branch(ctx, live, "")
 	}
 
 	if err != nil {
-		return nativeSession{}, err
+		return Session{}, err
 	}
 
 	if result.SessionID == "" {
-		return nativeSession{}, fmt.Errorf("hermes branch response missing session_id")
+		return Session{}, fmt.Errorf("hermes branch response missing session_id")
 	}
 
 	stored, err := s.storedSessionIDForLive(ctx, result.SessionID)
 	if err != nil {
-		return nativeSession{}, err
+		return Session{}, err
 	}
 
 	s.rememberGatewaySession(stored, result.SessionID)
@@ -1384,30 +1478,30 @@ func (s *hermesServer) lookupStoredSessionIDForLive(ctx context.Context, live st
 	return "", fmt.Errorf("%s active_list missing live session %q", label, live)
 }
 
-func (s *hermesServer) Todos(ctx context.Context, id string) ([]nativeTodo, error) {
+func (s *hermesServer) Todos(ctx context.Context, id string) ([]Todo, error) {
 	_, _ = ctx, id
 
 	return nil, nil
 }
 
-func (s *hermesServer) ConfigProviders(ctx context.Context) (providersResponse, error) {
+func (s *hermesServer) ConfigProviders(ctx context.Context) (ProvidersResponse, error) {
 	live := s.anyLiveSessionID()
 
 	models, err := s.gatewayClient().ModelOptions(ctx, live)
 	if err != nil {
-		return providersResponse{}, err
+		return ProvidersResponse{}, err
 	}
 
 	return providersFromGateway(models), nil
 }
 
-func (s *hermesServer) PendingPermissions(ctx context.Context) ([]permissionRequest, error) {
+func (s *hermesServer) PendingPermissions(ctx context.Context) ([]PermissionRequest, error) {
 	_ = ctx
 
 	return nil, nil
 }
 
-func (s *hermesServer) ReplyPermission(ctx context.Context, req permissionRequest, reply string, message string) error {
+func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionRequest, reply string, message string) error {
 	_ = message
 	choice := "deny"
 
@@ -1418,51 +1512,57 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req permissionReques
 
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
+		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 
 	return s.gatewayClient().ApprovalRespond(ctx, live, choice, reply == valAlways)
 }
 
-func (s *hermesServer) PendingQuestions(ctx context.Context) ([]questionRequest, error) {
+func (s *hermesServer) PendingQuestions(ctx context.Context) ([]QuestionRequest, error) {
 	_ = ctx
 
 	return nil, nil
 }
 
-func (s *hermesServer) ReplyQuestion(ctx context.Context, req questionRequest, answers [][]string) error {
+func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, answers [][]string) error {
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
+		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 
 	return s.gatewayClient().ClarifyRespond(ctx, live, answers)
 }
 
-func (s *hermesServer) RejectQuestion(ctx context.Context, req questionRequest) error {
+func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) error {
 	live := s.liveSessionID(req.SessionID)
 	if live == "" {
-		return missingLiveSessionMappingError{StoredSessionID: req.SessionID}
+		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 
 	return s.gatewayClient().ClarifyRespond(ctx, live, "")
 }
 
-type streamError struct {
+type StreamError struct {
 	epoch uint64
 	err   error
 }
 
-func (e streamError) Error() string {
+func (e StreamError) Error() string {
 	return e.err.Error()
 }
 
-func (e streamError) Unwrap() error {
+func (e StreamError) Unwrap() error {
 	return e.err
 }
 
-func streamErrorEpoch(err error) uint64 {
-	var streamErr streamError
+// NewStreamError builds a gateway stream error carrying the turn epoch it
+// belongs to, so a late failure from a superseded turn can be ignored.
+func NewStreamError(epoch uint64, err error) StreamError {
+	return StreamError{epoch: epoch, err: err}
+}
+
+func StreamErrorEpoch(err error) uint64 {
+	var streamErr StreamError
 	if errors.As(err, &streamErr) {
 		return streamErr.epoch
 	}
@@ -1470,13 +1570,13 @@ func streamErrorEpoch(err error) uint64 {
 	return 0
 }
 
-func createXDGDirs(root string, sessionID string) (xdgDirs, error) {
+func CreateXDGDirs(root string, sessionID string) (XDGDirs, error) {
 	if sessionID == "" {
-		sessionID = string(permissionRouteSession)
+		sessionID = string(PermissionRouteSession)
 	}
 
-	base := filepath.Join(root, safePathName(sessionID))
-	dirs := xdgDirs{
+	base := filepath.Join(root, SafePathName(sessionID))
+	dirs := XDGDirs{
 		Root:   base,
 		Data:   filepath.Join(base, "data"),
 		Config: filepath.Join(base, "config"),
@@ -1487,7 +1587,7 @@ func createXDGDirs(root string, sessionID string) (xdgDirs, error) {
 	return dirs, ensureXDGDirs(dirs)
 }
 
-func ensureXDGDirs(dirs xdgDirs) error {
+func ensureXDGDirs(dirs XDGDirs) error {
 	for _, dir := range []string{dirs.Root, dirs.Data, dirs.Config, dirs.Cache, dirs.State} {
 		if dir == "" {
 			return fmt.Errorf("xdg directory is empty")
@@ -1529,7 +1629,7 @@ func materializeHermesConfig(home string, servers []acp.McpServer, files map[str
 	var managed map[string]any
 
 	if len(servers) > 0 {
-		managed = hermesMCPServersConfig(servers)
+		managed = MCPServersConfig(servers)
 	}
 
 	writes, seededConfig, haveSeededConfig, err := buildHermesSeedWrites(home, files)
@@ -1716,12 +1816,12 @@ func seedFileInvalid(relative string) error {
 	})
 }
 
-// hermesMCPServersConfig builds the wrapper-managed config block that hermes
+// MCPServersConfig builds the wrapper-managed config block that hermes
 // reads for MCP servers. Callers pass a non-empty server list that has already
 // passed validateMCPServers, so every entry is stdio or http and carries a
 // non-empty name unique within the request; names are used verbatim as the
 // config keys with no fabrication or deduplication.
-func hermesMCPServersConfig(servers []acp.McpServer) map[string]any {
+func MCPServersConfig(servers []acp.McpServer) map[string]any {
 	mcpServers := make(map[string]any, len(servers))
 
 	for _, server := range servers {
@@ -1843,13 +1943,13 @@ func deepMergeYAML(base, override map[string]any) map[string]any {
 	return merged
 }
 
-func passwordHash(password string) string {
+func PasswordHash(password string) string {
 	sum := sha256.Sum256([]byte(password))
 
 	return hex.EncodeToString(sum[:])
 }
 
-type serverLease struct {
+type ServerLease struct {
 	PID              int    `json:"pid"`
 	Port             int    `json:"port"`
 	StartedAt        int64  `json:"startedAtUnixMilli"`
@@ -1858,7 +1958,7 @@ type serverLease struct {
 	ProcessStartTime string `json:"processStartTime,omitempty"`
 }
 
-func writeLease(stateDir string, lease serverLease) error {
+func WriteLease(stateDir string, lease ServerLease) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
@@ -1868,7 +1968,7 @@ func writeLease(stateDir string, lease serverLease) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(stateDir, leaseFileName), data, 0o600)
+	return os.WriteFile(filepath.Join(stateDir, LeaseFileName), data, 0o600)
 }
 
 func reapStaleLeases(root string, log *slog.Logger) error {
@@ -1876,32 +1976,32 @@ func reapStaleLeases(root string, log *slog.Logger) error {
 		return nil
 	}
 
-	matches, err := filepath.Glob(filepath.Join(root, "*", "state", leaseFileName))
+	matches, err := filepath.Glob(filepath.Join(root, "*", "state", LeaseFileName))
 	if err != nil {
 		return err
 	}
 
 	for _, match := range matches {
-		reapLeaseFile(match, log)
+		ReapLeaseFile(match, log)
 	}
 
 	return nil
 }
 
 var (
-	leaseReapTimeout      = 3 * time.Second
-	leaseReapPollInterval = 20 * time.Millisecond
+	LeaseReapTimeout      = 3 * time.Second
+	LeaseReapPollInterval = 20 * time.Millisecond
 	leaseReapSleep        = time.Sleep
 	leaseReapNow          = time.Now
 )
 
-func reapLeaseFile(path string, log *slog.Logger) bool {
+func ReapLeaseFile(path string, log *slog.Logger) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 
-	var lease serverLease
+	var lease ServerLease
 	if err := json.Unmarshal(data, &lease); err != nil {
 		_ = os.Remove(path)
 
@@ -1933,7 +2033,7 @@ func reapLeaseFile(path string, log *slog.Logger) bool {
 // reapLeaseProcess runs the shutdown ladder against an identified stale server
 // process: signal the group, wait, escalate to SIGKILL, then VERIFY the process
 // is gone. It returns true only when the process is confirmed dead.
-func reapLeaseProcess(lease serverLease, log *slog.Logger) bool {
+func reapLeaseProcess(lease ServerLease, log *slog.Logger) bool {
 	if err := terminateProcessGroupID(lease.PID); err != nil {
 		if log != nil {
 			log.Debug("terminate stale hermes lease group failed", slog.Int("pid", lease.PID), slog.String(jsonFieldError, err.Error()))
@@ -1957,8 +2057,8 @@ func reapLeaseProcess(lease serverLease, log *slog.Logger) bool {
 	return waitLeaseProcessGone(lease)
 }
 
-func waitLeaseProcessGone(lease serverLease) bool {
-	deadline := leaseReapNow().Add(leaseReapTimeout)
+func waitLeaseProcessGone(lease ServerLease) bool {
+	deadline := leaseReapNow().Add(LeaseReapTimeout)
 
 	for {
 		if leaseProcessGone(lease) {
@@ -1969,14 +2069,14 @@ func waitLeaseProcessGone(lease serverLease) bool {
 			return false
 		}
 
-		leaseReapSleep(leaseReapPollInterval)
+		leaseReapSleep(LeaseReapPollInterval)
 	}
 }
 
 // leaseProcessGone reports whether the leased process no longer exists or was
 // replaced by an unrelated process reusing the PID.
-func leaseProcessGone(lease serverLease) bool {
-	identity, err := hermesInspectProcess(lease.PID)
+func leaseProcessGone(lease ServerLease) bool {
+	identity, err := InspectProcess(lease.PID)
 	if err != nil {
 		return true
 	}
@@ -1988,12 +2088,12 @@ func leaseProcessGone(lease serverLease) bool {
 	return false
 }
 
-func leaseMatchesProcess(path string, lease serverLease) bool {
+func leaseMatchesProcess(path string, lease ServerLease) bool {
 	if lease.PID <= 0 || lease.ProcessStartTime == "" {
 		return false
 	}
 
-	identity, err := hermesInspectProcess(lease.PID)
+	identity, err := InspectProcess(lease.PID)
 	if err != nil {
 		return false
 	}
@@ -2002,7 +2102,7 @@ func leaseMatchesProcess(path string, lease serverLease) bool {
 		return false
 	}
 
-	if passwordHash(identity.Env["HERMES_DASHBOARD_SESSION_TOKEN"]) != lease.TokenHash {
+	if PasswordHash(identity.Env["HERMES_DASHBOARD_SESSION_TOKEN"]) != lease.TokenHash {
 		return false
 	}
 
@@ -2022,7 +2122,7 @@ func cmdlineLooksLikeHermesServe(args []string) bool {
 	}
 
 	for _, arg := range args {
-		if strings.Contains(filepath.Base(arg), "hermes") {
+		if strings.Contains(filepath.Base(arg), valHermes) {
 			return true
 		}
 	}
@@ -2030,10 +2130,10 @@ func cmdlineLooksLikeHermesServe(args []string) bool {
 	return false
 }
 
-func safePathName(value string) string {
+func SafePathName(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return string(permissionRouteSession)
+		return string(PermissionRouteSession)
 	}
 
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_")
@@ -2041,7 +2141,7 @@ func safePathName(value string) string {
 	return replacer.Replace(value)
 }
 
-func intFromNumber(value any) (int, bool) {
+func IntFromNumber(value any) (int, bool) {
 	switch typed := value.(type) {
 	case float64:
 		if typed > 0 && typed <= math.MaxInt {

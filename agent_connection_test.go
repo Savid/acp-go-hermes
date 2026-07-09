@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -265,9 +267,9 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	})
 
 	agent := NewAgent()
-	agent.options.clientFactory = func(_ context.Context, opts hermesStartOptions) (hermesClient, error) {
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 		client := newFakeHermesClient()
-		xdg, err := createXDGDirs(t.TempDir(), string(opts.ACPSessionID))
+		xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), string(opts.ACPSessionID))
 		if err != nil {
 			return nil, err
 		}

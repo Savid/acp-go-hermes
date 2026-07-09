@@ -1,6 +1,6 @@
 //go:build freebsd
 
-package hermesacp
+package hermes
 
 import (
 	"errors"
@@ -12,6 +12,6 @@ func configureHermesProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
-func inspectHermesProcess(int) (processIdentity, error) {
-	return processIdentity{}, errors.ErrUnsupported
+func inspectHermesProcess(int) (ProcessIdentity, error) {
+	return ProcessIdentity{}, errors.ErrUnsupported
 }

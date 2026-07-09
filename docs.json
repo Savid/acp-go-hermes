@@ -88,7 +88,6 @@
     "options": [
       "copy",
       "view",
-      "claude",
       "chatgpt",
       "mcp",
       "cursor",

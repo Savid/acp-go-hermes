@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -27,7 +29,7 @@ type session struct {
 	env                   map[string]string
 	rawMessages           rawMessageConfig
 
-	client hermesClient
+	client nativehermes.Server
 
 	turn                chan struct{}
 	mu                  sync.Mutex
@@ -37,8 +39,8 @@ type session struct {
 	cancelled           bool
 	rawSeq              int64
 	seenParts           map[string]string
-	pending             map[string]permissionRequest
-	questions           map[string]questionRequest
+	pending             map[string]nativehermes.PermissionRequest
+	questions           map[string]nativehermes.QuestionRequest
 	processedPermission map[string]struct{}
 	processedQuestion   map[string]struct{}
 	turnEpoch           uint64
@@ -63,10 +65,10 @@ type sessionSnapshot struct {
 	mode                  string
 	env                   map[string]string
 	rawMessages           rawMessageConfig
-	client                hermesClient
+	client                nativehermes.Server
 }
 
-func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativeSession, client hermesClient, meta sessionMeta, idmap idmapRecord) *session {
+func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativehermes.Session, client nativehermes.Server, meta sessionMeta, idmap idmapRecord) *session {
 	title := native.Title
 	if title == "" {
 		title = "Hermes session"
@@ -119,8 +121,8 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		rawMessages:           meta.RawMessages,
 		client:                client,
 		seenParts:             map[string]string{},
-		pending:               map[string]permissionRequest{},
-		questions:             map[string]questionRequest{},
+		pending:               map[string]nativehermes.PermissionRequest{},
+		questions:             map[string]nativehermes.QuestionRequest{},
 		processedPermission:   map[string]struct{}{},
 		processedQuestion:     map[string]struct{}{},
 		activeMessageIDs:      map[string]struct{}{},
@@ -195,8 +197,8 @@ func (s *session) finishTurn() {
 	s.turnInFlight = false
 	s.cancelled = false
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.pending = map[string]permissionRequest{}
-	s.questions = map[string]questionRequest{}
+	s.pending = map[string]nativehermes.PermissionRequest{}
+	s.questions = map[string]nativehermes.QuestionRequest{}
 	s.activeMessageIDs = map[string]struct{}{}
 	s.mu.Unlock()
 
@@ -213,19 +215,19 @@ func (s *session) cancelTurn() {
 		s.cancelled = true
 	}
 
-	pending := make([]permissionRequest, 0, len(s.pending))
+	pending := make([]nativehermes.PermissionRequest, 0, len(s.pending))
 	for id := range s.pending {
 		pending = append(pending, s.pending[id])
 	}
 
-	s.pending = map[string]permissionRequest{}
+	s.pending = map[string]nativehermes.PermissionRequest{}
 
-	questions := make([]questionRequest, 0, len(s.questions))
+	questions := make([]nativehermes.QuestionRequest, 0, len(s.questions))
 	for _, req := range s.questions {
 		questions = append(questions, req)
 	}
 
-	s.questions = map[string]questionRequest{}
+	s.questions = map[string]nativehermes.QuestionRequest{}
 	s.mu.Unlock()
 
 	if cancel != nil {
@@ -305,7 +307,7 @@ func (s *session) poisonMissingLiveSessionMapping(ctx context.Context, err error
 		return nil
 	}
 
-	var missing missingLiveSessionMappingError
+	var missing nativehermes.MissingLiveSessionMappingError
 	if errors.As(err, &missing) {
 		return s.poisonWithError(ctx, "hermes_missing_live_session_mapping", missing.Error())
 	}
@@ -349,7 +351,7 @@ func (s *session) markStreamFailed(epoch uint64) {
 	s.mu.Unlock()
 }
 
-func (s *session) shouldSuppressEvent(event hermesEvent) bool {
+func (s *session) shouldSuppressEvent(event nativehermes.TurnEvent) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -381,10 +383,10 @@ func (s *session) clearSuppressBacklog() {
 	s.mu.Unlock()
 }
 
-func (s *session) addPendingPermission(req permissionRequest) {
+func (s *session) addPendingPermission(req nativehermes.PermissionRequest) {
 	s.mu.Lock()
 	if s.pending == nil {
-		s.pending = map[string]permissionRequest{}
+		s.pending = map[string]nativehermes.PermissionRequest{}
 	}
 
 	s.pending[req.ID] = req
@@ -412,7 +414,7 @@ func (s *session) claimPermissionRequest(id string) bool {
 	return true
 }
 
-func (s *session) takePendingPermission(id string) (permissionRequest, bool, bool) {
+func (s *session) takePendingPermission(id string) (nativehermes.PermissionRequest, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -424,10 +426,10 @@ func (s *session) takePendingPermission(id string) (permissionRequest, bool, boo
 	return req, ok, s.cancelled
 }
 
-func (s *session) addPendingQuestion(req questionRequest) {
+func (s *session) addPendingQuestion(req nativehermes.QuestionRequest) {
 	s.mu.Lock()
 	if s.questions == nil {
-		s.questions = map[string]questionRequest{}
+		s.questions = map[string]nativehermes.QuestionRequest{}
 	}
 
 	s.questions[req.ID] = req
@@ -455,7 +457,7 @@ func (s *session) claimQuestionRequest(id string) bool {
 	return true
 }
 
-func (s *session) takePendingQuestion(id string) (questionRequest, bool, bool) {
+func (s *session) takePendingQuestion(id string) (nativehermes.QuestionRequest, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -504,7 +506,7 @@ func (s *session) currentModel() string {
 	return joinModelValue(s.providerID, s.modelID)
 }
 
-func (s *session) modelSelector() *hermesModelSelector {
+func (s *session) modelSelector() *nativehermes.ModelSelector {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -512,7 +514,7 @@ func (s *session) modelSelector() *hermesModelSelector {
 		return nil
 	}
 
-	return &hermesModelSelector{ProviderID: s.providerID, ModelID: s.modelID}
+	return &nativehermes.ModelSelector{ProviderID: s.providerID, ModelID: s.modelID}
 }
 
 func (s *session) currentMode() string {
@@ -531,7 +533,7 @@ func (s *session) nextRawEventSequence() int64 {
 	return s.rawSeq
 }
 
-func (s *session) markPart(part nativePart) bool {
+func (s *session) markPart(part nativehermes.Part) bool {
 	if part.ID == "" {
 		return true
 	}

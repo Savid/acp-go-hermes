@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -120,7 +122,7 @@ func (s *session) contextWindow(ctx context.Context) int {
 				continue
 			}
 
-			if n, ok := intFromNumber(model.Limit["context"]); ok {
+			if n, ok := nativehermes.IntFromNumber(model.Limit["context"]); ok {
 				return n
 			}
 		}
@@ -129,7 +131,7 @@ func (s *session) contextWindow(ctx context.Context) int {
 	return 0
 }
 
-func modelConfigOption(snapshot sessionSnapshot, providers providersResponse) acp.SessionConfigOption {
+func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.ProvidersResponse) acp.SessionConfigOption {
 	category := acp.SessionConfigOptionCategoryModel
 	current := snapshot.modelValue()
 
@@ -202,13 +204,13 @@ func (snapshot sessionSnapshot) modelValue() string {
 	return joinModelValue(snapshot.providerID, snapshot.modelID)
 }
 
-func modelMeta(providerID string, modelID string, model providerModel) map[string]any {
+func modelMeta(providerID string, modelID string, model nativehermes.ProviderModel) map[string]any {
 	meta := map[string]any{"modelId": providerID + "/" + modelID}
-	if n, ok := intFromNumber(model.Limit["context"]); ok {
+	if n, ok := nativehermes.IntFromNumber(model.Limit["context"]); ok {
 		meta["contextWindow"] = n
 	}
 
-	if n, ok := intFromNumber(model.Limit["output"]); ok {
+	if n, ok := nativehermes.IntFromNumber(model.Limit["output"]); ok {
 		meta["maxOutputTokens"] = n
 	}
 
@@ -225,7 +227,7 @@ func modelMeta(providerID string, modelID string, model providerModel) map[strin
 	return meta
 }
 
-func modelCapabilities(model providerModel) []string {
+func modelCapabilities(model nativehermes.ProviderModel) []string {
 	var caps []string
 	if model.Reasoning {
 		caps = append(caps, valReasoning)
@@ -247,7 +249,7 @@ func modelCapabilities(model providerModel) []string {
 	return slices.Compact(caps)
 }
 
-func supportedEfforts(model providerModel) []string {
+func supportedEfforts(model nativehermes.ProviderModel) []string {
 	seen := map[string]struct{}{}
 
 	for key, raw := range model.Options {

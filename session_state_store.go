@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
 	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 )
@@ -105,9 +107,9 @@ type archiveInfo struct {
 }
 
 type stateSnapshotWrapper struct {
-	Todos              []nativeTodo `json:"todos"`
-	PermissionsHistory []any        `json:"permissionsHistory"`
-	PendingInput       bool         `json:"pendingInput"`
+	Todos              []nativehermes.Todo `json:"todos"`
+	PermissionsHistory []any               `json:"permissionsHistory"`
+	PendingInput       bool                `json:"pendingInput"`
 }
 
 type archiveEntry struct {
@@ -219,7 +221,7 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 	return s.agent.sessionStore().Replace(storeCtx, mainKey, replacements)
 }
 
-func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID string, xdg xdgDirs) (idmapRecord, stateSnapshot, bool, error) {
+func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
 	idEntries, err := store.Load(ctx, SessionKey{SessionID: sessionID, Subpath: idmapSubpath})
 	if err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
