@@ -1603,12 +1603,12 @@ func ensureXDGDirs(dirs XDGDirs) error {
 
 const (
 	hermesConfigFileName   = "config.yaml"
-	hermesSeedManifestName = ".wagie-seed-manifest.json"
-	hermesSeedBackupSuffix = ".wagie.bak"
+	hermesSeedManifestName = ".seed-manifest.json"
+	hermesSeedBackupSuffix = ".seed.bak"
 )
 
 // seedWrite is a single planned write under the session config root: the
-// slash-form cleaned relative path (the ownership-manifest key and .wagie.bak
+// slash-form cleaned relative path (the ownership-manifest key and .seed.bak
 // base) and the final bytes to author.
 type seedWrite struct {
 	relative string
@@ -1684,7 +1684,7 @@ func hermesConfigBytes(managed map[string]any, seededConfig string, haveSeededCo
 // ownership manifest so a seed can never clobber a file the wrapper did not
 // author. It pre-flights every target: if any target already exists and is not
 // recorded in the manifest it fails closed with the uniform unsupported error,
-// writing nothing. Recorded targets are overwritten (keeping a .wagie.bak copy
+// writing nothing. Recorded targets are overwritten (keeping a .seed.bak copy
 // of the prior bytes when they differ), and first writes are recorded in the
 // manifest. The isolation harness gives each session a fresh root, so the
 // manifest is normally absent and every write is a first write.
@@ -1737,7 +1737,7 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 }
 
 // writeManagedSeedFile writes data to target, first copying the current on-disk
-// bytes to <target>.wagie.bak when they differ from data. An identical existing
+// bytes to <target>.seed.bak when they differ from data. An identical existing
 // file is left untouched (no backup, no rewrite).
 func writeManagedSeedFile(target string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

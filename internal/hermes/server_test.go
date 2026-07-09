@@ -932,7 +932,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 			t.Fatalf("second seed: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(home, "foo"+hermesSeedBackupSuffix)); !os.IsNotExist(err) {
-			t.Fatalf("identical re-seed created a .wagie.bak (err=%v)", err)
+			t.Fatalf("identical re-seed created a .seed.bak (err=%v)", err)
 		}
 	})
 
