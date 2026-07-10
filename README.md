@@ -1,10 +1,6 @@
 # acp-go-hermes
 
-Go ACP agent for the local Hermes CLI. It runs one isolated `hermes serve`
-process per ACP session, speaks
-[Agent Client Protocol](https://agentclientprotocol.com/) over JSON-RPC
-streams, and is built on
-[`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
+Go ACP agent that exposes the local Hermes CLI as an [Agent Client Protocol](https://agentclientprotocol.com/) agent.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-hermes.svg)](https://pkg.go.dev/github.com/savid/acp-go-hermes)
 [![CI](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml)
@@ -60,11 +56,10 @@ Or drive the agent from an interactive client session:
 go run ./examples/interactive-chat
 ```
 
-Load a stored session from a Hermes transcript you captured, and send one
-follow-up prompt against it:
+Load and resume a stored session transcript:
 
 ```sh
-go run ./examples/resume-from-file -file ./transcript.jsonl -session <session-id>
+go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
 ```
 
 ## Embedded Go

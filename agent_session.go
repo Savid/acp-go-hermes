@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -450,7 +451,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	a.mu.Unlock()
 
 	record := a.deleteCleanupRecord(params.SessionId, session)
-	storeCtx, cancel := a.sessionStoreContext(ctx)
+	storeCtx, cancel := sessionStoreWriteContext(ctx)
 	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)})
 
 	cancel()
@@ -735,32 +736,43 @@ func cloneHermesStateDB(source nativehermes.XDGDirs, target nativehermes.XDGDirs
 }
 
 func paginateSessionInfos(infos []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
-	start := 0
-
-	if cursor != nil && *cursor != "" {
-		parsed, err := strconv.Atoi(*cursor)
-		if err != nil || parsed < 0 {
-			return nil, nil, acp.NewInvalidParams(map[string]any{keyField: "cursor"})
-		}
-
-		start = parsed
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "invalid cursor"})
 	}
 
-	if start >= len(infos) {
-		return []acp.SessionInfo{}, nil, nil
+	if offset > len(infos) {
+		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "cursor is past end"})
 	}
 
-	end := start + listSessionsPageSize
-	if end > len(infos) {
-		end = len(infos)
+	end := offset + listSessionsPageSize
+	if end >= len(infos) {
+		return infos[offset:], nil, nil
 	}
 
-	var next *string
+	next := encodeListCursor(end)
 
-	if end < len(infos) {
-		value := strconv.Itoa(end)
-		next = &value
+	return infos[offset:end], &next, nil
+}
+
+func decodeListCursor(cursor *string) (int, error) {
+	if cursor == nil || *cursor == "" {
+		return 0, nil
 	}
 
-	return infos[start:end], next, nil
+	data, err := base64.RawURLEncoding.DecodeString(*cursor)
+	if err != nil {
+		return 0, err
+	}
+
+	offset, err := strconv.Atoi(string(data))
+	if err != nil || offset < 0 {
+		return 0, strconv.ErrSyntax
+	}
+
+	return offset, nil
+}
+
+func encodeListCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }

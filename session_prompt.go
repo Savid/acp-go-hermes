@@ -18,6 +18,56 @@ import (
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
+// Native Hermes wire vocabulary used by the prompt, event, permission, and
+// elicitation mapping.
+const (
+	valAssistant  = "assistant"
+	valText       = "text"
+	valReasoning  = "reasoning"
+	valAlways     = "always"
+	valUser       = "user"
+	valStepFinish = "step-finish"
+	valTool       = "tool"
+	valOnce       = "once"
+	valQuestion1  = "question_1"
+	valString     = "string"
+	valLength     = "length"
+	valPending    = "pending"
+	valCompleted  = "completed"
+	valRead       = "read"
+	valEdit       = "edit"
+	valDelete     = "delete"
+	valHigh       = "high"
+	valLow        = "low"
+	valSuccess    = "success"
+	valFile       = "file"
+
+	defaultMimeType = "application/octet-stream"
+
+	keyType      = "type"
+	keyTitle     = "title"
+	keyMime      = "mime"
+	keyFilename  = "filename"
+	keyQuestion  = "question"
+	keyMessageID = "messageId"
+
+	jsonFieldCause        = "cause"
+	jsonFieldStatusCode   = "statusCode"
+	jsonFieldProviderCode = "providerCode"
+	valHermesTurnFailed   = "hermes_turn_failed"
+	valHermesServeSource  = "hermes-serve"
+
+	msgHermesNeedsInput = "Hermes needs input"
+
+	acpFieldPrompt = "prompt"
+
+	evtApprovalRequest    = "approval.request"
+	evtClarifyRequest     = "clarify.request"
+	evtMessagePartUpdated = "message.part.updated"
+	evtMessagePartCreated = "message.part.created"
+	evtServerConnected    = "server.connected"
+)
+
 var errPromptCancelled = errors.New("prompt cancelled")
 
 // mapTurnFailure maps a classified native turn failure to the uniform
@@ -211,6 +261,8 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	done := make(chan result, 1)
 
 	go func() {
+		defer recoverAgentGoroutine(turnCtx, agentLogger(s.agent), "Hermes turn send")
+
 		message, err := s.client.SendMessage(turnCtx, s.idmap.NativeSessionID, req)
 		done <- result{message: message, err: err}
 	}()
@@ -329,12 +381,12 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 
 			parts = append(parts, part)
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "prompt"})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt})
 		}
 	}
 
 	if len(parts) == 0 {
-		return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt"})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt})
 	}
 
 	return parts, nil
@@ -1121,6 +1173,12 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 	var raw map[string]any
 	if len(event.Raw) > 0 {
 		_ = json.Unmarshal(event.Raw, &raw)
+	}
+
+	// A native event without a payload is skipped without consuming a
+	// sequence: consumers never receive "event": null and never see a gap.
+	if raw == nil {
+		return nil
 	}
 
 	payload := map[string]any{

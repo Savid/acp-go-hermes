@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -280,5 +281,43 @@ func TestInMemoryStoreReplaceValidation(t *testing.T) {
 		{Key: SessionKey{SessionID: "s1", Subpath: "empty"}, Entries: nil},
 	}); err != nil {
 		t.Fatalf("replace with empty subkey: %v", err)
+	}
+}
+
+func TestInMemoryStoreEmptySessionIDKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+
+	err := store.Append(ctx, SessionKey{}, []SessionStoreEntry{json.RawMessage(`{}`)})
+	if err == nil || !strings.Contains(err.Error(), "session id is required") {
+		t.Fatalf("append empty session id error = %v, want session id is required", err)
+	}
+	err = store.Append(ctx, SessionKey{Subpath: "idmap"}, []SessionStoreEntry{json.RawMessage(`{}`)})
+	if err == nil || !strings.Contains(err.Error(), "session id is required") {
+		t.Fatalf("append empty session id subkey error = %v, want session id is required", err)
+	}
+
+	// Delete of an empty-SessionID key is a pure no-op: no error and no
+	// tombstone that would swallow later writes.
+	if deleteErr := store.Delete(ctx, SessionKey{}); deleteErr != nil {
+		t.Fatalf("delete empty session id: %v", deleteErr)
+	}
+	if deleteErr := store.Delete(ctx, SessionKey{Subpath: "idmap"}); deleteErr != nil {
+		t.Fatalf("delete empty session id subkey: %v", deleteErr)
+	}
+	store.mu.Lock()
+	tombstones := len(store.tombstones)
+	store.mu.Unlock()
+	if tombstones != 0 {
+		t.Fatalf("tombstones after empty-key deletes = %d, want 0", tombstones)
+	}
+
+	key := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	if appendErr := store.Append(ctx, key, []SessionStoreEntry{json.RawMessage(`{}`)}); appendErr != nil {
+		t.Fatalf("append after empty-key deletes: %v", appendErr)
+	}
+	entries, loadErr := store.Load(ctx, key)
+	if loadErr != nil || len(entries) != 1 {
+		t.Fatalf("load after empty-key deletes entries=%d err=%v", len(entries), loadErr)
 	}
 }

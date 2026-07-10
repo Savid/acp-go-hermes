@@ -14,6 +14,12 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// Turn-lifecycle reply vocabulary shared with the prompt mapping.
+const (
+	valCancelled = "cancelled"
+	valReject    = "reject"
+)
+
 type session struct {
 	agent                 *Agent
 	id                    acp.SessionId

@@ -273,3 +273,31 @@ func TestRawEventDefaultOffEmitsNothing(t *testing.T) {
 		t.Fatalf("rawEvent notifications with feature off = %d, want 0", got)
 	}
 }
+
+func TestRawEventNilPayloadSkippedWithoutSequence(t *testing.T) {
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	session := enabledRawSession(t, agent, conn, "session-1")
+	ctx := context.Background()
+
+	// A native event without a payload is skipped entirely: no "event": null
+	// notification and no consumed sequence.
+	if err := session.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Type: "native.custom"}); err != nil {
+		t.Fatalf("emit nil payload: %v", err)
+	}
+	if err := session.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Type: "native.custom", Raw: json.RawMessage(`null`)}); err != nil {
+		t.Fatalf("emit null payload: %v", err)
+	}
+	if exts := conn.extensionsFor(RawEventMethod); len(exts) != 0 {
+		t.Fatalf("nil payload emitted notifications: %#v", exts)
+	}
+
+	emitRaw(t, session, `{"n":1}`)
+	exts := conn.extensionsFor(RawEventMethod)
+	if len(exts) != 1 {
+		t.Fatalf("rawEvent notifications = %d, want 1", len(exts))
+	}
+	if payload := rawEventPayload(t, exts[0]); payload[keySequence] != int64(1) {
+		t.Fatalf("sequence after skipped nil payload = %v, want 1", payload[keySequence])
+	}
+}

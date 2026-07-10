@@ -553,36 +553,6 @@ func requireUnknownSession(t *testing.T, err error) {
 	}
 }
 
-func TestUnknownSessionErrorShape(t *testing.T) {
-	ctx := context.Background()
-	cwd := t.TempDir()
-
-	t.Run("load not in store", func(t *testing.T) {
-		_, err := NewAgent().LoadSession(ctx, LoadSessionRequest("missing", cwd))
-		requireUnknownSession(t, err)
-	})
-	t.Run("resume not in store", func(t *testing.T) {
-		_, err := NewAgent().ResumeSession(ctx, ResumeSessionRequest("missing", cwd))
-		requireUnknownSession(t, err)
-	})
-	t.Run("load tombstoned", func(t *testing.T) {
-		agent := NewAgent()
-		agent.deleted["gone"] = struct{}{}
-		_, err := agent.LoadSession(ctx, LoadSessionRequest("gone", cwd))
-		requireUnknownSession(t, err)
-	})
-	t.Run("resume tombstoned", func(t *testing.T) {
-		agent := NewAgent()
-		agent.deleted["gone"] = struct{}{}
-		_, err := agent.ResumeSession(ctx, ResumeSessionRequest("gone", cwd))
-		requireUnknownSession(t, err)
-	})
-	t.Run("close unknown", func(t *testing.T) {
-		_, err := NewAgent().CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
-		requireUnknownSession(t, err)
-	})
-}
-
 func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
@@ -753,13 +723,18 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	if len(listResp.Sessions) != listSessionsPageSize || listResp.NextCursor == nil {
 		t.Fatalf("list resp len=%d next=%v", len(listResp.Sessions), listResp.NextCursor)
 	}
+	secondPage, err := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor(*listResp.NextCursor)))
+	if err != nil || len(secondPage.Sessions) != 2 || secondPage.NextCursor != nil {
+		t.Fatalf("second page = %#v err=%v", secondPage, err)
+	}
 	if _, err23 := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor("bad"))); err23 == nil {
 		t.Fatal("bad cursor accepted")
 	}
-	cursor := "999"
-	empty, err := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor(cursor)))
-	if err != nil || len(empty.Sessions) != 0 || empty.NextCursor != nil {
-		t.Fatalf("empty page = %#v err=%v", empty, err)
+	if _, err24 := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor("!not-base64!"))); err24 == nil {
+		t.Fatal("non-base64 cursor accepted")
+	}
+	if _, err25 := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCursor(encodeListCursor(999)))); err25 == nil {
+		t.Fatal("past-end cursor accepted")
 	}
 
 	parentClient := newFakeHermesClient()

@@ -27,7 +27,7 @@ reader/writer pair.
 | `WithEnv` | Environment injected into each `hermes serve` process. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
-| `WithSessionStoreLoadTimeout` | Bound on each store load (default 10s). |
+| `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |

@@ -24,7 +24,9 @@ Set the flag in the session's `_meta.hermes.rawEvent` block:
 ```
 
 Events are then delivered as `_hermes/rawEvent` notifications, each carrying
-`sessionId`, `sequence`, `source`, and the native `event` payload.
+`sessionId`, `sequence`, `source`, and the native `event` payload. A native
+event without a payload is skipped entirely: no notification is emitted and no
+sequence number is consumed, so the per-session sequence stays contiguous.
 
 ## Size cap and truncation
 

@@ -11,6 +11,13 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// Session-config option vocabulary.
+const (
+	keyValue = "value"
+	valAudio = "audio"
+	valImage = "image"
+)
+
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if params.Boolean != nil {
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyValue})

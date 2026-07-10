@@ -8,6 +8,13 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// Uniform validation-error vocabulary shared across request validation.
+const (
+	valUnsupported = "unsupported"
+	valServer      = "server"
+	keyField       = "field"
+)
+
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {
 	if err := validateRequiredAbsolutePath(jsonFieldCwd, cwd); err != nil {
 		return err
@@ -93,7 +100,10 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 	case server.Http != nil:
 		name = server.Http.Name
 	default:
-		return "", acp.NewInvalidParams(map[string]any{keyField: fmt.Sprintf("mcpServers[%d]", index)})
+		return "", acp.NewInvalidParams(map[string]any{
+			jsonFieldError: "no_transport",
+			keyField:       fmt.Sprintf("mcpServers[%d]", index),
+		})
 	}
 
 	if strings.TrimSpace(name) == "" {

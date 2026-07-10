@@ -158,7 +158,7 @@ func TestValidateMCPServerNames(t *testing.T) {
 
 	t.Run("rejects server with no transport", func(t *testing.T) {
 		data := requireInvalidParamsData(t, validateMCPServers([]acp.McpServer{{}}))
-		want := map[string]any{"field": "mcpServers[0]"}
+		want := map[string]any{"error": "no_transport", "field": "mcpServers[0]"}
 		if !reflect.DeepEqual(data, want) {
 			t.Fatalf("error data = %#v, want %#v", data, want)
 		}

@@ -45,18 +45,18 @@ coverage-check:
 
 ## test-integration-smoke: compile and run integration tests that can skip without live auth
 test-integration-smoke:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes .
+	ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
 
 ## test-integration-live: run live Hermes CLI integration tests
 test-integration-live:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes .
+	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
 	rm -rf .tmp/integration-cover coverage-integration.out
 	mkdir -p .tmp/integration-cover/data
 	go build -cover -coverpkg=./... -o .tmp/integration-cover/acp-go-hermes ./cmd/acp-go-hermes
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-hermes GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes .
+	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-hermes GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
 	go tool covdata percent -i=.tmp/integration-cover/data
 	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 

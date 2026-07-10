@@ -866,6 +866,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 		absolute := filepath.Join(t.TempDir(), "abs")
 		for name, relative := range map[string]string{
 			"empty":           "",
+			"whitespace-only": "   ",
 			"absolute":        absolute,
 			"parent":          "..",
 			"parent-prefix":   filepath.FromSlash("../escape"),

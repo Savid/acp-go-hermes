@@ -13,6 +13,13 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// Elicitation request shape vocabulary shared with the prompt mapping.
+const (
+	keyMode = "mode"
+	valForm = "form"
+	valURL  = "url"
+)
+
 type agentClient interface {
 	Done() <-chan struct{}
 	CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope) (acp.UnstableCreateElicitationResponse, error)

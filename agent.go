@@ -21,6 +21,11 @@ const (
 	sessionTurnCapacity             = 1
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
+
+	valElicitation    = "elicitation"
+	valBackpressure   = "backpressure"
+	valUnknownSession = "unknown session"
+	keyLimit          = "limit"
 )
 
 var (

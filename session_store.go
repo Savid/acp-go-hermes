@@ -75,6 +75,10 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 		return nil
 	}
 
+	if key.SessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -178,6 +182,12 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error
 
 	if s == nil {
 		return fmt.Errorf("nil InMemorySessionStore")
+	}
+
+	// Deleting a key without a session id is a pure no-op: it never plants a
+	// tombstone that would silently swallow later writes.
+	if key.SessionID == "" {
+		return nil
 	}
 
 	s.mu.Lock()

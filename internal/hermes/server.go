@@ -1895,8 +1895,8 @@ func buildHermesSeedWrites(home string, files map[string]string) ([]seedWrite, s
 
 // resolveSeedFilePath validates a relative seed path and joins it under home,
 // failing closed with the uniform unsupported error on absolute paths, ".."
-// segments, or empty keys. It returns the cleaned relative path and the
-// absolute target.
+// segments, or empty and whitespace-only keys. It returns the cleaned relative
+// path and the absolute target.
 func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	invalid := func() error {
 		return acp.NewInvalidParams(map[string]any{
@@ -1904,7 +1904,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 			keyField:       fmt.Sprintf("seedFiles[%q]", relative),
 		})
 	}
-	if relative == "" || filepath.IsAbs(relative) {
+	if strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) {
 		return "", "", invalid()
 	}
 	// Reject any ".." segment so the cleaned join can never escape home; a

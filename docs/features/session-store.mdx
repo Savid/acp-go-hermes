@@ -22,8 +22,11 @@ agent := hermesacp.NewAgent(
 )
 ```
 
-`WithSessionStoreLoadTimeout` bounds each store load; it defaults to 10 seconds.
-The `SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`,
+`WithSessionStoreLoadTimeout` bounds each store read; it defaults to 10
+seconds. Store writes (snapshot `Replace` commits and `session/delete`
+tombstones) run under a separate fixed 60-second bound, so a slow but
+successful commit never fails a prompt just because it outlived the read
+budget. The `SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`,
 `ListSessions`, `ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
 
 ## Snapshot shape

@@ -26,6 +26,17 @@ const (
 	jsonFieldCwd          = "cwd"
 	validationRequired    = "required"
 	validationDuplicate   = "duplicate"
+
+	keySequence = "sequence"
+	keySource   = "source"
+	keyEvent    = "event"
+
+	rawEventReasonOversize     = "oversize"
+	rawEventReasonUnserialized = "unserializable"
+	rawEventKeyTruncated       = "truncated"
+	rawEventKeyReason          = "reason"
+	rawEventKeyMaxBytes        = "maxBytes"
+	rawEventKeySizeBytes       = "sizeBytes"
 )
 
 type rawMessageConfig struct {

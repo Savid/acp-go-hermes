@@ -26,6 +26,29 @@ import (
 
 const maxHydrateFileBytes int64 = 128 * 1024 * 1024
 
+// sessionStoreWriteTimeout bounds session-store writes (snapshot Replace
+// commits and session/delete tombstones). SessionStoreLoadTimeout bounds
+// store reads only: a slow-but-successful write never fails the operation
+// just because it outlived the read budget.
+const sessionStoreWriteTimeout = 60 * time.Second
+
+func sessionStoreWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, sessionStoreWriteTimeout)
+}
+
+// State-db archive and snapshot vocabulary for the hermes-state-db-v1 format.
+const (
+	archiveEncodingTarZstdBase64 = "tar+zstd+base64"
+	reasonTurn                   = "turn"
+	reasonPermission             = "permission"
+	reasonGeneration             = "generation"
+	fileStateDB                  = "state.db"
+	fileStateDBSHM               = "state.db-shm"
+	fileStateDBWAL               = "state.db-wal"
+	tableAccount                 = "account"
+	valSecret                    = "secret"
+)
+
 type archiveTarWriter interface {
 	io.Writer
 	WriteHeader(*tar.Header) error
@@ -215,7 +238,7 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 		SessionStoreReplacement{Key: SessionKey{SessionID: string(s.id), Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
 	)
 
-	storeCtx, cancel := s.agent.sessionStoreContext(ctx)
+	storeCtx, cancel := sessionStoreWriteContext(ctx)
 	defer cancel()
 
 	return s.agent.sessionStore().Replace(storeCtx, mainKey, replacements)

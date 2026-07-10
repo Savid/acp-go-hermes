@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -30,8 +31,15 @@ func TestHermesACPAgentBinarySessionLifecycle(t *testing.T) {
 	if initResp.AgentCapabilities.SessionCapabilities.Fork != nil {
 		t.Fatalf("stable fork advertised: %#v", initResp.AgentCapabilities.SessionCapabilities.Fork)
 	}
-	if _, err := conn.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{}); err == nil {
+	// Fork is exposed only through the namespaced extension method; the stable
+	// ACP session/fork route must be method-not-found (-32601) on the wire.
+	_, forkErr := conn.CallExtension(ctx, acp.AgentMethodSessionFork, map[string]any{})
+	if forkErr == nil {
 		t.Fatal("stable session/fork unexpectedly succeeded")
+	}
+	var forkReqErr *acp.RequestError
+	if !errors.As(forkErr, &forkReqErr) || forkReqErr.Code != -32601 {
+		t.Fatalf("stable session/fork error = %#v, want method-not-found", forkErr)
 	}
 
 	cwd := t.TempDir()

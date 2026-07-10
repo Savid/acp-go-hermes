@@ -21,10 +21,11 @@ go run ./examples/minimal-client "Say hello"
 ```
 
 The resume client reads a JSONL transcript and takes `-file` and `-session`
-flags; the session id is inferred from the transcript when omitted:
+flags; the session id is inferred from the transcript when omitted. The
+example ships a `session.jsonl` fixture it can load as-is:
 
 ```sh
-go run ./examples/resume-from-file -file ./transcript.jsonl -session <session-id>
+go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
 ```
 
 Each example directory has its own `README.md` with the full flag list.

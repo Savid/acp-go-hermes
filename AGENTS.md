@@ -60,7 +60,7 @@ Run live integration tests only when a local Hermes CLI is installed and
 authenticated:
 
 ```sh
-ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=240s -v ./integration/... ./internal/hermes .
+ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
 ```
 
 `make test-integration-smoke` runs the tier that can skip without live auth.

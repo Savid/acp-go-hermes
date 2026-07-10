@@ -12,6 +12,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// valACPGoHermes is the adapter identity used for agent metadata defaults and
+// the fallback home root.
+const valACPGoHermes = "acp-go-hermes"
+
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
