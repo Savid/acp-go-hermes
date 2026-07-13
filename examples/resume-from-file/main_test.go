@@ -62,8 +62,8 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	expectedCwd := cwd
 	expectedPrompt := "prompt"
 	expectedPath := "/bin/hermes"
-	expectedHome := "/home/hermes"
-	runLoaded = func(_ context.Context, store hermesacp.SessionStore, sessionID string, gotCwd string, prompt string, hermesPath string, hermesHome string, stdout io.Writer) error {
+	expectedScratch := "/home/hermes"
+	runLoaded = func(_ context.Context, store hermesacp.SessionStore, sessionID string, gotCwd string, prompt string, hermesPath string, scratchDir string, stdout io.Writer) error {
 		if sessionID != expectedSessionID {
 			t.Fatalf("sessionID = %q, want %q", sessionID, expectedSessionID)
 		}
@@ -76,8 +76,8 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 		if hermesPath != expectedPath {
 			t.Fatalf("path = %q, want %q", hermesPath, expectedPath)
 		}
-		if hermesHome != expectedHome {
-			t.Fatalf("home = %q, want %q", hermesHome, expectedHome)
+		if scratchDir != expectedScratch {
+			t.Fatalf("scratch = %q, want %q", scratchDir, expectedScratch)
 		}
 		entries, err := store.Load(context.Background(), hermesacp.SessionKey{SessionID: sessionID})
 		if err != nil {
@@ -93,7 +93,7 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	t.Cleanup(func() { runLoaded = previousRunLoaded })
 
 	var stdout bytes.Buffer
-	if err := run(context.Background(), []string{"-file", path, "-prompt", "prompt", "-path", "/bin/hermes", "-home", "/home/hermes"}, &stdout, io.Discard); err != nil {
+	if err := run(context.Background(), []string{"-file", path, "-prompt", "prompt", "-path", "/bin/hermes", "-scratch-dir", "/home/hermes"}, &stdout, io.Discard); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if stdout.String() != "loaded" {
@@ -104,7 +104,7 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	expectedSessionID = "explicit"
 	expectedPrompt = defaultPrompt
 	expectedPath = ""
-	expectedHome = ""
+	expectedScratch = ""
 	if err := run(context.Background(), []string{"-file", path, "-session", "explicit", "-cwd", cwd}, &stdout, io.Discard); err != nil {
 		t.Fatalf("run explicit: %v", err)
 	}

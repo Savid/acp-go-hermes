@@ -117,7 +117,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
 	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
 	hermesPath := flags.String("path", "", "path to hermes CLI")
-	hermesHome := flags.String("home", "", "parent root for isolated Hermes session state")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -155,7 +155,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return err
 	}
 
-	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *hermesPath, *hermesHome, stdout)
+	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *hermesPath, *scratchDir, stdout)
 }
 
 func runLoadedSession(
@@ -165,7 +165,7 @@ func runLoadedSession(
 	cwd string,
 	prompt string,
 	hermesPath string,
-	hermesHome string,
+	scratchDir string,
 	stdout io.Writer,
 ) error {
 	clientInput, agentOutput := io.Pipe()
@@ -188,7 +188,7 @@ func runLoadedSession(
 			agentInput,
 			agentOutput,
 			hermesacp.WithExecutablePath(hermesPath),
-			hermesacp.WithHome(hermesHome),
+			hermesacp.WithScratchDir(scratchDir),
 			hermesacp.WithSessionStore(store),
 			hermesacp.WithLogger(slog.New(slog.DiscardHandler)),
 		)

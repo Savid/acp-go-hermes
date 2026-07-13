@@ -46,11 +46,15 @@ var (
 type ProcessOptions struct {
 	ExecutablePath string
 	Home           string
-	Cwd            string
-	Env            map[string]string
-	Timeout        time.Duration
-	Configure      func(*exec.Cmd)
-	LogWriter      io.Writer
+	// ScratchParent is the resolved parent directory used to materialize an
+	// isolated home when Home is empty. The internal package never consults the
+	// system temp directory itself.
+	ScratchParent string
+	Cwd           string
+	Env           map[string]string
+	Timeout       time.Duration
+	Configure     func(*exec.Cmd)
+	LogWriter     io.Writer
 }
 
 type Process struct {
@@ -79,7 +83,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if home == "" {
 		var err error
 
-		home, err = mkdirTemp("", "acp-go-hermes-*")
+		home, err = mkdirTemp(opts.ScratchParent, "acp-go-hermes-*")
 		if err != nil {
 			return nil, err
 		}

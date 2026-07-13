@@ -32,9 +32,18 @@ type Options struct {
 	AgentVersion string
 
 	ExecutablePath string
-	Home           string
-	DefaultModel   string
-	Env            map[string]string
+	// Home is unsupported: Hermes has no native config or auth root that the
+	// adapter may target, so a non-empty Home is rejected as an unsupported
+	// option when a session is established. Use ScratchDir to control where
+	// ephemeral per-session state is materialized.
+	Home string
+	// ScratchDir is the sole parent directory for all ephemeral on-disk
+	// materialization: isolated per-session Hermes homes, sqlite temp
+	// directories, and process/server temp roots. An empty value means the
+	// system temp directory. It is created with 0700 permissions when missing.
+	ScratchDir   string
+	DefaultModel string
+	Env          map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -95,11 +104,23 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithHome sets the parent root under which isolated per-session Hermes homes
-// are created. The adapter never shares the user's real Hermes home.
+// WithHome is unsupported. Hermes has no native config or auth root that the
+// adapter may target, so establishing a session with a non-empty Home is
+// rejected as an unsupported option. Use WithScratchDir to control where
+// ephemeral per-session state is materialized.
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
+	}
+}
+
+// WithScratchDir sets the sole parent directory for all ephemeral on-disk
+// materialization: isolated per-session Hermes homes, sqlite temp directories,
+// and process/server temp roots. An empty value (the default) means the system
+// temp directory. The directory is created with 0700 permissions when missing.
+func WithScratchDir(dir string) Option {
+	return func(options *Options) {
+		options.ScratchDir = dir
 	}
 }
 

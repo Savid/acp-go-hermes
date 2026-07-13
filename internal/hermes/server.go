@@ -125,8 +125,12 @@ type Server interface {
 }
 
 type StartOptions struct {
-	ACPSessionID   ACPSessionIDString
-	Root           string
+	ACPSessionID ACPSessionIDString
+	Root         string
+	// ScratchParent is the resolved parent directory for ephemeral on-disk
+	// materialization, supplied by the caller. The internal package never
+	// consults the system temp directory itself.
+	ScratchParent  string
 	Cwd            string
 	ExecutablePath string
 	DefaultModel   string
@@ -454,7 +458,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 
 	root := options.Root
 	if root == "" {
-		root = filepath.Join(os.TempDir(), valACPGoHermes)
+		root = filepath.Join(options.ScratchParent, valACPGoHermes)
 	}
 
 	if err := reapStaleLeases(root, options.Logger); err != nil {
@@ -482,6 +486,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	proc, err := Start(ctx, ProcessOptions{
 		ExecutablePath: options.ExecutablePath,
 		Home:           xdg.Root,
+		ScratchParent:  options.ScratchParent,
 		Cwd:            options.Cwd,
 		Env:            options.Env,
 		Timeout:        options.HealthTimeout,

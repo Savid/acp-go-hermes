@@ -49,7 +49,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{
 		"-path", "hermes",
-		"-home", "/tmp/home",
+		"-scratch-dir", "/tmp/scratch",
 		"-model", "openai/gpt-test",
 		"-debug",
 	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {

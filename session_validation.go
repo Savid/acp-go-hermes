@@ -13,6 +13,11 @@ const (
 	valUnsupported = "unsupported"
 	valServer      = "server"
 	keyField       = "field"
+
+	// optionFieldHome names the unsupported Home option in the uniform
+	// unsupported-option error. Hermes has no native config or auth root the
+	// adapter may target.
+	optionFieldHome = "home"
 )
 
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {

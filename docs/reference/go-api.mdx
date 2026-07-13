@@ -22,7 +22,8 @@ reader/writer pair.
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Path to the `hermes` binary (falls back to `hermes` on `PATH`). |
-| `WithHome` | Parent directory for isolated per-session homes. |
+| `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
+| `WithHome` | Unsupported. Hermes has no native config or auth root; a non-empty `Home` is rejected as an unsupported option when a session is established. Use `WithScratchDir`. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
 | `WithEnv` | Environment injected into each `hermes serve` process. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |

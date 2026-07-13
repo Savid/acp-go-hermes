@@ -78,7 +78,7 @@ import (
 func main() {
 	err := hermesacp.Serve(context.Background(), os.Stdin, os.Stdout,
 		hermesacp.WithExecutablePath("hermes"),
-		hermesacp.WithHome("/tmp/hermes-acp-home"),
+		hermesacp.WithScratchDir("/tmp/hermes-acp-scratch"),
 		hermesacp.WithDefaultModel("openai/gpt-5.5"),
 	)
 	if err != nil {
@@ -88,8 +88,12 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Hermes
-executable path, isolated home root, default model, environment, session
-storage, concurrency limits, and OpenTelemetry providers.
+executable path, the scratch directory for ephemeral per-session state, default
+model, environment, session storage, concurrency limits, and OpenTelemetry
+providers. Hermes has no native config or auth root, so `WithHome` is
+unsupported: a non-empty `Home` is rejected as an unsupported option when a
+session is established. Use `WithScratchDir` to control where ephemeral state is
+materialized.
 
 ## What It Provides
 

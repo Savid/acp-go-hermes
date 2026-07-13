@@ -24,6 +24,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
+	if err := a.rejectUnsupportedHome(); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
@@ -151,6 +155,10 @@ func (a *Agent) loadOrResumeSession(
 	metaMap map[string]any,
 ) (*session, error) {
 	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	if err := a.rejectUnsupportedHome(); err != nil {
 		return nil, err
 	}
 
@@ -487,6 +495,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 }
 
 func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	if err := a.rejectUnsupportedHome(); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 
 	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
@@ -526,7 +538,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	if cloneErr := cloneHermesStateDB(parentSnapshot.client.XDGDirs(), xdg); cloneErr != nil {
+	if cloneErr := cloneHermesStateDB(a.options.ScratchDir, parentSnapshot.client.XDGDirs(), xdg); cloneErr != nil {
 		return acp.UnstableForkSessionResponse{}, cloneErr
 	}
 
@@ -594,11 +606,17 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 		servers = cloneMCPServers(mcpServers[0])
 	}
 
+	parent, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return nil, err
+	}
+
 	a.observe.RecordHermesProcessStart(ctx)
 
 	return factory(ctx, nativehermes.StartOptions{
 		ACPSessionID:   nativehermes.ACPSessionIDString(id),
 		Root:           a.homeRoot(),
+		ScratchParent:  parent,
 		Cwd:            cwd,
 		ExecutablePath: a.options.ExecutablePath,
 		DefaultModel:   firstNonEmpty(meta.Model, a.options.DefaultModel),
@@ -705,12 +723,23 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	return os.RemoveAll(record.XDGRoot)
 }
 
+// homeRoot returns the parent directory under which isolated per-session
+// Hermes homes are created, rooted at the resolved scratch parent. Home is an
+// unsupported option (rejected before any session is established), so it never
+// participates in this path.
 func (a *Agent) homeRoot() string {
+	return filepath.Join(scratchParent(a.options.ScratchDir), valACPGoHermes)
+}
+
+// rejectUnsupportedHome fails session establishment with the uniform
+// unsupported-option error when a Home value is configured. Hermes has no
+// native config or auth root the adapter may target.
+func (a *Agent) rejectUnsupportedHome() error {
 	if a.options.Home != "" {
-		return a.options.Home
+		return unsupportedField(optionFieldHome)
 	}
 
-	return filepath.Join(os.TempDir(), valACPGoHermes)
+	return nil
 }
 
 // validateUnstableMCPServers applies the same acceptance rules as
@@ -722,8 +751,8 @@ func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
 	return validateMCPServers(stableMCPServersFromUnstable(servers))
 }
 
-func cloneHermesStateDB(source nativehermes.XDGDirs, target nativehermes.XDGDirs) error {
-	data, _, ok, err := encodeHermesStateDBArchive(source.Root)
+func cloneHermesStateDB(scratchDir string, source nativehermes.XDGDirs, target nativehermes.XDGDirs) error {
+	data, _, ok, err := encodeHermesStateDBArchive(scratchDir, source.Root)
 	if err != nil {
 		return err
 	}

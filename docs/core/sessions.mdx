@@ -4,9 +4,10 @@ description: The per-session process model, adapter-owned IDs, and the load/resu
 ---
 
 Each ACP session owns one `hermes serve` process and one isolated per-session
-`HERMES_HOME` under the configured home parent. The adapter talks to the native
-dashboard gateway over loopback WebSocket JSON-RPC. Sessions are independent:
-one crashing or ending never touches another's home or process.
+`HERMES_HOME` materialized under the scratch parent (`WithScratchDir`, or the
+system temp directory by default). The adapter talks to the native dashboard
+gateway over loopback WebSocket JSON-RPC. Sessions are independent: one crashing
+or ending never touches another's home or process.
 
 ## Lifecycle
 

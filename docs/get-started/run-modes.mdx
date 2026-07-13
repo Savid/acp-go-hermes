@@ -13,7 +13,7 @@ An ACP client launches `acp-go-hermes` as a subprocess and speaks ACP over its
 stdin/stdout. Stdout carries ACP JSON-RPC only; diagnostics go to stderr.
 
 ```sh
-acp-go-hermes -path /usr/bin/hermes -home /tmp/acp-hermes
+acp-go-hermes -path /usr/bin/hermes -scratch-dir /tmp/acp-hermes
 ```
 
 ## Embedded
@@ -23,11 +23,11 @@ a reader/writer pair:
 
 <CodeGroup>
 ```go NewAgent
-agent := hermesacp.NewAgent(hermesacp.WithHome(home))
+agent := hermesacp.NewAgent(hermesacp.WithScratchDir(scratchDir))
 ```
 
 ```go Serve
-err := hermesacp.Serve(ctx, input, output, hermesacp.WithHome(home))
+err := hermesacp.Serve(ctx, input, output, hermesacp.WithScratchDir(scratchDir))
 ```
 </CodeGroup>
 

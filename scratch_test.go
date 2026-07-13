@@ -1,0 +1,61 @@
+package hermesacp
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestScratchParent(t *testing.T) {
+	if got := scratchParent(""); got != os.TempDir() {
+		t.Fatalf("scratchParent(\"\") = %q, want %q", got, os.TempDir())
+	}
+
+	if got := scratchParent("/custom/scratch"); got != "/custom/scratch" {
+		t.Fatalf("scratchParent = %q, want /custom/scratch", got)
+	}
+}
+
+func TestEnsureScratchParent(t *testing.T) {
+	t.Run("empty resolves to system temp", func(t *testing.T) {
+		got, err := ensureScratchParent("")
+		if err != nil {
+			t.Fatalf("ensureScratchParent(\"\"): %v", err)
+		}
+		if got != os.TempDir() {
+			t.Fatalf("ensureScratchParent(\"\") = %q, want %q", got, os.TempDir())
+		}
+	})
+
+	t.Run("missing nested dir created 0700", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "nested", "scratch")
+		got, err := ensureScratchParent(dir)
+		if err != nil {
+			t.Fatalf("ensureScratchParent: %v", err)
+		}
+		if got != dir {
+			t.Fatalf("ensureScratchParent = %q, want %q", got, dir)
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat created dir: %v", err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("created scratch parent is not a directory")
+		}
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("created scratch parent perm = %o, want 700", perm)
+		}
+	})
+
+	t.Run("regular-file parent errors", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(file, "scratch")
+		if _, err := ensureScratchParent(child); err == nil {
+			t.Fatal("ensureScratchParent accepted regular-file parent")
+		}
+	})
+}

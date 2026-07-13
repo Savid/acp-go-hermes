@@ -431,7 +431,7 @@ func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
 	if err := (&session{agent: NewAgent(), client: nil}).snapshotToStore(context.Background()); err != nil {
 		t.Fatalf("nil client snapshot: %v", err)
 	}
-	if _, ok, err := sqliteArchiveContent(filepath.Join(t.TempDir(), "missing.db")); err == nil || ok {
+	if _, ok, err := sqliteArchiveContent("", filepath.Join(t.TempDir(), "missing.db")); err == nil || ok {
 		t.Fatalf("sqliteArchiveContent missing ok=%v err=%v", ok, err)
 	}
 	short := filepath.Join(t.TempDir(), "short.db")
@@ -642,18 +642,18 @@ func TestHydrateStateFromStoreFaults(t *testing.T) {
 }
 
 func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
-	if _, _, ok, err := encodeHermesStateDBArchive(""); err != nil || ok {
+	if _, _, ok, err := encodeHermesStateDBArchive("", ""); err != nil || ok {
 		t.Fatalf("empty root ok=%v err=%v", ok, err)
 	}
 	emptyRoot := t.TempDir()
-	if _, _, ok, err := encodeHermesStateDBArchive(emptyRoot); err != nil || ok {
+	if _, _, ok, err := encodeHermesStateDBArchive("", emptyRoot); err != nil || ok {
 		t.Fatalf("empty state db root ok=%v err=%v", ok, err)
 	}
 	dirRoot := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dirRoot, "state.db"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := encodeHermesStateDBArchive(dirRoot); err != nil || ok {
+	if _, _, ok, err := encodeHermesStateDBArchive("", dirRoot); err != nil || ok {
 		t.Fatalf("directory state db ok=%v err=%v", ok, err)
 	}
 
@@ -661,7 +661,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "state.db"), []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if archive, sha, ok, err := encodeHermesStateDBArchive(root); err != nil || !ok || len(archive) == 0 || sha == "" {
+	if archive, sha, ok, err := encodeHermesStateDBArchive("", root); err != nil || !ok || len(archive) == 0 || sha == "" {
 		t.Fatalf("encodeHermesStateDBArchive ok=%v sha=%q len=%d err=%v", ok, sha, len(archive), err)
 	}
 
@@ -670,7 +670,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 			stateLstat = func(string) (os.FileInfo, error) { return nil, errors.New("lstat failed") }
 		},
 		"sqlite content": func() {
-			stateSQLiteArchiveContent = func(string) ([]byte, bool, error) {
+			stateSQLiteArchiveContent = func(string, string) ([]byte, bool, error) {
 				return nil, false, errors.New("sqlite content failed")
 			}
 		},
@@ -709,13 +709,13 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 			}
 		},
 		"write scrubbed": func() {
-			stateSQLiteArchiveContent = func(string) ([]byte, bool, error) { return []byte("scrubbed"), true, nil }
+			stateSQLiteArchiveContent = func(string, string) ([]byte, bool, error) { return []byte("scrubbed"), true, nil }
 			stateNewTarWriter = func(io.Writer) archiveTarWriter {
 				return fakeTarWriter{writeErr: errors.New("write failed")}
 			}
 		},
 		"open": func() {
-			stateSQLiteArchiveContent = func(string) ([]byte, bool, error) { return nil, false, nil }
+			stateSQLiteArchiveContent = func(string, string) ([]byte, bool, error) { return nil, false, nil }
 			stateOpen = func(string) (io.ReadCloser, error) { return nil, errors.New("open failed") }
 		},
 		"copy": func() {
@@ -751,7 +751,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			restoreStateStoreSeams(t)
 			setup()
-			if _, _, _, err := encodeHermesStateDBArchive(root); err == nil {
+			if _, _, _, err := encodeHermesStateDBArchive("", root); err == nil {
 				t.Fatal("encodeHermesStateDBArchive ignored injected error")
 			}
 		})
@@ -888,11 +888,20 @@ func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "store.db")
 			seedSQLiteStore(t, dbPath)
 			setup(dbPath)
-			if _, ok, err := sqliteArchiveContent(dbPath); err == nil || ok {
+			if _, ok, err := sqliteArchiveContent("", dbPath); err == nil || ok {
 				t.Fatal("sqliteArchiveContent ignored injected error")
 			}
 		})
 	}
+
+	t.Run("scratch parent", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		dbPath := filepath.Join(t.TempDir(), "store.db")
+		seedSQLiteStore(t, dbPath)
+		if _, ok, err := sqliteArchiveContent(string([]byte{0}), dbPath); err == nil || ok {
+			t.Fatal("sqliteArchiveContent ignored scratch parent error")
+		}
+	})
 
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.WriteFile(source, []byte("body"), 0o600); err != nil {

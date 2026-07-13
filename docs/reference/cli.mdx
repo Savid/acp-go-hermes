@@ -12,7 +12,8 @@ acp-go-hermes [flags]
 | Flag | Meaning |
 |---|---|
 | `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
-| `-home` | Parent directory for isolated per-session Hermes homes. |
+| `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-home` | Unsupported. Hermes has no native config or auth root; a non-empty value is rejected when a session is established. Use `-scratch-dir`. |
 | `-model` | Default model value passed as `provider/model`. |
 | `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
 | `-debug` | Enable debug logging on stderr. |

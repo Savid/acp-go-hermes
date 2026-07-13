@@ -32,7 +32,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	defer cancel()
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(hermesacp.WithHome(home), hermesacp.WithSessionStore(store))
+	agent := hermesacp.NewAgent(hermesacp.WithScratchDir(home), hermesacp.WithSessionStore(store))
 	cwd := t.TempDir()
 	newResp, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
@@ -52,7 +52,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(hermesacp.WithHome(restoreHome), hermesacp.WithSessionStore(store))
+	restored := hermesacp.NewAgent(hermesacp.WithScratchDir(restoreHome), hermesacp.WithSessionStore(store))
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession after native delete: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	if err := restored.Close(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "*", "state.db")); len(matches) == 0 {
+	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "acp-go-hermes", "*", "state.db")); len(matches) == 0 {
 		t.Fatalf("restored home did not contain state.db under %s", restoreHome)
 	}
 }
@@ -75,7 +75,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(hermesacp.WithHome(home), hermesacp.WithSessionStore(store))
+	agent := hermesacp.NewAgent(hermesacp.WithScratchDir(home), hermesacp.WithSessionStore(store))
 	cwd := t.TempDir()
 	parent, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
@@ -124,7 +124,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(hermesacp.WithHome(restoreHome), hermesacp.WithSessionStore(store))
+	restored := hermesacp.NewAgent(hermesacp.WithScratchDir(restoreHome), hermesacp.WithSessionStore(store))
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession fork after native delete: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if err := restored.Close(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "*", "state.db")); len(matches) == 0 {
+	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "acp-go-hermes", "*", "state.db")); len(matches) == 0 {
 		t.Fatalf("restored fork home did not contain state.db under %s", restoreHome)
 	}
 }

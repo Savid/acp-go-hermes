@@ -20,6 +20,7 @@ func TestApplyOptions(t *testing.T) {
 		WithAgentVersion("version"),
 		WithExecutablePath("hermes"),
 		WithHome("/tmp/home"),
+		WithScratchDir("/tmp/scratch"),
 		WithDefaultModel("openai/gpt"),
 		WithEnv(map[string]string{"A": "1"}),
 		WithTracerProvider(tracenoop.NewTracerProvider()),
@@ -33,6 +34,9 @@ func TestApplyOptions(t *testing.T) {
 	if opts.AgentName != "name" || opts.AgentTitle != "title" || opts.ExecutablePath != "hermes" ||
 		opts.Env["A"] != "1" || opts.SessionStore != store {
 		t.Fatalf("options = %#v", opts)
+	}
+	if opts.Home != "/tmp/home" || opts.ScratchDir != "/tmp/scratch" {
+		t.Fatalf("home/scratch options = %q / %q", opts.Home, opts.ScratchDir)
 	}
 	if opts.SeedFiles["config.yaml"] != "model: {}\n" {
 		t.Fatalf("seed files = %#v", opts.SeedFiles)

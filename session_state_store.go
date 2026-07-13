@@ -196,7 +196,7 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 	mainKey := SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}
 
 	xdg := snapshot.client.XDGDirs()
-	if archive, sha, ok, err := encodeHermesStateDBArchive(xdg.Root); err != nil {
+	if archive, sha, ok, err := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); err != nil {
 		return err
 	} else if ok {
 		main.Archives["state-db"] = archiveInfo{
@@ -334,7 +334,7 @@ func (s *session) snapshotBlockedReason() string {
 	}
 }
 
-func encodeHermesStateDBArchive(root string) ([]byte, string, bool, error) {
+func encodeHermesStateDBArchive(scratchDir string, root string) ([]byte, string, bool, error) {
 	if root == "" {
 		return nil, "", false, nil
 	}
@@ -352,7 +352,7 @@ func encodeHermesStateDBArchive(root string) ([]byte, string, bool, error) {
 			return nil, "", false, err
 		}
 	} else if info.Mode().IsRegular() {
-		if data, ok, err := stateSQLiteArchiveContent(stateDBPath); err != nil {
+		if data, ok, err := stateSQLiteArchiveContent(scratchDir, stateDBPath); err != nil {
 			return nil, "", false, err
 		} else if ok {
 			files = append(files, stateDBFile{name: fileStateDB, data: data})
@@ -578,13 +578,18 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 	return nil
 }
 
-func sqliteArchiveContent(path string) ([]byte, bool, error) {
+func sqliteArchiveContent(scratchDir string, path string) ([]byte, bool, error) {
 	ok, err := isSQLiteDatabase(path)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
 
-	tempDir, err := stateMkdirTemp("", "acp-go-hermes-sqlite-*")
+	parent, err := ensureScratchParent(scratchDir)
+	if err != nil {
+		return nil, false, err
+	}
+
+	tempDir, err := stateMkdirTemp(parent, "acp-go-hermes-sqlite-*")
 	if err != nil {
 		return nil, false, err
 	}

@@ -29,7 +29,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags.SetOutput(stderr)
 
 	hermesPath := flags.String("path", "", "path to hermes CLI")
-	hermesHome := flags.String("home", "", "parent root for isolated Hermes session state")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
+	hermesHome := flags.String("home", "", "unsupported: Hermes has no native config or auth root; a non-empty value is rejected when a session is established (use -scratch-dir)")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
@@ -80,11 +81,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
-	opts := make([]hermesacp.Option, 0, 5+len(telemetry.options))
+	opts := make([]hermesacp.Option, 0, 6+len(telemetry.options))
 
 	opts = append(opts,
 		hermesacp.WithAgentVersion(version),
 		hermesacp.WithExecutablePath(*hermesPath),
+		hermesacp.WithScratchDir(*scratchDir),
 		hermesacp.WithHome(*hermesHome),
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
