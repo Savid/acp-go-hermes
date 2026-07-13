@@ -13,7 +13,7 @@ import (
 )
 
 // valACPGoHermes is the adapter identity used for agent metadata defaults and
-// the fallback home root.
+// the per-session home root directory name under the scratch parent.
 const valACPGoHermes = "acp-go-hermes"
 
 // Option configures the Hermes ACP agent.
