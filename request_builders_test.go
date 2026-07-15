@@ -45,8 +45,11 @@ func TestRequestBuilders(t *testing.T) {
 	if ResumeSessionRequest("s", "/tmp/project", WithSessionMCPServers(httpServer)).SessionId != "s" {
 		t.Fatal("ResumeSessionRequest did not set session id")
 	}
-	if prompt := TextPromptRequest("s", "hello"); prompt.SessionId != "s" || len(prompt.Prompt) != 1 {
+	if prompt := TextPromptRequest("s", "turn-1", "hello"); prompt.SessionId != "s" || len(prompt.Prompt) != 1 {
 		t.Fatalf("TextPromptRequest = %#v", prompt)
+	}
+	if cancel := CancelRequest("s", "turn-cancel"); cancel.Meta[routeMetaKey] == nil {
+		t.Fatalf("CancelRequest = %#v", cancel)
 	}
 	list := ListSessionsRequest(WithListSessionsCursor("next"), WithListSessionsMeta(map[string]any{"a": "b"}))
 	if list.Cursor == nil || *list.Cursor != "next" || list.Meta["a"] != "b" {
@@ -219,15 +222,15 @@ func TestAgentConnectionHelpers(t *testing.T) {
 		},
 		Meta: map[string]any{"m": true},
 	}}
-	raw, err := scopedElicitationParams(form, elicitationScope{SessionID: "s", ToolCallID: "tool"})
+	raw, err := scopedElicitationParams(form, elicitationScope{SessionID: "s", TurnNonce: "turn-1", ToolCallID: "tool"})
 	if err != nil {
 		t.Fatalf("scopedElicitationParams form: %v", err)
 	}
-	if !strings.Contains(string(raw), `"sessionId":"s"`) || !strings.Contains(string(raw), `"toolCallId":"tool"`) {
+	if !strings.Contains(string(raw), `"sessionId":"s"`) || !strings.Contains(string(raw), `"toolCallId":"tool"`) || !strings.Contains(string(raw), `"turnNonce":"turn-1"`) {
 		t.Fatalf("scoped form = %s", raw)
 	}
 	urlReq := acp.NewUnstableCreateElicitationRequestUrl("e1", "https://example.com")
-	if _, err := scopedElicitationParams(urlReq, elicitationScope{}); err != nil {
+	if _, err := scopedElicitationParams(urlReq, elicitationScope{SessionID: "s", TurnNonce: "turn-2"}); err != nil {
 		t.Fatalf("scopedElicitationParams url: %v", err)
 	}
 	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{}, elicitationScope{}); err == nil {
@@ -247,7 +250,7 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	}
 	conn := &localAgentConnection{agent: agent}
 	agent.clientCalls <- struct{}{}
-	if _, err := conn.CreateElicitation(ctx, form, elicitationScope{}); err == nil {
+	if _, err := conn.CreateElicitation(ctx, form, elicitationScope{SessionID: "s", TurnNonce: "turn-1"}); err == nil {
 		t.Fatal("CreateElicitation ignored client-call backpressure")
 	}
 	<-agent.clientCalls

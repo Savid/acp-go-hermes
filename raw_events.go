@@ -86,10 +86,15 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 		marker[rawEventKeySizeBytes] = len(encoded)
 	}
 
-	return map[string]any{
+	capped := map[string]any{
 		jsonFieldSessionID: payload[jsonFieldSessionID],
 		keySequence:        payload[keySequence],
 		keySource:          payload[keySource],
 		keyEvent:           marker,
 	}
+	if meta, ok := payload["_meta"]; ok {
+		capped["_meta"] = meta
+	}
+
+	return capped
 }

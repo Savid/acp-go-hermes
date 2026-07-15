@@ -36,6 +36,8 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 			t.Fatalf("Initialize: %v", err)
 		}
 		session := testSession(agent, client)
+		turnCtx := session.beginTurn(ctx, "turn-question-1")
+		defer session.finishTurn()
 
 		req := nativehermes.QuestionRequest{
 			ID:        "question-1",
@@ -61,7 +63,7 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 				},
 			},
 		}
-		if err := session.handleQuestion(ctx, req); err != nil {
+		if err := session.handleQuestion(turnCtx, req); err != nil {
 			t.Fatalf("handleQuestion: %v", err)
 		}
 		if len(conn.elicitations) != 1 {
@@ -71,7 +73,7 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 		if got.Form == nil || got.Form.Mode != "form" || got.Form.Message != "Hermes needs input" {
 			t.Fatalf("elicitation form = %#v", got.Form)
 		}
-		if conn.scopes[0].SessionID != session.id || conn.scopes[0].ToolCallID != "call-1" {
+		if conn.scopes[0].SessionID != session.id || conn.scopes[0].TurnNonce != "turn-question-1" || conn.scopes[0].RequestID == nil || *conn.scopes[0].RequestID != "question-1" {
 			t.Fatalf("scope = %#v", conn.scopes[0])
 		}
 		if len(got.Form.RequestedSchema.Required) != 2 {
@@ -140,7 +142,7 @@ func TestQuestionToolReconcileAndCancelRejectsPending(t *testing.T) {
 		t.Fatalf("question rejects = %d, want 1", client.questionRejectCount())
 	}
 
-	turnCtx := session.beginTurn(ctx)
+	turnCtx := session.beginTurn(ctx, "test-turn")
 	session.mu.Lock()
 	session.questions["q2"] = nativehermes.QuestionRequest{ID: "q2", SessionID: "native-1"}
 	session.pending["p1"] = nativehermes.PermissionRequest{ID: "p1", SessionID: "native-1"}
@@ -406,7 +408,7 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := agent.Prompt(ctx, TextPromptRequest(session.id, "turn-disconnect", "hello"))
 		done <- err
 	}()
 	select {
@@ -441,7 +443,7 @@ func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
 
-	_, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	_, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "connection reset by peer")
 	if client.abortCount() != 1 {
 		t.Fatalf("abort count = %d, want 1", client.abortCount())
@@ -463,7 +465,7 @@ func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
 
-	resp, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	resp, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
@@ -493,7 +495,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		done <- err
 	}()
 	select {
@@ -531,7 +533,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-2", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 	}
-	if _, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}}); err != nil {
+	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}}); err != nil {
 		t.Fatalf("second Prompt: %v", err)
 	}
 	if conn.updateCount() != 1 {
@@ -555,7 +557,7 @@ func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		done <- err
 	}()
 	select {
@@ -595,7 +597,7 @@ func TestPromptServerReconnectReconcilesPendingPermissionAndQuestion(t *testing.
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		done <- err
 	}()
 	select {
@@ -736,7 +738,7 @@ func TestPromptServerReconnectReconcileFailures(t *testing.T) {
 				err  error
 			}, 1)
 			go func() {
-				resp, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+				resp, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 				done <- struct {
 					resp acp.PromptResponse
 					err  error
@@ -861,7 +863,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 			defer cancel()
 			done := make(chan acp.PromptResponse, 1)
 			go func() {
-				resp, _ := agent.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+				resp, _ := agent.Prompt(ctx, TextPromptRequest(session.id, "turn-cancel", "hello"))
 				done <- resp
 			}()
 			select {
@@ -884,7 +886,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 					t.Fatal("elicitation request did not start")
 				}
 			}
-			if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id}); err != nil {
+			if err := agent.Cancel(ctx, CancelRequest(session.id, "turn-cancel")); err != nil {
 				t.Fatalf("Cancel: %v", err)
 			}
 			select {
@@ -943,7 +945,7 @@ func TestPromptBacklogCancelledBeforeTurn(t *testing.T) {
 		Type:       "approval.request",
 		Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1"}`),
 	}
-	resp, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	resp, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 	if err != nil || resp.StopReason != acp.StopReasonCancelled {
 		t.Fatalf("resp=%#v err=%v", resp, err)
 	}
@@ -956,7 +958,7 @@ func TestPromptBacklogErrorBeforeTurn(t *testing.T) {
 		Type:       "approval.request",
 		Properties: json.RawMessage(`{`),
 	}
-	if _, err := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
+	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 		t.Fatal("malformed backlog event was ignored")
 	}
 }
@@ -1014,7 +1016,7 @@ func TestPromptReconcileCancelledBeforeSend(t *testing.T) {
 			defer cancel()
 			done := make(chan acp.PromptResponse, 1)
 			go func() {
-				resp, _ := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+				resp, _ := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 				done <- resp
 			}()
 			tt.waitStart(ctx, t, conn)
@@ -1036,7 +1038,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		session := testSession(NewAgent(), client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		if err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"}); err != nil {
 			t.Fatalf("handlePermission: %v", err)
@@ -1055,7 +1057,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
 		if !errors.Is(err, errPromptCancelled) {
@@ -1074,7 +1076,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
 		if !errors.Is(err, errPromptCancelled) {
@@ -1094,7 +1096,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		if err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"}); err == nil {
 			t.Fatal("reply error was ignored")
@@ -1142,7 +1144,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background())
+		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
@@ -1170,7 +1172,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background())
+		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
@@ -1194,7 +1196,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		session := testSession(NewAgent(), client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		if err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}); err != nil {
 			t.Fatalf("handleQuestion: %v", err)
@@ -1214,7 +1216,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
 		if !errors.Is(err, errPromptCancelled) {
@@ -1249,7 +1251,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
 		if !errors.Is(err, errPromptCancelled) {
@@ -1269,7 +1271,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background())
+		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
@@ -1327,7 +1329,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
 		if !errors.Is(err, errPromptCancelled) {
@@ -1348,7 +1350,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx)
+		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
 		if err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}); err == nil {
 			t.Fatal("reject error was ignored")
@@ -1366,7 +1368,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background())
+		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
@@ -1395,7 +1397,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background())
+		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
@@ -1514,7 +1516,7 @@ func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 	}
 
-	resp, err := session.Prompt(context.Background(), acp.PromptRequest{
+	resp, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"),
 		SessionId: session.id,
 		MessageId: &messageID,
 		Prompt:    []acp.ContentBlock{acp.TextBlock("/review inspect this")},
@@ -1559,7 +1561,9 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 
 			return msg, nil
 		}
-		resp, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: session.id, MessageId: &messageID, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		request := TextPromptRequest(session.id, "turn-success", "hello")
+		request.MessageId = &messageID
+		resp, err := agent.Prompt(ctx, request)
 		if err != nil {
 			t.Fatalf("Prompt: %v", err)
 		}
@@ -1577,7 +1581,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 			return nativehermes.NativeMessage{}, errors.New("send failed")
 		}
 		session := testSession(NewAgent(), client)
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("send error prompt succeeded")
 		}
 	})
@@ -1589,7 +1593,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 		}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
 			!strings.Contains(err.Error(), "snapshot failed") {
 			t.Fatalf("snapshot error = %v", err)
 		}
@@ -1598,14 +1602,14 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 	t.Run("prompt validation and turn backpressure", func(t *testing.T) {
 		session := testSession(NewAgent(), newFakeHermesClient())
 		session.turnQueue() <- struct{}{}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("prompt backpressure was ignored")
 		}
 		<-session.turnQueue()
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id}); err == nil {
 			t.Fatal("empty prompt was accepted")
 		}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}}}}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}}}}); err == nil {
 			t.Fatal("unsupported audio prompt was accepted")
 		}
 	})
@@ -1614,7 +1618,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		client := newFakeHermesClient()
 		client.permissionsErr = errors.New("permissions failed")
 		session := testSession(NewAgent(), client)
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("permission error prompt succeeded")
 		}
 	})
@@ -1623,7 +1627,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		client := newFakeHermesClient()
 		client.questionsErr = errors.New("questions failed")
 		session := testSession(NewAgent(), client)
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("question error prompt succeeded")
 		}
 	})
@@ -1641,7 +1645,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		ctx2, cancel := context.WithCancel(context.Background())
 		done := make(chan acp.PromptResponse, 1)
 		go func() {
-			resp, _ := session.Prompt(ctx2, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+			resp, _ := session.Prompt(ctx2, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 			done <- resp
 		}()
 		select {
@@ -1662,7 +1666,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 
 	t.Run("unknown agent prompt and cancel", func(t *testing.T) {
 		agent := NewAgent()
-		_, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: "missing"})
+		_, err := agent.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: "missing"})
 		if err == nil {
 			t.Fatal("unknown agent prompt succeeded")
 		}
@@ -1700,7 +1704,7 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 			}, nil
 		}
 
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		assertNativeSessionDriftPoison(t, session, conn, store, err, "native-other")
 	})
 
@@ -1718,7 +1722,7 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 			}, nil
 		}
 
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		assertNativeSessionDriftPoison(t, session, conn, store, err, "native-other")
 	})
 
@@ -1762,7 +1766,7 @@ func assertNativeSessionDriftPoison(
 	if store.replaceCount() != 0 {
 		t.Fatalf("store writes after poison = %d, want 0", store.replaceCount())
 	}
-	_, nextErr := session.Prompt(context.Background(), acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}})
+	_, nextErr := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}})
 	if nextErr == nil || !strings.Contains(nextErr.Error(), "session_poisoned") || !strings.Contains(nextErr.Error(), gotNativeID) {
 		t.Fatalf("subsequent poison error = %v", nextErr)
 	}
@@ -1812,7 +1816,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() {
-			_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+			_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 			done <- err
 		}()
 		<-started
@@ -1855,7 +1859,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() {
-			_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+			_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 			done <- err
 		}()
 		<-started
@@ -1884,7 +1888,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 				Parts: []nativehermes.Part{{ID: "final", SessionID: id, MessageID: "assistant", Type: "text", Text: "done", Raw: json.RawMessage(`{"id":"final"}`)}},
 			}, nil
 		}
-		if _, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
+		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
 			!strings.Contains(err.Error(), "final update failed") {
 			t.Fatalf("final emit error = %v", err)
 		}
@@ -2058,7 +2062,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 
 			return nativehermes.NativeMessage{}, errors.New("cancelled send")
 		}
-		resp, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		resp, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		if err != nil || resp.StopReason != acp.StopReasonCancelled {
 			t.Fatalf("cancelled send resp=%#v err=%v", resp, err)
 		}
@@ -2074,7 +2078,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 
 			return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: "native-1", Role: "assistant", Finish: "stop"}}, nil
 		}
-		resp, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		resp, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 		if err != nil || resp.StopReason != acp.StopReasonCancelled {
 			t.Fatalf("cancelled success resp=%#v err=%v", resp, err)
 		}
@@ -2234,7 +2238,7 @@ func requireTurnFailure(t *testing.T, err error, cause nativehermes.TurnFailureC
 }
 
 func promptOnce(ctx context.Context, session *session, text string) (acp.PromptResponse, error) {
-	return session.Prompt(ctx, acp.PromptRequest{
+	return session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"),
 		SessionId: session.id,
 		Prompt:    []acp.ContentBlock{acp.TextBlock(text)},
 	})

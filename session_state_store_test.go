@@ -205,7 +205,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 			name: "turn",
 			want: "turn",
 			set: func(s *session) func() {
-				s.beginTurn(ctx)
+				s.beginTurn(ctx, "test-turn")
 
 				return s.finishTurn
 			},

@@ -531,8 +531,16 @@ func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choi
 	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": all}, nil)
 }
 
-func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID string, answer any) error {
-	return c.Call(ctx, "clarify.respond", map[string]any{fieldSessionID: liveSessionID, "answer": answer}, nil)
+func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID, requestID string, answer any) error {
+	if requestID == "" {
+		return errors.New("clarify request_id is required")
+	}
+
+	return c.Call(ctx, "clarify.respond", map[string]any{
+		fieldSessionID: liveSessionID,
+		"request_id":   requestID,
+		"answer":       answer,
+	}, nil)
 }
 
 func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelOptionsResult, error) {

@@ -205,7 +205,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 func runFakeHermesServer(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (fake)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.2 (fake)")
 			return nil
 		}
 	}

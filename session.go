@@ -38,6 +38,7 @@ type session struct {
 	client nativehermes.Server
 
 	turn                chan struct{}
+	cancelMu            sync.Mutex
 	mu                  sync.Mutex
 	turnInFlight        bool
 	cancel              context.CancelFunc
@@ -50,6 +51,7 @@ type session struct {
 	processedPermission map[string]struct{}
 	processedQuestion   map[string]struct{}
 	turnEpoch           uint64
+	turnNonce           string
 	activeMessageIDs    map[string]struct{}
 	failedStreamEpochs  map[uint64]struct{}
 	failedMessageIDs    map[string]struct{}
@@ -181,27 +183,36 @@ func (s *session) turnQueue() chan struct{} {
 	return s.turn
 }
 
-func (s *session) beginTurn(ctx context.Context) context.Context {
+func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Context {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	turnCtx, cancel := context.WithCancel(ctx)
+	turnCtx = withTurnRoute(turnCtx, turnNonce)
 	s.cancel = cancel
 	s.turnDone = turnCtx.Done()
 	s.cancelled = false
 	s.turnEpoch++
+	s.turnNonce = turnNonce
 	s.activeMessageIDs = map[string]struct{}{}
 
 	return turnCtx
 }
 
 func (s *session) finishTurn() {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
 	s.mu.Lock()
 	cancel := s.cancel
 	s.cancel = nil
 	s.turnDone = nil
 	s.turnInFlight = false
 	s.cancelled = false
+	s.turnNonce = ""
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.pending = map[string]nativehermes.PermissionRequest{}
 	s.questions = map[string]nativehermes.QuestionRequest{}
@@ -211,6 +222,13 @@ func (s *session) finishTurn() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (s *session) currentTurnNonce() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnNonce
 }
 
 func (s *session) cancelTurn() {

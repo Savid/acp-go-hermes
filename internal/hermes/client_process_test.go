@@ -250,6 +250,17 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 
 	assertClientEventStream(t, client)
 	assertClientWrappers(t, ctx, client)
+	gateway.mu.Lock()
+	var clarifyParams map[string]any
+	for _, call := range gateway.calls {
+		if call.Method == "clarify.respond" {
+			clarifyParams = call.Params
+		}
+	}
+	gateway.mu.Unlock()
+	if clarifyParams["session_id"] != "live" || clarifyParams["request_id"] != "request-1" || clarifyParams["answer"] != "yes" {
+		t.Fatalf("clarify.respond params = %#v", clarifyParams)
+	}
 	assertClientCallEdges(t, ctx, client)
 	assertClientCloseSemantics(t, ctx, client, gateway)
 }
@@ -307,8 +318,11 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	if err := client.ApprovalRespond(ctx, "live", "once", false); err != nil {
 		t.Fatalf("ApprovalRespond: %v", err)
 	}
-	if err := client.ClarifyRespond(ctx, "live", "yes"); err != nil {
+	if err := client.ClarifyRespond(ctx, "live", "request-1", "yes"); err != nil {
 		t.Fatalf("ClarifyRespond: %v", err)
+	}
+	if err := client.ClarifyRespond(ctx, "live", "", "yes"); err == nil {
+		t.Fatal("ClarifyRespond accepted an empty request_id")
 	}
 	if out, err := client.ModelOptions(ctx, "live"); err != nil || len(out.Providers) != 2 {
 		t.Fatalf("ModelOptions = %#v err=%v", out, err)
@@ -568,7 +582,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 	restoreProcessSeams(t)
 	commandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
 		if len(args) == 1 && args[0] == "--version" {
-			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.18.0\\n'")
+			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.18.2\\n'")
 		}
 
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
@@ -861,7 +875,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 
 				return nil
 			}
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (test)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.2 (test)")
 
 			return nil
 		}

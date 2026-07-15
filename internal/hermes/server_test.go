@@ -61,6 +61,58 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	return fake
 }
 
+func TestMCPServersWithSecretEnv(t *testing.T) {
+	servers := []acp.McpServer{
+		{Stdio: &acp.McpServerStdio{Name: "stdio", Command: "tool"}},
+		{Http: &acp.McpServerHttpInline{
+			Name: "http",
+			Url:  "https://example.test/mcp",
+			Headers: []acp.HttpHeader{
+				{Name: "Authorization", Value: "Bearer secret"},
+				{Name: "X-API-Key", Value: "secret-key"},
+			},
+		}},
+	}
+
+	materialized, env, err := mcpServersWithSecretEnv(servers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := materialized[1].Http.Headers[0].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_1}" {
+		t.Fatalf("authorization placeholder = %q", got)
+	}
+	if got := materialized[1].Http.Headers[1].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_2}" {
+		t.Fatalf("API key placeholder = %q", got)
+	}
+	if env["ACP_GO_HERMES_MCP_HEADER_2_1"] != "Bearer secret" || env["ACP_GO_HERMES_MCP_HEADER_2_2"] != "secret-key" {
+		t.Fatalf("secret environment = %#v", env)
+	}
+	if servers[1].Http.Headers[0].Value != "Bearer secret" {
+		t.Fatalf("input server was mutated: %#v", servers[1])
+	}
+
+	_, _, err = mcpServersWithSecretEnv(servers, map[string]string{"ACP_GO_HERMES_MCP_HEADER_2_1": "occupied"})
+	if err == nil {
+		t.Fatal("reserved MCP environment collision was accepted")
+	}
+}
+
+func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
+	_, err := StartServer(t.Context(), StartOptions{
+		ACPSessionID:  "session-1",
+		Root:          t.TempDir(),
+		ScratchParent: t.TempDir(),
+		Cwd:           t.TempDir(),
+		Env:           map[string]string{"ACP_GO_HERMES_MCP_HEADER_1_1": "occupied"},
+		MCPServers: []acp.McpServer{{Http: &acp.McpServerHttpInline{
+			Name: "http", Url: "https://example.test", Headers: []acp.HttpHeader{{Name: "Authorization", Value: "secret"}},
+		}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("StartServer collision error = %v", err)
+	}
+}
+
 func (s *fakeGatewayServer) dialClient(t *testing.T) *Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -598,10 +650,10 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	if err10 := server.ReplyPermission(ctx, PermissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err10 != nil {
 		t.Fatalf("ReplyPermission reject: %v", err10)
 	}
-	if err11 := server.ReplyQuestion(ctx, QuestionRequest{SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
+	if err11 := server.ReplyQuestion(ctx, QuestionRequest{ID: "question-1", SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
 		t.Fatalf("ReplyQuestion: %v", err11)
 	}
-	if err12 := server.RejectQuestion(ctx, QuestionRequest{SessionID: "stored-1"}); err12 != nil {
+	if err12 := server.RejectQuestion(ctx, QuestionRequest{ID: "question-2", SessionID: "stored-1"}); err12 != nil {
 		t.Fatalf("RejectQuestion: %v", err12)
 	}
 	if err13 := server.Abort(ctx, "missing-live"); err13 != nil {
@@ -1689,6 +1741,14 @@ func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
 }
 
 func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
+	restoreLeaseReapSeams(t)
+	reachedIdle := make(chan struct{})
+	releaseIdle := make(chan struct{})
+	superviseGatewayAfterTurnIdle = func() {
+		close(reachedIdle)
+		<-releaseIdle
+	}
+
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	reconnied := make(chan struct{}, 1)
@@ -1701,10 +1761,13 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	server.beginGatewayTurn()
 	original := server.gatewayClient()
 	_ = original.Close(websocket.StatusNormalClosure, "drop")
-	// Shut down while the turn is still in flight; the supervisor must stop
-	// after the turn ends without reconnecting.
-	close(server.closed)
 	server.endGatewayTurn()
+	<-reachedIdle
+
+	// Shut down after the turn becomes idle but before the supervisor can
+	// redial; the supervisor must stop without reconnecting.
+	close(server.closed)
+	close(releaseIdle)
 
 	select {
 	case <-reconnied:
@@ -1938,7 +2001,7 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string) string {
 func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.0 (fake)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.2 (fake)")
 
 			return nil
 		}
@@ -2056,11 +2119,13 @@ func restoreLeaseReapSeams(t *testing.T) {
 	interval := LeaseReapPollInterval
 	sleep := leaseReapSleep
 	now := leaseReapNow
+	afterTurnIdle := superviseGatewayAfterTurnIdle
 	t.Cleanup(func() {
 		LeaseReapTimeout = timeout
 		LeaseReapPollInterval = interval
 		leaseReapSleep = sleep
 		leaseReapNow = now
+		superviseGatewayAfterTurnIdle = afterTurnIdle
 	})
 }
 

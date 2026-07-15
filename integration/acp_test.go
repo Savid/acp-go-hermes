@@ -90,7 +90,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	}
 
 	permissionPrompt := envOrDefault("ACP_GO_HERMES_PERMISSION_PROMPT", "Create a file named acp-permission-probe.txt in the working directory, then stop.")
-	if _, err := conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock(permissionPrompt)}}); err != nil {
+	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-permission", permissionPrompt)); err != nil {
 		t.Fatalf("permission prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	if client.permissionCount() == 0 {
@@ -98,7 +98,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	}
 
 	questionPrompt := envOrDefault("ACP_GO_HERMES_QUESTION_PROMPT", `Use the question tool to ask the user "Continue?" with options "Yes" and "No", then stop after receiving the answer.`)
-	if _, err := conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock(questionPrompt)}}); err != nil {
+	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-question", questionPrompt)); err != nil {
 		t.Fatalf("question prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	if client.elicitationCount() == 0 {

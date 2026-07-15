@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,8 +195,7 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 	if got := requestError(errors.New("plain")); got == nil || got.Code != -32603 {
 		t.Fatalf("requestError plain = %#v", got)
 	}
-	requestIDStr := acp.RequestIdStr("request")
-	requestID := acp.RequestId{Str: &requestIDStr}
+	requestID := "request"
 	urlParams, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
 			ElicitationId: "e",
@@ -203,8 +203,8 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 			Url:           "https://example.test",
 			Meta:          map[string]any{"k": "v"},
 		},
-	}, elicitationScope{SessionID: "s", ToolCallID: "tool", RequestID: &requestID})
-	if err != nil || !strings.Contains(string(urlParams), `"requestId":"request"`) {
+	}, elicitationScope{SessionID: "s", TurnNonce: "turn-1", RequestID: &requestID})
+	if err != nil || !strings.Contains(string(urlParams), `"acp-go.dev/route":{"requestId":"request","sessionId":"s","turnNonce":"turn-1","version":1}`) {
 		t.Fatalf("url scoped elicitation = %s err=%v", urlParams, err)
 	}
 	if selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf8}) != acp.PositionEncodingKindUtf8 {
@@ -357,7 +357,7 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 	if err3 := conn.NotifyExtension(ctx, "_hermes/test", map[string]any{"ok": true}); err3 != nil {
 		t.Fatalf("NotifyExtension: %v", err3)
 	}
-	resp, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message: "m",
 			Mode:    "form",
@@ -365,17 +365,53 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 				Type: acp.UnstableElicitationSchemaTypeObject,
 			},
 		},
-	})
+	}, elicitationScope{SessionID: "s", TurnNonce: "turn-1", ToolCallID: "tool-1"})
 	if err != nil {
 		t.Fatalf("UnstableCreateElicitation: %v", err)
 	}
 	if resp.Accept == nil {
 		t.Fatalf("elicitation resp = %#v", resp)
 	}
+	requestID := "request-1"
+	if _, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+		Url: &acp.UnstableCreateElicitationUrl{
+			ElicitationId: "e1",
+			Message:       "open",
+			Mode:          "url",
+			Url:           "https://example.test",
+			Meta:          map[string]any{"url-meta": "kept"},
+		},
+	}, elicitationScope{SessionID: "s", TurnNonce: "turn-2", RequestID: &requestID}); err != nil {
+		t.Fatalf("URL CreateElicitation: %v", err)
+	}
+	if _, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{}); err == nil {
+		t.Fatal("unscoped elicitation unexpectedly succeeded")
+	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if client.updates != 1 || len(client.extensions) != 1 || client.elicitations != 1 {
-		t.Fatalf("client state updates=%d extensions=%#v elicitations=%d", client.updates, client.extensions, client.elicitations)
+	if client.updates != 1 || len(client.extensions) != 1 || len(client.elicitations) != 2 {
+		t.Fatalf("client state updates=%d extensions=%#v elicitations=%d", client.updates, client.extensions, len(client.elicitations))
+	}
+	wantFormMeta := map[string]any{routeMetaKey: map[string]any{
+		routeFieldVer:  float64(1),
+		routeFieldID:   "s",
+		routeFieldTurn: "turn-1",
+		"toolCallId":   "tool-1",
+	}}
+	if !reflect.DeepEqual(client.elicitations[0].Form.Meta, wantFormMeta) {
+		t.Fatalf("decoded form route meta = %#v, want %#v", client.elicitations[0].Form.Meta, wantFormMeta)
+	}
+	wantURLMeta := map[string]any{
+		"url-meta": "kept",
+		routeMetaKey: map[string]any{
+			routeFieldVer:  float64(1),
+			routeFieldID:   "s",
+			routeFieldTurn: "turn-2",
+			"requestId":    "request-1",
+		},
+	}
+	if !reflect.DeepEqual(client.elicitations[1].Url.Meta, wantURLMeta) {
+		t.Fatalf("decoded URL route meta = %#v, want %#v", client.elicitations[1].Url.Meta, wantURLMeta)
 	}
 }
 
@@ -393,7 +429,7 @@ type pipeACPClient struct {
 	mu           sync.Mutex
 	updates      int
 	extensions   []string
-	elicitations int
+	elicitations []acp.UnstableCreateElicitationRequest
 }
 
 var _ acp.Client = (*pipeACPClient)(nil)
@@ -444,9 +480,9 @@ func (*pipeACPClient) UnstableCompleteElicitation(context.Context, acp.UnstableC
 	return nil
 }
 
-func (c *pipeACPClient) UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *pipeACPClient) UnstableCreateElicitation(_ context.Context, request acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
 	c.mu.Lock()
-	c.elicitations++
+	c.elicitations = append(c.elicitations, request)
 	c.mu.Unlock()
 
 	return acp.UnstableCreateElicitationResponse{

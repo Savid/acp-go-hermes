@@ -19,6 +19,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+var reapHermesLeaseFile = nativehermes.ReapLeaseFile
+
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	if err := a.ensureOpen(); err != nil {
 		return acp.NewSessionResponse{}, err
@@ -59,11 +61,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
+	sessionStarted := time.Now()
 	native, err := client.CreateSession(ctx, "")
-	if err != nil {
-		_ = client.Close(context.Background())
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
 
-		return acp.NewSessionResponse{}, err
+	if err != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+
+		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	idmap := idmapRecord{
@@ -74,15 +79,15 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, params.McpServers, native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return acp.NewSessionResponse{}, err
+		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		a.cleanupFailedStartedSession(ctx, session)
+		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
 
-		return acp.NewSessionResponse{}, err
+		return acp.NewSessionResponse{}, errors.Join(err, cleanupErr)
 	}
 
 	return acp.NewSessionResponse{
@@ -97,7 +102,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 // nor listable, deletes and closes the native Hermes session, and removes the
 // XDG root and lease. The store is the durability boundary, so a failed initial
 // or fork Replace must leave no orphan process or listable session behind.
-func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *session) {
+func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *session) error {
 	if a.removeSessionIf(session.id, session) {
 		a.observe.AddActiveSession(ctx, -1)
 	}
@@ -108,10 +113,16 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 
 	cancel()
 
+	if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		return err
+	}
+
 	err = errors.Join(err, a.cleanupDeletedSession(record))
 	if err != nil {
 		a.log.DebugContext(ctx, "clean up Hermes session after failed snapshot", slog.String(jsonFieldError, err.Error()))
 	}
+
+	return err
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
@@ -153,7 +164,7 @@ func (a *Agent) loadOrResumeSession(
 	additionalDirectories []string,
 	mcpServers []acp.McpServer,
 	metaMap map[string]any,
-) (*session, error) {
+) (_ *session, returnErr error) {
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -203,7 +214,26 @@ func (a *Agent) loadOrResumeSession(
 		return existing, nil
 	}
 
-	xdg, err := nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
+	if proofErr := a.rejectUnprovenHermesRoot(a.hermesXDGRoot(id, nativehermes.XDGDirs{})); proofErr != nil {
+		return nil, proofErr
+	}
+
+	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
+	keepScratch := false
+
+	var xdg nativehermes.XDGDirs
+
+	defer func() {
+		if !keepScratch {
+			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
+		}
+	}()
+
+	xdg, err = nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
 	if err != nil {
 		return nil, err
 	}
@@ -225,16 +255,24 @@ func (a *Agent) loadOrResumeSession(
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "cwd_mismatch", keyField: jsonFieldCwd})
 	}
 
-	client, err := a.newHermesClient(ctx, id, cwd, meta, xdg, mcpServers)
+	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, xdg, scratchRelease, mcpServers)
 	if err != nil {
+		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			keepScratch = true
+
+			a.retainUnprovenHermesRoot(xdg.Root)
+		}
+
 		return nil, err
 	}
 
+	keepScratch = true
+
 	native, err := client.GetSession(ctx, idmap.NativeSessionID)
 	if err != nil {
-		_ = client.Close(context.Background())
+		closeErr := closeHermesClientAfterStartupFailure(client)
 
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 
 	if meta.Model == "" {
@@ -243,9 +281,9 @@ func (a *Agent) loadOrResumeSession(
 
 	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 
 	return session, nil
@@ -488,13 +526,21 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
+	if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		a.mu.Lock()
+		delete(a.deleteCleanup, record.SessionID)
+		a.mu.Unlock()
+
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
 	cleanupErr := a.cleanupDeletedSession(record)
 	a.forgetDeleteCleanupIfDone(record.SessionID)
 
 	return acp.UnstableDeleteSessionResponse{}, errors.Join(err, cleanupErr)
 }
 
-func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (_ acp.UnstableForkSessionResponse, returnErr error) {
 	if err := a.rejectUnsupportedHome(); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -533,7 +579,26 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	id := acp.SessionId(idValue)
 
-	xdg, err := nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
+	if proofErr := a.rejectUnprovenHermesRoot(a.hermesXDGRoot(id, nativehermes.XDGDirs{})); proofErr != nil {
+		return acp.UnstableForkSessionResponse{}, proofErr
+	}
+
+	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
+	keepScratch := false
+
+	var xdg nativehermes.XDGDirs
+
+	defer func() {
+		if !keepScratch {
+			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
+		}
+	}()
+
+	xdg, err = nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -546,16 +611,24 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		meta.Model = joinModelValue(parentSnapshot.providerID, parentSnapshot.modelID)
 	}
 
-	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, xdg, stableMCPServersFromUnstable(params.McpServers))
+	client, err := a.newHermesClientWithScratch(ctx, id, params.Cwd, meta, xdg, scratchRelease, stableMCPServersFromUnstable(params.McpServers))
 	if err != nil {
+		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			keepScratch = true
+
+			a.retainUnprovenHermesRoot(xdg.Root)
+		}
+
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	keepScratch = true
+
 	native, err := client.GetSession(ctx, nativeChild.ID)
 	if err != nil {
-		_ = client.Close(context.Background())
+		closeErr := closeHermesClientAfterStartupFailure(client)
 
-		return acp.UnstableForkSessionResponse{}, err
+		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	idmap := idmapRecord{
@@ -568,15 +641,15 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, stableMCPServersFromUnstable(params.McpServers), native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
-		_ = session.Close(context.Background())
+		closeErr := session.Close(context.Background())
 
-		return acp.UnstableForkSessionResponse{}, err
+		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
 	}
 
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		a.cleanupFailedStartedSession(ctx, session)
+		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
 
-		return acp.UnstableForkSessionResponse{}, err
+		return acp.UnstableForkSessionResponse{}, errors.Join(err, cleanupErr)
 	}
 
 	return acp.UnstableForkSessionResponse{
@@ -587,6 +660,46 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 }
 
 func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, mcpServers ...[]acp.McpServer) (nativehermes.Server, error) {
+	root := a.hermesXDGRoot(id, existing)
+	if err := a.rejectUnprovenHermesRoot(root); err != nil {
+		return nil, err
+	}
+
+	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, existing, scratchRelease, mcpServers...)
+	if err != nil {
+		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			a.retainUnprovenHermesRoot(root)
+
+			return nil, err
+		}
+
+		return nil, errors.Join(err, deleteHermesScratchRoot(root, scratchRelease))
+	}
+
+	return client, nil
+}
+
+func (a *Agent) hermesXDGRoot(id acp.SessionId, existing nativehermes.XDGDirs) string {
+	if existing.Root != "" {
+		return existing.Root
+	}
+
+	return filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id)))
+}
+
+func closeHermesClientAfterStartupFailure(client nativehermes.Server) error {
+	closeCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+
+	return client.Close(closeCtx)
+}
+
+func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, scratchRelease func(), mcpServers ...[]acp.McpServer) (nativehermes.Server, error) {
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = nativehermes.StartServer
@@ -611,9 +724,14 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 		return nil, err
 	}
 
+	nativeRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
 	a.observe.RecordHermesProcessStart(ctx)
 
-	return factory(ctx, nativehermes.StartOptions{
+	client, err := factory(ctx, nativehermes.StartOptions{
 		ACPSessionID:   nativehermes.ACPSessionIDString(id),
 		Root:           a.homeRoot(),
 		ScratchParent:  parent,
@@ -625,7 +743,37 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 		ExistingXDG:    existing,
 		MCPServers:     servers,
 		SeedFiles:      cloneStringMap(a.options.SeedFiles),
+		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
+			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
+			if observe != nil {
+				observe(stageCtx, RuntimeResourceKind(lifecycle), RuntimeStartupStage(stage), elapsed, stageErr)
+			}
+		},
 	})
+	if err != nil {
+		if !errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			nativeRelease()
+		}
+
+		return nil, err
+	}
+
+	root := client.XDGDirs().Root
+	if root == "" {
+		root = existing.Root
+	}
+
+	if root == "" {
+		root = filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id)))
+	}
+
+	return &managedHermesServer{
+		Server:         client,
+		root:           root,
+		nativeRelease:  nativeRelease,
+		scratchRelease: scratchRelease,
+		retainUnproven: a.retainUnprovenHermesRoot,
+	}, nil
 }
 
 type deleteCleanupRecord struct {
@@ -716,7 +864,7 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 		return nil
 	}
 
-	if nativehermes.ReapLeaseFile(filepath.Join(record.XDGRoot, "state", nativehermes.LeaseFileName), a.log) {
+	if reapHermesLeaseFile(filepath.Join(record.XDGRoot, "state", nativehermes.LeaseFileName), a.log) {
 		return fmt.Errorf("hermes delete cleanup kept live lease for session %q", record.SessionID)
 	}
 

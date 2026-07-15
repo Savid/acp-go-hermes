@@ -182,15 +182,21 @@ func HTTPMCPServer(name string, url string, headers map[string]string) acp.McpSe
 	}}
 }
 
-func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.PromptRequest {
+func PromptRequest(sessionID acp.SessionId, turnNonce string, blocks ...acp.ContentBlock) acp.PromptRequest {
 	return acp.PromptRequest{
 		SessionId: sessionID,
+		Meta:      turnRouteMeta(turnNonce),
 		Prompt:    append([]acp.ContentBlock{}, blocks...),
 	}
 }
 
-func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest {
-	return PromptRequest(sessionID, acp.TextBlock(text))
+func TextPromptRequest(sessionID acp.SessionId, turnNonce, text string) acp.PromptRequest {
+	return PromptRequest(sessionID, turnNonce, acp.TextBlock(text))
+}
+
+// CancelRequest builds an active-turn cancellation carrying the mandatory route nonce.
+func CancelRequest(sessionID acp.SessionId, turnNonce string) acp.CancelNotification {
+	return acp.CancelNotification{SessionId: sessionID, Meta: turnRouteMeta(turnNonce)}
 }
 
 func SetConfigOptionRequest(sessionID acp.SessionId, configID acp.SessionConfigId, value acp.SessionConfigValueId) acp.SetSessionConfigOptionRequest {

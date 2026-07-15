@@ -29,6 +29,16 @@ adapter's managed `mcp_servers` block wins on deep-merge while the seed supplies
 the `model` block and everything else — see
 [Models and config](/docs/features/models-config).
 
+HTTP header values are never written literally into `config.yaml`. The adapter
+generates a distinct `MCP_HEADER_<server-index>_<header-index>` environment
+reference under the adapter namespace for every header
+and injects the value only into that isolated session process environment. A
+caller-supplied environment variable colliding with a generated reserved name
+fails session start. The session process and its children can observe their own
+environment; cross-session separation therefore comes from one process and
+home per ACP session. Separate OS users or containers are required across
+hostile same-machine tenants.
+
 ```go
 req := hermesacp.NewSessionRequest(cwd,
 	hermesacp.WithSessionMCPServers(

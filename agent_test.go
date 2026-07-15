@@ -4,25 +4,38 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 )
 
 func TestServeCloseErrorAndAgentCloneFallbacks(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
 	client := newFakeHermesClient()
-	client.closeErr = errors.New("close failed")
+	client.closeErr = errors.Join(errors.New("close failed"), ErrProcessTreeUnproven)
 	agent := NewAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 
+	started := make(chan struct{})
 	oldNewAgent := newAgentForServe
-	newAgentForServe = func(...Option) *Agent { return agent }
+	newAgentForServe = func(...Option) *Agent {
+		close(started)
+
+		return agent
+	}
 	t.Cleanup(func() { newAgentForServe = oldNewAgent })
-	if err := Serve(ctx, strings.NewReader(""), io.Discard); err != nil {
-		t.Fatalf("Serve: %v", err)
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, input, io.Discard) }()
+	<-started
+	cancel()
+	if err := <-errCh; !errors.Is(err, ErrProcessTreeUnproven) {
+		t.Fatalf("Serve close proof error = %v", err)
 	}
 
 	oldMarshal := agentJSONMarshal

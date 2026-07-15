@@ -47,6 +47,7 @@ type Agent struct {
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
 	deleteCleanup      map[acp.SessionId]deleteCleanupRecord
+	unprovenRoots      map[string]struct{}
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -72,32 +73,37 @@ func NewAgent(opts ...Option) *Agent {
 		options.SessionStore = NewInMemorySessionStore()
 	}
 
+	observe := observer.New(observer.Config{
+		MeterProvider:  options.MeterProvider,
+		Propagator:     options.TextMapPropagator,
+		TracerProvider: options.TracerProvider,
+		Version:        options.AgentVersion,
+	})
+	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+
 	return &Agent{
-		options:    options,
-		log:        log,
-		optionsErr: optionsErr,
-		observe: observer.New(observer.Config{
-			MeterProvider:  options.MeterProvider,
-			Propagator:     options.TextMapPropagator,
-			TracerProvider: options.TracerProvider,
-			Version:        options.AgentVersion,
-		}),
+		options:       options,
+		log:           log,
+		optionsErr:    optionsErr,
+		observe:       observe,
 		sessions:      make(map[acp.SessionId]*session),
 		deleted:       make(map[acp.SessionId]struct{}),
 		deleteCleanup: make(map[acp.SessionId]deleteCleanupRecord),
+		unprovenRoots: make(map[string]struct{}),
 		clientCalls:   make(chan struct{}, limits.MaxConcurrentClientCalls),
 	}
 }
 
-func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	agent := newAgentForServe(opts...)
 	defer func() {
-		if err := agent.Close(); err != nil {
-			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String(jsonFieldError, err.Error()))
+		if closeErr := agent.Close(); closeErr != nil {
+			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
+			returnErr = closeErr
 		}
 	}()
 
@@ -175,7 +181,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		"fork": map[string]any{
 			"unstable":      true,
 			jsonFieldMethod: ForkSessionMethod,
-			"request":       "acp.UnstableForkSessionRequest JSON payload only",
+			keyRequest:      "acp.UnstableForkSessionRequest JSON payload only",
 			"response":      "acp.UnstableForkSessionResponse JSON payload only",
 		},
 		valElicitation: map[string]any{
@@ -204,7 +210,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta:        map[string]any{hermesMetaKey: hermesMeta},
+			Meta: map[string]any{
+				hermesMetaKey: hermesMeta,
+				routeMetaKey:  map[string]any{"versions": []int{routeVersion}},
+			},
 			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
 				Http: true,

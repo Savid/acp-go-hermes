@@ -17,6 +17,13 @@ err := hermesacp.Serve(ctx, input, output, opts...)
 `NewAgent` builds an `Agent` you own; `Serve` runs the ACP loop over a
 reader/writer pair.
 
+`ErrProcessTreeUnproven` is the stable `errors.Is` discriminator returned
+when shutdown cannot prove that every Hermes descendant exited. `Serve`
+returns an `Agent.Close` error carrying this sentinel even when the stream
+loop would otherwise return normally or with context cancellation. A host that
+receives it must retain or quarantine any resources the native process tree may
+still reach.
+
 ## Agent options
 
 | Option | Purpose |
@@ -31,6 +38,7 @@ reader/writer pair.
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
+| `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
@@ -53,7 +61,8 @@ other seeded files are written verbatim.
 | Builder | Produces |
 |---|---|
 | `NewSessionRequest` / `LoadSessionRequest` / `ResumeSessionRequest` / `ForkSessionRequest` | Session lifecycle requests. |
-| `PromptRequest` / `TextPromptRequest` | Prompt requests. |
+| `PromptRequest` / `TextPromptRequest` | Prompt requests carrying a required per-turn nonce. |
+| `CancelRequest` | Active-turn cancellation carrying the same nonce. |
 | `StdioMCPServer` / `HTTPMCPServer` | MCP server definitions. |
 | `SetModelRequest` / `SetConfigOptionRequest` | Config-option requests. |
 | `ListSessionsRequest` | Session listing, with `WithListSessions*` options. |
@@ -61,6 +70,21 @@ other seeded files are written verbatim.
 Session requests take options such as `WithSessionMCPServers`,
 `WithSessionAdditionalDirectories`, `WithSessionMeta`, `WithSessionHermesOptions`,
 and `WithSessionRawEvents`.
+
+`PromptRequest(sessionID, turnNonce, blocks...)` and
+`TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
+nonce for every turn. `CancelRequest(sessionID, turnNonce)` reuses it only for
+that active turn.
+
+`RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
+`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
+callbacks leave standalone operation unbounded. Hermes reserves the isolated
+session home before creating it, holds the native permit for the one
+`hermes serve` tree, and releases the reservation only after clean shutdown and
+root deletion. Hermes is lockless and emits no supervisor count. Descendant
+snapshots require proven containment; startup observations distinguish spawn,
+readiness, configuration, and native session creation.
 
 ## Session store
 

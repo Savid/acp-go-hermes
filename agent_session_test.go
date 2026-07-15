@@ -51,7 +51,7 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	createClient := newFakeHermesClient()
 	createClient.createSession = testNativeSession("native-created")
 	createClient.getSession = createClient.createSession
-	// A native close error during cleanup is logged, not surfaced.
+	// A native close error during cleanup is joined with the snapshot failure.
 	createClient.closeErr = errors.New("close boom")
 	agent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -348,7 +348,7 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "blocked"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "turn-blocked", "blocked"))
 		done <- err
 	}()
 	select {

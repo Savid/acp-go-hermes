@@ -28,3 +28,12 @@ responses, and secrets are never persisted.
 Form elicitation uses an unstable ACP shape; a host must advertise the matching
 capability at `initialize` for any Hermes clarification to reach the user.
 </Note>
+
+## Route correlation
+
+The agent advertises route-envelope version 1 during initialize. Every
+clarification includes the owning session, the current turn nonce, and the
+native Hermes clarification request id under `_meta["acp-go.dev/route"]`.
+Hermes replies carry that same native request id back to `clarify.respond`, so
+stale or unknown questions cannot consume another request. A callback whose
+metadata already contains the reserved route key fails closed.

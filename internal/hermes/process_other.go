@@ -8,8 +8,6 @@ import (
 	"os/exec"
 )
 
-func configureHermesProcess(*exec.Cmd) {}
-
 func terminateHermesProcess(cmd *exec.Cmd) error {
 	return killHermesProcess(cmd)
 }

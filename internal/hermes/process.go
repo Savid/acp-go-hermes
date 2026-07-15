@@ -21,11 +21,15 @@ import (
 )
 
 const (
-	MinimumVersion    = "0.18.0"
+	MinimumVersion    = "0.18.2"
 	fieldCwd          = "cwd"
 	fieldTitle        = "title"
 	eventGatewayReady = "gateway.ready"
 )
+
+// ErrProcessTreeUnproven means a launched Hermes process tree could not be
+// proven quiescent. Callers that hold native-root admission must retain it.
+var ErrProcessTreeUnproven = errors.New("hermes process tree quiescence is unproven")
 
 var (
 	commandContext      = exec.CommandContext
@@ -38,6 +42,7 @@ var (
 	after               = time.After
 	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
 	waitProcessCommand  = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	processTreeClose    = func(tree *processContainment) error { return tree.close() }
 	executableProbeMu   sync.Mutex
 	executableProbed    = map[string]struct{}{}
 	versionPattern      = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
@@ -49,12 +54,13 @@ type ProcessOptions struct {
 	// ScratchParent is the resolved parent directory used to materialize an
 	// isolated home when Home is empty. The internal package never consults the
 	// system temp directory itself.
-	ScratchParent string
-	Cwd           string
-	Env           map[string]string
-	Timeout       time.Duration
-	Configure     func(*exec.Cmd)
-	LogWriter     io.Writer
+	ScratchParent       string
+	Cwd                 string
+	Env                 map[string]string
+	Timeout             time.Duration
+	Configure           func(*exec.Cmd)
+	LogWriter           io.Writer
+	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
 }
 
 type Process struct {
@@ -66,6 +72,7 @@ type Process struct {
 	StatusURL string
 
 	cancel context.CancelFunc
+	tree   *processContainment
 }
 
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
@@ -144,11 +151,19 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		opts.Configure(cmd)
 	}
 
-	if startErr := cmd.Start(); startErr != nil {
+	configureHermesProcess(cmd)
+
+	spawnStarted := time.Now()
+
+	tree, startErr := startContainedProcess(cmd)
+	if startErr != nil {
+		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, startErr)
 		cancel()
 
 		return nil, startErr
 	}
+
+	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, nil)
 
 	process := &Process{
 		Cmd:       cmd,
@@ -157,42 +172,44 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		Token:     token,
 		StatusURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
 		cancel:    cancel,
+		tree:      tree,
 	}
 
 	readyCtx, readyCancel := context.WithTimeout(ctx, timeout)
 	defer readyCancel()
 
+	readinessStarted := time.Now()
 	if readyErr := process.waitReady(readyCtx); readyErr != nil {
-		_ = process.Close(context.Background())
+		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, readyErr)
 
-		return nil, readyErr
+		return nil, errors.Join(readyErr, process.Close(context.Background()))
 	}
 
 	client, err := Dial(readyCtx, "ws://127.0.0.1:"+strconv.Itoa(port)+"/api/ws?token="+token, http.Header{
 		"X-Hermes-Session-Token": []string{token},
 	})
 	if err != nil {
-		_ = process.Close(context.Background())
-
-		return nil, err
+		return nil, errors.Join(err, process.Close(context.Background()))
 	}
 
 	process.Client = client
 	if err := process.waitGatewayReady(readyCtx); err != nil {
-		_ = process.Close(context.Background())
+		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, err)
 
-		return nil, err
+		return nil, errors.Join(err, process.Close(context.Background()))
 	}
 
 	if probeNeeded {
 		if err := process.probeGatewayMethods(readyCtx); err != nil {
-			_ = process.Close(context.Background())
+			observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, err)
 
-			return nil, err
+			return nil, errors.Join(err, process.Close(context.Background()))
 		}
 
 		markExecutableProbed(executable)
 	}
+
+	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, nil)
 
 	return process, nil
 }
@@ -307,7 +324,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 		return err
 	}
 
-	if err := methodPresent("clarify.respond", p.Client.ClarifyRespond(ctx, live, "")); err != nil {
+	if err := methodPresent("clarify.respond", p.Client.ClarifyRespond(ctx, live, "acp-go-hermes-probe", "")); err != nil {
 		return err
 	}
 
@@ -363,7 +380,7 @@ func (p *Process) Close(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return nil
+		return p.quiesceProcessTree()
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-afterFn(5 * time.Second):
@@ -377,7 +394,27 @@ func (p *Process) Close(ctx context.Context) error {
 	case <-afterFn(time.Second):
 	}
 
-	return err
+	return errors.Join(err, p.quiesceProcessTree())
+}
+
+func (p *Process) quiesceProcessTree() error {
+	if p.tree == nil {
+		// Start always installs containment. A nil tree is only possible for
+		// package-internal tests that wrap an already-started command.
+		return nil
+	}
+
+	if err := p.tree.quiesce(5 * time.Second); err != nil {
+		return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
+	}
+
+	if err := processTreeClose(p.tree); err != nil {
+		return fmt.Errorf("close Hermes process containment: %w", err)
+	}
+
+	p.tree = nil
+
+	return nil
 }
 
 // Redial opens a fresh WebSocket gateway connection to the still-running

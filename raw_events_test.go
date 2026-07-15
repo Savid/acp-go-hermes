@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -52,8 +53,21 @@ func TestRawEventOversizeEmitsFixedMarker(t *testing.T) {
 	agent := NewAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
 
+	ctx := withTurnRoute(context.Background(), "turn-raw")
+	if err := session.emitUpdate(ctx, acp.UpdateAgentMessageText("late")); err != nil {
+		t.Fatalf("emit update: %v", err)
+	}
+	conn.mu.Lock()
+	updateMeta := conn.updates[0].Meta
+	conn.mu.Unlock()
+	if !reflect.DeepEqual(updateMeta, turnRouteMeta("turn-raw")) {
+		t.Fatalf("session/update route envelope = %#v", updateMeta)
+	}
+
 	big := `{"blob":"` + strings.Repeat("x", 70000) + `"}`
-	emitRaw(t, session, big)
+	if err := session.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Type: "native.custom", Raw: json.RawMessage(big)}); err != nil {
+		t.Fatalf("emit raw: %v", err)
+	}
 
 	exts := conn.extensionsFor(RawEventMethod)
 	if len(exts) != 1 {
@@ -61,6 +75,9 @@ func TestRawEventOversizeEmitsFixedMarker(t *testing.T) {
 	}
 
 	payload := rawEventPayload(t, exts[0])
+	if !reflect.DeepEqual(payload["_meta"], turnRouteMeta("turn-raw")) {
+		t.Fatalf("raw route envelope = %#v", payload["_meta"])
+	}
 	if payload[jsonFieldSessionID] != session.id {
 		t.Fatalf("marker sessionId = %v, want %v", payload[jsonFieldSessionID], session.id)
 	}

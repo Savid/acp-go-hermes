@@ -38,7 +38,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "Reply with exactly ACP_HERMES_STORE_ONE.")); err != nil {
+	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-one", "Reply with exactly ACP_HERMES_STORE_ONE.")); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	if entries, err := store.Load(ctx, hermesacp.SessionKey{SessionID: string(newResp.SessionId), Subpath: stateDBSubpath}); err != nil || len(entries) == 0 {
@@ -56,7 +56,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession after native delete: %v", err)
 	}
-	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "Reply with exactly ACP_HERMES_STORE_TWO.")); err != nil {
+	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-two", "Reply with exactly ACP_HERMES_STORE_TWO.")); err != nil {
 		t.Fatalf("Prompt after restore: %v", err)
 	}
 	if err := restored.Close(); err != nil {
@@ -81,7 +81,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "Reply with exactly ACP_HERMES_FORK_PARENT.")); err != nil {
+	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "turn-fork-parent", "Reply with exactly ACP_HERMES_FORK_PARENT.")); err != nil {
 		t.Fatalf("Prompt parent: %v", err)
 	}
 	forkRaw, err := json.Marshal(hermesacp.ForkSessionRequest(parent.SessionId, cwd))
@@ -113,7 +113,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if entries, err := store.Load(ctx, hermesacp.SessionKey{SessionID: string(fork.SessionId), Subpath: stateDBSubpath}); err != nil || len(entries) == 0 {
 		t.Fatalf("fork state-db snapshot entries=%d err=%v", len(entries), err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "Reply with exactly ACP_HERMES_FORK_CHILD.")); err != nil {
+	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-child", "Reply with exactly ACP_HERMES_FORK_CHILD.")); err != nil {
 		t.Fatalf("Prompt child: %v", err)
 	}
 	if err := agent.Close(); err != nil {
@@ -128,7 +128,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession fork after native delete: %v", err)
 	}
-	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "Reply with exactly ACP_HERMES_FORK_RESTORED.")); err != nil {
+	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-restored", "Reply with exactly ACP_HERMES_FORK_RESTORED.")); err != nil {
 		t.Fatalf("Prompt fork after restore: %v", err)
 	}
 	if err := restored.Close(); err != nil {

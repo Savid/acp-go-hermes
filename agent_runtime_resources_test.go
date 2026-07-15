@@ -1,0 +1,524 @@
+package hermesacp
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"testing"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRuntimeResourceHooks(t *testing.T) {
+	options := Options{}
+	WithRuntimeResourceHooks(RuntimeResourceHooks{AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+		return func() {}, nil
+	}})(&options)
+	require.NotNil(t, options.RuntimeResourceHooks.AcquireNativeRoot)
+
+	release, err := acquireNativeRoot(t.Context(), RuntimeResourceHooks{}, RuntimeResourceSession)
+	require.NoError(t, err)
+	release()
+
+	wantErr := errors.New("full")
+	_, err = reserveScratchRoot(t.Context(), RuntimeResourceHooks{ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+		return nil, wantErr
+	}}, RuntimeResourceSession)
+	require.ErrorIs(t, err, wantErr)
+
+	_, err = acquireNativeRoot(t.Context(), RuntimeResourceHooks{AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+		return nil, nil //nolint:nilnil // A nil release is the invalid hook result under test.
+	}}, RuntimeResourcePrompt)
+	require.ErrorContains(t, err, "nil release")
+
+	releases := 0
+	release, err = acquireNativeRoot(t.Context(), RuntimeResourceHooks{AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+		require.Equal(t, RuntimeResourceDiscovery, kind)
+
+		return func() { releases++ }, nil
+	}}, RuntimeResourceDiscovery)
+	require.NoError(t, err)
+	release()
+	release()
+	require.Equal(t, 1, releases)
+}
+
+func TestManagedHermesServerResourceRelease(t *testing.T) {
+	previousRemove := runtimeRemoveAll
+	t.Cleanup(func() { runtimeRemoveAll = previousRemove })
+
+	t.Run("success is idempotent", func(t *testing.T) {
+		runtimeRemoveAll = previousRemove
+		nativeReleases, scratchReleases := 0, 0
+		server := &managedHermesServer{
+			Server:         newFakeHermesClient(),
+			root:           t.TempDir(),
+			nativeRelease:  func() { nativeReleases++ },
+			scratchRelease: func() { scratchReleases++ },
+		}
+
+		require.NoError(t, server.Close(t.Context()))
+		require.NoError(t, server.Close(t.Context()))
+		require.Equal(t, 1, nativeReleases)
+		require.Equal(t, 1, scratchReleases)
+	})
+
+	t.Run("ordinary close error still unwinds", func(t *testing.T) {
+		runtimeRemoveAll = previousRemove
+		nativeReleases, scratchReleases := 0, 0
+		closeErr := errors.New("close")
+		client := newFakeHermesClient()
+		client.closeErr = closeErr
+		server := &managedHermesServer{
+			Server:         client,
+			root:           t.TempDir(),
+			nativeRelease:  func() { nativeReleases++ },
+			scratchRelease: func() { scratchReleases++ },
+		}
+
+		require.ErrorIs(t, server.Close(t.Context()), closeErr)
+		require.Equal(t, 1, nativeReleases)
+		require.Equal(t, 1, scratchReleases)
+	})
+
+	t.Run("unproven tree retains all ownership", func(t *testing.T) {
+		removeCalls := 0
+		runtimeRemoveAll = func(string) error {
+			removeCalls++
+
+			return nil
+		}
+		nativeReleases, scratchReleases := 0, 0
+		client := newFakeHermesClient()
+		client.closeErr = errors.Join(errors.New("shutdown failed"), nativehermes.ErrProcessTreeUnproven)
+		server := &managedHermesServer{
+			Server:         client,
+			root:           t.TempDir(),
+			nativeRelease:  func() { nativeReleases++ },
+			scratchRelease: func() { scratchReleases++ },
+		}
+
+		require.ErrorIs(t, server.Close(t.Context()), nativehermes.ErrProcessTreeUnproven)
+		require.Zero(t, removeCalls)
+		require.Zero(t, nativeReleases)
+		require.Zero(t, scratchReleases)
+	})
+
+	t.Run("deletion failure retains scratch and joins errors", func(t *testing.T) {
+		closeErr := errors.New("close")
+		removeErr := errors.New("remove")
+		runtimeRemoveAll = func(string) error { return removeErr }
+		nativeReleases, scratchReleases := 0, 0
+		client := newFakeHermesClient()
+		client.closeErr = closeErr
+		server := &managedHermesServer{
+			Server:         client,
+			root:           t.TempDir(),
+			nativeRelease:  func() { nativeReleases++ },
+			scratchRelease: func() { scratchReleases++ },
+		}
+
+		err := server.Close(t.Context())
+		require.ErrorIs(t, err, closeErr)
+		require.ErrorIs(t, err, removeErr)
+		require.Equal(t, 1, nativeReleases)
+		require.Zero(t, scratchReleases)
+	})
+}
+
+func TestHermesSessionResourceAdmission(t *testing.T) {
+	wantErr := errors.New("resource exhausted")
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
+	}))
+	_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+	require.ErrorIs(t, err, wantErr)
+	_, err = agent.LoadSession(t.Context(), LoadSessionRequest("session-2", t.TempDir()))
+	require.ErrorIs(t, err, wantErr)
+
+	scratchReleases := 0
+	agent = NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { scratchReleases++ }, nil
+		},
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
+	}))
+	_, err = agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, 1, scratchReleases)
+
+	forkBlocked := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
+	}))
+	client := newFakeHermesClient()
+	client.forkSession = testNativeSession("native-child")
+	parent := testSession(forkBlocked, client)
+	forkBlocked.sessions[parent.id] = parent
+	_, err = forkBlocked.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+	require.ErrorIs(t, err, wantErr)
+
+	previousReap := reapHermesLeaseFile
+	reapHermesLeaseFile = func(string, *slog.Logger) bool { return true }
+	t.Cleanup(func() { reapHermesLeaseFile = previousReap })
+	err = NewAgent().cleanupDeletedSession(deleteCleanupRecord{SessionID: "session-1", XDGRoot: t.TempDir()})
+	require.ErrorContains(t, err, "live lease")
+}
+
+func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.T) {
+	previousRemove := runtimeRemoveAll
+	t.Cleanup(func() { runtimeRemoveAll = previousRemove })
+
+	t.Run("factory sentinel retains native scratch and root", func(t *testing.T) {
+		runtimeRemoveAll = previousRemove
+		nativeReleases, scratchReleases := 0, 0
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { scratchReleases++ }, nil
+			},
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { nativeReleases++ }, nil
+			},
+		}))
+
+		var xdg nativehermes.XDGDirs
+		factoryCalls := 0
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			factoryCalls++
+			var err error
+			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
+			require.NoError(t, err)
+
+			return nil, nativehermes.ErrProcessTreeUnproven
+		}
+
+		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.DirExists(t, xdg.Root)
+		require.Zero(t, nativeReleases)
+		require.Zero(t, scratchReleases)
+		_, retryErr := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+		require.ErrorIs(t, retryErr, nativehermes.ErrProcessTreeUnproven)
+		require.Equal(t, 1, factoryCalls)
+		require.NoError(t, previousRemove(xdg.Root))
+	})
+
+	t.Run("ordinary factory error deletes and releases", func(t *testing.T) {
+		runtimeRemoveAll = previousRemove
+		startupErr := errors.New("startup")
+		nativeReleases, scratchReleases := 0, 0
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { scratchReleases++ }, nil
+			},
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { nativeReleases++ }, nil
+			},
+		}))
+
+		var xdg nativehermes.XDGDirs
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			var err error
+			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
+			require.NoError(t, err)
+
+			return nil, startupErr
+		}
+
+		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+		require.ErrorIs(t, err, startupErr)
+		require.NoDirExists(t, xdg.Root)
+		require.Equal(t, 1, nativeReleases)
+		require.Equal(t, 1, scratchReleases)
+	})
+
+	t.Run("delete failure joins and retains scratch", func(t *testing.T) {
+		startupErr := errors.New("startup")
+		deleteErr := errors.New("delete")
+		runtimeRemoveAll = func(string) error { return deleteErr }
+		nativeReleases, scratchReleases := 0, 0
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { scratchReleases++ }, nil
+			},
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { nativeReleases++ }, nil
+			},
+		}))
+
+		var xdg nativehermes.XDGDirs
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			var err error
+			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
+			require.NoError(t, err)
+
+			return nil, startupErr
+		}
+
+		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+		require.ErrorIs(t, err, startupErr)
+		require.ErrorIs(t, err, deleteErr)
+		require.DirExists(t, xdg.Root)
+		require.Equal(t, 1, nativeReleases)
+		require.Zero(t, scratchReleases)
+		require.NoError(t, previousRemove(xdg.Root))
+	})
+}
+
+func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
+	t.Run("load", func(t *testing.T) {
+		nativeReleases, scratchReleases := 0, 0
+		agent := NewAgent(
+			WithScratchDir(t.TempDir()),
+			WithSessionStore(validHydrateStore(t, t.Context())),
+			WithRuntimeResourceHooks(RuntimeResourceHooks{
+				ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					return func() { scratchReleases++ }, nil
+				},
+				AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					return func() { nativeReleases++ }, nil
+				},
+			}),
+		)
+
+		var root string
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			root = options.ExistingXDG.Root
+
+			return nil, nativehermes.ErrProcessTreeUnproven
+		}
+
+		_, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
+		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.DirExists(t, root)
+		require.Zero(t, nativeReleases)
+		require.Zero(t, scratchReleases)
+		require.NoError(t, os.RemoveAll(root))
+	})
+
+	t.Run("fork", func(t *testing.T) {
+		nativeReleases, scratchReleases := 0, 0
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { scratchReleases++ }, nil
+			},
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return func() { nativeReleases++ }, nil
+			},
+		}))
+		parentClient := newFakeHermesClient()
+		parentClient.forkSession = testNativeSession("native-child")
+		parent := testSession(agent, parentClient)
+		agent.sessions[parent.id] = parent
+
+		var root string
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			root = options.ExistingXDG.Root
+
+			return nil, nativehermes.ErrProcessTreeUnproven
+		}
+
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.DirExists(t, root)
+		require.Zero(t, nativeReleases)
+		require.Zero(t, scratchReleases)
+		require.NoError(t, os.RemoveAll(root))
+	})
+
+	t.Run("fork rejects a retained generated root before admission", func(t *testing.T) {
+		previousReader := sessionIDRandReader
+		sessionIDRandReader = bytes.NewReader(make([]byte, 16))
+		t.Cleanup(func() { sessionIDRandReader = previousReader })
+
+		scratchAcquires := 0
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				scratchAcquires++
+
+				return func() {}, nil
+			},
+		}))
+		parentClient := newFakeHermesClient()
+		parentClient.forkSession = testNativeSession("native-child")
+		parent := testSession(agent, parentClient)
+		agent.sessions[parent.id] = parent
+		agent.retainUnprovenHermesRoot(agent.hermesXDGRoot("00000000-0000-4000-8000-000000000000", nativehermes.XDGDirs{}))
+
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.Zero(t, scratchAcquires)
+	})
+}
+
+func TestHermesLoadGetSessionFailureUnwind(t *testing.T) {
+	previousRemove := runtimeRemoveAll
+	t.Cleanup(func() { runtimeRemoveAll = previousRemove })
+
+	tests := []struct {
+		name                string
+		closeErr            error
+		deleteErr           error
+		wantSentinel        bool
+		wantNativeReleases  int
+		wantScratchReleases int
+		wantRoot            bool
+	}{
+		{name: "ordinary close error unwinds", closeErr: errors.New("close"), wantNativeReleases: 1, wantScratchReleases: 1},
+		{name: "proof sentinel retains all ownership", closeErr: errors.Join(errors.New("close"), nativehermes.ErrProcessTreeUnproven), wantSentinel: true, wantRoot: true},
+		{name: "delete failure retains scratch", closeErr: errors.New("close"), deleteErr: errors.New("delete"), wantNativeReleases: 1, wantRoot: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeRemoveAll = previousRemove
+			if test.deleteErr != nil {
+				runtimeRemoveAll = func(string) error { return test.deleteErr }
+			}
+
+			getErr := errors.New("get")
+			nativeReleases, scratchReleases := 0, 0
+			client := newFakeHermesClient()
+			client.getErr = getErr
+			client.closeErr = test.closeErr
+			agent := NewAgent(
+				WithScratchDir(t.TempDir()),
+				WithSessionStore(validHydrateStore(t, t.Context())),
+				WithRuntimeResourceHooks(RuntimeResourceHooks{
+					ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+						return func() { scratchReleases++ }, nil
+					},
+					AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+						return func() { nativeReleases++ }, nil
+					},
+				}),
+			)
+
+			var root string
+			factoryCalls := 0
+			agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+				factoryCalls++
+				root = options.ExistingXDG.Root
+				client.xdg = options.ExistingXDG
+
+				return client, nil
+			}
+
+			_, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
+			require.ErrorIs(t, err, getErr)
+			require.ErrorIs(t, err, test.closeErr)
+			if test.wantSentinel {
+				require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+				_, retryErr := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
+				require.ErrorIs(t, retryErr, nativehermes.ErrProcessTreeUnproven)
+				require.Equal(t, 1, factoryCalls)
+			}
+			if test.deleteErr != nil {
+				require.ErrorIs(t, err, test.deleteErr)
+			}
+
+			require.Equal(t, test.wantNativeReleases, nativeReleases)
+			require.Equal(t, test.wantScratchReleases, scratchReleases)
+			if test.wantRoot {
+				require.DirExists(t, root)
+				require.NoError(t, previousRemove(root))
+			} else {
+				require.NoDirExists(t, root)
+			}
+		})
+	}
+}
+
+func TestHermesForkGetSessionProofFailureRetainsOwnership(t *testing.T) {
+	nativeReleases, scratchReleases := 0, 0
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { scratchReleases++ }, nil
+		},
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { nativeReleases++ }, nil
+		},
+	}))
+	parentClient := newFakeHermesClient()
+	parentClient.forkSession = testNativeSession("native-child")
+	parent := testSession(agent, parentClient)
+	agent.sessions[parent.id] = parent
+
+	getErr := errors.New("get")
+	child := newFakeHermesClient()
+	child.getErr = getErr
+	child.closeErr = errors.Join(errors.New("close"), nativehermes.ErrProcessTreeUnproven)
+	var root string
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		root = options.ExistingXDG.Root
+		child.xdg = options.ExistingXDG
+
+		return child, nil
+	}
+
+	_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+	require.ErrorIs(t, err, getErr)
+	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.DirExists(t, root)
+	require.Zero(t, nativeReleases)
+	require.Zero(t, scratchReleases)
+	require.NoError(t, os.RemoveAll(root))
+}
+
+func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
+	nativeReleases, scratchReleases := 0, 0
+	rootParent := t.TempDir()
+	xdg, err := nativehermes.CreateXDGDirs(rootParent, "failed-start")
+	require.NoError(t, err)
+	client := newFakeHermesClient()
+	client.xdg = xdg
+	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	managed := &managedHermesServer{
+		Server:         client,
+		root:           xdg.Root,
+		nativeRelease:  func() { nativeReleases++ },
+		scratchRelease: func() { scratchReleases++ },
+	}
+	agent := NewAgent()
+	session := newSession(agent, "failed-start", t.TempDir(), nil, nil, testNativeSession("native-failed"), managed, sessionMeta{}, idmapRecord{})
+	agent.sessions[session.id] = session
+
+	err = agent.cleanupFailedStartedSession(t.Context(), session)
+	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.Nil(t, agent.activeSession(session.id))
+	require.DirExists(t, xdg.Root)
+	require.Zero(t, nativeReleases)
+	require.Zero(t, scratchReleases)
+	require.NoError(t, os.RemoveAll(xdg.Root))
+}
+
+func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
+	nativeReleases, scratchReleases := 0, 0
+	rootParent := t.TempDir()
+	xdg, err := nativehermes.CreateXDGDirs(rootParent, "deleted")
+	require.NoError(t, err)
+	client := newFakeHermesClient()
+	client.xdg = xdg
+	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	managed := &managedHermesServer{
+		Server:         client,
+		root:           xdg.Root,
+		nativeRelease:  func() { nativeReleases++ },
+		scratchRelease: func() { scratchReleases++ },
+	}
+	agent := NewAgent()
+	session := newSession(agent, "deleted", t.TempDir(), nil, nil, testNativeSession("native-deleted"), managed, sessionMeta{}, idmapRecord{})
+	agent.sessions[session.id] = session
+
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.Nil(t, agent.activeSession(session.id))
+	require.Contains(t, agent.deleted, session.id)
+	require.NotContains(t, agent.deleteCleanup, session.id)
+	require.DirExists(t, xdg.Root)
+	require.Zero(t, nativeReleases)
+	require.Zero(t, scratchReleases)
+	require.NoError(t, os.RemoveAll(xdg.Root))
+}

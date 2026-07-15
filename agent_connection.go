@@ -31,8 +31,9 @@ type agentClient interface {
 
 type elicitationScope struct {
 	SessionID  acp.SessionId
+	TurnNonce  string
 	ToolCallID acp.ToolCallId
-	RequestID  *acp.RequestId
+	RequestID  *string
 }
 
 type localAgentConnection struct {
@@ -295,7 +296,10 @@ func scopedElicitationParams(
 	params acp.UnstableCreateElicitationRequest,
 	scope elicitationScope,
 ) (json.RawMessage, error) {
-	var payload map[string]any
+	var (
+		payload map[string]any
+		meta    map[string]any
+	)
 
 	switch {
 	case params.Form != nil:
@@ -304,9 +308,7 @@ func scopedElicitationParams(
 			keyMode:           valForm,
 			"requestedSchema": params.Form.RequestedSchema,
 		}
-		if len(params.Form.Meta) > 0 {
-			payload["_meta"] = params.Form.Meta
-		}
+		meta = params.Form.Meta
 	case params.Url != nil:
 		payload = map[string]any{
 			"elicitationId":  params.Url.ElicitationId,
@@ -314,24 +316,17 @@ func scopedElicitationParams(
 			keyMode:          valURL,
 			valURL:           params.Url.Url,
 		}
-		if len(params.Url.Meta) > 0 {
-			payload["_meta"] = params.Url.Meta
-		}
+		meta = params.Url.Meta
 	default:
 		return nil, errors.New("elicitation request must include form or url")
 	}
 
-	if scope.SessionID != "" {
-		payload[jsonFieldSessionID] = scope.SessionID
+	stamped, err := stampRouteMeta(meta, scope)
+	if err != nil {
+		return nil, err
 	}
 
-	if scope.ToolCallID != "" {
-		payload["toolCallId"] = scope.ToolCallID
-	}
-
-	if scope.RequestID != nil {
-		payload["requestId"] = scope.RequestID
-	}
+	payload["_meta"] = stamped
 
 	return json.Marshal(payload)
 }

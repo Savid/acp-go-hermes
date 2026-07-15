@@ -52,6 +52,28 @@ func TestProcessCloseKillsProcessGroupGrandchild(t *testing.T) {
 	}
 }
 
+func TestProcessCloseProvesQuiescenceAfterRootExit(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := exec.Command("sh", "-c", "(trap '' TERM; sleep 30) & echo $! > "+strconv.Quote(pidFile)+"; exit 0")
+	configureHermesProcess(cmd)
+	tree, err := startContainedProcess(cmd)
+	if err != nil {
+		t.Fatalf("start contained process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = killProcess(cmd)
+		_, _ = cmd.Process.Wait()
+	})
+	childPID := waitForPIDFile(t, pidFile)
+
+	if err := (&Process{Cmd: cmd, tree: tree}).Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if processAlive(childPID) {
+		t.Fatalf("Close returned before post-root descendant %d exited", childPID)
+	}
+}
+
 func TestSignalProcessBranches(t *testing.T) {
 	oldGetpgid := processGetpgid
 	oldKill := processKill
@@ -95,6 +117,114 @@ func TestSignalProcessBranches(t *testing.T) {
 	processKill = func(int, syscall.Signal) error { return errors.New("kill failed") }
 	if err := signalProcess(cmd, syscall.SIGTERM); err == nil {
 		t.Fatal("signalProcess ignored kill failure")
+	}
+}
+
+func TestUnixProcessContainmentProofBranches(t *testing.T) {
+	if _, err := startContainedProcess(exec.Command("sh", "-c", "exit 0")); err == nil {
+		t.Fatal("startContainedProcess accepted a command without a process group")
+	}
+
+	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
+	configureHermesProcess(missing)
+	if _, err := startContainedProcess(missing); err == nil {
+		t.Fatal("startContainedProcess accepted a missing executable")
+	}
+
+	if err := (*processContainment)(nil).quiesce(time.Millisecond); err == nil {
+		t.Fatal("nil containment quiesced")
+	}
+	if err := (&processContainment{}).quiesce(time.Millisecond); err == nil {
+		t.Fatal("zero containment quiesced")
+	}
+
+	oldKill := processKill
+	t.Cleanup(func() { processKill = oldKill })
+	tree := &processContainment{processGroupID: 123}
+
+	for _, tc := range []struct {
+		name  string
+		err   error
+		alive bool
+		bad   bool
+	}{
+		{name: "alive", alive: true},
+		{name: "permission", err: syscall.EPERM, alive: true},
+		{name: "gone", err: syscall.ESRCH},
+		{name: "failure", err: errors.New("probe failed"), bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			processKill = func(int, syscall.Signal) error { return tc.err }
+			alive, err := tree.alive()
+			if alive != tc.alive || (err != nil) != tc.bad {
+				t.Fatalf("alive=%v err=%v, want alive=%v bad=%v", alive, err, tc.alive, tc.bad)
+			}
+		})
+	}
+
+	processKill = func(int, syscall.Signal) error { return syscall.ESRCH }
+	if err := tree.signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal gone tree: %v", err)
+	}
+	if err := tree.quiesce(0); err != nil {
+		t.Fatalf("quiesce gone tree: %v", err)
+	}
+
+	processKill = func(int, syscall.Signal) error { return errors.New("signal failed") }
+	if err := tree.signal(syscall.SIGTERM); err == nil {
+		t.Fatal("signal failure ignored")
+	}
+	if err := tree.waitUntilEmpty(time.Now().Add(time.Second)); err == nil {
+		t.Fatal("probe failure ignored")
+	}
+
+	processKill = func(int, syscall.Signal) error { return nil }
+	if err := tree.waitUntilEmpty(time.Now().Add(-time.Second)); err == nil {
+		t.Fatal("expired deadline ignored")
+	}
+	if err := tree.quiesce(time.Nanosecond); err == nil {
+		t.Fatal("non-quiescent tree reported quiescent")
+	}
+
+	probeCalls := 0
+	processKill = func(_ int, signal syscall.Signal) error {
+		if signal != 0 {
+			return nil
+		}
+
+		probeCalls++
+		if probeCalls == 1 {
+			return errors.New("first probe failed")
+		}
+
+		return syscall.ESRCH
+	}
+	if err := tree.quiesce(time.Second); err != nil {
+		t.Fatalf("fallback quiescence: %v", err)
+	}
+}
+
+func TestProcessQuiescenceProofFailures(t *testing.T) {
+	oldKill := processKill
+	oldClose := processTreeClose
+	t.Cleanup(func() {
+		processKill = oldKill
+		processTreeClose = oldClose
+	})
+	if err := (&Process{}).quiesceProcessTree(); err != nil {
+		t.Fatalf("nil process tree: %v", err)
+	}
+
+	process := &Process{tree: &processContainment{processGroupID: 123}}
+	processKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
+	if err := process.quiesceProcessTree(); !errors.Is(err, ErrProcessTreeUnproven) {
+		t.Fatalf("quiesce error = %v", err)
+	}
+
+	processKill = func(int, syscall.Signal) error { return syscall.ESRCH }
+	processTreeClose = func(*processContainment) error { return errors.New("close failed") }
+	if err := process.quiesceProcessTree(); err == nil || !strings.Contains(err.Error(), "close Hermes process containment") {
+		t.Fatalf("close containment error = %v", err)
 	}
 }
 

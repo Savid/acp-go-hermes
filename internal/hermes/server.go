@@ -130,16 +130,17 @@ type StartOptions struct {
 	// ScratchParent is the resolved parent directory for ephemeral on-disk
 	// materialization, supplied by the caller. The internal package never
 	// consults the system temp directory itself.
-	ScratchParent  string
-	Cwd            string
-	ExecutablePath string
-	DefaultModel   string
-	Env            map[string]string
-	HealthTimeout  time.Duration
-	Logger         *slog.Logger
-	ExistingXDG    XDGDirs
-	MCPServers     []acp.McpServer
-	SeedFiles      map[string]string
+	ScratchParent       string
+	Cwd                 string
+	ExecutablePath      string
+	DefaultModel        string
+	Env                 map[string]string
+	HealthTimeout       time.Duration
+	Logger              *slog.Logger
+	ExistingXDG         XDGDirs
+	MCPServers          []acp.McpServer
+	SeedFiles           map[string]string
+	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
 }
 
 type ACPSessionIDString string
@@ -479,18 +480,41 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		return nil, err
 	}
 
-	if err := materializeHermesConfig(xdg.Root, options.MCPServers, options.SeedFiles); err != nil {
+	configurationStarted := time.Now()
+
+	servers, mcpSecretEnv, err := mcpServersWithSecretEnv(options.MCPServers, options.Env)
+	if err != nil {
+		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, err)
+
 		return nil, err
 	}
 
+	if configErr := materializeHermesConfig(xdg.Root, servers, options.SeedFiles); configErr != nil {
+		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, configErr)
+
+		return nil, configErr
+	}
+
+	observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, nil)
+
+	processEnv := make(map[string]string, len(options.Env)+len(mcpSecretEnv))
+	for key, value := range options.Env {
+		processEnv[key] = value
+	}
+
+	for key, value := range mcpSecretEnv {
+		processEnv[key] = value
+	}
+
 	proc, err := Start(ctx, ProcessOptions{
-		ExecutablePath: options.ExecutablePath,
-		Home:           xdg.Root,
-		ScratchParent:  options.ScratchParent,
-		Cwd:            options.Cwd,
-		Env:            options.Env,
-		Timeout:        options.HealthTimeout,
-		Configure:      configureHermesProcess,
+		ExecutablePath:      options.ExecutablePath,
+		Home:                xdg.Root,
+		ScratchParent:       options.ScratchParent,
+		Cwd:                 options.Cwd,
+		Env:                 processEnv,
+		Timeout:             options.HealthTimeout,
+		Configure:           configureHermesProcess,
+		ObserveStartupStage: options.ObserveStartupStage,
 	})
 	if err != nil {
 		return nil, err
@@ -508,9 +532,9 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	}
 
 	if err := hermesWriteLease(xdg.State, lease); err != nil {
-		_ = proc.Close(context.Background())
+		closeErr := proc.Close(context.Background())
 
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 
 	server := &hermesServer{
@@ -530,6 +554,12 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	server.enableReconnect(proc.Redial)
 
 	return server, nil
+}
+
+func observeHermesStartupStage(ctx context.Context, observe func(context.Context, string, string, time.Duration, error), lifecycle, stage string, started time.Time, err error) {
+	if observe != nil {
+		observe(ctx, lifecycle, stage, time.Since(started), err)
+	}
 }
 
 func (s *hermesServer) Close(ctx context.Context) error {
@@ -782,6 +812,8 @@ func (s *hermesServer) superviseGateway() {
 			s.turnIdle.Wait()
 		}
 		s.connMu.Unlock()
+
+		superviseGatewayAfterTurnIdle()
 
 		if s.serverClosed() {
 			return
@@ -1535,7 +1567,7 @@ func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, a
 		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 
-	return s.gatewayClient().ClarifyRespond(ctx, live, answers)
+	return s.gatewayClient().ClarifyRespond(ctx, live, req.ID, answers)
 }
 
 func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) error {
@@ -1544,7 +1576,7 @@ func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) 
 		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
 	}
 
-	return s.gatewayClient().ClarifyRespond(ctx, live, "")
+	return s.gatewayClient().ClarifyRespond(ctx, live, req.ID, "")
 }
 
 type StreamError struct {
@@ -1864,6 +1896,39 @@ func MCPServersConfig(servers []acp.McpServer) map[string]any {
 	return map[string]any{"mcp_servers": mcpServers}
 }
 
+// mcpServersWithSecretEnv replaces every literal HTTP header value with a
+// generated environment reference before config.yaml is authored. The values
+// are returned separately for injection into this session's hermes process;
+// neither the config nor adapter-owned durable state receives the secret.
+func mcpServersWithSecretEnv(servers []acp.McpServer, baseEnv map[string]string) ([]acp.McpServer, map[string]string, error) {
+	cloned := make([]acp.McpServer, len(servers))
+	secrets := map[string]string{}
+
+	for serverIndex, server := range servers {
+		cloned[serverIndex] = server
+		if server.Http == nil {
+			continue
+		}
+
+		httpServer := *server.Http
+
+		httpServer.Headers = append([]acp.HttpHeader(nil), server.Http.Headers...)
+		for headerIndex := range httpServer.Headers {
+			name := fmt.Sprintf("ACP_GO_HERMES_MCP_HEADER_%d_%d", serverIndex+1, headerIndex+1)
+			if _, exists := baseEnv[name]; exists {
+				return nil, nil, fmt.Errorf("reserved MCP environment variable collision: %s", name)
+			}
+
+			secrets[name] = httpServer.Headers[headerIndex].Value
+			httpServer.Headers[headerIndex].Value = "${" + name + "}"
+		}
+
+		cloned[serverIndex].Http = &httpServer
+	}
+
+	return cloned, secrets, nil
+}
+
 // buildHermesSeedWrites resolves each seeded file into a planned write under
 // home, confining paths to that root. The seeded config.yaml is not planned
 // here: its raw contents are returned so the caller can deep-merge the wrapper's
@@ -1994,10 +2059,11 @@ func reapStaleLeases(root string, log *slog.Logger) error {
 }
 
 var (
-	LeaseReapTimeout      = 3 * time.Second
-	LeaseReapPollInterval = 20 * time.Millisecond
-	leaseReapSleep        = time.Sleep
-	leaseReapNow          = time.Now
+	LeaseReapTimeout              = 3 * time.Second
+	LeaseReapPollInterval         = 20 * time.Millisecond
+	leaseReapSleep                = time.Sleep
+	leaseReapNow                  = time.Now
+	superviseGatewayAfterTurnIdle = func() {}
 )
 
 func ReapLeaseFile(path string, log *slog.Logger) bool {

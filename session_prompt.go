@@ -49,6 +49,7 @@ const (
 	keyMime      = "mime"
 	keyFilename  = "filename"
 	keyQuestion  = "question"
+	keyRequest   = "request"
 	keyMessageID = "messageId"
 
 	jsonFieldCause        = "cause"
@@ -132,6 +133,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 		return acp.PromptResponse{}, err
 	}
 
+	_, err = parseInboundTurnRoute(params.Meta)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, session.currentModel())
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
@@ -179,17 +185,47 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error
 		return err
 	}
 
-	session.cancelTurn()
+	return session.cancelRouted(params.Meta)
+}
+
+// cancelRouted validates the active turn and keeps its native abort fenced
+// from turn completion and admission of the next turn.
+func (s *session) cancelRouted(meta map[string]any) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	activeNonce := s.turnNonce
+	active := s.turnInFlight && activeNonce != ""
+	s.mu.Unlock()
+
+	if active {
+		route, err := parseInboundTurnRoute(meta)
+		if err != nil {
+			return err
+		}
+
+		if route.turnNonce != activeNonce {
+			return routeInvalid("stale route turnNonce")
+		}
+	}
+
+	s.cancelTurn()
 
 	cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
 
-	return session.client.Abort(cancelCtx, session.idmap.NativeSessionID)
+	return s.client.Abort(cancelCtx, s.idmap.NativeSessionID)
 }
 
 func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
-	if err := s.ensureNotPoisoned(); err != nil {
+	route, err := parseInboundTurnRoute(params.Meta)
+	if err != nil {
 		return acp.PromptResponse{}, err
+	}
+
+	if poisonErr := s.ensureNotPoisoned(); poisonErr != nil {
+		return acp.PromptResponse{}, poisonErr
 	}
 
 	release, err := s.acquireTurn(ctx)
@@ -220,7 +256,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 
-	turnCtx := s.beginTurn(ctx)
+	turnCtx := s.beginTurn(ctx, route.turnNonce)
 
 	turnActive := true
 	defer func() {
@@ -684,7 +720,7 @@ func eventQuestion(data json.RawMessage) (nativehermes.QuestionRequest, bool) {
 		return req, true
 	}
 
-	for _, key := range []string{keyQuestion, "request", "data"} {
+	for _, key := range []string{keyQuestion, keyRequest, "data"} {
 		var wrapper map[string]json.RawMessage
 		if err := json.Unmarshal(data, &wrapper); err != nil {
 			continue
@@ -780,14 +816,14 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 			Kind:       &kind,
 			Status:     &status,
 			RawInput: map[string]any{
-				"action":     req.ActionName(),
-				"resources":  req.ResourceList(),
-				"metadata":   req.Metadata,
-				keySource:    req.Source,
-				"save":       req.Save,
-				valAlways:    req.Always,
-				"toolCallId": req.Tool.CallID,
-				keyMessageID: req.Tool.MessageID,
+				"action":       req.ActionName(),
+				"resources":    req.ResourceList(),
+				"metadata":     req.Metadata,
+				keySource:      req.Source,
+				"save":         req.Save,
+				valAlways:      req.Always,
+				routeFieldTool: req.Tool.CallID,
+				keyMessageID:   req.Tool.MessageID,
 			},
 		},
 		Options: []acp.PermissionOption{
@@ -795,7 +831,7 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 			{OptionId: valAlways, Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
 			{OptionId: valReject, Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
 		},
-		Meta: map[string]any{hermesMetaKey: map[string]any{"requestId": req.ID, "nativeSessionId": req.SessionID}},
+		Meta: map[string]any{hermesMetaKey: map[string]any{routeFieldReq: req.ID, "nativeSessionId": req.SessionID}},
 	})
 	if err != nil {
 		_, ok, cancelled := s.takePendingPermission(req.ID)
@@ -884,9 +920,12 @@ func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionR
 
 	request, propertyIDs := questionElicitationRequest(req)
 
+	requestID := req.ID
+
 	resp, err := conn.CreateElicitation(ctx, request, elicitationScope{
-		SessionID:  s.id,
-		ToolCallID: acp.ToolCallId(firstNonEmpty(req.Tool.CallID, req.ID)),
+		SessionID: s.id,
+		TurnNonce: s.currentTurnNonce(),
+		RequestID: &requestID,
 	})
 	if err != nil {
 		_, ok, cancelled := s.takePendingQuestion(req.ID)
@@ -1012,7 +1051,7 @@ func questionElicitationRequest(req nativehermes.QuestionRequest) (acp.UnstableC
 				Required:   required,
 			},
 			Meta: map[string]any{hermesMetaKey: map[string]any{
-				"requestId":       req.ID,
+				routeFieldReq:     req.ID,
 				"nativeSessionId": req.SessionID,
 				valTool: map[string]any{
 					keyMessageID: req.Tool.MessageID,
@@ -1157,7 +1196,11 @@ func (s *session) emitUpdate(ctx context.Context, update acp.SessionUpdate) erro
 
 	s.agent.observe.ObserveFirstPromptUpdate(ctx)
 
-	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: s.id, Update: update})
+	return conn.SessionUpdate(ctx, acp.SessionNotification{
+		Meta:      turnRouteMetaFromContext(ctx),
+		SessionId: s.id,
+		Update:    update,
+	})
 }
 
 func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.TurnEvent) error {
@@ -1186,6 +1229,9 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		keySequence:        s.nextRawEventSequence(),
 		keySource:          valHermesServeSource,
 		keyEvent:           raw,
+	}
+	if meta := turnRouteMetaFromContext(ctx); meta != nil {
+		payload["_meta"] = meta
 	}
 
 	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
