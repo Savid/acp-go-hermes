@@ -13,15 +13,16 @@ type providerProcessInventory interface {
 }
 
 type providerProcessTracker struct {
-	mu      sync.Mutex
-	hooks   RuntimeResourceHooks
-	nextID  uint64
-	entries map[uint64]providerProcessEntry
+	mu         sync.Mutex
+	hooks      RuntimeResourceHooks
+	nextID     uint64
+	entries    map[uint64]providerProcessEntry
+	publishing bool
+	dirty      bool
 }
 
 type providerProcessEntry struct {
-	count int
-	known bool
+	inventory providerProcessInventory
 }
 
 type providerProcessRoot struct {
@@ -38,12 +39,17 @@ func newProviderProcessTracker(hooks RuntimeResourceHooks) *providerProcessTrack
 
 func (t *providerProcessTracker) register() *providerProcessRoot {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	t.nextID++
 	t.entries[t.nextID] = providerProcessEntry{}
+	root := &providerProcessRoot{tracker: t, id: t.nextID}
+	startPublisher := t.markDirtyLocked()
+	t.mu.Unlock()
 
-	return &providerProcessRoot{tracker: t, id: t.nextID}
+	if startPublisher {
+		t.publish(context.Background())
+	}
+
+	return root
 }
 
 func (r *providerProcessRoot) observe(ctx context.Context, process any) {
@@ -52,12 +58,7 @@ func (r *providerProcessRoot) observe(ctx context.Context, process any) {
 		return
 	}
 
-	count, available := inventory.ProviderDescendantCount()
-	if !available || count < 0 {
-		return
-	}
-
-	r.tracker.update(ctx, r.id, providerProcessEntry{count: count, known: true})
+	r.tracker.update(ctx, r.id, providerProcessEntry{inventory: inventory})
 }
 
 func (r *providerProcessRoot) retire(ctx context.Context, proven bool) {
@@ -70,40 +71,86 @@ func (r *providerProcessRoot) retire(ctx context.Context, proven bool) {
 
 func (t *providerProcessTracker) update(ctx context.Context, id uint64, entry providerProcessEntry) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if _, ok := t.entries[id]; !ok {
+		t.mu.Unlock()
+
 		return
 	}
 
 	t.entries[id] = entry
-	t.publishLocked(ctx)
+	startPublisher := t.markDirtyLocked()
+	t.mu.Unlock()
+
+	if startPublisher {
+		t.publish(ctx)
+	}
 }
 
 func (t *providerProcessTracker) remove(ctx context.Context, id uint64) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if _, ok := t.entries[id]; !ok {
+		t.mu.Unlock()
+
 		return
 	}
 
 	delete(t.entries, id)
-	t.publishLocked(ctx)
+	startPublisher := t.markDirtyLocked()
+	t.mu.Unlock()
+
+	if startPublisher {
+		t.publish(ctx)
+	}
 }
 
-func (t *providerProcessTracker) publishLocked(ctx context.Context) {
-	total := 0
+func (t *providerProcessTracker) markDirtyLocked() bool {
+	t.dirty = true
+	if t.publishing {
+		return false
+	}
 
-	for _, entry := range t.entries {
-		if !entry.known {
+	t.publishing = true
+
+	return true
+}
+
+func (t *providerProcessTracker) publish(ctx context.Context) {
+	for {
+		t.mu.Lock()
+		if !t.dirty {
+			t.publishing = false
+			t.mu.Unlock()
+
 			return
 		}
 
-		total += entry.count
+		t.dirty = false
+		total, available := t.snapshotLocked()
+		t.mu.Unlock()
+
+		if available {
+			observeRuntimeProcessSnapshot(ctx, t.hooks, RuntimeProcessProviderDescendant, total)
+		}
+	}
+}
+
+func (t *providerProcessTracker) snapshotLocked() (int, bool) {
+	total := 0
+
+	for _, entry := range t.entries {
+		if entry.inventory == nil {
+			return 0, false
+		}
+
+		count, available := entry.inventory.ProviderDescendantCount()
+		if !available || count < 0 {
+			return 0, false
+		}
+
+		total += count
 	}
 
-	observeRuntimeProcessSnapshot(ctx, t.hooks, RuntimeProcessProviderDescendant, total)
+	return total, true
 }
 
 func providerProcessTreeProven(err error) bool {

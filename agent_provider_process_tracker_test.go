@@ -15,6 +15,26 @@ type testProviderInventory struct {
 	available bool
 }
 
+type mutableProviderInventory struct {
+	mu        sync.Mutex
+	count     int
+	available bool
+}
+
+func (i *mutableProviderInventory) ProviderDescendantCount() (int, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return i.count, i.available
+}
+
+func (i *mutableProviderInventory) set(count int, available bool) {
+	i.mu.Lock()
+	i.count = count
+	i.available = available
+	i.mu.Unlock()
+}
+
 func (i testProviderInventory) ProviderDescendantCount() (int, bool) {
 	return i.count, i.available
 }
@@ -105,9 +125,59 @@ func TestProviderProcessTrackerConcurrentLifecycle(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, snapshots, roots+1)
+	require.GreaterOrEqual(t, len(snapshots), 2)
+	require.LessOrEqual(t, len(snapshots), roots+1)
 	require.Equal(t, roots, snapshots[0])
 	require.Equal(t, 0, snapshots[len(snapshots)-1])
+}
+
+func TestProviderProcessTrackerRequeriesEveryRoot(t *testing.T) {
+	var snapshots []int
+	tracker := newProviderProcessTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+			snapshots = append(snapshots, count)
+		},
+	})
+	rootA := tracker.register()
+	rootB := tracker.register()
+	inventoryA := &mutableProviderInventory{count: 1, available: true}
+	inventoryB := &mutableProviderInventory{count: 2, available: true}
+
+	rootA.observe(t.Context(), inventoryA)
+	rootB.observe(t.Context(), inventoryB)
+	require.Equal(t, []int{3}, snapshots)
+
+	inventoryA.set(5, true)
+	inventoryB.set(4, true)
+	rootB.observe(t.Context(), inventoryB)
+	require.Equal(t, []int{3, 9}, snapshots)
+
+	inventoryA.set(5, false)
+	rootB.observe(t.Context(), inventoryB)
+	require.Equal(t, []int{3, 9}, snapshots)
+
+	inventoryA.set(6, true)
+	rootB.observe(t.Context(), inventoryB)
+	require.Equal(t, []int{3, 9, 10}, snapshots)
+}
+
+func TestProviderProcessTrackerHookCanReenter(t *testing.T) {
+	var (
+		root      *providerProcessRoot
+		snapshots []int
+	)
+	tracker := newProviderProcessTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(ctx context.Context, _ RuntimeProcessKind, count int) {
+			snapshots = append(snapshots, count)
+			if count == 1 {
+				root.retire(ctx, true)
+			}
+		},
+	})
+	root = tracker.register()
+	root.observe(t.Context(), testProviderInventory{count: 1, available: true})
+
+	require.Equal(t, []int{1, 0}, snapshots)
 }
 
 func TestManagedHermesServerProviderInventory(t *testing.T) {
