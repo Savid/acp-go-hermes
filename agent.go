@@ -21,6 +21,7 @@ const (
 	sessionTurnCapacity             = 1
 	defaultMaxConcurrentClientCalls = 16
 	closeTimeout                    = 5 * time.Second
+	mcpReloadTimeout                = 2 * time.Minute
 
 	valElicitation    = "elicitation"
 	valBackpressure   = "backpressure"

@@ -298,6 +298,8 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	agent := NewAgent(WithScratchDir(root), WithSessionStore(store))
 	session := testSession(agent, sourceClient)
 	session.cwd = root
+	mcpServer := HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)
+	session.mcpServers = []acp.McpServer{mcpServer}
 	if err6 := session.snapshotToStore(ctx); err6 != nil {
 		t.Fatalf("snapshotToStore: %v", err6)
 	}
@@ -320,12 +322,24 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	resp, err := agent.LoadSession(ctx, LoadSessionRequest("session-1", root))
+	resp, err := agent.LoadSession(ctx, LoadSessionRequest("session-1", root, WithSessionMCPServers(mcpServer)))
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	if resp.Meta[hermesMetaKey] == nil || conn.updateCount() != 1 {
 		t.Fatalf("load resp=%#v updates=%#v", resp, conn.updates)
+	}
+	loaded := agent.activeSession("session-1")
+	for _, nonce := range []string{"loaded-continuation-1", "loaded-continuation-2"} {
+		if _, err := loaded.Prompt(ctx, TextPromptRequest(loaded.id, nonce, "continue")); err != nil {
+			t.Fatalf("loaded Prompt(%s): %v", nonce, err)
+		}
+	}
+	loadedClient.mu.Lock()
+	reloads := loadedClient.reloadCalls
+	loadedClient.mu.Unlock()
+	if reloads != 1 {
+		t.Fatalf("loaded session MCP reloads = %d, want one before continuation", reloads)
 	}
 }
 

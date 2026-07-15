@@ -1576,6 +1576,101 @@ func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 	}
 }
 
+func TestPromptReloadsMCPOnceInsideFirstAuthorizedTurn(t *testing.T) {
+	client := newFakeHermesClient()
+	session := testSession(NewAgent(), client)
+	session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
+
+	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		client.mu.Lock()
+		reloads := client.reloadCalls
+		client.mu.Unlock()
+		if reloads != 1 {
+			t.Fatalf("SendMessage observed %d MCP reloads, want exactly one", reloads)
+		}
+
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
+	}
+
+	for _, nonce := range []string{"authorized-1", "authorized-2"} {
+		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, nonce, "reply")); err != nil {
+			t.Fatalf("Prompt(%s): %v", nonce, err)
+		}
+	}
+
+	client.mu.Lock()
+	reloads := client.reloadCalls
+	client.mu.Unlock()
+	if reloads != 1 {
+		t.Fatalf("reload calls = %d, want 1", reloads)
+	}
+}
+
+func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
+	t.Run("cancelled reload retries on the next authorized turn", func(t *testing.T) {
+		client := newFakeHermesClient()
+		started := make(chan struct{})
+		client.reloadFunc = func(ctx context.Context, id string) error {
+			if id != "native-1" {
+				t.Fatalf("reload native id = %q", id)
+			}
+			close(started)
+			<-ctx.Done()
+
+			return ctx.Err()
+		}
+		session := testSession(NewAgent(), client)
+		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
+
+		result := make(chan acp.PromptResponse, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "reload-cancel", "reply"))
+			result <- resp
+			errCh <- err
+		}()
+		<-started
+		if err := session.cancelRouted(turnRouteMeta("reload-cancel")); err != nil {
+			t.Fatalf("cancelRouted: %v", err)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("cancelled Prompt error = %v", err)
+		}
+		if resp := <-result; resp.StopReason != acp.StopReasonCancelled {
+			t.Fatalf("cancelled Prompt response = %#v", resp)
+		}
+
+		client.mu.Lock()
+		client.reloadFunc = nil
+		client.mu.Unlock()
+		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-retry", "reply")); err != nil {
+			t.Fatalf("retry Prompt: %v", err)
+		}
+		client.mu.Lock()
+		reloads := client.reloadCalls
+		client.mu.Unlock()
+		if reloads != 2 {
+			t.Fatalf("reload calls = %d, want cancelled attempt plus retry", reloads)
+		}
+	})
+
+	t.Run("indeterminate reload failure poisons the session", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.reloadErr = errors.New("reload unavailable")
+		session := testSession(NewAgent(), client)
+		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
+
+		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-fail", "reply"))
+		if err == nil || !strings.Contains(err.Error(), "hermes_mcp_reload_failed") || !strings.Contains(err.Error(), "reload unavailable") {
+			t.Fatalf("reload failure = %v", err)
+		}
+		_, nextErr := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-after-fail", "reply"))
+		if nextErr == nil || !strings.Contains(nextErr.Error(), "session_poisoned") {
+			t.Fatalf("post-reload-failure Prompt = %v", nextErr)
+		}
+	})
+}
+
 func TestPromptSuccessCancelAndErrors(t *testing.T) {
 	ctx := context.Background()
 	t.Run("success through agent", func(t *testing.T) {

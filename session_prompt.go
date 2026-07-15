@@ -101,6 +101,14 @@ func mapTurnFailure(err error) error {
 // reconcileConnected drives the reconnect reconciliation for a turn: pending
 // permissions first, then pending questions.
 func (s *session) reconcileConnected(ctx context.Context) error {
+	if err := s.reloadMCPForAuthorizedTurn(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return errPromptCancelled
+		}
+
+		return err
+	}
+
 	if err := s.reconcilePermissions(ctx); err != nil {
 		return err
 	}

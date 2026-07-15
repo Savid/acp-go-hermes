@@ -108,6 +108,7 @@ type Server interface {
 	GetSession(context.Context, string) (Session, error)
 	ListSessions(context.Context, string) ([]Session, error)
 	DeleteSession(context.Context, string) error
+	ReloadMCP(context.Context, string) error
 	SendMessage(context.Context, string, MessageRequest) (NativeMessage, error)
 	Messages(context.Context, string) ([]NativeMessage, error)
 	Abort(context.Context, string) error
@@ -984,6 +985,35 @@ func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 	s.forgetGatewaySession(id)
 
 	return err
+}
+
+// ReloadMCP forces Hermes to reconnect every configured MCP server and rebuild
+// the selected session's cached tool surface. Hermes discovers MCP tools while
+// the native process starts, which is too early for hosts that arm an
+// authorization-scoped MCP endpoint only after session/new has returned.
+func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
+	live, err := s.ensureLiveGatewaySession(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		Status string `json:"status"`
+	}
+
+	err = s.gatewayClient().Call(ctx, "reload.mcp", map[string]any{
+		keySessionIDSnake: live,
+		"confirm":         true,
+	}, &result)
+	if err != nil {
+		return err
+	}
+
+	if result.Status != "reloaded" {
+		return fmt.Errorf("hermes reload.mcp returned status %q", result.Status)
+	}
+
+	return nil
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {

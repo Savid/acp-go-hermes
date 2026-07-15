@@ -4,15 +4,132 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
 )
+
+type authorizedMCPProbe struct {
+	mu      sync.Mutex
+	armed   bool
+	lists   [][]string
+	execute []map[string]any
+}
+
+func (p *authorizedMCPProbe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	var request struct {
+		JSONRPC string         `json:"jsonrpc"`
+		ID      any            `json:"id"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	if request.ID == nil {
+		w.WriteHeader(http.StatusAccepted)
+
+		return
+	}
+
+	result := map[string]any{}
+	switch request.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "authorized-probe", "version": "1.0.0"},
+		}
+	case "ping":
+	case "tools/list":
+		p.mu.Lock()
+		armed := p.armed
+		names := []string{"runtime_ready"}
+		if armed {
+			names = []string{"runtime_ready", "execute", "search"}
+		}
+		p.lists = append(p.lists, append([]string(nil), names...))
+		p.mu.Unlock()
+
+		tools := make([]map[string]any, 0, len(names))
+		for _, name := range names {
+			tools = append(tools, map[string]any{
+				"name":        name,
+				"description": "Deterministic authorization probe " + name,
+				"inputSchema": map[string]any{"type": "object", "additionalProperties": true},
+			})
+		}
+		result = map[string]any{"tools": tools}
+	case "tools/call":
+		name, _ := request.Params["name"].(string)
+		arguments, _ := request.Params["arguments"].(map[string]any)
+		p.mu.Lock()
+		armed := p.armed
+		if name == "execute" && armed {
+			p.execute = append(p.execute, arguments)
+		}
+		p.mu.Unlock()
+		if name != "execute" || !armed {
+			result = map[string]any{"isError": true, "content": []map[string]any{{"type": "text", "text": "not authorized"}}}
+		} else {
+			result = map[string]any{"content": []map[string]any{{"type": "text", "text": "AUTHORIZED_EXECUTE_OK"}}}
+		}
+	default:
+		writeMCPResponse(w, request.ID, nil, fmt.Sprintf("unsupported method %s", request.Method))
+
+		return
+	}
+
+	writeMCPResponse(w, request.ID, result, "")
+}
+
+func writeMCPResponse(w http.ResponseWriter, id any, result any, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]any{"jsonrpc": "2.0", "id": id}
+	if message != "" {
+		response["error"] = map[string]any{"code": -32601, "message": message}
+	} else {
+		response["result"] = result
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (p *authorizedMCPProbe) arm() {
+	p.mu.Lock()
+	p.armed = true
+	p.mu.Unlock()
+}
+
+func (p *authorizedMCPProbe) snapshot() ([][]string, []map[string]any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	lists := make([][]string, len(p.lists))
+	for index := range p.lists {
+		lists[index] = append([]string(nil), p.lists[index]...)
+	}
+
+	return lists, append([]map[string]any(nil), p.execute...)
+}
 
 func TestHermesACPAgentLiveCompletionText(t *testing.T) {
 	requireRunLiveTokens(t)
@@ -44,6 +161,73 @@ func TestHermesACPAgentLiveCompletionText(t *testing.T) {
 	if got := client.agentText(); !strings.Contains(got, sentinel) {
 		t.Fatalf("agent text = %q, want sentinel %q\nstderr:\n%s", got, sentinel, agent.stderrString())
 	}
+}
+
+func TestHermesACPAgentLiveAuthorizedMCPReload(t *testing.T) {
+	requireRunLiveTokens(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	probe := &authorizedMCPProbe{}
+	mcpServer := httptest.NewServer(probe)
+	defer mcpServer.Close()
+
+	args := []string{}
+	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
+		args = append(args, "-model", model)
+	}
+	agent := startLiveAgent(t, ctx, t.TempDir(), args...)
+	defer agent.close()
+
+	client := newRecordingClient()
+	conn := acp.NewClientSideConnection(client, agent.stdin, agent.stdout)
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(
+		t.TempDir(),
+		hermesacp.WithSessionMCPServers(hermesacp.HTTPMCPServer("wagie", mcpServer.URL, nil)),
+	))
+	if err != nil {
+		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+
+	listsBeforeArm, _ := probe.snapshot()
+	if len(listsBeforeArm) == 0 || len(listsBeforeArm[0]) != 1 || listsBeforeArm[0][0] != "runtime_ready" {
+		t.Fatalf("provisional MCP discovery = %#v, want runtime_ready only\nstderr:\n%s", listsBeforeArm, agent.stderrString())
+	}
+	probe.arm()
+
+	const sentinel = "HERMES_AUTHORIZED_MCP_RELOAD_OK"
+	prompt := "Call mcp__wagie__execute exactly once with the JSON argument {\"probe\":\"authorized\"}. After its result, reply with exactly " + sentinel + "."
+	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-authorized-mcp", prompt)); err != nil {
+		t.Fatalf("prompt: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+
+	lists, execute := probe.snapshot()
+	if len(lists) < 2 || !containsExactStrings(lists[len(lists)-1], "runtime_ready", "execute", "search") {
+		t.Fatalf("authorized MCP discovery = %#v, want execute/search after reload\nstderr:\n%s", lists, agent.stderrString())
+	}
+	if len(execute) != 1 || execute[0]["probe"] != "authorized" {
+		t.Fatalf("execute calls = %#v, want exact authorized call\nstderr:\n%s", execute, agent.stderrString())
+	}
+	if got := client.agentText(); !strings.Contains(got, sentinel) {
+		t.Fatalf("agent text = %q, want sentinel %q\nstderr:\n%s", got, sentinel, agent.stderrString())
+	}
+}
+
+func containsExactStrings(got []string, want ...string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func TestHermesACPAgentBinarySessionLifecycle(t *testing.T) {

@@ -56,8 +56,50 @@ type session struct {
 	failedStreamEpochs  map[uint64]struct{}
 	failedMessageIDs    map[string]struct{}
 	suppressNextBacklog bool
+	mcpReloadComplete   bool
 	poisonCause         string
 	closed              bool
+}
+
+// reloadMCPForAuthorizedTurn closes the gap between native process startup and
+// turn-scoped MCP authorization. The descriptor is stable across both phases,
+// but an HTTP MCP server can intentionally expose only runtime_ready until the
+// host arms the first turn. Hermes caches its startup discovery, so force one
+// bounded native reload after the authorized Prompt has begun and before the
+// model sees its tool surface.
+func (s *session) reloadMCPForAuthorizedTurn(ctx context.Context) error {
+	s.mu.Lock()
+	if s.mcpReloadComplete || len(s.mcpServers) == 0 {
+		s.mcpReloadComplete = true
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	client := s.client
+	nativeID := s.idmap.NativeSessionID
+	s.mu.Unlock()
+
+	reloadCtx, cancel := context.WithTimeout(ctx, mcpReloadTimeout)
+	err := client.ReloadMCP(reloadCtx, nativeID)
+
+	cancel()
+
+	if err == nil {
+		s.mu.Lock()
+		s.mcpReloadComplete = true
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	if errors.Is(err, context.Canceled) {
+		// No native reload remains in flight after Call observes the turn
+		// cancellation. Let a later authorized turn make the one real attempt.
+		return err
+	}
+
+	return s.poisonWithError(ctx, "hermes_mcp_reload_failed", err.Error())
 }
 
 type sessionSnapshot struct {

@@ -48,6 +48,7 @@ type fakeGatewayServer struct {
 	resumeNoLive        bool
 	resumeNoKey         bool
 	resumeKey           string
+	reloadStatus        string
 	activeNoID          bool
 	activeNoKey         bool
 }
@@ -268,6 +269,14 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			return
 		}
 		s.writeResult(ctx, conn, id, map[string]any{})
+	case "reload.mcp":
+		s.mu.Lock()
+		status := s.reloadStatus
+		s.mu.Unlock()
+		if status == "" {
+			status = "reloaded"
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"status": status})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		s.writeResult(ctx, conn, id, map[string]any{})
@@ -600,6 +609,15 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if got, err3 := server.GetSession(ctx, "restored"); err3 != nil || got.ID != "restored" {
 		t.Fatalf("GetSession resume = %#v err=%v", got, err3)
 	}
+	if err3 := server.ReloadMCP(ctx, "restored"); err3 != nil {
+		t.Fatalf("ReloadMCP: %v", err3)
+	}
+	fake.mu.Lock()
+	reloadCall := fake.calls[len(fake.calls)-1]
+	fake.mu.Unlock()
+	if reloadCall.Method != "reload.mcp" || reloadCall.Params["session_id"] != "live-restored" || reloadCall.Params["confirm"] != true {
+		t.Fatalf("reload.mcp call = %#v", reloadCall)
+	}
 	list, err := server.ListSessions(ctx, "/repo")
 	if err != nil || len(list) != 1 || list[0].ID != "stored-1" {
 		t.Fatalf("ListSessions = %#v err=%v", list, err)
@@ -624,6 +642,28 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	}
 
 	testGatewayServerMessageForkAndClose(ctx, t, server, fake)
+}
+
+func TestHermesGatewayReloadMCPFailures(t *testing.T) {
+	t.Run("native rpc failure", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setFail("reload.mcp")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "reload.mcp failed") {
+			t.Fatalf("ReloadMCP RPC error = %v", err)
+		}
+	})
+
+	t.Run("unexpected status", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.mu.Lock()
+		fake.reloadStatus = "confirm_required"
+		fake.mu.Unlock()
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "confirm_required") {
+			t.Fatalf("ReloadMCP status error = %v", err)
+		}
+	})
 }
 
 func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {

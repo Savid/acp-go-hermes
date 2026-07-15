@@ -50,6 +50,9 @@ type fakeHermesClient struct {
 	questionsErr   error
 	replyErr       error
 	closeErr       error
+	reloadErr      error
+	reloadCalls    int
+	reloadFunc     func(context.Context, string) error
 }
 
 type fakePermissionReply struct {
@@ -110,6 +113,18 @@ func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
 	c.mu.Unlock()
 
 	return c.deleteErr
+}
+
+func (c *fakeHermesClient) ReloadMCP(ctx context.Context, id string) error {
+	c.mu.Lock()
+	c.reloadCalls++
+	reload := c.reloadFunc
+	c.mu.Unlock()
+	if reload != nil {
+		return reload(ctx, id)
+	}
+
+	return c.reloadErr
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {

@@ -29,6 +29,16 @@ adapter's managed `mcp_servers` block wins on deep-merge while the seed supplies
 the `model` block and everything else — see
 [Models and config](/docs/features/models-config).
 
+Hermes snapshots MCP tools while its native process starts. Hosts can keep an
+HTTP MCP endpoint disarmed during `session/new` and arm it only for an
+authorized turn, so the adapter forces one native `reload.mcp` before the first
+prompt reaches the model. The reload is scoped to the live native session and
+bounded at two minutes. Cancellation before it completes leaves the reload
+eligible for the next authorized turn; any other indeterminate reload failure
+poisons the session instead of running with a stale tool surface. A process
+created by `session/load` or `session/resume` performs the same one-time reload
+before its first continuation.
+
 HTTP header values are never written literally into `config.yaml`. The adapter
 generates a distinct `MCP_HEADER_<server-index>_<header-index>` environment
 reference under the adapter namespace for every header
