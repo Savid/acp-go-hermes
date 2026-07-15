@@ -39,8 +39,11 @@ snapshot after each completed turn:
 - `state-db`
 
 The `state-db` archive contains `state.db`, `state.db-wal`, and `state.db-shm`
-when present. Archive entries are `tar+zstd+base64` and are restored into a fresh
-per-session `HERMES_HOME`.
+when present. Its compressed tar bytes are split into ordered 256 KiB chunks;
+each `tar+zstd+base64` entry carries a zero-based sequence, a final marker, and
+the full-archive SHA-256. Restore requires a contiguous sequence, exactly one
+terminal chunk, matching size/checksum metadata, and then reassembles the
+archive into a fresh per-session `HERMES_HOME`.
 
 The `idmap` subpath records the ACP session ID, durable Hermes session key, and
 fork lineage. Live gateway session IDs and auth tokens are not persisted.
@@ -50,6 +53,12 @@ fork lineage. Live gateway session IDs and auth tokens are not persisted.
 Restore after native deletion hydrates `state-db` into a fresh home, calls native
 `session.resume`, and — for `session/load` — replays `session.history` to the ACP
 client.
+
+`session/close` captures its final eligible snapshot before stopping the native
+client, because managed client shutdown removes the isolated XDG root. Close
+still skips snapshotting while a turn, permission, elicitation, or generation
+is pending, and it always proceeds with native teardown even if the snapshot
+fails.
 
 <Note>
 Snapshots exclude credential-bearing files and scrub credential tables from the

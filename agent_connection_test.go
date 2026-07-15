@@ -124,8 +124,18 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	}
 	closedConn := &localAgentConnection{agent: closedAgent}
 	closedConn.initialized.Store(true)
-	if _, reqErr := closedConn.handle(ctx, acp.AgentMethodSessionNew, mustJSON(t, NewSessionRequest(t.TempDir()))); reqErr == nil {
-		t.Fatal("closed agent new-session error was not surfaced")
+	for _, request := range []struct {
+		method string
+		params json.RawMessage
+	}{
+		{method: acp.AgentMethodSessionNew, params: mustJSON(t, NewSessionRequest(t.TempDir()))},
+		{method: acp.AgentMethodSessionPrompt, params: json.RawMessage(`{`)},
+		{method: "missing/method", params: json.RawMessage(`{}`)},
+		{method: "_missing/method", params: json.RawMessage(`{`)},
+	} {
+		if _, reqErr := closedConn.handle(ctx, request.method, request.params); reqErr == nil || reqErr.Code != -32600 {
+			t.Fatalf("closed dispatch %q reqErr = %#v, want -32600", request.method, reqErr)
+		}
 	}
 	if _, reqErr := conn.handle(ctx, ForkSessionMethod, json.RawMessage(`{`)); reqErr == nil {
 		t.Fatal("malformed extension fork unexpectedly succeeded")
@@ -195,6 +205,14 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 	if got := requestError(errors.New("plain")); got == nil || got.Code != -32603 {
 		t.Fatalf("requestError plain = %#v", got)
 	}
+	lifecycle := localLifecycleResponse[acp.CloseSessionRequest, *acp.CloseSessionRequest, acp.CloseSessionResponse](
+		func(*Agent, context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+			return acp.CloseSessionResponse{}, errors.New("close failed")
+		},
+	)
+	if _, lifecycleErr := lifecycle(t.Context(), NewAgent(), json.RawMessage(`{"sessionId":"s"}`)); lifecycleErr == nil {
+		t.Fatal("local lifecycle response ignored agent error")
+	}
 	requestID := "request"
 	urlParams, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
@@ -206,6 +224,11 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 	}, elicitationScope{SessionID: "s", TurnNonce: "turn-1", RequestID: &requestID})
 	if err != nil || !strings.Contains(string(urlParams), `"acp-go.dev/route":{"requestId":"request","sessionId":"s","turnNonce":"turn-1","version":1}`) {
 		t.Fatalf("url scoped elicitation = %s err=%v", urlParams, err)
+	}
+	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
+		Form: &acp.UnstableCreateElicitationForm{Meta: map[string]any{routeMetaKey: map[string]any{}}},
+	}, elicitationScope{SessionID: "s", TurnNonce: "turn-1"}); err == nil {
+		t.Fatal("scoped elicitation accepted reserved route metadata")
 	}
 	if selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf8}) != acp.PositionEncodingKindUtf8 {
 		t.Fatal("utf8 position encoding not selected")

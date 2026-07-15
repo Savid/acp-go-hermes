@@ -1467,12 +1467,12 @@ func TestPromptImageParts(t *testing.T) {
 		t.Fatalf("image data part = %#v", imageData[0])
 	}
 
-	imageURI := "file:///tmp/pic.png"
+	imageURI := "data:image/png;base64,AA=="
 	imageURL, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &imageURI}}})
 	if err != nil {
 		t.Fatalf("image uri prompt: %v", err)
 	}
-	if len(imageURL) != 1 || imageURL[0]["mime"] != defaultMimeType || imageURL[0]["url"] != imageURI || imageURL[0]["filename"] != "pic.png" {
+	if len(imageURL) != 1 || imageURL[0]["mime"] != defaultMimeType || imageURL[0]["url"] != imageURI {
 		t.Fatalf("image uri part = %#v", imageURL[0])
 	}
 
@@ -1480,16 +1480,9 @@ func TestPromptImageParts(t *testing.T) {
 		t.Fatal("image without data or uri accepted")
 	}
 
-	invalidURI := "%"
-	imageInvalid, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &invalidURI}}})
-	if err != nil || imageInvalid[0]["filename"] != nil || imageInvalid[0]["mime"] != defaultMimeType || imageInvalid[0]["url"] != invalidURI {
-		t.Fatalf("invalid uri image part = %#v err=%v", imageInvalid, err)
-	}
-
-	rootURI := "https://example.com"
-	imageRoot, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &rootURI}}})
-	if err != nil || imageRoot[0]["filename"] != nil || imageRoot[0]["url"] != rootURI {
-		t.Fatalf("root uri image part = %#v err=%v", imageRoot, err)
+	remoteURI := "https://example.com/pic.png"
+	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &remoteURI}}}); err == nil {
+		t.Fatal("non-embedded image URI accepted")
 	}
 }
 
@@ -1503,12 +1496,16 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 		{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: "AA==", Uri: "file:///tmp/blob"},
 		}}},
+		{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
+			BlobResourceContents: &acp.BlobResourceContents{Blob: "AA==", MimeType: acp.Ptr("image/png"), Uri: "file:///tmp/image"},
+		}}},
 	})
 	if err != nil {
 		t.Fatalf("promptToHermesParts: %v", err)
 	}
-	if len(parts) != 4 || parts[0]["text"] != "hello" || parts[1]["text"] != "file:///tmp/a" ||
-		parts[2]["text"] != "embedded" || parts[3]["text"] != "file:///tmp/blob" {
+	if len(parts) != 5 || parts[0]["text"] != "hello" || parts[1]["text"] != "file:///tmp/a" ||
+		parts[2]["text"] != "embedded" || parts[3]["text"] != "file:///tmp/blob" ||
+		parts[4]["type"] != "file" || parts[4]["url"] != "data:image/png;base64,AA==" {
 		t.Fatalf("parts = %#v", parts)
 	}
 	_, emptyErr := promptToHermesParts(nil)
@@ -2175,8 +2172,8 @@ func testForeignEventAndPartHelperBranches(t *testing.T, ctx context.Context, se
 		t.Fatal("empty tokens produced usage")
 	}
 	var emptyResource acp.EmbeddedResourceResource
-	if got := embeddedResourceText(emptyResource); got != "" {
-		t.Fatalf("empty embeddedResourceText = %q", got)
+	if part, err := embeddedResourceHermesPart(emptyResource); err == nil || part != nil {
+		t.Fatalf("empty embeddedResourceHermesPart = %#v err=%v", part, err)
 	}
 	if updates := partUpdates("assistant", nativehermes.Part{Type: "text"}); updates != nil {
 		t.Fatalf("empty text updates = %#v", updates)

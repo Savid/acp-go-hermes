@@ -413,10 +413,12 @@ func promptToHermesParts(blocks []acp.ContentBlock) ([]map[string]any, error) {
 		case block.ResourceLink != nil:
 			parts = append(parts, map[string]any{keyType: valText, valText: block.ResourceLink.Uri})
 		case block.Resource != nil:
-			text := embeddedResourceText(block.Resource.Resource)
-			if text != "" {
-				parts = append(parts, map[string]any{keyType: valText, valText: text})
+			part, err := embeddedResourceHermesPart(block.Resource.Resource)
+			if err != nil {
+				return nil, err
 			}
+
+			parts = append(parts, part)
 		case block.Image != nil:
 			part, err := imageHermesPart(block.Image)
 			if err != nil {
@@ -450,10 +452,10 @@ func imageHermesPart(image *acp.ContentBlockImage) (map[string]any, error) {
 	switch {
 	case image.Data != "":
 		part[valURL] = "data:" + mimeType + ";base64," + image.Data
-	case image.Uri != nil && *image.Uri != "":
+	case image.Uri != nil && strings.HasPrefix(*image.Uri, "data:image/"):
 		part[valURL] = *image.Uri
 	default:
-		return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.image", jsonFieldError: "missing image data or uri"})
+		return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.image", jsonFieldError: "embedded image data is required"})
 	}
 
 	if image.Uri != nil && *image.Uri != "" {
@@ -479,21 +481,39 @@ func filenameFromURI(uri string) string {
 	return name
 }
 
-func embeddedResourceText(resource acp.EmbeddedResourceResource) string {
-	data, _ := json.Marshal(resource)
+func embeddedResourceHermesPart(resource acp.EmbeddedResourceResource) (map[string]any, error) {
+	if resource.TextResourceContents != nil {
+		text := resource.TextResourceContents.Text
+		if text == "" {
+			text = resource.TextResourceContents.Uri
+		}
 
-	var raw map[string]any
+		if text == "" {
+			return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.resource", jsonFieldError: "embedded resource is empty"})
+		}
 
-	_ = json.Unmarshal(data, &raw)
-	if text, _ := raw[valText].(string); text != "" {
-		return text
+		return map[string]any{keyType: valText, valText: text}, nil
 	}
 
-	if uri, _ := raw["uri"].(string); uri != "" {
-		return uri
+	if resource.BlobResourceContents != nil {
+		mimeType := ""
+		if resource.BlobResourceContents.MimeType != nil {
+			mimeType = *resource.BlobResourceContents.MimeType
+		}
+
+		if strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+			return imageHermesPart(&acp.ContentBlockImage{
+				Data:     resource.BlobResourceContents.Blob,
+				MimeType: mimeType,
+			})
+		}
+
+		if resource.BlobResourceContents.Uri != "" {
+			return map[string]any{keyType: valText, valText: resource.BlobResourceContents.Uri}, nil
+		}
 	}
 
-	return ""
+	return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.resource", jsonFieldError: valUnsupported})
 }
 
 func (s *session) replayMessages(ctx context.Context) error {

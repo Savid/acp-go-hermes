@@ -105,6 +105,8 @@ materialized.
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session
   metadata.
+- Native image forwarding through Hermes `image.attach_bytes`, including
+  image-MIME embedded resource blobs.
 - Command, file, and generic permission prompts, plus MCP elicitation bridging.
 - MCP stdio and streamable HTTP server configuration through the session
   request builders.
@@ -113,7 +115,7 @@ materialized.
 - Forking through `_hermes/session/fork`, and optional raw gateway events
   through `_hermes/rawEvent` after per-session opt-in.
 - Durable mirroring through a host-provided `SessionStore` in the
-  `hermes-state-db-v1` format.
+  `hermes-state-db-v1` format with sequenced tar+zstd+base64 archive chunks.
 - OpenTelemetry telemetry through injected tracer, meter, and propagator
   providers, recording no prompt or tool secrets by default.
 

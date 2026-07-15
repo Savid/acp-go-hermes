@@ -42,3 +42,7 @@ idempotent.
 
 Durable rehydration depends on a configured store — see
 [Session store](/docs/features/session-store).
+
+On `session/close`, an idle session is snapshotted synchronously before Hermes
+shutdown removes its isolated XDG root. Sessions with a turn, permission,
+elicitation, or generation still pending are closed without a fresh snapshot.

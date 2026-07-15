@@ -270,8 +270,8 @@ func TestInMemoryStoreReplaceValidation(t *testing.T) {
 			}
 		})
 	}
-	if err := store.Replace(ctx, SessionKey{}, nil); err == nil {
-		t.Fatal("replace accepted missing main session id")
+	if err := store.Replace(ctx, SessionKey{}, nil); err == nil || err.Error() != "session id is required" {
+		t.Fatalf("replace empty session id error = %v", err)
 	}
 	if err := store.Replace(ctx, SessionKey{SessionID: "s1", Subpath: "sub"}, nil); err == nil {
 		t.Fatal("replace accepted non-main subpath")

@@ -24,7 +24,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const maxHydrateFileBytes int64 = 128 * 1024 * 1024
+const (
+	maxHydrateFileBytes int64 = 128 * 1024 * 1024
+	archiveChunkBytes         = 256 * 1024
+)
 
 // sessionStoreWriteTimeout bounds session-store writes (snapshot Replace
 // commits and session/delete tombstones). SessionStoreLoadTimeout bounds
@@ -205,21 +208,14 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 			Bytes:   len(archive),
 		}
 
-		entry, err := stateJSONMarshal(archiveEntry{
-			Format:   SessionStoreFormat,
-			Encoding: archiveEncodingTarZstdBase64,
-			Sequence: 0,
-			Final:    true,
-			SHA256:   sha,
-			Data:     base64.StdEncoding.EncodeToString(archive),
-		})
+		entries, err := encodeArchiveEntries(archive, sha)
 		if err != nil {
 			return err
 		}
 
 		replacements = append(replacements, SessionStoreReplacement{
 			Key:     SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
-			Entries: []SessionStoreEntry{entry},
+			Entries: entries,
 		})
 	}
 
@@ -287,23 +283,9 @@ func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID st
 			return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("store missing archive %s", stateDBSubpath)
 		}
 
-		var archive archiveEntry
-		if archiveErr := json.Unmarshal(entries[len(entries)-1], &archive); archiveErr != nil {
-			return idmapRecord{}, stateSnapshot{}, false, archiveErr
-		}
-
-		if archive.Format != SessionStoreFormat || archive.Encoding != archiveEncodingTarZstdBase64 || !archive.Final {
-			return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("invalid archive entry %s", stateDBSubpath)
-		}
-
-		data, err := base64.StdEncoding.DecodeString(archive.Data)
+		data, err := decodeArchiveEntries(entries, snapshot.Archives["state-db"])
 		if err != nil {
 			return idmapRecord{}, stateSnapshot{}, false, err
-		}
-
-		sum := sha256.Sum256(data)
-		if archive.SHA256 != "" && archive.SHA256 != hex.EncodeToString(sum[:]) {
-			return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("archive checksum mismatch %s", stateDBSubpath)
 		}
 
 		if err := decodeXDGArchive(data, xdg.Root); err != nil {
@@ -314,6 +296,76 @@ func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID st
 	}
 
 	return idmap, snapshot, true, nil
+}
+
+func encodeArchiveEntries(archive []byte, sha string) ([]SessionStoreEntry, error) {
+	entries := make([]SessionStoreEntry, 0, (len(archive)+archiveChunkBytes-1)/archiveChunkBytes)
+	for start, sequence := 0, 0; start < len(archive); start, sequence = start+archiveChunkBytes, sequence+1 {
+		end := min(start+archiveChunkBytes, len(archive))
+
+		entry, err := stateJSONMarshal(archiveEntry{
+			Format:   SessionStoreFormat,
+			Encoding: archiveEncodingTarZstdBase64,
+			Sequence: sequence,
+			Final:    end == len(archive),
+			SHA256:   sha,
+			Data:     base64.StdEncoding.EncodeToString(archive[start:end]),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+func decodeArchiveEntries(entries []SessionStoreEntry, info archiveInfo) ([]byte, error) {
+	if len(entries) == 0 || info.SHA256 == "" || info.Bytes <= 0 || int64(info.Bytes) > maxHydrateFileBytes {
+		return nil, fmt.Errorf("invalid archive entry %s", stateDBSubpath)
+	}
+
+	var archive bytes.Buffer
+
+	for sequence, raw := range entries {
+		var entry archiveEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			return nil, err
+		}
+
+		final := sequence == len(entries)-1
+		if entry.Format != SessionStoreFormat ||
+			entry.Encoding != archiveEncodingTarZstdBase64 ||
+			entry.Sequence != sequence ||
+			entry.Final != final ||
+			entry.SHA256 != info.SHA256 {
+			return nil, fmt.Errorf("invalid archive entry %s sequence %d", stateDBSubpath, sequence)
+		}
+
+		chunk, err := base64.StdEncoding.DecodeString(entry.Data)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(chunk) > archiveChunkBytes || (!final && len(chunk) != archiveChunkBytes) {
+			return nil, fmt.Errorf("invalid archive chunk size %s sequence %d", stateDBSubpath, sequence)
+		}
+
+		_, _ = archive.Write(chunk)
+	}
+
+	data := archive.Bytes()
+	if info.Bytes != len(data) {
+		return nil, fmt.Errorf("archive size mismatch %s", stateDBSubpath)
+	}
+
+	sum := sha256.Sum256(data)
+	if info.SHA256 != hex.EncodeToString(sum[:]) {
+		return nil, fmt.Errorf("archive checksum mismatch %s", stateDBSubpath)
+	}
+
+	return data, nil
 }
 
 func (s *session) snapshotBlockedReason() string {

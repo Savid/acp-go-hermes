@@ -131,6 +131,104 @@ func TestDecodeArchiveRoundTripAndHelpers(t *testing.T) {
 	}
 }
 
+func TestArchiveEntriesChunkAndReassembleDeterministically(t *testing.T) {
+	data := make([]byte, archiveChunkBytes*2+17)
+	for index := range data {
+		data[index] = byte(index % 251)
+	}
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+
+	entries, err := encodeArchiveEntries(data, sha)
+	if err != nil {
+		t.Fatalf("encodeArchiveEntries: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("archive chunks = %d, want 3", len(entries))
+	}
+	for index, raw := range entries {
+		var entry archiveEntry
+		if decodeErr := json.Unmarshal(raw, &entry); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if entry.Sequence != index || entry.Final != (index == len(entries)-1) || entry.SHA256 != sha {
+			t.Fatalf("chunk %d metadata = %#v", index, entry)
+		}
+	}
+
+	decoded, err := decodeArchiveEntries(entries, archiveInfo{SHA256: sha, Bytes: len(data)})
+	if err != nil || !bytes.Equal(decoded, data) {
+		t.Fatalf("decodeArchiveEntries bytes=%d err=%v", len(decoded), err)
+	}
+
+	if _, err := decodeArchiveEntries([]SessionStoreEntry{entries[1], entries[0], entries[2]}, archiveInfo{SHA256: sha, Bytes: len(data)}); err == nil {
+		t.Fatal("decodeArchiveEntries accepted out-of-order chunks")
+	}
+	if _, err := decodeArchiveEntries(entries[:2], archiveInfo{SHA256: sha, Bytes: len(data)}); err == nil {
+		t.Fatal("decodeArchiveEntries accepted a missing final chunk")
+	}
+
+	assertArchiveEntryDecodeFailures(t)
+}
+
+func assertArchiveEntryDecodeFailures(t *testing.T) {
+	t.Helper()
+
+	data := []byte("archive")
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	validEntry := mustStateJSON(t, archiveEntry{
+		Format: SessionStoreFormat, Encoding: archiveEncodingTarZstdBase64, Final: true, SHA256: sha,
+		Data: base64.StdEncoding.EncodeToString(data),
+	})
+	wrongSHA := strings.Repeat("0", sha256.Size*2)
+	wrongChecksumEntry := mustStateJSON(t, archiveEntry{
+		Format: SessionStoreFormat, Encoding: archiveEncodingTarZstdBase64, Final: true, SHA256: wrongSHA,
+		Data: base64.StdEncoding.EncodeToString(data),
+	})
+
+	for name, test := range map[string]struct {
+		entries []SessionStoreEntry
+		info    archiveInfo
+	}{
+		"json": {
+			entries: []SessionStoreEntry{json.RawMessage(`{`)},
+			info:    archiveInfo{SHA256: sha, Bytes: 1},
+		},
+		"base64": {
+			entries: []SessionStoreEntry{mustStateJSON(t, archiveEntry{
+				Format: SessionStoreFormat, Encoding: archiveEncodingTarZstdBase64, Final: true, SHA256: sha, Data: "not-base64",
+			})},
+			info: archiveInfo{SHA256: sha, Bytes: 1},
+		},
+		"oversize metadata": {
+			entries: []SessionStoreEntry{validEntry},
+			info:    archiveInfo{SHA256: sha, Bytes: int(maxHydrateFileBytes + 1)},
+		},
+		"oversize chunk": {
+			entries: []SessionStoreEntry{mustStateJSON(t, archiveEntry{
+				Format: SessionStoreFormat, Encoding: archiveEncodingTarZstdBase64, Final: true, SHA256: sha,
+				Data: base64.StdEncoding.EncodeToString(make([]byte, archiveChunkBytes+1)),
+			})},
+			info: archiveInfo{SHA256: sha, Bytes: archiveChunkBytes + 1},
+		},
+		"size": {
+			entries: []SessionStoreEntry{validEntry},
+			info:    archiveInfo{SHA256: sha, Bytes: len(data) + 1},
+		},
+		"checksum": {
+			entries: []SessionStoreEntry{wrongChecksumEntry},
+			info:    archiveInfo{SHA256: wrongSHA, Bytes: len(data)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeArchiveEntries(test.entries, test.info); err == nil {
+				t.Fatalf("decodeArchiveEntries accepted %s fault", name)
+			}
+		})
+	}
+}
+
 func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -361,6 +459,13 @@ func TestHydrateStateDBArchiveFaults(t *testing.T) {
 				t.Fatalf("hydrate accepted state-db %s fault", name)
 			}
 		})
+	}
+
+	traversalArchive := testTarZstd(t, []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Size: 0}}, nil)
+	traversalSum := sha256.Sum256(traversalArchive)
+	traversalStore := validStateDBHydrateStore(t, ctx, traversalArchive, hex.EncodeToString(traversalSum[:]))
+	if _, _, _, err := hydrateStateFromStore(ctx, traversalStore, "s", xdg); err == nil {
+		t.Fatal("hydrate accepted a traversal archive after entry validation")
 	}
 }
 

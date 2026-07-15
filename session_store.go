@@ -131,7 +131,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	s.ensureLocked()
 
 	if main.SessionID == "" {
-		return fmt.Errorf("main session id is required")
+		return fmt.Errorf("session id is required")
 	}
 
 	if main.Subpath != SessionStoreMainSubpath {

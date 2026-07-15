@@ -328,6 +328,8 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 				"total_models":    1,
 			}},
 		})
+	case "image.attach_bytes":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"attached": true})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		if strings.HasPrefix(live, "__acp_go_hermes_missing_probe__") {

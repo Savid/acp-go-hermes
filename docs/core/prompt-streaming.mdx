@@ -12,10 +12,16 @@ from completion payloads becomes `usage_update`.
 
 The adapter advertises `promptCapabilities` with both embedded context and image
 support enabled, so a prompt may carry text, resource links, embedded resources,
-and image blocks. Text and resource content is forwarded as native text parts;
-an image block (inline base64 `data` or a `uri`) is converted to a native file
-part with its MIME type. A prompt with no usable parts is rejected with
-`invalid_params`.
+and image blocks. Text and resource content is forwarded as native text parts.
+Inline base64 image data and image-MIME embedded blob resources are uploaded
+through Hermes' native `image.attach_bytes` route immediately before
+`prompt.submit`; non-embedded image URLs are rejected rather than fetched by
+the adapter. A prompt with no usable parts is rejected with `invalid_params`.
+
+Hermes' authoritative `message.complete` text is reconciled with the prefix
+already emitted by `message.delta`. The adapter emits only a missing completion
+suffix, accepts a completion-only response, and suppresses duplicate or
+conflicting terminal text instead of replaying it to the ACP client.
 
 ## Turn failure contract
 

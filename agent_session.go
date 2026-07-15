@@ -464,15 +464,16 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	}
 
 	skipSnapshot := session.snapshotBlockedReason() != ""
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-	closeErr := session.Close(closeCtx)
-
-	closeCancel()
 
 	var snapshotErr error
 	if !skipSnapshot {
 		snapshotErr = session.snapshotToStore(context.WithoutCancel(ctx))
 	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr := session.Close(closeCtx)
+
+	closeCancel()
 
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)

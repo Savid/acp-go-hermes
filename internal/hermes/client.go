@@ -523,6 +523,29 @@ func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text st
 	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, nil)
 }
 
+// AttachImageBytes uploads one embedded image to the live session. Hermes
+// queues it for the immediately following prompt.submit call.
+func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, data string, filename string) error {
+	var result struct {
+		Attached bool `json:"attached"`
+	}
+
+	err := c.Call(ctx, "image.attach_bytes", map[string]any{
+		fieldSessionID:   liveSessionID,
+		"content_base64": data,
+		"filename":       filename,
+	}, &result)
+	if err != nil {
+		return err
+	}
+
+	if !result.Attached {
+		return fmt.Errorf("hermes image.attach_bytes did not attach image")
+	}
+
+	return nil
+}
+
 func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {
 	return c.Call(ctx, "session.interrupt", map[string]any{fieldSessionID: liveSessionID}, nil)
 }

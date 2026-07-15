@@ -40,6 +40,7 @@ const (
 	valStop             = "stop"
 	valText             = "text"
 	valReasoning        = "reasoning"
+	valFile             = "file"
 	valAlways           = "always"
 	valServe            = "serve"
 	valHermes           = "hermes"
@@ -1017,7 +1018,7 @@ func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {
-	return s.submitGatewayText(ctx, id, textFromHermesParts(req.Parts))
+	return s.submitGatewayParts(ctx, id, req.Parts)
 }
 
 func assistantMessageError(message NativeMessage) error {
@@ -1147,16 +1148,64 @@ func textFromHermesParts(parts []map[string]any) string {
 	return builder.String()
 }
 
-func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, text string) (NativeMessage, error) {
+type gatewayImageAttachment struct {
+	data     string
+	filename string
+}
+
+func imageAttachmentsFromHermesParts(parts []map[string]any) ([]gatewayImageAttachment, error) {
+	attachments := make([]gatewayImageAttachment, 0)
+
+	for _, part := range parts {
+		partType, _ := part["type"].(string)
+		if partType != valFile {
+			continue
+		}
+
+		dataURL, _ := part[valURL].(string)
+
+		_, encoded, found := strings.Cut(dataURL, ";base64,")
+		if !found || !strings.HasPrefix(dataURL, "data:image/") || encoded == "" {
+			return nil, fmt.Errorf("hermes image part requires embedded base64 data")
+		}
+
+		filename, _ := part["filename"].(string)
+		attachments = append(attachments, gatewayImageAttachment{data: encoded, filename: filename})
+	}
+
+	return attachments, nil
+}
+
+func (s *hermesServer) submitGatewayParts(ctx context.Context, stored string, parts []map[string]any) (NativeMessage, error) {
 	live, err := s.ensureLiveGatewaySession(ctx, stored)
 	if err != nil {
 		return NativeMessage{}, err
 	}
 
+	attachments, err := imageAttachmentsFromHermesParts(parts)
+	if err != nil {
+		return NativeMessage{}, err
+	}
+
+	return s.submitGatewayTextForLive(ctx, stored, live, textFromHermesParts(parts), attachments)
+}
+
+func (s *hermesServer) submitGatewayTextForLive(
+	ctx context.Context,
+	stored string,
+	live string,
+	text string,
+	attachments []gatewayImageAttachment,
+) (NativeMessage, error) {
 	s.beginGatewayTurn()
 	defer s.endGatewayTurn()
 
 	gw := s.gatewayClient()
+	for _, attachment := range attachments {
+		if err := gw.AttachImageBytes(ctx, live, attachment.data, attachment.filename); err != nil {
+			return NativeMessage{}, err
+		}
+	}
 
 	messageID := "hermes-" + live
 	if err := gw.SubmitPrompt(ctx, live, text); err != nil {

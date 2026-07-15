@@ -114,8 +114,31 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"uri":"file:///tmp/a","text":"body"}`), &resource); err != nil {
 		t.Fatal(err)
 	}
-	if got := embeddedResourceText(resource); got == "" {
-		t.Fatalf("embeddedResourceText = %q", got)
+	part, err := embeddedResourceHermesPart(resource)
+	if err != nil || part["text"] == "" {
+		t.Fatalf("embeddedResourceHermesPart = %#v err=%v", part, err)
+	}
+	var uriResource acp.EmbeddedResourceResource
+	if decodeErr := json.Unmarshal([]byte(`{"uri":"file:///tmp/fallback"}`), &uriResource); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if uriPart, uriErr := embeddedResourceHermesPart(uriResource); uriErr != nil || uriPart[valText] != "file:///tmp/fallback" {
+		t.Fatalf("URI resource fallback = %#v err=%v", uriPart, uriErr)
+	}
+	var emptyTextResource acp.EmbeddedResourceResource
+	if decodeErr := json.Unmarshal([]byte(`{"uri":"","text":""}`), &emptyTextResource); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if _, promptErr := promptToHermesParts([]acp.ContentBlock{acp.ResourceBlock(emptyTextResource)}); promptErr == nil {
+		t.Fatal("prompt mapping accepted an empty embedded resource")
+	}
+	imageURI := "file:///tmp/image.png"
+	imagePart, err := imageHermesPart(&acp.ContentBlockImage{Data: "AA==", MimeType: "image/png", Uri: &imageURI})
+	if err != nil || imagePart[keyFilename] != "image.png" {
+		t.Fatalf("image filename mapping = %#v err=%v", imagePart, err)
+	}
+	if filenameFromURI("%") != "" {
+		t.Fatal("malformed image URI produced a filename")
 	}
 	if update := usageUpdateFromTokens("m", nativehermes.Tokens{}, 0); update != nil {
 		t.Fatalf("empty usage update = %#v", update)

@@ -386,6 +386,39 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 	}
 }
 
+func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	xdg, createErr := nativehermes.CreateXDGDirs(root, "close-snapshot")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(xdg.Root, "state.db"), []byte("durable state"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	store := NewInMemorySessionStore()
+	client := newFakeHermesClient()
+	client.xdg = xdg
+	client.closeFunc = func(context.Context) error { return os.RemoveAll(xdg.Root) }
+	agent := NewAgent(WithSessionStore(store))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	if _, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); closeErr != nil {
+		t.Fatalf("CloseSession: %v", closeErr)
+	}
+	if _, statErr := os.Stat(xdg.Root); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("native close did not remove root: %v", statErr)
+	}
+	entries, err := store.Load(ctx, SessionKey{SessionID: string(session.id), Subpath: stateDBSubpath})
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("state DB was not captured before close: entries=%d err=%v", len(entries), err)
+	}
+}
+
 // TestSnapshotFencedAfterAcquireTurn parks a turn after acquireTurn but before
 // beginTurn and asserts no Replace happens (HW3 turn-in-flight snapshot fence).
 func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {

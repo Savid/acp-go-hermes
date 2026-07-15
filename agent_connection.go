@@ -115,6 +115,12 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 		}
 	}()
 
+	if err := c.agent.ensureOpen(); err != nil {
+		reqErr = requestError(err)
+
+		return nil, reqErr
+	}
+
 	if method != acp.AgentMethodInitialize && !c.initialized.Load() {
 		reqErr = acp.NewInvalidRequest(map[string]any{
 			jsonFieldMethod: method,

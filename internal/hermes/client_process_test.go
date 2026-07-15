@@ -126,6 +126,8 @@ func resultForMethod(method string, params map[string]any) any {
 		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
 	case "session.active_list":
 		return map[string]any{"sessions": []map[string]any{{"id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
+	case "image.attach_bytes":
+		return map[string]any{"attached": true}
 	case "model.options":
 		return map[string]any{
 			"model":    "anthropic/claude-sonnet-4",
@@ -311,6 +313,9 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	}
 	if err := client.SubmitPrompt(ctx, "live", "hello"); err != nil {
 		t.Fatalf("SubmitPrompt: %v", err)
+	}
+	if err := client.AttachImageBytes(ctx, "live", "AA==", "image.png"); err != nil {
+		t.Fatalf("AttachImageBytes: %v", err)
 	}
 	if err := client.Interrupt(ctx, "live"); err != nil {
 		t.Fatalf("Interrupt: %v", err)
@@ -697,6 +702,8 @@ func assertStartFaultModes(t *testing.T, ctx context.Context) {
 		{"probe-error:session.active_list", "session.active_list"},
 		{"probe-empty:session.active_list", "session.active_list schema drift"},
 		{"probe-empty:model.options", "model.options schema drift"},
+		{"probe-error:image.attach_bytes", "image.attach_bytes"},
+		{"probe-empty:image.attach_bytes", "image.attach_bytes did not attach image"},
 		{"probe-error:prompt.submit", "prompt.submit"},
 		{"probe-error:approval.respond", "approval.respond"},
 		{"probe-error:clarify.respond", "clarify.respond"},

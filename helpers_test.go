@@ -53,6 +53,7 @@ type fakeHermesClient struct {
 	reloadErr      error
 	reloadCalls    int
 	reloadFunc     func(context.Context, string) error
+	closeFunc      func(context.Context) error
 }
 
 type fakePermissionReply struct {
@@ -83,10 +84,14 @@ func newFakeHermesClient() *fakeHermesClient {
 	}
 }
 
-func (c *fakeHermesClient) Close(context.Context) error {
+func (c *fakeHermesClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closed = true
+	closeFunc := c.closeFunc
 	c.mu.Unlock()
+	if closeFunc != nil {
+		return closeFunc(ctx)
+	}
 
 	return c.closeErr
 }

@@ -187,6 +187,7 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+//nolint:gocyclo // The fake intentionally enumerates the complete native gateway method matrix.
 func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any) {
 	switch method {
 	case "session.create":
@@ -277,6 +278,8 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			status = "reloaded"
 		}
 		s.writeResult(ctx, conn, id, map[string]any{"status": status})
+	case "image.attach_bytes":
+		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		s.writeResult(ctx, conn, id, map[string]any{})
@@ -645,6 +648,15 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 }
 
 func TestHermesGatewayReloadMCPFailures(t *testing.T) {
+	t.Run("resume failure", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setFail("session.resume")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "session.resume failed") {
+			t.Fatalf("ReloadMCP resume error = %v", err)
+		}
+	})
+
 	t.Run("native rpc failure", func(t *testing.T) {
 		fake := newFakeGatewayServer(t)
 		fake.setFail("reload.mcp")
@@ -673,6 +685,7 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
+	assertGatewayImageMessage(ctx, t, server)
 	if got := [2]string{message.Parts[0].Text, message.Parts[0].StreamedText}; got != [2]string{"hello world", "hello world"} {
 		t.Fatalf("message and streamed text = %q", got)
 	}
@@ -729,13 +742,43 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 
 	methods := fake.callMethods()
 	for _, want := range []string{
-		"session.create", "session.resume", "session.active_list", "session.delete", "prompt.submit",
+		"session.create", "session.resume", "session.active_list", "session.delete", "prompt.submit", "image.attach_bytes",
 		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond",
 		"session.interrupt", "session.history", "session.branch", "model.options",
 	} {
 		if !containsString(methods, want) {
 			t.Fatalf("method %q not called; methods=%v", want, methods)
 		}
+	}
+}
+
+func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermesServer) {
+	t.Helper()
+
+	imageMessage, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{
+		{"type": "file", "url": "data:image/png;base64,AA==", "filename": "image.png"},
+	}})
+	if err != nil || imageMessage.Info.SessionID != "stored-1" {
+		t.Fatalf("image SendMessage = %#v err=%v", imageMessage, err)
+	}
+
+	if _, imageErr := imageAttachmentsFromHermesParts([]map[string]any{{"type": "file", "url": "https://example.test/image.png"}}); imageErr == nil {
+		t.Fatal("image parts accepted a non-embedded URL")
+	}
+	if _, imageErr := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
+		"type": "file", "url": "https://example.test/image.png",
+	}}}); imageErr == nil {
+		t.Fatal("SendMessage accepted a non-embedded image URL")
+	}
+
+	failing := newFakeGatewayServer(t)
+	failing.setFail("image.attach_bytes")
+	failingServer := newGatewayBackedHermesServer(t, failing, "")
+	failingServer.rememberGatewaySession("stored-1", "live-1")
+	if _, imageErr := failingServer.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
+		"type": "file", "url": "data:image/png;base64,AA==",
+	}}}); imageErr == nil {
+		t.Fatal("SendMessage ignored image.attach_bytes failure")
 	}
 }
 
@@ -2154,6 +2197,8 @@ func gatewayProcessResult(method string, params map[string]any) any {
 		return map[string]any{"count": 0, "messages": []any{}}
 	case "model.options":
 		return map[string]any{"model": "anthropic/claude-sonnet-4", "provider": "", "providers": []any{}}
+	case "image.attach_bytes":
+		return map[string]any{"attached": true}
 	default:
 		return map[string]any{}
 	}
