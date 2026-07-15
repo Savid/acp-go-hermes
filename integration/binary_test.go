@@ -29,7 +29,7 @@ func TestHermesACPAgentBinaryClosedInput(t *testing.T) {
 
 	cmd := agentCommand(ctx,
 		"-path", integrationHermesPath(t),
-		"-home", t.TempDir(),
+		"-scratch-dir", t.TempDir(),
 	)
 	cmd.Stdin = strings.NewReader("")
 

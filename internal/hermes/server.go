@@ -238,6 +238,13 @@ type Part struct {
 	Cost      float64         `json:"cost"`
 	Tokens    Tokens          `json:"tokens"`
 	Raw       json.RawMessage `json:"-"`
+
+	// StreamedText records the prefix already forwarded as message.delta
+	// events during the current turn. It is adapter-local state: the final
+	// NativeMessage still carries Hermes' authoritative complete text, while
+	// the ACP mapper can emit only a completion suffix (or nothing) instead of
+	// duplicating text the client already received.
+	StreamedText string `json:"-"`
 }
 
 func (p *Part) UnmarshalJSON(data []byte) error {
@@ -1168,6 +1175,12 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 				}
 
 				tokens := gatewayUsageTokens(event.Payload)
+				streamedText := textBuilder.String()
+				completeText := gatewayCompleteText(event.Payload)
+
+				if completeText == "" {
+					completeText = streamedText
+				}
 
 				return NativeMessage{
 					Info: NativeMessageInfo{
@@ -1178,11 +1191,12 @@ func (s *hermesServer) submitGatewayText(ctx context.Context, stored string, tex
 						Tokens:    tokens,
 					},
 					Parts: []Part{{
-						ID:        messageID + "-text",
-						SessionID: stored,
-						MessageID: messageID,
-						Type:      valText,
-						Text:      textBuilder.String(),
+						ID:           messageID + "-text",
+						SessionID:    stored,
+						MessageID:    messageID,
+						Type:         valText,
+						Text:         completeText,
+						StreamedText: streamedText,
 					}},
 				}, nil
 			}
@@ -1301,6 +1315,23 @@ func gatewayEventText(raw json.RawMessage) string {
 	}
 
 	return firstPayloadString(payload, valText, "delta", "content")
+}
+
+// gatewayCompleteText reads the authoritative final assistant text carried by
+// Hermes 0.18.x message.complete events. Complete payloads also contain status,
+// usage, and reasoning strings, so this intentionally reads only the direct
+// text/rendered fields instead of recursively accepting an unrelated string.
+func gatewayCompleteText(raw json.RawMessage) string {
+	var payload struct {
+		Text     string `json:"text"`
+		Rendered string `json:"rendered"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+
+	return firstNonEmpty(payload.Text, payload.Rendered)
 }
 
 func firstPayloadString(value any, keys ...string) string {

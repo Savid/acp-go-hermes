@@ -584,7 +584,8 @@ func partUpdates(role string, part nativehermes.Part) []acp.SessionUpdate {
 	messageID := part.MessageID
 	switch part.Type {
 	case valText:
-		if part.Text == "" {
+		text := unstreamedText(part.Text, part.StreamedText)
+		if text == "" {
 			return nil
 		}
 
@@ -592,14 +593,14 @@ func partUpdates(role string, part nativehermes.Part) []acp.SessionUpdate {
 			return []acp.SessionUpdate{{UserMessageChunk: &acp.SessionUpdateUserMessageChunk{
 				SessionUpdate: "user_message_chunk",
 				MessageId:     &messageID,
-				Content:       acp.TextBlock(part.Text),
+				Content:       acp.TextBlock(text),
 			}}}
 		}
 
 		return []acp.SessionUpdate{{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
 			SessionUpdate: "agent_message_chunk",
 			MessageId:     &messageID,
-			Content:       acp.TextBlock(part.Text),
+			Content:       acp.TextBlock(text),
 		}}}
 	case valReasoning:
 		if part.Text == "" {
@@ -616,6 +617,25 @@ func partUpdates(role string, part nativehermes.Part) []acp.SessionUpdate {
 	default:
 		return nil
 	}
+}
+
+func unstreamedText(complete string, streamed string) string {
+	if streamed == "" {
+		return complete
+	}
+
+	if complete == streamed {
+		return ""
+	}
+
+	if strings.HasPrefix(complete, streamed) {
+		return strings.TrimPrefix(complete, streamed)
+	}
+
+	// ACP text chunks append and cannot replace a previously streamed prefix.
+	// On an inconsistent native completion, preserve the already-delivered
+	// stream instead of appending a second, conflicting full response.
+	return ""
 }
 
 func toolPartUpdates(part nativehermes.Part) []acp.SessionUpdate {

@@ -567,7 +567,7 @@ func (s *session) markPart(part nativehermes.Part) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.seenParts[part.ID] == encoded {
+	if seen, ok := s.seenParts[part.ID]; ok && seen == encoded {
 		return false
 	}
 

@@ -18,5 +18,5 @@ can be omitted and are inferred from the transcript. Loading uses normal ACP
 `session/load`, and the prompt uses normal ACP `session/prompt`.
 
 Pass `-prompt "..."` to change the smoke-test turn, `-path` to point at a
-specific `hermes` CLI, and `-home` to set the parent root for isolated Hermes
-session state.
+specific `hermes` CLI, and `-scratch-dir` to set the parent root for isolated
+Hermes session state.

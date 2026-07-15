@@ -388,7 +388,7 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":""}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"delta":"hello "}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`["world"]`)},
-		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1}}`)},
+		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1}}`)},
 	}
 }
 
@@ -633,8 +633,8 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if got := message.Parts[0].Text; got != "hello world" {
-		t.Fatalf("message text = %q", got)
+	if got := [2]string{message.Parts[0].Text, message.Parts[0].StreamedText}; got != [2]string{"hello world", "hello world"} {
+		t.Fatalf("message and streamed text = %q", got)
 	}
 	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
 		t.Fatalf("tokens = %#v", message.Info.Tokens)
@@ -724,6 +724,18 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	} {
 		_ = gatewayEventText(raw)
 	}
+	if got := gatewayCompleteText(json.RawMessage(`{"text":"raw","rendered":"ansi"}`)); got != "raw" {
+		t.Fatalf("complete raw text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{"rendered":"fallback"}`)); got != "fallback" {
+		t.Fatalf("complete rendered text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{"reasoning":"not final","status":"complete"}`)); got != "" {
+		t.Fatalf("complete unrelated text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{`)); got != "" {
+		t.Fatalf("malformed complete text = %q", got)
+	}
 	tokens := gatewayUsageTokens(json.RawMessage(`{"usage":{"total":1,"input":2,"output":3,"reasoning":4}}`))
 	if tokens.Total != 1 || tokens.Input != 2 || tokens.Output != 3 || tokens.Reasoning != 4 {
 		t.Fatalf("fallback usage tokens = %#v", tokens)
@@ -767,6 +779,26 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 		t.Fatalf("fallback gateway message text = %q", got)
 	}
 	testGatewayProvidersAndConfigHelpers(t)
+}
+
+func TestHermesGatewayCompletionOnlyText(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(
+		Event{Type: evtThinkingDelta, Payload: json.RawMessage(`{"text":"thinking"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"final answer"}`)},
+	)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(message.Parts) != 1 || message.Parts[0].Text != "final answer" || message.Parts[0].StreamedText != "" {
+		t.Fatalf("completion-only message = %#v", message)
+	}
 }
 
 func testGatewayProvidersAndConfigHelpers(t *testing.T) {

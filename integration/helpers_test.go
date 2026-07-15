@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,8 +16,8 @@ import (
 // liveAgent holds a launched acp-go-hermes subprocess and its stdio pipes.
 //
 // Home isolation is bespoke to Hermes: each launch passes a caller-provided
-// `-home` temp root so the subprocess owns an isolated HERMES_HOME and never
-// touches the developer's real Hermes home.
+// `-scratch-dir` temp root so the subprocess owns an isolated HERMES_HOME and
+// never touches the developer's real Hermes home.
 type liveAgent struct {
 	cmd    interface{ ProcessState() *os.ProcessState }
 	stdin  io.WriteCloser
@@ -30,7 +31,7 @@ func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ..
 	t.Helper()
 	args := []string{
 		"-path", integrationHermesPath(t),
-		"-home", home,
+		"-scratch-dir", home,
 	}
 	args = append(args, extraArgs...)
 	cmd := agentCommand(ctx, args...)
@@ -149,6 +150,21 @@ func (c *recordingClient) elicitationCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.elicitations)
+}
+
+func (c *recordingClient) agentText() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var out strings.Builder
+	for _, notification := range c.updates {
+		chunk := notification.Update.AgentMessageChunk
+		if chunk != nil && chunk.Content.Text != nil {
+			out.WriteString(chunk.Content.Text.Text)
+		}
+	}
+
+	return out.String()
 }
 
 func envOrDefault(name string, fallback string) string {

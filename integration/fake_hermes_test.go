@@ -37,7 +37,8 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeOK), t.TempDir())
 	defer agent.close()
 
-	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
+	client := newRecordingClient()
+	conn := acp.NewClientSideConnection(client, agent.stdin, agent.stdout)
 	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
 		t.Fatalf("initialize with fake hermes: %v\nstderr:\n%s", err, agent.stderrString())
 	}
@@ -47,6 +48,16 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	}
 	if session.SessionId == "" {
 		t.Fatalf("empty fake session response: %#v", session)
+	}
+	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-complete-only", "reply")); err != nil {
+		t.Fatalf("completion-only prompt: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	deadline := time.Now().Add(time.Second)
+	for client.agentText() != "fake response" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := client.agentText(); got != "fake response" {
+		t.Fatalf("completion-only ACP text = %q, want %q\nstderr:\n%s", got, "fake response", agent.stderrString())
 	}
 	fork, err := hermesacp.CallForkSession(ctx, conn, hermesacp.ForkSessionRequest(session.SessionId, t.TempDir()))
 	if err != nil {
@@ -83,7 +94,7 @@ func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
 		<-waitOrphan
 	})
 
-	leaseDir := filepath.Join(home, "orphan", "state")
+	leaseDir := filepath.Join(home, "acp-go-hermes", "orphan", "state")
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		t.Fatalf("mkdir lease dir: %v", err)
 	}
@@ -163,7 +174,7 @@ func startAgentWithHermesPath(t *testing.T, ctx context.Context, hermesPath stri
 	t.Helper()
 	cmd := agentCommand(ctx,
 		"-path", hermesPath,
-		"-home", home,
+		"-scratch-dir", home,
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -324,8 +335,12 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			return
 		}
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
-		writeFakeGatewayEvent(ctx, conn, "message.delta", live, map[string]any{"text": "fake response"})
-		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{"usage": map[string]any{"total_tokens": 1}})
+		// Hermes 0.18.2 may deliver the entire assistant reply only on the
+		// authoritative completion event, with no preceding message.delta.
+		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{
+			"text":  "fake response",
+			"usage": map[string]any{"total_tokens": 1},
+		})
 	case "session.delete", "session.close", "session.interrupt",
 		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})

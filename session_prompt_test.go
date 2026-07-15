@@ -307,6 +307,48 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 	}
 }
 
+func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		complete string
+		streamed string
+		want     string
+	}{
+		{name: "completion only", complete: "final answer", want: "final answer"},
+		{name: "fully streamed", complete: "final answer", streamed: "final answer"},
+		{name: "completion suffix", complete: "final answer", streamed: "final ", want: "answer"},
+		{name: "inconsistent completion", complete: "replacement", streamed: "already sent"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			updates := partUpdates(valAssistant, nativehermes.Part{
+				MessageID:    "message-1",
+				Type:         valText,
+				Text:         test.complete,
+				StreamedText: test.streamed,
+			})
+			if test.want == "" {
+				if updates != nil {
+					t.Fatalf("updates = %#v, want nil", updates)
+				}
+
+				return
+			}
+
+			if len(updates) != 1 || updates[0].AgentMessageChunk == nil ||
+				updates[0].AgentMessageChunk.Content.Text == nil ||
+				updates[0].AgentMessageChunk.Content.Text.Text != test.want {
+				t.Fatalf("updates = %#v, want text %q", updates, test.want)
+			}
+		})
+	}
+}
+
 func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 	ctx := context.Background()
 

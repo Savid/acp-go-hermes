@@ -48,6 +48,19 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 	}
 }
 
+func TestSessionMarkPartAcceptsFirstEmptyRawPayload(t *testing.T) {
+	t.Parallel()
+
+	session := testSession(NewAgent(), newFakeHermesClient())
+	part := nativehermes.Part{ID: "completion-only", Type: "text", Text: "final answer"}
+	if !session.markPart(part) {
+		t.Fatal("first completion-only part was suppressed")
+	}
+	if session.markPart(part) {
+		t.Fatal("duplicate completion-only part was accepted")
+	}
+}
+
 func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()

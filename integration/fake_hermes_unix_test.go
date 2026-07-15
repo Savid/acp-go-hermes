@@ -31,7 +31,7 @@ func TestHermesACPAgentFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *te
 	defer cancel()
 
 	home := t.TempDir()
-	sessionRoot := filepath.Join(home, "orphan")
+	sessionRoot := filepath.Join(home, "acp-go-hermes", "orphan")
 	stateDir := filepath.Join(sessionRoot, "state")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
