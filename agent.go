@@ -41,6 +41,7 @@ type Agent struct {
 	log        *slog.Logger
 	observe    *observer.Observer
 	optionsErr error
+	processes  *providerProcessTracker
 
 	mu                 sync.Mutex
 	closed             bool
@@ -82,7 +83,7 @@ func NewAgent(opts ...Option) *Agent {
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
 
-	return &Agent{
+	agent := &Agent{
 		options:       options,
 		log:           log,
 		optionsErr:    optionsErr,
@@ -93,6 +94,9 @@ func NewAgent(opts ...Option) *Agent {
 		unprovenRoots: make(map[string]struct{}),
 		clientCalls:   make(chan struct{}, limits.MaxConcurrentClientCalls),
 	}
+	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks)
+
+	return agent
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {

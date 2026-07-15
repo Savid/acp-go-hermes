@@ -731,6 +731,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 	}
 
 	a.observe.RecordHermesProcessStart(ctx)
+	processRoot := a.processes.register()
 
 	client, err := factory(ctx, nativehermes.StartOptions{
 		ACPSessionID:   nativehermes.ACPSessionIDString(id),
@@ -752,12 +753,16 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		},
 	})
 	if err != nil {
+		processRoot.retire(ctx, providerProcessTreeProven(err))
+
 		if !errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
 			nativeRelease()
 		}
 
 		return nil, err
 	}
+
+	processRoot.observe(ctx, client)
 
 	root := client.XDGDirs().Root
 	if root == "" {
@@ -774,6 +779,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		nativeRelease:  nativeRelease,
 		scratchRelease: scratchRelease,
 		retainUnproven: a.retainUnprovenHermesRoot,
+		processRoot:    processRoot,
 	}, nil
 }
 

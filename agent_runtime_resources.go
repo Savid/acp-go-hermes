@@ -18,13 +18,22 @@ type managedHermesServer struct {
 	nativeRelease  func()
 	scratchRelease func()
 	retainUnproven func(string)
+	processRoot    *providerProcessRoot
 	once           sync.Once
 	closeErr       error
 }
 
 func (s *managedHermesServer) Close(ctx context.Context) error {
 	s.once.Do(func() {
+		if s.processRoot != nil {
+			s.processRoot.observe(ctx, s.Server)
+		}
+
 		s.closeErr = s.Server.Close(ctx)
+		if s.processRoot != nil {
+			s.processRoot.retire(ctx, providerProcessTreeProven(s.closeErr))
+		}
+
 		if errors.Is(s.closeErr, nativehermes.ErrProcessTreeUnproven) {
 			if s.retainUnproven != nil {
 				s.retainUnproven(s.root)
@@ -43,6 +52,15 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 	})
 
 	return s.closeErr
+}
+
+func (s *managedHermesServer) ProviderDescendantCount() (int, bool) {
+	inventory, ok := s.Server.(providerProcessInventory)
+	if !ok {
+		return 0, false
+	}
+
+	return inventory.ProviderDescendantCount()
 }
 
 func (a *Agent) retainUnprovenHermesRoot(root string) {

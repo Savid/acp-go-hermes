@@ -75,6 +75,17 @@ type Process struct {
 	tree   *processContainment
 }
 
+// ProviderDescendantCount returns the absolute number of processes in the
+// native containment boundary when that boundary provides authoritative
+// inventory. A false result means no observation may be inferred.
+func (p *Process) ProviderDescendantCount() (int, bool) {
+	if p == nil || p.tree == nil {
+		return 0, false
+	}
+
+	return p.tree.descendantCount()
+}
+
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {

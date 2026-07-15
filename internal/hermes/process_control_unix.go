@@ -102,6 +102,12 @@ func (c *processContainment) signal(signal syscall.Signal) error {
 	return err
 }
 
+func (*processContainment) descendantCount() (int, bool) {
+	// A process-group existence probe proves quiescence, but it cannot
+	// enumerate an authoritative nonzero membership count.
+	return 0, false
+}
+
 func (*processContainment) close() error { return nil }
 
 func terminateProcess(cmd *exec.Cmd) error {

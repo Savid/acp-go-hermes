@@ -179,6 +179,14 @@ type hermesServer struct {
 	redial   func(context.Context) (*Client, error)
 }
 
+func (s *hermesServer) ProviderDescendantCount() (int, bool) {
+	if s == nil || s.process == nil {
+		return 0, false
+	}
+
+	return s.process.ProviderDescendantCount()
+}
+
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`

@@ -221,4 +221,13 @@ func (c *processContainment) activeProcesses() (uint32, error) {
 	return info.ActiveProcesses, nil
 }
 
+func (c *processContainment) descendantCount() (int, bool) {
+	active, err := c.activeProcesses()
+	if err != nil {
+		return 0, false
+	}
+
+	return int(active), true
+}
+
 func (c *processContainment) close() error { return windows.CloseHandle(c.job) }
