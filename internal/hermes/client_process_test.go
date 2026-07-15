@@ -539,6 +539,39 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	assertProcessStartSeams(t, ctx)
 }
 
+func TestProcessReapsSpontaneousExitBeforeClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := Start(ctx, ProcessOptions{
+		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
+		Home:           t.TempDir(),
+		Timeout:        5 * time.Second,
+		LogWriter:      io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = proc.Close(context.Background()) })
+
+	if err := proc.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill spontaneous process: %v", err)
+	}
+
+	select {
+	case <-proc.waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("spontaneously exited Hermes process was not reaped")
+	}
+
+	if proc.Cmd.ProcessState == nil {
+		t.Fatal("process waiter completed without recording process state")
+	}
+	if err := proc.Close(ctx); err != nil {
+		t.Fatalf("Close after spontaneous exit: %v", err)
+	}
+}
+
 func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
 	t.Helper()
 

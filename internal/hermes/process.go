@@ -73,6 +73,9 @@ type Process struct {
 
 	cancel context.CancelFunc
 	tree   *processContainment
+
+	waitOnce sync.Once
+	waitDone chan struct{}
 }
 
 // ProviderDescendantCount returns the absolute number of processes in the
@@ -185,6 +188,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		cancel:    cancel,
 		tree:      tree,
 	}
+	process.beginWait()
 
 	readyCtx, readyCancel := context.WithTimeout(ctx, timeout)
 	defer readyCancel()
@@ -384,10 +388,7 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 
 	afterFn := after
-	waitFn := waitProcessCommand
-
-	done := make(chan error, 1)
-	go func() { done <- waitFn(p.Cmd) }()
+	done := p.beginWait()
 
 	_ = terminateProcess(p.Cmd)
 
@@ -410,6 +411,24 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 
 	return errors.Join(err, p.quiesceProcessTree())
+}
+
+// beginWait installs the process's sole waiter as soon as the child starts.
+// A Hermes server may exit independently after a provider failure while its
+// ACP session remains resident; waiting only from Close would leave that root
+// as a zombie until the session was eventually released.
+func (p *Process) beginWait() <-chan struct{} {
+	p.waitOnce.Do(func() {
+		p.waitDone = make(chan struct{})
+		waitFn := waitProcessCommand
+
+		go func() {
+			_ = waitFn(p.Cmd)
+			close(p.waitDone)
+		}()
+	})
+
+	return p.waitDone
 }
 
 func (p *Process) quiesceProcessTree() error {
