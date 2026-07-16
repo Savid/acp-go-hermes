@@ -863,6 +863,33 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 	ctx := context.Background()
 
+	t.Run("completion context window wins over provider listing", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
+			ID: "openai",
+			Models: map[string]nativehermes.ProviderModel{
+				"gpt-test": {ID: "gpt-test", Limit: map[string]any{"context": float64(100000)}},
+			},
+		}}}
+		conn := newRecordingAgentClient()
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+
+		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
+			Info: nativehermes.NativeMessageInfo{
+				ID: "message-1", SessionID: "native-1", Role: "assistant",
+				Tokens: nativehermes.Tokens{Total: 1000}, ContextWindow: 200000,
+			},
+		}, false); err != nil {
+			t.Fatalf("emitMessage: %v", err)
+		}
+		usage := conn.updates[0].Update.UsageUpdate
+		if usage == nil || usage.Size != 200000 {
+			t.Fatalf("usage = %#v, want size 200000", usage)
+		}
+	})
+
 	t.Run("advertised context window populates size", func(t *testing.T) {
 		client := newFakeHermesClient()
 		client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{

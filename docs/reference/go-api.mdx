@@ -73,8 +73,10 @@ and `WithSessionRawEvents`.
 
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
-nonce for every turn. `CancelRequest(sessionID, turnNonce)` reuses it only for
-that active turn.
+nonce of at most 4096 bytes for every turn. `CancelRequest(sessionID,
+turnNonce)` reuses it only for that active turn. Builders fail closed by
+omitting the route envelope when given an empty or oversized nonce, so the
+adapter rejects the resulting request.
 
 `RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
 `ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.

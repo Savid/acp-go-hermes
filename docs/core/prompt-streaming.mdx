@@ -6,7 +6,11 @@ description: How native gateway events map to ACP updates, and how turn failures
 Prompt turns call native `prompt.submit` over the Hermes WebSocket gateway and
 consume gateway events until the turn completes. `message.delta` events become
 ACP text chunks, `thinking.delta` events become reasoning chunks, and token data
-from completion payloads becomes `usage_update`.
+from completion payloads becomes `usage_update`. When Hermes supplies
+`message.complete.usage.context_max`, that exact native value becomes
+`usage_update.size`. When it is absent or invalid, the adapter falls back to an
+advertised provider-model context limit; if neither source has one, the size is
+`0`.
 
 ## Prompt content
 

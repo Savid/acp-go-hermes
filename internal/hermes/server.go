@@ -67,6 +67,8 @@ const (
 	evtSudoRequest        = "sudo.request"
 	evtThinkingDelta      = "thinking.delta"
 	evtTerminalReadReq    = "terminal.read.request"
+	evtToolComplete       = "tool.complete"
+	evtToolStart          = "tool.start"
 )
 
 // firstNonEmpty returns the first non-empty string in values.
@@ -209,19 +211,20 @@ type NativeMessage struct {
 }
 
 type NativeMessageInfo struct {
-	ID         string       `json:"id"`
-	SessionID  string       `json:"sessionID"`
-	Role       string       `json:"role"`
-	ParentID   string       `json:"parentID"`
-	ModelID    string       `json:"modelID"`
-	ProviderID string       `json:"providerID"`
-	Mode       string       `json:"mode"`
-	Agent      string       `json:"agent"`
-	Finish     string       `json:"finish"`
-	Cost       float64      `json:"cost"`
-	Tokens     Tokens       `json:"tokens"`
-	Error      *nativeError `json:"error,omitempty"`
-	Time       struct {
+	ID            string       `json:"id"`
+	SessionID     string       `json:"sessionID"`
+	Role          string       `json:"role"`
+	ParentID      string       `json:"parentID"`
+	ModelID       string       `json:"modelID"`
+	ProviderID    string       `json:"providerID"`
+	Mode          string       `json:"mode"`
+	Agent         string       `json:"agent"`
+	Finish        string       `json:"finish"`
+	Cost          float64      `json:"cost"`
+	Tokens        Tokens       `json:"tokens"`
+	ContextWindow int          `json:"contextWindow"`
+	Error         *nativeError `json:"error,omitempty"`
+	Time          struct {
 		Created   int64 `json:"created"`
 		Completed int64 `json:"completed"`
 	} `json:"time"`
@@ -522,6 +525,12 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	for key, value := range mcpSecretEnv {
 		processEnv[key] = value
 	}
+
+	// Hermes approval.request events are session-keyed and do not carry the
+	// native tool-call id. The immediately preceding tool.start event is the
+	// only exact correlation source, so the private gateway must always emit
+	// tool progress even when the user's seeded display config disables it.
+	processEnv["HERMES_TUI_TOOL_PROGRESS"] = "all"
 
 	proc, err := Start(ctx, ProcessOptions{
 		ExecutablePath:      options.ExecutablePath,
@@ -1236,6 +1245,8 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 	var textBuilder strings.Builder
 
+	activeToolCalls := map[string]struct{}{}
+
 	for {
 		select {
 		case event, ok := <-gw.Events():
@@ -1252,13 +1263,21 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 			switch event.Type {
 			case evtApprovalRequest:
-				s.forwardGatewayPermission(stored, live, event)
+				s.forwardGatewayPermission(stored, live, messageID, uniqueGatewayToolCallID(activeToolCalls), event)
 			case evtClarifyRequest:
 				s.forwardGatewayQuestion(stored, live, event)
 			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
 				s.declineGatewayQuestion(ctx, live, event.Type)
 			case evtSessionError:
 				return NativeMessage{}, gatewayEventFailure(event.Payload)
+			case evtToolStart:
+				if toolCallID := gatewayToolCallID(event.Payload); toolCallID != "" {
+					activeToolCalls[toolCallID] = struct{}{}
+				}
+			case evtToolComplete:
+				if toolCallID := gatewayToolCallID(event.Payload); toolCallID != "" {
+					delete(activeToolCalls, toolCallID)
+				}
 			case evtMessageDelta, evtThinkingDelta:
 				chunk := gatewayEventText(event.Payload)
 				if chunk == "" {
@@ -1285,11 +1304,12 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 				return NativeMessage{
 					Info: NativeMessageInfo{
-						ID:        messageID,
-						SessionID: stored,
-						Role:      valAssistant,
-						Finish:    valStop,
-						Tokens:    tokens,
+						ID:            messageID,
+						SessionID:     stored,
+						Role:          valAssistant,
+						Finish:        valStop,
+						Tokens:        tokens,
+						ContextWindow: gatewayContextWindow(event.Payload),
 					},
 					Parts: []Part{{
 						ID:           messageID + "-text",
@@ -1347,12 +1367,24 @@ func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event
 	}
 }
 
-func (s *hermesServer) forwardGatewayPermission(stored string, live string, event Event) {
+func (s *hermesServer) forwardGatewayPermission(
+	stored string,
+	live string,
+	messageID string,
+	toolCallID string,
+	event Event,
+) {
+	requestID := "approval-unbound"
+	if toolCallID != "" {
+		requestID = "approval:" + toolCallID
+	}
+
 	req := PermissionRequest{
-		ID:         firstNonEmpty(gatewayPayloadString(event.Payload, "id"), gatewayPayloadString(event.Payload, "request_id"), "approval"),
+		ID:         requestID,
 		SessionID:  stored,
-		Action:     firstNonEmpty(gatewayPayloadString(event.Payload, keyTitle), gatewayPayloadString(event.Payload, "command"), "approval"),
+		Action:     firstNonEmpty(gatewayPayloadString(event.Payload, "command"), "approval"),
 		Metadata:   map[string]any{"liveSessionId": live},
+		Tool:       permissionTool{MessageID: messageID, CallID: toolCallID},
 		ReplyRoute: PermissionRouteAPI,
 	}
 
@@ -1361,6 +1393,24 @@ func (s *hermesServer) forwardGatewayPermission(stored string, live string, even
 	case s.events <- TurnEvent{Type: evtApprovalRequest, Properties: data, Raw: event.Raw}:
 	default:
 	}
+}
+
+func gatewayToolCallID(raw json.RawMessage) string {
+	return gatewayPayloadString(raw, "tool_id")
+}
+
+func uniqueGatewayToolCallID(active map[string]struct{}) string {
+	if len(active) != 1 {
+		return ""
+	}
+
+	var unique string
+
+	for toolCallID := range active {
+		unique = toolCallID
+	}
+
+	return unique
 }
 
 func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event Event) {
@@ -1474,6 +1524,22 @@ func gatewayUsageTokens(raw json.RawMessage) Tokens {
 		Output:    numberValue(usage["output_tokens"], usage["completion_tokens"], usage["output"]),
 		Reasoning: numberValue(usage["reasoning_tokens"], usage[valReasoning]),
 	}
+}
+
+func gatewayContextWindow(raw json.RawMessage) int {
+	var payload map[string]any
+
+	_ = json.Unmarshal(raw, &payload)
+	usage, _ := payload["usage"].(map[string]any)
+	contextWindow := numberValue(usage["context_max"])
+
+	maxInt := int(^uint(0) >> 1)
+
+	if contextWindow <= 0 || contextWindow != math.Trunc(contextWindow) || contextWindow > float64(maxInt) {
+		return 0
+	}
+
+	return int(contextWindow)
 }
 
 func numberValue(values ...any) float64 {

@@ -390,7 +390,8 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 	}
 
 	return []Event{
-		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"id":"approval-1","title":"Edit file","command":"write"}`)},
+		{Type: "tool.start", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"write"}`)},
+		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"command":"write","description":"Edit file"}`)},
 		{Type: "clarify.request", SessionID: live, Payload: json.RawMessage(`{"id":"clarify-1","question":"Continue?"}`)},
 		{Type: "terminal.read.request", SessionID: live, Payload: json.RawMessage(`{}`)},
 		{Type: "sudo.request", SessionID: live, Payload: json.RawMessage(`{}`)},
@@ -400,7 +401,8 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":""}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"delta":"hello "}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`["world"]`)},
-		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1}}`)},
+		{Type: "tool.complete", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","result":"done"}`)},
+		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1,"context_max":200000}}`)},
 	}
 }
 
@@ -681,18 +683,11 @@ func TestHermesGatewayReloadMCPFailures(t *testing.T) {
 func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
 	t.Helper()
 
-	message, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
-	if err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
+	assertGatewayTextMessage(ctx, t, server)
 	assertGatewayImageMessage(ctx, t, server)
-	if got := [2]string{message.Parts[0].Text, message.Parts[0].StreamedText}; got != [2]string{"hello world", "hello world"} {
-		t.Fatalf("message and streamed text = %q", got)
-	}
-	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
-		t.Fatalf("tokens = %#v", message.Info.Tokens)
-	}
-	for _, want := range []string{"approval.request", "clarify.request", "message.part.updated"} {
+	assertGatewayPermissionCorrelation(t, server.events)
+
+	for _, want := range []string{"clarify.request", "message.part.updated"} {
 		if !drainHermesEventType(server.events, want) {
 			t.Fatalf("missing forwarded event %q", want)
 		}
@@ -749,6 +744,44 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 		if !containsString(methods, want) {
 			t.Fatalf("method %q not called; methods=%v", want, methods)
 		}
+	}
+}
+
+func assertGatewayTextMessage(ctx context.Context, t *testing.T, server *hermesServer) {
+	t.Helper()
+
+	message, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if got := [2]string{message.Parts[0].Text, message.Parts[0].StreamedText}; got != [2]string{"hello world", "hello world"} {
+		t.Fatalf("message and streamed text = %q", got)
+	}
+	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
+		t.Fatalf("tokens = %#v", message.Info.Tokens)
+	}
+	if message.Info.ContextWindow != 200000 {
+		t.Fatalf("context window = %d, want 200000", message.Info.ContextWindow)
+	}
+}
+
+func assertGatewayPermissionCorrelation(t *testing.T, events <-chan TurnEvent) {
+	t.Helper()
+
+	var permission PermissionRequest
+	select {
+	case event := <-events:
+		if event.Type != evtApprovalRequest {
+			t.Fatalf("first forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+		}
+		if decodeErr := json.Unmarshal(event.Properties, &permission); decodeErr != nil {
+			t.Fatalf("decode permission: %v", decodeErr)
+		}
+	default:
+		t.Fatal("missing forwarded approval.request")
+	}
+	if permission.ID != "approval:native-tool-1" || permission.Tool.CallID != "native-tool-1" || !strings.HasPrefix(permission.Tool.MessageID, "hermes-live-") {
+		t.Fatalf("permission correlation = %#v", permission)
 	}
 }
 
@@ -823,6 +856,8 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if tokens.Total != 1 || tokens.Input != 2 || tokens.Output != 3 || tokens.Reasoning != 4 {
 		t.Fatalf("fallback usage tokens = %#v", tokens)
 	}
+	testGatewayContextAndToolHelpers(t)
+
 	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "error"}}); err == nil {
 		t.Fatal("assistant finish error accepted")
 	}
@@ -864,6 +899,38 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	testGatewayProvidersAndConfigHelpers(t)
 }
 
+func testGatewayContextAndToolHelpers(t *testing.T) {
+	t.Helper()
+
+	if failure := gatewayCompleteFailure(json.RawMessage(`{"finish":"error"}`)); failure == nil || failure.message != "hermes assistant error" {
+		t.Fatalf("finish-only complete failure = %#v", failure)
+	}
+
+	if got := gatewayContextWindow(json.RawMessage(`{"usage":{"context_max":200000}}`)); got != 200000 {
+		t.Fatalf("context window = %d, want 200000", got)
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"usage":{"context_max":0}}`),
+		json.RawMessage(`{"usage":{"context_max":-1}}`),
+		json.RawMessage(`{"usage":{"context_max":1.5}}`),
+		json.RawMessage(`{"usage":{"context_max":"200000"}}`),
+		json.RawMessage(`{`),
+	} {
+		if got := gatewayContextWindow(raw); got != 0 {
+			t.Fatalf("invalid context window %s = %d", raw, got)
+		}
+	}
+	if got := gatewayToolCallID(json.RawMessage(`{"tool_id":"native-tool"}`)); got != "native-tool" {
+		t.Fatalf("tool call id = %q", got)
+	}
+	if got := uniqueGatewayToolCallID(map[string]struct{}{"one": {}}); got != "one" {
+		t.Fatalf("unique tool call = %q", got)
+	}
+	if got := uniqueGatewayToolCallID(map[string]struct{}{"one": {}, "two": {}}); got != "" {
+		t.Fatalf("ambiguous tool call = %q", got)
+	}
+}
+
 func TestHermesGatewayCompletionOnlyText(t *testing.T) {
 	t.Parallel()
 
@@ -881,6 +948,40 @@ func TestHermesGatewayCompletionOnlyText(t *testing.T) {
 	}
 	if len(message.Parts) != 1 || message.Parts[0].Text != "final answer" || message.Parts[0].StreamedText != "" {
 		t.Fatalf("completion-only message = %#v", message)
+	}
+}
+
+func TestHermesGatewayApprovalRequiresUniqueActiveNativeTool(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(
+		Event{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1"}`)},
+		Event{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-2"}`)},
+		Event{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"read"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"blocked"}`)},
+	)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	if _, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	select {
+	case event := <-server.events:
+		var permission PermissionRequest
+		if event.Type != evtApprovalRequest {
+			t.Fatalf("forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+		}
+		if err := json.Unmarshal(event.Properties, &permission); err != nil {
+			t.Fatalf("decode permission: %v", err)
+		}
+		if permission.ID != "approval-unbound" || permission.Tool.CallID != "" {
+			t.Fatalf("ambiguous permission correlation = %#v", permission)
+		}
+	default:
+		t.Fatal("missing forwarded approval.request")
 	}
 }
 
@@ -1475,7 +1576,7 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 		server := &hermesServer{events: make(chan TurnEvent, 1)}
 		server.events <- TurnEvent{Type: "filled"}
 		server.forwardGatewayPart("stored", "message", Event{Type: "message.delta"}, "text")
-		server.forwardGatewayPermission("stored", "live", Event{Payload: json.RawMessage(`{}`)})
+		server.forwardGatewayPermission("stored", "live", "message", "tool", Event{Payload: json.RawMessage(`{}`)})
 		server.forwardGatewayQuestion("stored", "live", Event{Payload: json.RawMessage(`{}`)})
 		if got := len(server.events); got != 1 {
 			t.Fatalf("event channel len = %d", got)

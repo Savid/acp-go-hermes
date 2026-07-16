@@ -162,12 +162,15 @@ func TestRawEventCrossSessionIsolation(t *testing.T) {
 	}
 }
 func TestRawEventMarkerAlwaysValidJSON(t *testing.T) {
-	oversize := capRawEventPayload(map[string]any{
+	oversize, err := capRawEventPayload(map[string]any{
 		jsonFieldSessionID: "s",
 		keySequence:        int64(1),
 		keySource:          valHermesServeSource,
 		keyEvent:           map[string]any{"blob": strings.Repeat("z", 70000)},
 	})
+	if err != nil {
+		t.Fatalf("cap oversize: %v", err)
+	}
 	oversizeEvent, _ := oversize[keyEvent].(map[string]any)
 	if oversizeEvent[rawEventKeyReason] != rawEventReasonOversize {
 		t.Fatalf("oversize marker = %#v", oversizeEvent)
@@ -177,12 +180,15 @@ func TestRawEventMarkerAlwaysValidJSON(t *testing.T) {
 
 	// An unserializable event (a channel cannot be marshalled) yields the
 	// unserializable marker with no sizeBytes and still valid JSON.
-	unserializable := capRawEventPayload(map[string]any{
+	unserializable, err := capRawEventPayload(map[string]any{
 		jsonFieldSessionID: "s",
 		keySequence:        int64(2),
 		keySource:          valHermesServeSource,
 		keyEvent:           make(chan int),
 	})
+	if err != nil {
+		t.Fatalf("cap unserializable: %v", err)
+	}
 	marker, _ := unserializable[keyEvent].(map[string]any)
 	if marker[rawEventKeyReason] != rawEventReasonUnserialized {
 		t.Fatalf("unserializable marker = %#v", marker)
@@ -199,6 +205,103 @@ func TestRawEventMarkerAlwaysValidJSON(t *testing.T) {
 		keyEvent:           marker,
 	})
 }
+
+func TestRawEventFinalPayloadBoundaryIncludesMaximumRoute(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		jsonFieldSessionID: "session-1",
+		keySequence:        int64(1),
+		keySource:          valHermesServeSource,
+		keyEvent:           map[string]any{keyData: ""},
+		"_meta":            turnRouteMeta(strings.Repeat("n", routeTurnNonceMaxBytes)),
+	}
+	empty, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal empty boundary: %v", err)
+	}
+	padding := rawEventMaxBytes - len(empty)
+	if padding <= 0 {
+		t.Fatalf("boundary overhead = %d, want less than %d", len(empty), rawEventMaxBytes)
+	}
+	payload[keyEvent] = map[string]any{keyData: strings.Repeat("x", padding)}
+
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("cap exact boundary: %v", err)
+	}
+	encoded, err := json.Marshal(capped)
+	if err != nil {
+		t.Fatalf("marshal exact boundary: %v", err)
+	}
+	if len(encoded) != rawEventMaxBytes {
+		t.Fatalf("exact boundary size = %d, want %d", len(encoded), rawEventMaxBytes)
+	}
+
+	payload[keyEvent] = map[string]any{keyData: strings.Repeat("x", padding+1)}
+	capped, err = capRawEventPayload(payload)
+	if err != nil {
+		t.Fatalf("cap over boundary: %v", err)
+	}
+	encoded, err = json.Marshal(capped)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	if len(encoded) > rawEventMaxBytes {
+		t.Fatalf("final marker size = %d, exceeds %d", len(encoded), rawEventMaxBytes)
+	}
+	marker, _ := capped[keyEvent].(map[string]any)
+	if marker[rawEventKeyReason] != rawEventReasonOversize || marker[rawEventKeySizeBytes] != rawEventMaxBytes+1 {
+		t.Fatalf("boundary marker = %#v", marker)
+	}
+}
+
+func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
+	t.Parallel()
+
+	_, err := capRawEventPayload(map[string]any{
+		jsonFieldSessionID: "session-1",
+		keySequence:        int64(1),
+		keySource:          valHermesServeSource,
+		keyEvent:           map[string]any{keyData: strings.Repeat("x", rawEventMaxBytes)},
+		"_meta": map[string]any{routeMetaKey: map[string]any{
+			routeFieldVer: routeVersion, routeFieldTurn: strings.Repeat("n", rawEventMaxBytes),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("unbounded internal route error = %v", err)
+	}
+
+	_, err = capRawEventPayload(map[string]any{
+		jsonFieldSessionID: "session-1",
+		keySequence:        int64(2),
+		keySource:          valHermesServeSource,
+		keyEvent:           make(chan int),
+		"_meta":            make(chan int),
+	})
+	if err == nil || !strings.Contains(err.Error(), "marshal capped") {
+		t.Fatalf("unserializable structural envelope error = %v", err)
+	}
+}
+
+func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	session := enabledRawSession(t, agent, conn, acp.SessionId(strings.Repeat("s", rawEventMaxBytes)))
+	ctx := withTurnRoute(context.Background(), strings.Repeat("n", routeTurnNonceMaxBytes))
+
+	err := session.emitRawHermesEvent(ctx, nativehermes.TurnEvent{
+		Type: "native.custom",
+		Raw:  json.RawMessage(`{"type":"native.custom"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("unbounded structural envelope error = %v", err)
+	}
+	if conn.extensionCount() != 0 {
+		t.Fatalf("unbounded emitter produced %d notifications", conn.extensionCount())
+	}
+}
+
 func requireValidJSON(t *testing.T, payload map[string]any) {
 	t.Helper()
 

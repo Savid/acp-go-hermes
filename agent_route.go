@@ -11,13 +11,14 @@ import (
 )
 
 const (
-	routeMetaKey   = "acp-go.dev/route"
-	routeVersion   = 1
-	routeFieldVer  = "version"
-	routeFieldID   = "sessionId"
-	routeFieldTurn = "turnNonce"
-	routeFieldTool = "toolCallId"
-	routeFieldReq  = "requestId"
+	routeMetaKey           = "acp-go.dev/route"
+	routeVersion           = 1
+	routeTurnNonceMaxBytes = 4 * 1024
+	routeFieldVer          = "version"
+	routeFieldID           = "sessionId"
+	routeFieldTurn         = "turnNonce"
+	routeFieldTool         = "toolCallId"
+	routeFieldReq          = "requestId"
 )
 
 type inboundTurnRoute struct {
@@ -48,6 +49,10 @@ func parseInboundTurnRoute(meta map[string]any) (inboundTurnRoute, error) {
 		return inboundTurnRoute{}, routeInvalid("route turnNonce is required")
 	}
 
+	if len(nonce) > routeTurnNonceMaxBytes {
+		return inboundTurnRoute{}, routeInvalid("route turnNonce exceeds the maximum size")
+	}
+
 	return inboundTurnRoute{turnNonce: nonce}, nil
 }
 
@@ -72,6 +77,10 @@ func routeInvalid(message string) error {
 func stampRouteMeta(meta map[string]any, scope elicitationScope) (map[string]any, error) {
 	if scope.SessionID == "" || strings.TrimSpace(scope.TurnNonce) == "" {
 		return nil, fmt.Errorf("route metadata requires sessionId and turnNonce")
+	}
+
+	if len(scope.TurnNonce) > routeTurnNonceMaxBytes {
+		return nil, fmt.Errorf("route metadata turnNonce exceeds the maximum size")
 	}
 
 	if _, exists := meta[routeMetaKey]; exists {
@@ -129,6 +138,10 @@ func newRouteRequestID() (string, error) {
 }
 
 func turnRouteMeta(turnNonce string) map[string]any {
+	if strings.TrimSpace(turnNonce) == "" || len(turnNonce) > routeTurnNonceMaxBytes {
+		return nil
+	}
+
 	return map[string]any{routeMetaKey: map[string]any{
 		routeFieldVer:  routeVersion,
 		routeFieldTurn: turnNonce,
@@ -136,6 +149,10 @@ func turnRouteMeta(turnNonce string) map[string]any {
 }
 
 func withTurnRoute(ctx context.Context, turnNonce string) context.Context {
+	if strings.TrimSpace(turnNonce) == "" || len(turnNonce) > routeTurnNonceMaxBytes {
+		turnNonce = ""
+	}
+
 	return context.WithValue(ctx, turnRouteContextKey{}, turnNonce)
 }
 

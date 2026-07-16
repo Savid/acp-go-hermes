@@ -30,9 +30,11 @@ sequence number is consumed, so the per-session sequence stays contiguous.
 
 ## Size cap and truncation
 
-Each event is capped at 64 KiB. Rather than drop an oversize event and leave a
-gap in the sequence, the adapter replaces the `event` payload with a fixed
-truncation marker and keeps the `sessionId`, `sequence`, and `source` envelope:
+Each complete routed notification is capped at 64 KiB, including its
+`sessionId`, `sequence`, `source`, and maximum 4096-byte turn nonce. Rather than
+drop an oversize event and leave a gap in the sequence, the adapter replaces
+only the `event` payload with a fixed truncation marker and keeps the structural
+and route envelopes:
 
 | Field | Meaning |
 |---|---|

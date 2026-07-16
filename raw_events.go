@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 const (
@@ -30,6 +31,7 @@ const (
 	keySequence = "sequence"
 	keySource   = "source"
 	keyEvent    = "event"
+	keyData     = "data"
 
 	rawEventReasonOversize     = "oversize"
 	rawEventReasonUnserialized = "unserializable"
@@ -63,16 +65,17 @@ func (c rawMessageConfig) Enabled() bool {
 	return c.enabled
 }
 
-// capRawEventPayload returns the payload unchanged when it marshals within the
-// size limit. Otherwise it replaces the event with the fixed truncation
-// marker, consuming the sequence rather than dropping the notification: an
-// oversize event keeps its byte size, a marshal failure is reported as
-// unserializable. The marker is always valid JSON, so a consumer never receives
-// an invalid payload and never sees an unexplained gap in the sequence.
-func capRawEventPayload(payload map[string]any) map[string]any {
+// capRawEventPayload returns the complete routed payload unchanged when it
+// marshals within the size limit. Otherwise it replaces only the event with the
+// fixed truncation marker, consuming the sequence rather than dropping the
+// notification: an oversize event keeps its byte size, a marshal failure is
+// reported as unserializable. It then proves the final marker envelope also
+// fits; the route nonce bound ensures route metadata alone cannot make the
+// marker exceed the cap.
+func capRawEventPayload(payload map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(payload)
 	if err == nil && len(encoded) <= rawEventMaxBytes {
-		return payload
+		return payload, nil
 	}
 
 	marker := map[string]any{
@@ -96,5 +99,14 @@ func capRawEventPayload(payload map[string]any) map[string]any {
 		capped["_meta"] = meta
 	}
 
-	return capped
+	encoded, err = json.Marshal(capped)
+	if err != nil {
+		return nil, fmt.Errorf("marshal capped raw event payload: %w", err)
+	}
+
+	if len(encoded) > rawEventMaxBytes {
+		return nil, fmt.Errorf("capped raw event payload is %d bytes, exceeds %d", len(encoded), rawEventMaxBytes)
+	}
+
+	return capped, nil
 }

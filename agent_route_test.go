@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -14,9 +15,10 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	require.Equal(t, turnRouteMeta("turn-old"), turnRouteMetaFromContext(ctx))
 	require.Nil(t, turnRouteMetaFromContext(context.Background()))
 
-	route, err := parseInboundTurnRoute(turnRouteMeta("turn-1"))
+	boundaryNonce := strings.Repeat("n", routeTurnNonceMaxBytes)
+	route, err := parseInboundTurnRoute(turnRouteMeta(boundaryNonce))
 	require.NoError(t, err)
-	require.Equal(t, "turn-1", route.turnNonce)
+	require.Equal(t, boundaryNonce, route.turnNonce)
 
 	for _, meta := range []map[string]any{
 		nil,
@@ -26,6 +28,7 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: ""}},
 		{routeMetaKey: map[string]any{routeFieldVer: "1", routeFieldTurn: "turn"}},
 		{routeMetaKey: map[string]any{routeFieldVer: 1.5, routeFieldTurn: "turn"}},
+		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: strings.Repeat("n", routeTurnNonceMaxBytes+1)}},
 	} {
 		_, routeErr := parseInboundTurnRoute(meta)
 		require.Error(t, routeErr)
@@ -53,6 +56,10 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	require.ErrorContains(t, err, "exactly one")
 	_, err = stampRouteMeta(nil, elicitationScope{})
 	require.Error(t, err)
+	_, err = stampRouteMeta(nil, elicitationScope{SessionID: "s", TurnNonce: strings.Repeat("n", routeTurnNonceMaxBytes+1)})
+	require.ErrorContains(t, err, "maximum size")
+	require.Nil(t, turnRouteMeta(strings.Repeat("n", routeTurnNonceMaxBytes+1)))
+	require.Nil(t, turnRouteMetaFromContext(withTurnRoute(context.Background(), strings.Repeat("n", routeTurnNonceMaxBytes+1))))
 
 	previous := routeRandRead
 	routeRandRead = func([]byte) (int, error) { return 0, errors.New("entropy") }

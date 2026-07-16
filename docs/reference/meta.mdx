@@ -12,8 +12,8 @@ Hermes namespace.
 
 `session/prompt` and cancellation of an active turn require exactly
 `{"version":1,"turnNonce":"..."}` under the reserved route key. The nonce is
-fresh and unguessable per turn; missing, extra, unsupported, or stale route
-data fails with invalid params.
+fresh and unguessable per turn and is at most 4096 bytes; missing, oversized,
+extra, unsupported, or stale route data fails with invalid params.
 
 Every live-turn `session/update` and `_hermes/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event

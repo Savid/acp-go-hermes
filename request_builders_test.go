@@ -51,6 +51,13 @@ func TestRequestBuilders(t *testing.T) {
 	if cancel := CancelRequest("s", "turn-cancel"); cancel.Meta[routeMetaKey] == nil {
 		t.Fatalf("CancelRequest = %#v", cancel)
 	}
+	oversizedNonce := strings.Repeat("n", routeTurnNonceMaxBytes+1)
+	if prompt := TextPromptRequest("s", oversizedNonce, "hello"); prompt.Meta != nil {
+		t.Fatalf("TextPromptRequest emitted oversized route = %#v", prompt.Meta)
+	}
+	if cancel := CancelRequest("s", oversizedNonce); cancel.Meta != nil {
+		t.Fatalf("CancelRequest emitted oversized route = %#v", cancel.Meta)
+	}
 	list := ListSessionsRequest(WithListSessionsCursor("next"), WithListSessionsMeta(map[string]any{"a": "b"}))
 	if list.Cursor == nil || *list.Cursor != "next" || list.Meta["a"] != "b" {
 		t.Fatalf("ListSessionsRequest = %#v", list)
@@ -378,12 +385,15 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	if !client.closed {
 		t.Fatal("client not closed")
 	}
-	payload := capRawEventPayload(map[string]any{
+	payload, err := capRawEventPayload(map[string]any{
 		"sessionId": "s",
 		"sequence":  int64(1),
 		"source":    "test",
 		"event":     strings.Repeat("x", rawEventMaxBytes),
 	})
+	if err != nil {
+		t.Fatalf("cap raw event: %v", err)
+	}
 	if event, _ := payload["event"].(map[string]any); event["truncated"] != true {
 		t.Fatalf("raw event was not capped: %#v", payload)
 	}

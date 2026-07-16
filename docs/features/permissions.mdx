@@ -12,13 +12,16 @@ load-bearing for user trust and is never silently auto-approved.
 A native `approval.request` gateway event maps to an ACP
 `session/request_permission` request. The adapter presents three options:
 
-The ACP permission request uses the native tool `callID` as its exact
-`toolCallId`. If the approval arrives before the native tool-start event, the
-adapter first publishes that ID as a pending tool call with the active turn's
-route envelope. A later native start advances the same ID to `in_progress`
-instead of publishing a duplicate start. Missing IDs, terminal IDs, and
-callbacks outside their exact active turn are rejected without invoking the
-ACP permission callback.
+Hermes 0.18.2's session-keyed `approval.request` payload has no request or tool
+identifier. The adapter therefore takes the exact native `tool_id` from the
+active `tool.start` event and uses it as the ACP `toolCallId`; it never treats a
+command string or adapter-generated approval ID as a tool identity. Exactly one
+tool must be active when the approval arrives. Missing or ambiguous active-tool
+correlation, terminal IDs, and callbacks outside their exact active turn are
+rejected without invoking the ACP permission callback.
+
+Before invoking `session/request_permission`, the adapter publishes the
+correlated ID as a pending tool call with the active turn's route envelope.
 
 | Option id | ACP kind | Native reply |
 |---|---|---|

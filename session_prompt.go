@@ -551,7 +551,10 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 	window := -1
 	resolveWindow := func() int {
 		if window < 0 {
-			window = s.contextWindow(ctx)
+			window = message.Info.ContextWindow
+			if window <= 0 {
+				window = s.contextWindow(ctx)
+			}
 		}
 
 		return window
@@ -878,7 +881,7 @@ func eventQuestion(data json.RawMessage) (nativehermes.QuestionRequest, bool) {
 		return req, true
 	}
 
-	for _, key := range []string{keyQuestion, keyRequest, "data"} {
+	for _, key := range []string{keyQuestion, keyRequest, keyData} {
 		var wrapper map[string]json.RawMessage
 		if err := json.Unmarshal(data, &wrapper); err != nil {
 			continue
@@ -1495,7 +1498,12 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		payload["_meta"] = meta
 	}
 
-	return conn.NotifyExtension(ctx, RawEventMethod, capRawEventPayload(payload))
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		return err
+	}
+
+	return conn.NotifyExtension(ctx, RawEventMethod, capped)
 }
 
 // usageUpdateFromTokens builds a usage_update. size is the model's true context
