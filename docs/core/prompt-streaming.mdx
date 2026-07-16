@@ -48,8 +48,19 @@ them.
 A timeout is a failure, not a user cancel, so it surfaces as
 `hermes_turn_failed` with `cause: "timeout"` — never the `cancelled` stop
 reason. A turn cancelled by the client returns the `cancelled` stop reason
-instead.
+instead. Neither result settles after Hermes' cooperative interrupt alone.
+The adapter closes the isolated native runtime and proves its entire process
+boundary empty first, including background tools that Hermes intentionally
+leaves running. If that proof fails, the prompt fails and the session is
+poisoned instead of reporting a normal timeout or cancellation.
 </Note>
+
+After a proved cancellation or timeout, the next authorized prompt lazily
+materializes a fresh isolated home from the last committed
+`hermes-state-db-v1` snapshot and resumes the exact stored native session key.
+The interrupted turn is never snapshotted. Turn nonces and adapter event
+sequences remain monotonic across the native-runtime replacement, and MCP is
+reloaded under the new turn's authorization before the model runs.
 
 ## Stream death and reconnect
 

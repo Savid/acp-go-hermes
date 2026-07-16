@@ -539,7 +539,7 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	assertProcessStartSeams(t, ctx)
 }
 
-func TestProcessReapsSpontaneousExitBeforeClose(t *testing.T) {
+func TestProcessFailsClosedWhenSupervisorDiesBeforeProof(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -554,7 +554,7 @@ func TestProcessReapsSpontaneousExitBeforeClose(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = proc.Close(context.Background()) })
 
-	if err := proc.Cmd.Process.Kill(); err != nil {
+	if err := proc.tree.kill(proc.Cmd); err != nil {
 		t.Fatalf("kill spontaneous process: %v", err)
 	}
 
@@ -567,8 +567,8 @@ func TestProcessReapsSpontaneousExitBeforeClose(t *testing.T) {
 	if proc.Cmd.ProcessState == nil {
 		t.Fatal("process waiter completed without recording process state")
 	}
-	if err := proc.Close(ctx); err != nil {
-		t.Fatalf("Close after spontaneous exit: %v", err)
+	if err := proc.Close(ctx); !errors.Is(err, ErrProcessTreeUnproven) {
+		t.Fatalf("Close after forced supervisor death = %v, want process-tree proof failure", err)
 	}
 }
 

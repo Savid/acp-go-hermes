@@ -44,7 +44,8 @@ still reach.
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
 
 `WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
-before the adapter aborts it and fails the prompt with the uniform
+before the adapter interrupts it, closes and proves its native process boundary,
+and fails the prompt with the uniform
 `hermes_turn_failed` error whose `cause` is `timeout`. The default `0` disables
 the deadline. A timeout is a failure, not a user cancel, so it is never reported
 as the `cancelled` stop reason — see
@@ -84,9 +85,11 @@ Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
 callbacks leave standalone operation unbounded. Hermes reserves the isolated
 session home before creating it, holds the native permit for the one
 `hermes serve` tree, and releases the reservation only after clean shutdown and
-root deletion. Hermes is lockless and emits no supervisor count. Descendant
-snapshots require proven containment; startup observations distinguish spawn,
-readiness, configuration, and native session creation.
+root deletion. Linux process snapshots include the dedicated per-session
+subreaper plus every currently owned native descendant; Windows snapshots come
+from the Job Object. Descendant snapshots require authoritative containment;
+startup observations distinguish spawn, readiness, configuration, and native
+session creation.
 
 ## Session store
 

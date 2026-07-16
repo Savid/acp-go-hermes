@@ -37,7 +37,7 @@ func TestProcessCloseKillsProcessGroupGrandchild(t *testing.T) {
 		return ch
 	}
 
-	err := (&Process{Cmd: cmd}).Close(context.Background())
+	err := (&Process{Cmd: cmd, tree: &processContainment{processGroupID: cmd.Process.Pid}}).Close(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "did not exit") {
 		t.Fatalf("Close error = %v", err)
 	}

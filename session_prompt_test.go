@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2253,8 +2254,20 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 
 			return ctx.Err()
 		}
-		session := testSession(NewAgent(), client)
+		agent := NewAgent(WithScratchDir(t.TempDir()))
+		session := testSession(agent, client)
 		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
+		if err := session.snapshotToStore(t.Context()); err != nil {
+			t.Fatalf("snapshot checkpoint: %v", err)
+		}
+
+		replacement := newFakeHermesClient()
+		replacement.getSession = testNativeSession("native-1")
+		agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+			replacement.xdg = opts.ExistingXDG
+
+			return replacement, nil
+		}
 
 		result := make(chan acp.PromptResponse, 1)
 		errCh := make(chan error, 1)
@@ -2274,17 +2287,17 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 			t.Fatalf("cancelled Prompt response = %#v", resp)
 		}
 
-		client.mu.Lock()
-		client.reloadFunc = nil
-		client.mu.Unlock()
 		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-retry", "reply")); err != nil {
 			t.Fatalf("retry Prompt: %v", err)
 		}
 		client.mu.Lock()
-		reloads := client.reloadCalls
+		oldReloads := client.reloadCalls
 		client.mu.Unlock()
-		if reloads != 2 {
-			t.Fatalf("reload calls = %d, want cancelled attempt plus retry", reloads)
+		replacement.mu.Lock()
+		newReloads := replacement.reloadCalls
+		replacement.mu.Unlock()
+		if oldReloads != 1 || newReloads != 1 {
+			t.Fatalf("reload calls old/new = %d/%d, want cancelled attempt plus replacement retry", oldReloads, newReloads)
 		}
 	})
 
@@ -3209,6 +3222,465 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 	}
 }
 
+func TestTurnCancelWaitsForOneProvedRuntimeClose(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	closeEntered := make(chan struct{})
+	releaseClose := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	client.closeFunc = func(context.Context) error {
+		close(closeEntered)
+		<-releaseClose
+
+		return nil
+	}
+
+	session := testSession(NewAgent(), client)
+	promptDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "cancel-fence", "hang"))
+		promptDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-started
+
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- session.cancelRouted(turnRouteMeta("cancel-fence")) }()
+	<-closeEntered
+	assertNoPromptSettlement(t, promptDone, "Prompt settled before native Close proof")
+	select {
+	case err := <-cancelDone:
+		t.Fatalf("Cancel settled before native Close proof: %v", err)
+	default:
+	}
+
+	close(releaseClose)
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	out := <-promptDone
+	if out.err != nil || out.resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("cancelled Prompt = %#v err=%v", out.resp, out.err)
+	}
+	if got := client.closeCount(); got != 1 {
+		t.Fatalf("runtime close count = %d, want 1", got)
+	}
+}
+
+func TestTurnTimeoutWaitsForOneProvedRuntimeClose(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	closeEntered := make(chan struct{})
+	releaseClose := make(chan struct{})
+	timeout := make(chan time.Time, 1)
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	client.closeFunc = func(context.Context) error {
+		close(closeEntered)
+		<-releaseClose
+
+		return nil
+	}
+
+	agent := NewAgent(WithTurnTimeout(time.Hour))
+	agent.options.newPromptTimer = func(time.Duration) promptTimer {
+		return promptTimer{C: timeout, Stop: func() bool { return true }}
+	}
+	session := testSession(agent, client)
+	promptDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "timeout-fence", "hang"))
+		promptDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-started
+	timeout <- time.Now()
+	<-closeEntered
+	assertNoPromptSettlement(t, promptDone, "timeout settled before native Close proof")
+
+	close(releaseClose)
+	out := <-promptDone
+	if out.resp.StopReason != "" {
+		t.Fatalf("timeout stop reason = %q", out.resp.StopReason)
+	}
+	requireTurnFailure(t, out.err, nativehermes.CauseTimeout, "deadline")
+	if got := client.closeCount(); got != 1 {
+		t.Fatalf("runtime close count = %d, want 1", got)
+	}
+}
+
+func TestTurnCancelCoincidentWithTimeoutClosesOnceAndWins(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	closeEntered := make(chan struct{})
+	releaseClose := make(chan struct{})
+	timeout := make(chan time.Time, 1)
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	client.closeFunc = func(context.Context) error {
+		close(closeEntered)
+		<-releaseClose
+
+		return nil
+	}
+
+	agent := NewAgent(WithTurnTimeout(time.Hour))
+	agent.options.newPromptTimer = func(time.Duration) promptTimer {
+		return promptTimer{C: timeout, Stop: func() bool { return true }}
+	}
+	session := testSession(agent, client)
+	promptDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "coincident-fence", "hang"))
+		promptDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-started
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- session.cancelRouted(turnRouteMeta("coincident-fence")) }()
+	<-closeEntered
+	timeout <- time.Now()
+	close(releaseClose)
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	out := <-promptDone
+	if out.err != nil || out.resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("coincident Prompt = %#v err=%v", out.resp, out.err)
+	}
+	if got := client.closeCount(); got != 1 {
+		t.Fatalf("runtime close count = %d, want 1", got)
+	}
+}
+
+func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	session := testSession(NewAgent(), client)
+	promptDone := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "unproven-fence", "hang"))
+		promptDone <- err
+	}()
+	<-started
+
+	cancelErr := session.cancelRouted(turnRouteMeta("unproven-fence"))
+	if !errors.Is(cancelErr, nativehermes.ErrProcessTreeUnproven) {
+		t.Fatalf("Cancel error = %v, want process-tree proof failure", cancelErr)
+	}
+	if promptErr := <-promptDone; !errors.Is(promptErr, nativehermes.ErrProcessTreeUnproven) {
+		t.Fatalf("Prompt error = %v, want process-tree proof failure", promptErr)
+	}
+	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+		t.Fatalf("poisoned session error = %v", err)
+	}
+	if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "after-unproven", "reply")); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+		t.Fatalf("Prompt after proof failure = %v", err)
+	}
+	if got := client.closeCount(); got != 1 {
+		t.Fatalf("runtime close count = %d, want 1", got)
+	}
+}
+
+func TestPromptFenceRemainingFailureBranches(t *testing.T) {
+	t.Run("idle cancel without runtime", func(t *testing.T) {
+		session := testSession(NewAgent(), newFakeHermesClient())
+		session.client = nil
+		if err := session.cancelRouted(nil); err != nil {
+			t.Fatalf("idle cancel: %v", err)
+		}
+	})
+
+	t.Run("prompt resume admission failure", func(t *testing.T) {
+		wantErr := errors.New("resume denied")
+		agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return nil, wantErr
+			},
+		}))
+		session := testSession(agent, newFakeHermesClient())
+		session.runtimeNeedsResume = true
+		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "resume-denied", "reply")); !errors.Is(err, wantErr) {
+			t.Fatalf("Prompt resume error = %v", err)
+		}
+	})
+
+	t.Run("default timer fallback", func(t *testing.T) {
+		agent := NewAgent(WithTurnTimeout(time.Hour))
+		agent.options.newPromptTimer = nil
+		session := testSession(agent, newFakeHermesClient())
+		response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "default-timer", "reply"))
+		if err != nil || response.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("Prompt with default timer = %#v err=%v", response, err)
+		}
+	})
+
+	t.Run("timeout fence failure", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.closeErr = errors.New("close failed")
+		client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+			<-ctx.Done()
+
+			return nativehermes.NativeMessage{}, ctx.Err()
+		}
+		timeout := make(chan time.Time, 1)
+		timeout <- time.Now()
+		agent := NewAgent(WithTurnTimeout(time.Hour))
+		agent.options.newPromptTimer = func(time.Duration) promptTimer {
+			return promptTimer{C: timeout, Stop: func() bool { return true }}
+		}
+		session := testSession(agent, client)
+		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "timeout-fence-error", "hang")); err == nil || !strings.Contains(err.Error(), "close failed") {
+			t.Fatalf("timeout fence error = %v", err)
+		}
+	})
+}
+
+func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) {
+	oldClient := newFakeHermesClient()
+	oldStarted := make(chan struct{})
+	oldClient.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(oldStarted)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+
+	scratch := t.TempDir()
+	agent := NewAgent(WithScratchDir(scratch))
+	session := testSession(agent, oldClient)
+	session.env = map[string]string{"HERMES_REBIND_TEST": "preserved"}
+	session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", map[string]string{"Authorization": "Bearer test"})}
+	if err := session.snapshotToStore(t.Context()); err != nil {
+		t.Fatalf("snapshot checkpoint: %v", err)
+	}
+
+	replacement := newFakeHermesClient()
+	replacement.getSession = testNativeSession("native-1")
+	replacementStarted := make(chan struct{})
+	releaseReplacement := make(chan struct{})
+	replacement.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(replacementStarted)
+		<-releaseReplacement
+
+		return nativehermes.NativeMessage{
+			Info: nativehermes.NativeMessageInfo{ID: "replacement-message", SessionID: id, Role: valAssistant, Finish: "stop"},
+		}, nil
+	}
+
+	factoryCalls := 0
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+		factoryCalls++
+		if opts.ACPSessionID != nativehermes.ACPSessionIDString(session.id) {
+			t.Fatalf("replacement ACP session id = %q", opts.ACPSessionID)
+		}
+		if opts.Env["HERMES_REBIND_TEST"] != "preserved" {
+			t.Fatalf("replacement env = %#v", opts.Env)
+		}
+		if len(opts.MCPServers) != 1 {
+			t.Fatalf("replacement MCP servers = %#v", opts.MCPServers)
+		}
+		if opts.ExistingXDG.Root == "" || !strings.HasPrefix(opts.ExistingXDG.Root, agent.homeRoot()) {
+			t.Fatalf("replacement XDG = %#v, home=%q", opts.ExistingXDG, agent.homeRoot())
+		}
+		replacement.xdg = opts.ExistingXDG
+
+		return replacement, nil
+	}
+
+	oldDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "old-turn", "hang"))
+		oldDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-oldStarted
+	if err := session.cancelRouted(turnRouteMeta("old-turn")); err != nil {
+		t.Fatalf("cancel old turn: %v", err)
+	}
+	oldOut := <-oldDone
+	if oldOut.err != nil || oldOut.resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("old Prompt = %#v err=%v", oldOut.resp, oldOut.err)
+	}
+
+	newDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "replacement-turn", "reply"))
+		newDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-replacementStarted
+
+	if err := session.cancelRouted(turnRouteMeta("old-turn")); err == nil || !strings.Contains(err.Error(), "stale route turnNonce") {
+		t.Fatalf("stale old route error = %v", err)
+	}
+	if got := replacement.closeCount(); got != 0 {
+		t.Fatalf("stale route closed replacement %d times", got)
+	}
+
+	close(releaseReplacement)
+	newOut := <-newDone
+	if newOut.err != nil || newOut.resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("replacement Prompt = %#v err=%v", newOut.resp, newOut.err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("replacement factory calls = %d, want 1", factoryCalls)
+	}
+	replacement.mu.Lock()
+	getIDs := append([]string(nil), replacement.getSessionIDs...)
+	reloads := replacement.reloadCalls
+	replacement.mu.Unlock()
+	if !slices.Equal(getIDs, []string{"native-1"}) {
+		t.Fatalf("replacement GetSession ids = %#v", getIDs)
+	}
+	if reloads != 1 {
+		t.Fatalf("replacement MCP reload calls = %d, want 1", reloads)
+	}
+	if session.currentTurnEpoch() != 2 {
+		t.Fatalf("turn epoch = %d, want monotonic 2", session.currentTurnEpoch())
+	}
+	if err := session.Close(t.Context()); err != nil {
+		t.Fatalf("close replacement: %v", err)
+	}
+}
+
+func TestTurnLazyResumeSerializesWithSessionClose(t *testing.T) {
+	oldClient := newFakeHermesClient()
+	oldStarted := make(chan struct{})
+	oldClient.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(oldStarted)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	agent := NewAgent(WithScratchDir(t.TempDir()))
+	session := testSession(agent, oldClient)
+	if err := session.snapshotToStore(t.Context()); err != nil {
+		t.Fatalf("snapshot checkpoint: %v", err)
+	}
+
+	oldDone := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "old-close-race", "hang"))
+		oldDone <- err
+	}()
+	<-oldStarted
+	if err := session.cancelRouted(turnRouteMeta("old-close-race")); err != nil {
+		t.Fatalf("cancel old turn: %v", err)
+	}
+	if err := <-oldDone; err != nil {
+		t.Fatalf("old Prompt: %v", err)
+	}
+
+	replacement := newFakeHermesClient()
+	replacement.getSession = testNativeSession("native-1")
+	replacement.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	factoryEntered := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+		close(factoryEntered)
+		<-releaseFactory
+		replacement.xdg = opts.ExistingXDG
+
+		return replacement, nil
+	}
+
+	promptDone := make(chan struct {
+		resp acp.PromptResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "replacement-close-race", "hang"))
+		promptDone <- struct {
+			resp acp.PromptResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+	<-factoryEntered
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- session.Close(context.Background()) }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close crossed an in-flight replacement install: %v", err)
+	default:
+	}
+
+	close(releaseFactory)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	out := <-promptDone
+	if out.err != nil || out.resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("replacement Prompt during Close = %#v err=%v", out.resp, out.err)
+	}
+	if got := replacement.closeCount(); got != 1 {
+		t.Fatalf("replacement close count = %d, want 1", got)
+	}
+}
+
+func assertNoPromptSettlement(t *testing.T, done <-chan struct {
+	resp acp.PromptResponse
+	err  error
+}, message string) {
+	t.Helper()
+
+	select {
+	case out := <-done:
+		t.Fatalf("%s: response=%#v error=%v", message, out.resp, out.err)
+	default:
+	}
+}
+
 // T6 — a turn deadline aborts the native turn and fails with cause timeout, NOT
 // cancelled (WithTurnTimeout).
 func TestTurnFailureTimeout(t *testing.T) {
@@ -3345,12 +3817,11 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 }
 
 func TestFailedTurnResultGatewayDisconnectMarksStream(t *testing.T) {
-	ctx := context.Background()
 	session := testSession(NewAgent(), newFakeHermesClient())
 
 	aborted := false
 	sendErr := fmt.Errorf("send frame: %w", nativehermes.ErrGatewayDisconnected)
-	_, err := session.failedTurnResult(ctx, sendErr, nil, func() { aborted = true })
+	_, err := session.failedTurnResult(sendErr, func() { aborted = true })
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "send frame")
 	if !aborted {
 		t.Fatal("gateway disconnect did not abort the native turn")

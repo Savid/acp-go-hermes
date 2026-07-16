@@ -230,4 +230,8 @@ func (c *processContainment) descendantCount() (int, bool) {
 	return int(active), true
 }
 
+func (*processContainment) terminate(cmd *exec.Cmd) error { return terminateProcess(cmd) }
+
+func (*processContainment) kill(cmd *exec.Cmd) error { return killProcess(cmd) }
+
 func (c *processContainment) close() error { return windows.CloseHandle(c.job) }

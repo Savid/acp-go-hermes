@@ -24,4 +24,8 @@ func (*processContainment) quiesce(time.Duration) error {
 
 func (*processContainment) descendantCount() (int, bool) { return 0, false }
 
+func (*processContainment) terminate(cmd *exec.Cmd) error { return terminateProcess(cmd) }
+
+func (*processContainment) kill(cmd *exec.Cmd) error { return killProcess(cmd) }
+
 func (*processContainment) close() error { return nil }

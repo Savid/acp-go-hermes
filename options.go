@@ -61,6 +61,11 @@ type RuntimeResourceHooks struct {
 	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
 }
 
+type promptTimer struct {
+	C    <-chan time.Time
+	Stop func() bool
+}
+
 // Options configures the ACP agent process and Hermes sessions it starts.
 type Options struct {
 	AgentName    string
@@ -93,7 +98,8 @@ type Options struct {
 	TurnTimeout             time.Duration
 	RuntimeResourceHooks    RuntimeResourceHooks
 
-	clientFactory func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
+	clientFactory  func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
+	newPromptTimer func(time.Duration) promptTimer
 }
 
 func applyOptions(opts []Option) Options {
@@ -103,6 +109,11 @@ func applyOptions(opts []Option) Options {
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
 		clientFactory:           nativehermes.StartServer,
+		newPromptTimer: func(timeout time.Duration) promptTimer {
+			timer := time.NewTimer(timeout)
+
+			return promptTimer{C: timer.C, Stop: timer.Stop}
+		},
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -210,9 +221,10 @@ func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 }
 
 // WithTurnTimeout bounds how long a single native turn may run before the
-// wrapper aborts it and fails the prompt with a hermes_turn_failed error whose
-// cause is "timeout". The default of 0 disables the deadline. A timeout is a
-// failure, not a user cancel, so it is never reported as StopReason cancelled.
+// wrapper interrupts it, closes and proves the whole native process boundary,
+// and fails the prompt with a hermes_turn_failed error whose cause is "timeout".
+// The default of 0 disables the deadline. A timeout is a failure, not a user
+// cancel, so it is never reported as StopReason cancelled.
 func WithTurnTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.TurnTimeout = timeout

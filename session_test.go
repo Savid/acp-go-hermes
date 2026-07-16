@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -45,6 +46,40 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 		Properties:  json.RawMessage(`{"sessionID":"native-1","messageID":"message-1","type":"text","text":"late"}`),
 	}); err != nil {
 		t.Fatalf("suppressed handleEvent: %v", err)
+	}
+}
+
+func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
+	wantResumeErr := errors.New("resume admission")
+	resumeAgent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return nil, wantResumeErr
+		},
+	}))
+	resumeSession := testSession(resumeAgent, newFakeHermesClient())
+	resumeSession.runtimeNeedsResume = true
+	if _, _, err := resumeSession.preparePromptTurn(t.Context(), "resume-error"); !errors.Is(err, wantResumeErr) {
+		t.Fatalf("prepare resume error = %v", err)
+	}
+
+	nilClient := testSession(NewAgent(), newFakeHermesClient())
+	nilClient.client = nil
+	nilClient.cancelTurn()
+	if err := nilClient.fenceTurnLocked(t.Context(), 0, true); err != nil {
+		t.Fatalf("zero epoch fence: %v", err)
+	}
+	nilClient.turnEpoch = 2
+	if err := nilClient.fenceTurnLocked(t.Context(), 1, true); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
+		t.Fatalf("stale epoch fence error = %v", err)
+	}
+	if err := nilClient.fenceTurnLocked(t.Context(), 2, true); err == nil || !strings.Contains(err.Error(), "Hermes runtime is unavailable") {
+		t.Fatalf("nil runtime fence error = %v", err)
+	}
+
+	closed := testSession(NewAgent(), newFakeHermesClient())
+	closed.client = nil
+	if err := closed.Close(t.Context()); err != nil {
+		t.Fatalf("close nil runtime: %v", err)
 	}
 }
 

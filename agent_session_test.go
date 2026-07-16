@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -340,6 +341,242 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	loadedClient.mu.Unlock()
 	if reloads != 1 {
 		t.Fatalf("loaded session MCP reloads = %d, want one before continuation", reloads)
+	}
+}
+
+func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:gocyclo,maintidx // One lifecycle audit keeps every fail-closed branch explicit.
+	t.Run("poisoned", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		session.poisonCause = "earlier failure"
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+			t.Fatalf("poisoned resume error = %v", err)
+		}
+	})
+
+	t.Run("closed", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		session.closed = true
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "session closed") {
+			t.Fatalf("closed resume error = %v", err)
+		}
+	})
+
+	t.Run("retained unproven root", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainUnprovenHermesRoot(agent.hermesXDGRoot(session.id, nativehermes.XDGDirs{}))
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_tree_unproven") {
+			t.Fatalf("unproven-root resume error = %v", err)
+		}
+	})
+
+	t.Run("scratch admission", func(t *testing.T) {
+		wantErr := errors.New("scratch full")
+		session, _, _ := newResumeRuntimeTestSession(t, WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
+		}))
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, wantErr) {
+			t.Fatalf("scratch admission error = %v", err)
+		}
+	})
+
+	t.Run("xdg creation", func(t *testing.T) {
+		blockedRoot := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(blockedRoot, []byte("blocked"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		session, _, _ := newResumeRuntimeTestSession(t, WithScratchDir(blockedRoot))
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil {
+			t.Fatal("resume accepted an unusable XDG parent")
+		}
+	})
+
+	t.Run("store load", func(t *testing.T) {
+		wantErr := errors.New("store unavailable")
+		session, _, _ := newResumeRuntimeTestSession(t, WithSessionStore(&errorSessionStore{err: wantErr}))
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, wantErr) {
+			t.Fatalf("store load error = %v", err)
+		}
+	})
+
+	t.Run("missing checkpoint", func(t *testing.T) {
+		session, _, store := newResumeRuntimeTestSession(t)
+		if err := store.Delete(t.Context(), SessionKey{SessionID: string(session.id), Subpath: SessionStoreMainSubpath}); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "state is missing") {
+			t.Fatalf("missing-checkpoint resume error = %v", err)
+		}
+	})
+
+	t.Run("identity drift", func(t *testing.T) {
+		session, _, store := newResumeRuntimeTestSession(t)
+		snapshot := resumeRuntimeSnapshot(session)
+		snapshot.Session.NativeSessionID = "other-native"
+		replaceResumeRuntimeRecords(t, store, idmapRecord{
+			SessionID:       string(session.id),
+			NativeSessionID: "other-native",
+			Format:          SessionStoreFormat,
+		}, snapshot)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "stored session identity drift") {
+			t.Fatalf("identity-drift resume error = %v", err)
+		}
+	})
+
+	t.Run("cwd drift", func(t *testing.T) {
+		session, _, store := newResumeRuntimeTestSession(t)
+		snapshot := resumeRuntimeSnapshot(session)
+		snapshot.Session.Cwd = "/different/project"
+		replaceResumeRuntimeRecords(t, store, session.idmap, snapshot)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "stored cwd drift") {
+			t.Fatalf("cwd-drift resume error = %v", err)
+		}
+	})
+
+	t.Run("ordinary startup failure", func(t *testing.T) {
+		wantErr := errors.New("startup")
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+			return nil, wantErr
+		}
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, wantErr) {
+			t.Fatalf("startup error = %v", err)
+		}
+	})
+
+	t.Run("unproven startup failure", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+			return nil, nativehermes.ErrProcessTreeUnproven
+		}
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_tree_unproven") {
+			t.Fatalf("unproven startup error = %v", err)
+		}
+		if err := agent.rejectUnprovenHermesRoot(agent.hermesXDGRoot(session.id, nativehermes.XDGDirs{})); !errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			t.Fatalf("unproven root was not retained: %v", err)
+		}
+	})
+
+	t.Run("native lookup failure", func(t *testing.T) {
+		wantErr := errors.New("get session")
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		client := newFakeHermesClient()
+		client.getErr = wantErr
+		installResumeRuntimeFactory(agent, client)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, wantErr) {
+			t.Fatalf("native lookup error = %v", err)
+		}
+		if client.closeCount() != 1 {
+			t.Fatalf("failed replacement close count = %d", client.closeCount())
+		}
+	})
+
+	t.Run("native identity drift", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("different-native")
+		installResumeRuntimeFactory(agent, client)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "native session id drift") {
+			t.Fatalf("native identity error = %v", err)
+		}
+		if client.closeCount() != 1 {
+			t.Fatalf("drifted replacement close count = %d", client.closeCount())
+		}
+	})
+
+	t.Run("closed during startup", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+			client.xdg = options.ExistingXDG
+			session.mu.Lock()
+			session.closed = true
+			session.mu.Unlock()
+
+			return client, nil
+		}
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "session closed") {
+			t.Fatalf("concurrent close resume error = %v", err)
+		}
+		if client.closeCount() != 1 {
+			t.Fatalf("closed replacement close count = %d", client.closeCount())
+		}
+	})
+
+	t.Run("successful replacement drains historical channels", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		client.events <- nativehermes.TurnEvent{Type: "historical"}
+		client.errs <- errors.New("historical")
+		installResumeRuntimeFactory(agent, client)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err != nil {
+			t.Fatalf("resume runtime: %v", err)
+		}
+		if session.runtimeNeedsResume {
+			t.Fatal("successful replacement still needs resume")
+		}
+		select {
+		case event := <-client.events:
+			t.Fatalf("historical event was not drained: %#v", event)
+		default:
+		}
+		select {
+		case err := <-client.errs:
+			t.Fatalf("historical event error was not drained: %v", err)
+		default:
+		}
+		if err := session.Close(t.Context()); err != nil {
+			t.Fatalf("close replacement: %v", err)
+		}
+	})
+}
+
+func newResumeRuntimeTestSession(t *testing.T, options ...Option) (*session, *Agent, *InMemorySessionStore) {
+	t.Helper()
+	store := NewInMemorySessionStore()
+	base := make([]Option, 0, 2+len(options))
+	base = append(base, WithScratchDir(t.TempDir()), WithSessionStore(store))
+	base = append(base, options...)
+	agent := NewAgent(base...)
+	session := testSession(agent, newFakeHermesClient())
+	session.runtimeNeedsResume = true
+	replaceResumeRuntimeRecords(t, store, session.idmap, resumeRuntimeSnapshot(session))
+
+	return session, agent, store
+}
+
+func resumeRuntimeSnapshot(session *session) stateSnapshot {
+	return stateSnapshot{
+		Format: SessionStoreFormat,
+		Session: stateSnapshotSession{
+			SessionID:       string(session.id),
+			NativeSessionID: session.idmap.NativeSessionID,
+			Cwd:             session.cwd,
+			Model: stateSnapshotModel{
+				ProviderID: session.providerID,
+				ModelID:    session.modelID,
+			},
+		},
+	}
+}
+
+func replaceResumeRuntimeRecords(t *testing.T, store *InMemorySessionStore, idmap idmapRecord, snapshot stateSnapshot) {
+	t.Helper()
+	main := SessionKey{SessionID: snapshot.Session.SessionID, Subpath: SessionStoreMainSubpath}
+	if err := store.Replace(t.Context(), main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{mustStateJSON(t, snapshot)}},
+		{Key: SessionKey{SessionID: snapshot.Session.SessionID, Subpath: idmapSubpath}, Entries: []SessionStoreEntry{mustStateJSON(t, idmap)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installResumeRuntimeFactory(agent *Agent, client *fakeHermesClient) {
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		client.xdg = options.ExistingXDG
+
+		return client, nil
 	}
 }
 

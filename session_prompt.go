@@ -123,12 +123,7 @@ func (s *session) reconcileConnected(ctx context.Context) error {
 // cancel guard runs before all failure mapping: an error observed while the turn
 // is cancelled stays cancelled; otherwise the native turn is aborted and the
 // error becomes the uniform hermes_turn_failed error.
-func (s *session) failedTurnResult(turnCtx context.Context, sendErr error, messageID *string, abortTurn func()) (acp.PromptResponse, error) {
-	cancelled := s.wasCancelled() || turnCtx.Err() != nil
-	if cancelled {
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: messageID}, nil
-	}
-
+func (s *session) failedTurnResult(sendErr error, abortTurn func()) (acp.PromptResponse, error) {
 	abortTurn()
 
 	if nativehermes.IsGatewayDisconnect(sendErr) {
@@ -208,28 +203,38 @@ func (s *session) cancelRouted(meta map[string]any) error {
 	s.mu.Lock()
 	activeNonce := s.turnNonce
 	active := s.turnInFlight && activeNonce != ""
+	epoch := s.turnEpoch
 	s.mu.Unlock()
 
-	if active {
-		route, err := parseInboundTurnRoute(meta)
-		if err != nil {
-			return err
+	if !active {
+		s.mu.Lock()
+		client := s.client
+		nativeID := s.idmap.NativeSessionID
+		s.mu.Unlock()
+
+		if client == nil || nativeID == "" {
+			return nil
 		}
 
-		if route.turnNonce != activeNonce {
-			return routeInvalid("stale route turnNonce")
-		}
+		cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+
+		return client.Abort(cancelCtx, nativeID)
 	}
 
-	s.cancelTurn()
+	route, err := parseInboundTurnRoute(meta)
+	if err != nil {
+		return err
+	}
 
-	cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	defer cancel()
+	if route.turnNonce != activeNonce {
+		return routeInvalid("stale route turnNonce")
+	}
 
-	return s.client.Abort(cancelCtx, s.idmap.NativeSessionID)
+	return s.fenceTurnLocked(context.Background(), epoch, true)
 }
 
-func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) { //nolint:gocyclo // The turn select intentionally centralizes settlement precedence.
 	route, err := parseInboundTurnRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, err
@@ -259,15 +264,20 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		req.MessageID = *params.MessageId
 	}
 
-	if err := s.drainClientBacklog(ctx); err != nil {
-		if errors.Is(err, errPromptCancelled) {
-			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
-		}
+	if !s.needsRuntimeResume() {
+		if backlogErr := s.drainClientBacklog(ctx); backlogErr != nil {
+			if errors.Is(backlogErr, errPromptCancelled) {
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+			}
 
-		return acp.PromptResponse{}, err
+			return acp.PromptResponse{}, backlogErr
+		}
 	}
 
-	turnCtx := s.beginTurn(ctx, route.turnNonce)
+	turnCtx, turnEpoch, err := s.preparePromptTurn(ctx, route.turnNonce)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
 
 	turnActive := true
 	defer func() {
@@ -287,15 +297,24 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		})
 	}
 
+	cancelledTurn := func() (acp.PromptResponse, error) {
+		if fenceErr := s.fenceTurn(context.Background(), turnEpoch, true); fenceErr != nil {
+			return acp.PromptResponse{}, fenceErr
+		}
+
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+	}
+
 	failTurn := func(err error) (acp.PromptResponse, error) {
-		if errors.Is(err, errPromptCancelled) {
-			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+		if errors.Is(err, errPromptCancelled) || s.wasCancelled() || turnCtx.Err() != nil {
+			return cancelledTurn()
 		}
 
 		abortTurn()
 
 		return acp.PromptResponse{}, err
 	}
+
 	if err := s.reconcileConnected(turnCtx); err != nil {
 		return failTurn(err)
 	}
@@ -319,7 +338,16 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	var timeout <-chan time.Time
 
 	if turnTimeout > 0 {
-		timer := time.NewTimer(turnTimeout)
+		newTimer := s.agent.options.newPromptTimer
+		if newTimer == nil {
+			newTimer = func(timeout time.Duration) promptTimer {
+				timer := time.NewTimer(timeout)
+
+				return promptTimer{C: timer.C, Stop: timer.Stop}
+			}
+		}
+
+		timer := newTimer(turnTimeout)
 		defer timer.Stop()
 
 		timeout = timer.C
@@ -349,17 +377,21 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			// observed while the turn is cancelled stays cancelled.
 			cancelled := s.wasCancelled() || turnCtx.Err() != nil
 			s.markStreamFailed(nativehermes.StreamErrorEpoch(err))
-			s.cancelTurn()
-			abortTurn()
 
 			if cancelled {
-				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+				return cancelledTurn()
 			}
+
+			abortTurn()
 
 			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error()))
 		case result := <-done:
 			if result.err != nil {
-				return s.failedTurnResult(turnCtx, result.err, params.MessageId, abortTurn)
+				if s.wasCancelled() || turnCtx.Err() != nil {
+					return cancelledTurn()
+				}
+
+				return s.failedTurnResult(result.err, abortTurn)
 			}
 
 			final = result.message
@@ -369,10 +401,11 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 
 			usage = usageFromTokens(final.Info.Tokens)
 
-			stopReason := stopReasonFromHermes(final.Info.Finish)
 			if s.wasCancelled() || turnCtx.Err() != nil {
-				stopReason = acp.StopReasonCancelled
+				return cancelledTurn()
 			}
+
+			stopReason := stopReasonFromHermes(final.Info.Finish)
 
 			s.finishTurn()
 
@@ -388,21 +421,18 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			// turn deadline: when a user cancel and the timeout fire together the
 			// result is deterministically cancelled, never cause "timeout".
 			if s.wasCancelled() || turnCtx.Err() != nil {
-				s.cancelTurn()
-				abortTurn()
-
-				return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+				return cancelledTurn()
 			}
 
-			// A turn deadline is a failure, not a user cancel: abort the native
-			// turn and surface cause "timeout", never StopReason cancelled.
-			abortTurn()
+			// A turn deadline is a failure, not a user cancel. Settle it only
+			// after the native process boundary has been closed and proved empty.
+			if fenceErr := s.fenceTurn(context.Background(), turnEpoch, false); fenceErr != nil {
+				return acp.PromptResponse{}, fenceErr
+			}
 
 			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTimeout, fmt.Sprintf("hermes turn exceeded %s deadline", turnTimeout)))
 		case <-turnCtx.Done():
-			abortTurn()
-
-			return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+			return cancelledTurn()
 		}
 	}
 }

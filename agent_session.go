@@ -289,6 +289,153 @@ func (a *Agent) loadOrResumeSession(
 	return session, nil
 }
 
+// resumeRuntimeForTurnLocked rebuilds a fenced session runtime from the last
+// committed store snapshot. toolMu and cancelMu are held by the caller, so the
+// old prompt has fully released the per-session token and Close cannot cross
+// installation of the replacement runtime.
+func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr error) {
+	s.mu.Lock()
+	needsResume := s.runtimeNeedsResume
+	closed := s.closed
+	poisonErr := s.poisonedErrorLocked()
+	id := s.id
+	cwd := s.cwd
+	mcpServers := cloneMCPServers(s.mcpServers)
+	wantIDMap := s.idmap
+	meta := sessionMeta{
+		Model:       joinModelValue(s.providerID, s.modelID),
+		Env:         cloneStringMap(s.env),
+		RawMessages: s.rawMessages,
+	}
+	s.mu.Unlock()
+
+	if poisonErr != nil {
+		return poisonErr
+	}
+
+	if closed {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session closed"})
+	}
+
+	if !needsResume {
+		return nil
+	}
+
+	root := s.agent.hermesXDGRoot(id, nativehermes.XDGDirs{})
+	if err := s.agent.rejectUnprovenHermesRoot(root); err != nil {
+		return s.poisonWithError(ctx, "hermes_process_tree_unproven", err.Error())
+	}
+
+	scratchRelease, err := reserveScratchRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return err
+	}
+
+	keepScratch := false
+
+	var xdg nativehermes.XDGDirs
+
+	defer func() {
+		if !keepScratch {
+			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
+		}
+	}()
+
+	xdg, err = nativehermes.CreateXDGDirs(s.agent.homeRoot(), string(id))
+	if err != nil {
+		return err
+	}
+
+	storeCtx, cancel := s.agent.sessionStoreContext(ctx)
+	idmap, snapshot, ok, err := hydrateStateFromStore(storeCtx, s.agent.sessionStore(), string(id), xdg)
+
+	cancel()
+
+	if err != nil {
+		return err
+	}
+
+	if !ok {
+		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", "last committed Hermes session state is missing")
+	}
+
+	if idmap.SessionID != wantIDMap.SessionID || idmap.NativeSessionID != wantIDMap.NativeSessionID {
+		return s.poisonWithError(ctx, "hermes_native_session_id_drift", fmt.Sprintf(
+			"stored session identity drift: expected %q/%q, got %q/%q",
+			wantIDMap.SessionID,
+			wantIDMap.NativeSessionID,
+			idmap.SessionID,
+			idmap.NativeSessionID,
+		))
+	}
+
+	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
+		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", fmt.Sprintf(
+			"stored cwd drift: expected %q, got %q",
+			cwd,
+			snapshot.Session.Cwd,
+		))
+	}
+
+	client, err := s.agent.newHermesClientWithScratch(ctx, id, cwd, meta, xdg, scratchRelease, mcpServers)
+	if err != nil {
+		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+			keepScratch = true
+
+			s.agent.retainUnprovenHermesRoot(xdg.Root)
+
+			return s.poisonWithError(ctx, "hermes_process_tree_unproven", err.Error())
+		}
+
+		return err
+	}
+
+	keepScratch = true
+
+	native, err := client.GetSession(ctx, wantIDMap.NativeSessionID)
+	if err != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+
+		return errors.Join(err, closeErr)
+	}
+
+	if native.ID != wantIDMap.NativeSessionID {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+		driftErr := s.poisonNativeSessionDrift(ctx, "runtime resume", native.ID)
+
+		return errors.Join(driftErr, closeErr)
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+
+		closeErr := closeHermesClientAfterStartupFailure(client)
+
+		return errors.Join(acp.NewInvalidRequest(map[string]any{jsonFieldError: "session closed"}), closeErr)
+	}
+
+	s.client = client
+	s.runtimeNeedsResume = false
+	s.mcpReloadComplete = false
+	s.suppressNextBacklog = false
+	s.mu.Unlock()
+
+	// A resumed gateway may enqueue historical events before the first new
+	// prompt. They describe the already-committed checkpoint and must never be
+	// rebound to the new turn route.
+	for {
+		select {
+		case <-client.Events():
+			continue
+		case <-client.EventErrors():
+			continue
+		default:
+			return nil
+		}
+	}
+}
+
 func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, meta sessionMeta) error {
 	snapshot := existing.snapshot()
 	if snapshot.cwd != "" && snapshot.cwd != cwd {

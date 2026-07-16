@@ -17,19 +17,16 @@ var (
 )
 
 type processContainment struct {
-	processGroupID int
+	processGroupID    int
+	terminateFn       func() error
+	killFn            func() error
+	proof             <-chan bool
+	closeFn           func() error
+	descendantCountFn func() (int, bool)
 }
 
 func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		return nil, errors.New("hermes Unix process-group containment is not configured")
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	return &processContainment{processGroupID: cmd.Process.Pid}, nil
+	return startUnixContainedProcess(cmd)
 }
 
 func (c *processContainment) quiesce(timeout time.Duration) error {
@@ -39,6 +36,24 @@ func (c *processContainment) quiesce(timeout time.Duration) error {
 
 	if timeout <= 0 {
 		timeout = time.Second
+	}
+
+	if c.proof != nil {
+		deadline := time.Now().Add(timeout)
+		select {
+		case proved := <-c.proof:
+			if !proved {
+				return errors.New("hermes supervisor exited without proving descendant quiescence")
+			}
+		case <-time.After(time.Until(deadline)):
+			return errors.New("hermes supervisor did not prove descendant quiescence")
+		}
+
+		if err := c.waitUntilEmpty(deadline); err != nil {
+			return fmt.Errorf("hermes supervisor process group %d did not become quiescent: %w", c.processGroupID, err)
+		}
+
+		return nil
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -102,13 +117,39 @@ func (c *processContainment) signal(signal syscall.Signal) error {
 	return err
 }
 
-func (*processContainment) descendantCount() (int, bool) {
+func (c *processContainment) descendantCount() (int, bool) {
+	if c != nil && c.descendantCountFn != nil {
+		return c.descendantCountFn()
+	}
+
 	// A process-group existence probe proves quiescence, but it cannot
 	// enumerate an authoritative nonzero membership count.
 	return 0, false
 }
 
-func (*processContainment) close() error { return nil }
+func (c *processContainment) terminate(cmd *exec.Cmd) error {
+	if c != nil && c.terminateFn != nil {
+		return c.terminateFn()
+	}
+
+	return terminateProcess(cmd)
+}
+
+func (c *processContainment) kill(cmd *exec.Cmd) error {
+	if c != nil && c.killFn != nil {
+		return c.killFn()
+	}
+
+	return killProcess(cmd)
+}
+
+func (c *processContainment) close() error {
+	if c != nil && c.closeFn != nil {
+		return c.closeFn()
+	}
+
+	return nil
+}
 
 func terminateProcess(cmd *exec.Cmd) error {
 	return signalProcess(cmd, syscall.SIGTERM)

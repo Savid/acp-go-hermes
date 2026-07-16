@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,11 +22,13 @@ import (
 )
 
 const (
-	envFakeHermesHelper  = "ACP_GO_HERMES_FAKE_HELPER"
-	envFakeHermesMode    = "ACP_GO_HERMES_FAKE_MODE"
-	fakeModeOK           = "ok"
-	fakeModeStatusOnly   = "status-only"
-	fakeStoredSessionKey = "stored-fake"
+	envFakeHermesHelper        = "ACP_GO_HERMES_FAKE_HELPER"
+	envFakeHermesMode          = "ACP_GO_HERMES_FAKE_MODE"
+	envFakeHermesDescendantPID = "ACP_GO_HERMES_FAKE_DESCENDANT_PID_FILE"
+	fakeModeOK                 = "ok"
+	fakeModeStatusOnly         = "status-only"
+	fakeModeDetachedDescendant = "detached-descendant"
+	fakeStoredSessionKey       = "stored-fake"
 )
 
 func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
@@ -281,13 +284,15 @@ func runFakeHermesServer(args []string, mode string) error {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 	if mode != fakeModeStatusOnly {
-		handler.HandleFunc("/api/ws", handleFakeGatewayWS)
+		handler.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+			handleFakeGatewayWS(w, r, mode)
+		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return server.ListenAndServe()
 }
 
-func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request) {
+func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request, mode string) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -312,11 +317,11 @@ func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request) {
 		}
 		params := map[string]any{}
 		_ = json.Unmarshal(req.Params, &params)
-		handleFakeGatewayRPC(r.Context(), conn, req.ID, req.Method, params)
+		handleFakeGatewayRPC(r.Context(), conn, req.ID, req.Method, params, mode)
 	}
 }
 
-func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any) {
+func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any, mode string) {
 	switch method {
 	case "session.create":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
@@ -376,6 +381,15 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			writeFakeGatewayError(ctx, conn, id, 4001, "session not found")
 			return
 		}
+		if mode == fakeModeDetachedDescendant {
+			pidFile := os.Getenv(envFakeHermesDescendantPID)
+			if _, err := os.Stat(pidFile); errors.Is(err, os.ErrNotExist) {
+				writeFakeGatewayResult(ctx, conn, id, map[string]any{})
+				spawnFakeDetachedDescendant(pidFile)
+
+				return
+			}
+		}
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
 		writeFakeGatewayEvent(ctx, conn, "tool.start", live, map[string]any{
 			"tool_id": "native-tool-1",
@@ -427,4 +441,13 @@ func writeFakeGatewayEvent(ctx context.Context, conn *websocket.Conn, eventType 
 	}
 	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": params})
 	_ = conn.Write(ctx, websocket.MessageText, data)
+}
+
+func spawnFakeDetachedDescendant(pidFile string) {
+	if pidFile == "" {
+		return
+	}
+
+	cmd := exec.Command("setsid", "sh", "-c", `trap "" TERM; echo $$ > "$1"; while :; do sleep 30; done`, "fake-detached", pidFile)
+	_ = cmd.Start()
 }

@@ -28,6 +28,7 @@ type fakeHermesClient struct {
 	pendingQuestions   []nativehermes.QuestionRequest
 	questionReplies    []fakeQuestionReply
 	questionRejects    []fakeQuestionReject
+	getSessionIDs      []string
 
 	createSessionFunc func(context.Context, string) (nativehermes.Session, error)
 	sendMessage       func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error)
@@ -35,6 +36,7 @@ type fakeHermesClient struct {
 	aborts         []string
 	deleted        []string
 	closed         bool
+	closeCalls     int
 	events         chan nativehermes.TurnEvent
 	errs           chan error
 	createErr      error
@@ -87,6 +89,7 @@ func newFakeHermesClient() *fakeHermesClient {
 func (c *fakeHermesClient) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closed = true
+	c.closeCalls++
 	closeFunc := c.closeFunc
 	c.mu.Unlock()
 	if closeFunc != nil {
@@ -104,7 +107,11 @@ func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nat
 	return c.createSession, c.createErr
 }
 
-func (c *fakeHermesClient) GetSession(context.Context, string) (nativehermes.Session, error) {
+func (c *fakeHermesClient) GetSession(_ context.Context, id string) (nativehermes.Session, error) {
+	c.mu.Lock()
+	c.getSessionIDs = append(c.getSessionIDs, id)
+	c.mu.Unlock()
+
 	return c.getSession, c.getErr
 }
 
@@ -223,6 +230,13 @@ func (c *fakeHermesClient) abortCount() int {
 	defer c.mu.Unlock()
 
 	return len(c.aborts)
+}
+
+func (c *fakeHermesClient) closeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closeCalls
 }
 
 func (c *fakeHermesClient) permissionReply(index int) fakePermissionReply {

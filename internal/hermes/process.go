@@ -390,7 +390,11 @@ func (p *Process) Close(ctx context.Context) error {
 	afterFn := after
 	done := p.beginWait()
 
-	_ = terminateProcess(p.Cmd)
+	if p.tree != nil {
+		_ = p.tree.terminate(p.Cmd)
+	} else {
+		_ = terminateProcess(p.Cmd)
+	}
 
 	var err error
 
@@ -403,7 +407,11 @@ func (p *Process) Close(ctx context.Context) error {
 		err = fmt.Errorf("hermes serve did not exit")
 	}
 
-	_ = killProcess(p.Cmd)
+	if p.tree != nil {
+		_ = p.tree.kill(p.Cmd)
+	} else {
+		_ = killProcess(p.Cmd)
+	}
 
 	select {
 	case <-done:

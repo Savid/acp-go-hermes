@@ -3,7 +3,7 @@ title: Sessions
 description: The per-session process model, adapter-owned IDs, and the load/resume/delete semantics.
 ---
 
-Each ACP session owns one `hermes serve` process and one isolated per-session
+Each ACP session owns one supervised `hermes serve` process tree and one isolated per-session
 `HERMES_HOME` materialized under the scratch parent (`WithScratchDir`, or the
 system temp directory by default). The adapter talks to the native dashboard
 gateway over loopback WebSocket JSON-RPC. Sessions are independent: one crashing
@@ -46,3 +46,10 @@ Durable rehydration depends on a configured store — see
 On `session/close`, an idle session is snapshotted synchronously before Hermes
 shutdown removes its isolated XDG root. Sessions with a turn, permission,
 elicitation, or generation still pending are closed without a fresh snapshot.
+
+Cancellation and timeout are destructive runtime boundaries. The adapter first
+interrupts Hermes, then closes and proves the complete per-session process tree
+quiescent before the prompt settles. The logical ACP session remains active;
+its next prompt recreates the home from the last committed snapshot and resumes
+the same native durable session key. A stale cancel nonce cannot target that
+replacement runtime.

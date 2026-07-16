@@ -60,6 +60,9 @@ type session struct {
 	failedMessageIDs    map[string]struct{}
 	suppressNextBacklog bool
 	mcpReloadComplete   bool
+	runtimeNeedsResume  bool
+	fencedTurnEpoch     uint64
+	turnFenceErr        error
 	poisonCause         string
 	closed              bool
 }
@@ -236,6 +239,14 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
+	return s.beginTurnLocked(ctx, turnNonce)
+}
+
+// beginTurnLocked starts one turn while toolMu and cancelMu hold the runtime
+// generation stable. Keeping runtime installation and turn admission under the
+// same lock prevents Close from landing between a lazy resume and its first
+// routed operation.
+func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -250,6 +261,36 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 	s.toolStates = map[string]hermesToolState{}
 
 	return turnCtx
+}
+
+func (s *session) preparePromptTurn(ctx context.Context, turnNonce string) (context.Context, uint64, error) {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	if err := s.resumeRuntimeForTurnLocked(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	turnCtx := s.beginTurnLocked(ctx, turnNonce)
+
+	return turnCtx, s.currentTurnEpoch(), nil
+}
+
+func (s *session) currentTurnEpoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnEpoch
+}
+
+func (s *session) needsRuntimeResume() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.runtimeNeedsResume
 }
 
 func (s *session) finishTurn() {
@@ -286,10 +327,17 @@ func (s *session) currentTurnNonce() string {
 }
 
 func (s *session) cancelTurn() {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.cancelTurnLocked(s.client, true)
+}
+
+func (s *session) cancelTurnLocked(client nativehermes.Server, markCancelled bool) {
 	s.mu.Lock()
 
 	cancel := s.cancel
-	if cancel != nil {
+	if cancel != nil && markCancelled {
 		s.cancelled = true
 	}
 
@@ -315,13 +363,106 @@ func (s *session) cancelTurn() {
 	ctx, done := context.WithTimeout(context.Background(), closeTimeout)
 	defer done()
 
+	if client == nil {
+		return
+	}
+
 	for i := range pending {
-		_ = s.poisonMissingLiveSessionMapping(ctx, s.client.ReplyPermission(ctx, pending[i], valReject, valCancelled))
+		_ = client.ReplyPermission(ctx, pending[i], valReject, valCancelled)
 	}
 
 	for _, req := range questions {
-		_ = s.poisonMissingLiveSessionMapping(ctx, s.client.RejectQuestion(ctx, req))
+		_ = client.RejectQuestion(ctx, req)
 	}
+}
+
+// fenceTurnLocked is the single destructive turn fence. cancelMu must be held.
+// It memoizes by epoch so Cancel, the prompt context, and the deadline can all
+// race without issuing duplicate shutdowns. A normal cancellation/timeout is
+// returned only after Close proves the entire native containment boundary is
+// quiescent and releases its isolated root.
+func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancelled bool) error {
+	if epoch == 0 {
+		return nil
+	}
+
+	if s.fencedTurnEpoch == epoch {
+		if markCancelled {
+			s.mu.Lock()
+			s.cancelled = true
+			s.mu.Unlock()
+		}
+
+		return s.turnFenceErr
+	}
+
+	s.mu.Lock()
+	currentEpoch := s.turnEpoch
+	client := s.client
+	nativeID := s.idmap.NativeSessionID
+	s.mu.Unlock()
+
+	if currentEpoch != epoch {
+		return routeInvalid("stale turn epoch")
+	}
+
+	s.cancelTurnLocked(client, markCancelled)
+
+	if client == nil {
+		err := s.poisonWithError(ctx, "hermes_runtime_fence_failed", "Hermes runtime is unavailable")
+		s.fencedTurnEpoch = epoch
+		s.turnFenceErr = err
+
+		return err
+	}
+
+	abortCtx, abortCancel := context.WithTimeout(context.Background(), closeTimeout)
+	_ = client.Abort(abortCtx, nativeID)
+
+	abortCancel()
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr := client.Close(closeCtx)
+
+	closeCancel()
+
+	s.fencedTurnEpoch = epoch
+
+	if closeErr != nil {
+		name := "hermes_runtime_fence_failed"
+		if errors.Is(closeErr, nativehermes.ErrProcessTreeUnproven) {
+			name = "hermes_process_tree_unproven"
+		}
+
+		err := errors.Join(s.poisonWithError(ctx, name, closeErr.Error()), closeErr)
+		s.turnFenceErr = err
+
+		return err
+	}
+
+	s.mu.Lock()
+	s.runtimeNeedsResume = !s.closed
+	s.pending = map[string]nativehermes.PermissionRequest{}
+	s.questions = map[string]nativehermes.QuestionRequest{}
+	s.processedPermission = map[string]struct{}{}
+	s.processedQuestion = map[string]struct{}{}
+	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
+	s.failedStreamEpochs = map[uint64]struct{}{}
+	s.failedMessageIDs = map[string]struct{}{}
+	s.suppressNextBacklog = true
+	s.mcpReloadComplete = false
+	s.mu.Unlock()
+	s.turnFenceErr = nil
+
+	return nil
+}
+
+func (s *session) fenceTurn(ctx context.Context, epoch uint64, markCancelled bool) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	return s.fenceTurnLocked(ctx, epoch, markCancelled)
 }
 
 func (s *session) wasCancelled() bool {
@@ -621,8 +762,18 @@ func (s *session) markPart(part nativehermes.Part) bool {
 	return true
 }
 
-func (s *session) Close(_ context.Context) error {
-	s.cancelTurn()
+func (s *session) Close(ctx context.Context) error {
+	return s.close(ctx, false)
+}
+
+func (s *session) DeleteNativeAndClose(ctx context.Context) error {
+	return s.close(ctx, true)
+}
+
+func (s *session) close(ctx context.Context, deleteNative bool) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -633,35 +784,21 @@ func (s *session) Close(_ context.Context) error {
 	s.closed = true
 	client := s.client
 	nativeID := s.idmap.NativeSessionID
+	epoch := s.turnEpoch
+	active := s.cancel != nil && epoch > 0
 	s.mu.Unlock()
 
-	var err error
-
-	if client != nil && nativeID != "" {
-		abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		_ = client.Abort(abortCtx, nativeID)
-
-		cancel()
-
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, client.Close(closeCtx))
-
-		closeCancel()
+	if active {
+		return s.fenceTurnLocked(ctx, epoch, true)
 	}
 
-	return err
-}
+	s.cancelTurnLocked(client, true)
 
-func (s *session) DeleteNativeAndClose(ctx context.Context) error {
-	s.cancelTurn()
-	s.mu.Lock()
-	client := s.client
-	nativeID := s.idmap.NativeSessionID
-	s.mu.Unlock()
+	if client == nil {
+		return nil
+	}
 
-	var err error
-
-	if client != nil && nativeID != "" {
+	if deleteNative && nativeID != "" {
 		deleteCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		if deleteErr := client.DeleteSession(deleteCtx, nativeID); deleteErr != nil && s.agent != nil && s.agent.log != nil {
 			s.agent.log.DebugContext(deleteCtx, "delete native Hermes session failed", slog.String(jsonFieldError, deleteErr.Error()))
@@ -670,7 +807,19 @@ func (s *session) DeleteNativeAndClose(ctx context.Context) error {
 		cancel()
 	}
 
-	return errors.Join(err, s.Close(ctx))
+	if nativeID != "" {
+		abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		_ = client.Abort(abortCtx, nativeID)
+
+		cancel()
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	err := client.Close(closeCtx)
+
+	closeCancel()
+
+	return err
 }
 
 func (s *session) info() acp.SessionInfo {

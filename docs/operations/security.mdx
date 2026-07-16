@@ -13,6 +13,22 @@ Each `hermes serve` process binds to `127.0.0.1` and gates the dashboard
 WebSocket with a per-session random `HERMES_DASHBOARD_SESSION_TOKEN`. Nothing
 listens off-host.
 
+## Native process containment
+
+Hermes' cooperative interrupt stops its foreground command but intentionally
+leaves background servers and watchers running. The adapter therefore treats
+the whole per-session native process tree as the cancellation boundary. On
+Linux, a dedicated self-executed subreaper owns Hermes and every orphaned tool
+descendant, including processes that detach with `setsid(2)`; pidfd-bound
+signals, reaping, and an explicit proof pipe make supervisor death fail closed.
+On Windows, a kill-on-close Job Object supplies the equivalent boundary.
+
+Native session startup fails with `ErrProcessTreeUnproven` on operating systems
+where the adapter cannot establish an authoritative detached-descendant
+boundary. A cancellation, timeout, or close also fails closed if the active
+boundary cannot prove that every process exited; its isolated root and host
+admission ownership remain quarantined.
+
 ## Stdout discipline
 
 Stdout is reserved exclusively for ACP JSON-RPC frames. Child process stdout and

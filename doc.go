@@ -3,9 +3,11 @@
 //
 // Most hosts run the agent over a pair of JSON-RPC streams using [Serve].
 // Serve launches one isolated, authenticated loopback `hermes serve` process
-// per ACP session, maps ACP requests into native gateway WebSocket JSON-RPC
+// tree per ACP session, maps ACP requests into native gateway WebSocket JSON-RPC
 // calls, streams gateway events back to the client as ACP session updates,
-// and tears the process down when the session closes. Hosts must complete ACP
+// and proves the entire native tree quiescent on cancellation, timeout, and
+// close. A cancelled or timed-out session lazily resumes its exact native key
+// from the last committed snapshot on the next prompt. Hosts must complete ACP
 // initialization before issuing session or other agent methods.
 //
 // Hosts should use [Serve] for the JSON-RPC transport; hosts that embed the
