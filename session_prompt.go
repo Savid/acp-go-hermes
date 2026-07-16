@@ -119,15 +119,15 @@ func (s *session) reconcileConnected(ctx context.Context) error {
 	return s.reconcileQuestions(ctx)
 }
 
-// failedTurnResult maps a native SendMessage error to the turn outcome. The
-// cancel guard runs before all failure mapping: an error observed while the turn
-// is cancelled stays cancelled; otherwise the native turn is aborted and the
-// error becomes the uniform hermes_turn_failed error.
-func (s *session) failedTurnResult(sendErr error, abortTurn func()) (acp.PromptResponse, error) {
-	abortTurn()
-
+// failedTurnResult maps a native SendMessage error to the turn outcome only
+// after fencing the admitted native runtime back to its last committed state.
+func (s *session) failedTurnResult(ctx context.Context, turnEpoch uint64, sendErr error) (acp.PromptResponse, error) {
 	if nativehermes.IsGatewayDisconnect(sendErr) {
 		s.markStreamFailed(0)
+	}
+
+	if fenceErr := s.fenceTurn(context.WithoutCancel(ctx), turnEpoch, false); fenceErr != nil {
+		return acp.PromptResponse{}, fenceErr
 	}
 
 	return acp.PromptResponse{}, mapTurnFailure(sendErr)
@@ -231,6 +231,20 @@ func (s *session) cancelRouted(meta map[string]any) error {
 		return routeInvalid("stale route turnNonce")
 	}
 
+	// The terminal store replacement is the turn's settlement linearization
+	// point. Cancellation that wins before that claim fences the native runtime;
+	// cancellation after the claim is a post-settlement no-op and must not close
+	// the runtime underneath an atomic commit already in progress.
+	s.mu.Lock()
+	if s.turnSettlement == turnSettlementCommitting {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	s.turnSettlement = turnSettlementCancelled
+	s.mu.Unlock()
+
 	return s.fenceTurnLocked(context.Background(), epoch, true)
 }
 
@@ -278,6 +292,8 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
+
+	terminalBaseline := s.committedTerminalState()
 
 	turnActive := true
 	defer func() {
@@ -333,6 +349,18 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		done <- result{message: message, err: err}
 	}()
 
+	failAdmittedTurn := func(err error) (acp.PromptResponse, error) {
+		if errors.Is(err, errPromptCancelled) || s.wasCancelled() || turnCtx.Err() != nil {
+			return cancelledTurn()
+		}
+
+		if fenceErr := s.fenceTurn(context.Background(), turnEpoch, false); fenceErr != nil {
+			return acp.PromptResponse{}, fenceErr
+		}
+
+		return acp.PromptResponse{}, err
+	}
+
 	turnTimeout := s.agent.turnTimeout()
 
 	var timeout <-chan time.Time
@@ -363,14 +391,14 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		case event := <-s.client.Events():
 			if event.Type == evtServerConnected {
 				if err := s.reconcileConnected(turnCtx); err != nil {
-					return failTurn(err)
+					return failAdmittedTurn(err)
 				}
 
 				continue
 			}
 
 			if err := s.handleEvent(turnCtx, event); err != nil {
-				return failTurn(err)
+				return failAdmittedTurn(err)
 			}
 		case err := <-s.client.EventErrors():
 			// Cancel guard runs before all failure mapping: a stream error
@@ -382,22 +410,22 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return cancelledTurn()
 			}
 
-			abortTurn()
-
-			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error()))
+			return failAdmittedTurn(mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error())))
 		case result := <-done:
 			if result.err != nil {
 				if s.wasCancelled() || turnCtx.Err() != nil {
 					return cancelledTurn()
 				}
 
-				return s.failedTurnResult(result.err, abortTurn)
+				return s.failedTurnResult(ctx, turnEpoch, result.err)
 			}
 
 			final = result.message
 			if err := s.emitMessage(turnCtx, final, false); err != nil {
-				return acp.PromptResponse{}, err
+				return failAdmittedTurn(err)
 			}
+
+			s.markMessageCompleted(final.Info.ID)
 
 			usage = usageFromTokens(final.Info.Tokens)
 
@@ -405,17 +433,34 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return cancelledTurn()
 			}
 
+			if beforeCommit := s.agent.options.beforeTerminalCommit; beforeCommit != nil {
+				beforeCommit()
+			}
+
 			stopReason := stopReasonFromHermes(final.Info.Finish)
 
-			s.finishTurn()
+			if err := s.completeTurnWithSnapshot(
+				context.WithoutCancel(ctx), turnCtx, terminalBaseline, turnEpoch,
+			); err != nil {
+				if errors.Is(err, errPromptCancelled) {
+					return cancelledTurn()
+				}
 
-			turnActive = false
+				turnActive = false
 
-			if err := s.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
 				return acp.PromptResponse{}, err
 			}
 
-			return acp.PromptResponse{StopReason: stopReason, Usage: usage, UserMessageId: params.MessageId}, nil
+			turnActive = false
+
+			terminal := s.committedTerminalState()
+
+			return acp.PromptResponse{
+				Meta:          terminalResponseMeta(terminal),
+				StopReason:    stopReason,
+				Usage:         usage,
+				UserMessageId: params.MessageId,
+			}, nil
 		case <-timeout:
 			// The cancel guard runs before all failure mapping, including the
 			// turn deadline: when a user cancel and the timeout fire together the
@@ -603,7 +648,7 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 		}
 
 		if part.Type == valStepFinish {
-			if update := usageUpdateFromTokens(part.MessageID, part.Tokens, resolveWindow()); update != nil {
+			if update := usageUpdateFromTokens(part.Tokens, resolveWindow()); update != nil {
 				if err := s.emitUpdate(ctx, *update); err != nil {
 					return err
 				}
@@ -612,7 +657,7 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 	}
 
 	if message.Info.Tokens.Total > 0 {
-		if update := usageUpdateFromTokens(message.Info.ID, message.Info.Tokens, resolveWindow()); update != nil {
+		if update := usageUpdateFromTokens(message.Info.Tokens, resolveWindow()); update != nil {
 			return s.emitUpdate(ctx, *update)
 		}
 	}
@@ -1569,7 +1614,7 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 
 // usageUpdateFromTokens builds a usage_update. size is the model's true context
 // window in tokens, or 0 when unknown; it is never fabricated from used.
-func usageUpdateFromTokens(messageID string, tokens nativehermes.Tokens, size int) *acp.SessionUpdate {
+func usageUpdateFromTokens(tokens nativehermes.Tokens, size int) *acp.SessionUpdate {
 	used := int(tokens.Total)
 	if used <= 0 {
 		used = int(tokens.Input + tokens.Output + tokens.Reasoning)
@@ -1579,13 +1624,10 @@ func usageUpdateFromTokens(messageID string, tokens nativehermes.Tokens, size in
 		return nil
 	}
 
-	meta := map[string]any{hermesMetaKey: map[string]any{keyMessageID: messageID}}
-
 	return &acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
 		SessionUpdate: "usage_update",
 		Used:          used,
 		Size:          size,
-		Meta:          meta,
 	}}
 }
 

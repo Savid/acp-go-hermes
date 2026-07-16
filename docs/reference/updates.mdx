@@ -17,6 +17,7 @@ notifications.
 | Config option updates | Model/config option changes. |
 | Usage updates | Token data from completion payloads. |
 
-Usage metadata may include `_meta.hermes.messageId`. Text chunks originate from
-`message.delta`; reasoning chunks from `thinking.delta` — see
-[Prompt streaming](/docs/core/prompt-streaming).
+Usage updates carry token counts and no terminal message identity. The durable
+terminal identity belongs to the successful `session/prompt` response after
+its snapshot commit. Text chunks originate from `message.delta`; reasoning
+chunks from `thinking.delta` — see [Prompt streaming](/docs/core/prompt-streaming).

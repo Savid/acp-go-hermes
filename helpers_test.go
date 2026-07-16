@@ -32,30 +32,33 @@ type fakeHermesClient struct {
 
 	createSessionFunc func(context.Context, string) (nativehermes.Session, error)
 	sendMessage       func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error)
+	messagesFunc      func(context.Context, string) ([]nativehermes.NativeMessage, error)
 
-	aborts         []string
-	deleted        []string
-	closed         bool
-	closeCalls     int
-	events         chan nativehermes.TurnEvent
-	errs           chan error
-	createErr      error
-	getErr         error
-	listErr        error
-	deleteErr      error
-	messagesErr    error
-	abortErr       error
-	forkErr        error
-	todosErr       error
-	providersErr   error
-	permissionsErr error
-	questionsErr   error
-	replyErr       error
-	closeErr       error
-	reloadErr      error
-	reloadCalls    int
-	reloadFunc     func(context.Context, string) error
-	closeFunc      func(context.Context) error
+	aborts               []string
+	deleted              []string
+	closed               bool
+	closeCalls           int
+	events               chan nativehermes.TurnEvent
+	errs                 chan error
+	createErr            error
+	getErr               error
+	listErr              error
+	deleteErr            error
+	messagesErr          error
+	skipHistory          bool
+	skipAssistantHistory bool
+	abortErr             error
+	forkErr              error
+	todosErr             error
+	providersErr         error
+	permissionsErr       error
+	questionsErr         error
+	replyErr             error
+	closeErr             error
+	reloadErr            error
+	reloadCalls          int
+	reloadFunc           func(context.Context, string) error
+	closeFunc            func(context.Context) error
 }
 
 type fakePermissionReply struct {
@@ -140,14 +143,48 @@ func (c *fakeHermesClient) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+	var (
+		message nativehermes.NativeMessage
+		err     error
+	)
 	if c.sendMessage != nil {
-		return c.sendMessage(ctx, id, req)
+		message, err = c.sendMessage(ctx, id, req)
+	} else {
+		message = nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}
+	}
+	if err != nil {
+		return message, err
 	}
 
-	return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
+	c.mu.Lock()
+	if !c.skipHistory {
+		user := nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID:        historyMessageID(len(c.messages)),
+			SessionID: id,
+			Role:      "user",
+		}}
+		c.messages = append(c.messages, user)
+
+		if !c.skipAssistantHistory {
+			history := message
+			history.Info.ID = historyMessageID(len(c.messages))
+			history.Info.SessionID = id
+			c.messages = append(c.messages, history)
+		}
+	}
+	c.mu.Unlock()
+
+	return message, nil
 }
 
-func (c *fakeHermesClient) Messages(context.Context, string) ([]nativehermes.NativeMessage, error) {
+func (c *fakeHermesClient) Messages(ctx context.Context, id string) ([]nativehermes.NativeMessage, error) {
+	if c.messagesFunc != nil {
+		return c.messagesFunc(ctx, id)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	return append([]nativehermes.NativeMessage(nil), c.messages...), c.messagesErr
 }
 

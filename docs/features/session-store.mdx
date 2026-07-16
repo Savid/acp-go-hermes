@@ -23,11 +23,11 @@ agent := hermesacp.NewAgent(
 ```
 
 `WithSessionStoreLoadTimeout` bounds each store read; it defaults to 10
-seconds. Store writes (snapshot `Replace` commits and `session/delete`
-tombstones) run under a separate fixed 60-second bound, so a slow but
-successful commit never fails a prompt just because it outlived the read
-budget. The `SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`,
-`ListSessions`, `ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
+seconds. Snapshot capture and commit — including native history reads through
+the atomic `Replace` — and `session/delete` tombstones run under a separate
+fixed 60-second bound, so they do not inherit the store-read budget. The
+`SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
+`ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
 
 ## Snapshot shape
 
@@ -47,6 +47,38 @@ archive into a fresh per-session `HERMES_HOME`.
 
 The `idmap` subpath records the ACP session ID, durable Hermes session key, and
 fork lineage. Live gateway session IDs and auth tokens are not persisted.
+
+The main snapshot also carries a required terminal summary. Before any
+completed assistant turn it is empty. After a completed turn it identifies the
+latest finished assistant by its replay-stable `history-N` position; unfinished
+assistant rows and later user rows do not advance it. The summary is committed
+atomically with the main snapshot, `idmap`, and archive. A successful
+`session/prompt` response is returned only after that commit and carries the
+same identity as `_meta.hermes.messageId`.
+
+Every current-format main entry contains explicit non-null `terminal`,
+`archives`, and `wrapper` sections. Hydration and terminal inspection reject
+truncated entries, null required sections, and unknown fields.
+
+The successful turn must strictly advance the terminal `history-N` position
+beyond the committed baseline captured before native message submission. An
+equal or regressed position fails before any store replacement and returns no
+prompt-response terminal metadata. Loaded and internally resumed runtimes seed
+that baseline from the hydrated main snapshot. A required history read or
+commit failure poisons the live session and fences its native runtime, so a
+retry or later close cannot adopt native history that the failed prompt never
+committed. Prompt admission, terminal commit, and close share one lifecycle
+boundary; close cannot stop the native client while terminal capture or
+`Replace` is running. Cancellation can interrupt terminal capture. Immediately
+before `Replace`, the turn atomically claims settlement: cancellation that wins
+first fences with no write, while cancellation after that claim is a prompt
+no-op and the already-claimed commit completes.
+
+Hosts can call `InspectSessionStoreTerminalState` with the logical session ID
+and the one main-snapshot entry returned by `Load`. It strictly validates the
+current `hermes-state-db-v1` shape and returns the committed terminal identity.
+Missing summaries, noncanonical identities, and snapshots from any other
+format are rejected.
 
 ## Restore
 

@@ -59,4 +59,9 @@ invalid-params `{"error":"unsupported"}` response.
 Advertised model config options carry per-model `_meta.hermes` metadata:
 `contextWindow`, `maxOutputTokens`, `capabilities` (for example `tools`,
 `image`, `audio`), and `supportedEffortLevels` where the model exposes them.
-Usage updates may carry `_meta.hermes.messageId`.
+
+A successful `session/prompt` response carries exactly
+`_meta.hermes.messageId` under the Hermes namespace. The value is the
+replay-stable `history-N` identity of the latest finished assistant and is
+emitted only after the snapshot containing the same terminal identity commits.
+Usage updates do not carry terminal identity metadata.

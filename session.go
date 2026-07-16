@@ -16,8 +16,18 @@ import (
 
 // Turn-lifecycle reply vocabulary shared with the prompt mapping.
 const (
-	valCancelled = "cancelled"
-	valReject    = "reject"
+	valCancelled     = "cancelled"
+	valReject        = "reject"
+	valSessionClosed = "session closed"
+)
+
+type turnSettlementState uint8
+
+const (
+	turnSettlementIdle turnSettlementState = iota
+	turnSettlementOpen
+	turnSettlementCommitting
+	turnSettlementCancelled
 )
 
 type session struct {
@@ -38,6 +48,7 @@ type session struct {
 	client nativehermes.Server
 
 	turn                chan struct{}
+	lifecycleMu         sync.Mutex
 	cancelMu            sync.Mutex
 	toolMu              sync.Mutex
 	rawEventMu          sync.Mutex
@@ -54,6 +65,7 @@ type session struct {
 	processedQuestion   map[string]struct{}
 	turnEpoch           uint64
 	turnNonce           string
+	turnSettlement      turnSettlementState
 	activeMessageIDs    map[string]struct{}
 	toolStates          map[string]hermesToolState
 	failedStreamEpochs  map[uint64]struct{}
@@ -64,6 +76,7 @@ type session struct {
 	fencedTurnEpoch     uint64
 	turnFenceErr        error
 	poisonCause         string
+	committedTerminal   SessionStoreTerminalState
 	closed              bool
 }
 
@@ -189,6 +202,9 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 }
 
 func (s *session) acquireTurn(ctx context.Context) (func(), error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	turn := s.turnQueue()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +217,10 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 
 	if err := s.poisonedErrorLocked(); err != nil {
 		return nil, err
+	}
+
+	if s.closed {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
 
 	if len(turn) >= cap(turn) {
@@ -257,6 +277,7 @@ func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context
 	s.cancelled = false
 	s.turnEpoch++
 	s.turnNonce = turnNonce
+	s.turnSettlement = turnSettlementOpen
 	s.activeMessageIDs = map[string]struct{}{}
 	s.toolStates = map[string]hermesToolState{}
 
@@ -307,6 +328,7 @@ func (s *session) finishTurn() {
 	s.turnInFlight = false
 	s.cancelled = false
 	s.turnNonce = ""
+	s.turnSettlement = turnSettlementIdle
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.pending = map[string]nativehermes.PermissionRequest{}
 	s.questions = map[string]nativehermes.QuestionRequest{}
@@ -548,6 +570,16 @@ func (s *session) markActiveMessageID(messageID string) {
 	s.mu.Unlock()
 }
 
+func (s *session) markMessageCompleted(messageID string) {
+	if messageID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	delete(s.activeMessageIDs, messageID)
+	s.mu.Unlock()
+}
+
 func (s *session) markStreamFailed(epoch uint64) {
 	s.mu.Lock()
 	if s.failedMessageIDs == nil {
@@ -771,6 +803,13 @@ func (s *session) DeleteNativeAndClose(ctx context.Context) error {
 }
 
 func (s *session) close(ctx context.Context, deleteNative bool) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	return s.closeLocked(ctx, deleteNative)
+}
+
+func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 

@@ -313,7 +313,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 		t.Fatal(err7)
 	}
 	loadedClient.messages = []nativehermes.NativeMessage{{
-		Info:  nativehermes.NativeMessageInfo{ID: "user-1", SessionID: "native-1", Role: "user"},
+		Info:  nativehermes.NativeMessageInfo{ID: "history-1", SessionID: "native-1", Role: "user"},
 		Parts: []nativehermes.Part{replayPart},
 	}}
 	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -504,7 +504,10 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 	})
 
 	t.Run("successful replacement drains historical channels", func(t *testing.T) {
-		session, agent, _ := newResumeRuntimeTestSession(t)
+		session, agent, store := newResumeRuntimeTestSession(t)
+		snapshot := resumeRuntimeSnapshot(session)
+		snapshot.Terminal = &stateSnapshotTerminal{MessageID: "history-2", Role: valAssistant, Finish: "stop"}
+		replaceResumeRuntimeRecords(t, store, session.idmap, snapshot)
 		client := newFakeHermesClient()
 		client.getSession = testNativeSession("native-1")
 		client.events <- nativehermes.TurnEvent{Type: "historical"}
@@ -515,6 +518,9 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		}
 		if session.runtimeNeedsResume {
 			t.Fatal("successful replacement still needs resume")
+		}
+		if terminal := session.committedTerminalState(); terminal.MessageID != "history-2" {
+			t.Fatalf("resumed terminal baseline = %#v", terminal)
 		}
 		select {
 		case event := <-client.events:
@@ -548,7 +554,8 @@ func newResumeRuntimeTestSession(t *testing.T, options ...Option) (*session, *Ag
 
 func resumeRuntimeSnapshot(session *session) stateSnapshot {
 	return stateSnapshot{
-		Format: SessionStoreFormat,
+		Format:              SessionStoreFormat,
+		CapturedAtUnixMilli: 1,
 		Session: stateSnapshotSession{
 			SessionID:       string(session.id),
 			NativeSessionID: session.idmap.NativeSessionID,
@@ -558,6 +565,9 @@ func resumeRuntimeSnapshot(session *session) stateSnapshot {
 				ModelID:    session.modelID,
 			},
 		},
+		Terminal: &stateSnapshotTerminal{},
+		Archives: map[string]archiveInfo{},
+		Wrapper:  &stateSnapshotWrapper{},
 	}
 }
 

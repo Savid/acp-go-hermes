@@ -98,8 +98,10 @@ type Options struct {
 	TurnTimeout             time.Duration
 	RuntimeResourceHooks    RuntimeResourceHooks
 
-	clientFactory  func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
-	newPromptTimer func(time.Duration) promptTimer
+	clientFactory        func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
+	newPromptTimer       func(time.Duration) promptTimer
+	storeWriteTTL        time.Duration
+	beforeTerminalCommit func()
 }
 
 func applyOptions(opts []Option) Options {
@@ -108,6 +110,7 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              valACPGoHermes,
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
+		storeWriteTTL:           sessionStoreWriteTimeout,
 		clientFactory:           nativehermes.StartServer,
 		newPromptTimer: func(timeout time.Duration) promptTimer {
 			timer := time.NewTimer(timeout)

@@ -280,6 +280,8 @@ func (a *Agent) loadOrResumeSession(
 	}
 
 	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
+
+	session.committedTerminal = publicTerminalState(snapshot.Terminal)
 	if err := a.storeStartedSession(session); err != nil {
 		closeErr := session.Close(context.Background())
 
@@ -314,7 +316,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 
 	if closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "session closed"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
 
 	if !needsResume {
@@ -412,10 +414,11 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 
 		closeErr := closeHermesClientAfterStartupFailure(client)
 
-		return errors.Join(acp.NewInvalidRequest(map[string]any{jsonFieldError: "session closed"}), closeErr)
+		return errors.Join(acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed}), closeErr)
 	}
 
 	s.client = client
+	s.committedTerminal = publicTerminalState(snapshot.Terminal)
 	s.runtimeNeedsResume = false
 	s.mcpReloadComplete = false
 	s.suppressNextBacklog = false
@@ -610,17 +613,20 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
+	session.lifecycleMu.Lock()
+
 	skipSnapshot := session.snapshotBlockedReason() != ""
 
 	var snapshotErr error
 	if !skipSnapshot {
-		snapshotErr = session.snapshotToStore(context.WithoutCancel(ctx))
+		snapshotErr = session.snapshotToStoreLocked(context.WithoutCancel(ctx), nil, nil)
 	}
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-	closeErr := session.Close(closeCtx)
+	closeErr := session.closeLocked(closeCtx, false)
 
 	closeCancel()
+	session.lifecycleMu.Unlock()
 
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)

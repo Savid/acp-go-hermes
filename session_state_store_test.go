@@ -517,6 +517,13 @@ func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 			},
 			want: "native parent session mismatch",
 		},
+		{
+			name: "terminal summary is invalid",
+			mutate: func(_ *idmapRecord, snapshot *stateSnapshot) {
+				snapshot.Terminal = nil
+			},
+			want: "terminal summary",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -583,6 +590,32 @@ func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
 
 func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("terminal history read error", func(t *testing.T) {
+		session := snapshotFaultSession(t)
+		client, ok := session.client.(*fakeHermesClient)
+		if !ok {
+			t.Fatal("snapshot client is not a fakeHermesClient")
+		}
+		client.messagesErr = errors.New("messages failed")
+		if err := session.snapshotToStore(ctx); err == nil || !strings.Contains(err.Error(), "terminal history") {
+			t.Fatalf("snapshot terminal read error = %v", err)
+		}
+	})
+
+	t.Run("terminal history identity error", func(t *testing.T) {
+		session := snapshotFaultSession(t)
+		client, ok := session.client.(*fakeHermesClient)
+		if !ok {
+			t.Fatal("snapshot client is not a fakeHermesClient")
+		}
+		client.messages = []nativehermes.NativeMessage{
+			testHistoryMessage("history-2", "native-1", valAssistant, "stop"),
+		}
+		if err := session.snapshotToStore(ctx); err == nil || !strings.Contains(err.Error(), "terminal history message") {
+			t.Fatalf("snapshot terminal identity error = %v", err)
+		}
+	})
 
 	t.Run("created at is initialized", func(t *testing.T) {
 		session := snapshotFaultSession(t)
@@ -1223,11 +1256,15 @@ func validHydrateIDMap() idmapRecord {
 
 func validHydrateSnapshot() stateSnapshot {
 	return stateSnapshot{
-		Format: SessionStoreFormat,
+		Format:              SessionStoreFormat,
+		CapturedAtUnixMilli: 1,
 		Session: stateSnapshotSession{
 			SessionID:       "s",
 			NativeSessionID: "n",
 		},
+		Terminal: &stateSnapshotTerminal{},
+		Archives: map[string]archiveInfo{},
+		Wrapper:  &stateSnapshotWrapper{},
 	}
 }
 

@@ -147,7 +147,7 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if filenameFromURI("%") != "" {
 		t.Fatal("malformed image URI produced a filename")
 	}
-	if update := usageUpdateFromTokens("m", nativehermes.Tokens{}, 0); update != nil {
+	if update := usageUpdateFromTokens(nativehermes.Tokens{}, 0); update != nil {
 		t.Fatalf("empty usage update = %#v", update)
 	}
 	usage := usageFromTokens(nativehermes.Tokens{Input: 1, Output: 2, Reasoning: 3})

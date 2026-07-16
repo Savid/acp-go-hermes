@@ -106,8 +106,15 @@ type stateSnapshot struct {
 	Format              string                 `json:"format"`
 	CapturedAtUnixMilli int64                  `json:"capturedAtUnixMilli"`
 	Session             stateSnapshotSession   `json:"session"`
+	Terminal            *stateSnapshotTerminal `json:"terminal"`
 	Archives            map[string]archiveInfo `json:"archives"`
-	Wrapper             stateSnapshotWrapper   `json:"wrapper"`
+	Wrapper             *stateSnapshotWrapper  `json:"wrapper"`
+}
+
+type stateSnapshotTerminal struct {
+	MessageID string `json:"messageId"`
+	Role      string `json:"role"`
+	Finish    string `json:"finish"`
 }
 
 type stateSnapshotSession struct {
@@ -147,18 +154,80 @@ type archiveEntry struct {
 	Data     string `json:"data"`
 }
 
+type terminalSnapshotRequirement struct {
+	baseline  SessionStoreTerminalState
+	turnEpoch uint64
+}
+
 func (s *session) snapshotToStore(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	return s.snapshotToStoreLocked(ctx, nil, nil)
+}
+
+func (s *session) completeTurnWithSnapshot(
+	ctx context.Context,
+	turnCtx context.Context,
+	requiredBaseline SessionStoreTerminalState,
+	turnEpoch uint64,
+) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	snapshotErr := s.snapshotToStoreLocked(ctx, &terminalSnapshotRequirement{
+		baseline: requiredBaseline, turnEpoch: turnEpoch,
+	}, turnCtx)
+	if snapshotErr == nil {
+		s.finishTurn()
+
+		return nil
+	}
+
+	if s.terminalCommitCancelled(turnCtx, turnEpoch) {
+		return errPromptCancelled
+	}
+
+	poisonErr := s.poisonWithError(ctx, "hermes_terminal_snapshot_failed", snapshotErr.Error())
+	fenceErr := s.fenceTurn(context.WithoutCancel(ctx), turnEpoch, false)
+	s.finishTurn()
+
+	return errors.Join(snapshotErr, poisonErr, fenceErr)
+}
+
+func (s *session) snapshotToStoreLocked(
+	ctx context.Context,
+	requirement *terminalSnapshotRequirement,
+	turnCtx context.Context,
+) error {
 	if err := s.ensureNotPoisoned(); err != nil {
 		return err
 	}
 
-	if reason := s.snapshotBlockedReason(); reason != "" {
+	if requirement != nil && s.closedForSnapshot() {
+		return errors.New("session closed before Hermes terminal snapshot commit")
+	}
+
+	if reason := s.snapshotBlockedReasonForTerminalCommit(requirement != nil); reason != "" {
 		return fmt.Errorf("cannot snapshot Hermes session while %s pending", reason)
 	}
 
 	snapshot := s.snapshot()
 	if snapshot.client == nil {
+		if requirement != nil {
+			return errors.New("hermes runtime is unavailable for terminal snapshot commit")
+		}
+
 		return nil
+	}
+
+	snapshotCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.agent.options.storeWriteTTL)
+	defer cancel()
+
+	var stopTurnCancellation func() bool
+	if requirement != nil {
+		stopTurnCancellation = context.AfterFunc(turnCtx, cancel)
+		defer stopTurnCancellation()
 	}
 
 	idmap := snapshot.idmap
@@ -171,7 +240,33 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 
 	idmap.Format = SessionStoreFormat
 
-	todos, _ := snapshot.client.Todos(ctx, idmap.NativeSessionID)
+	todos, _ := snapshot.client.Todos(snapshotCtx, idmap.NativeSessionID)
+
+	messages, err := snapshot.client.Messages(snapshotCtx, idmap.NativeSessionID)
+	if err != nil {
+		return fmt.Errorf("read Hermes session terminal history: %w", err)
+	}
+
+	terminal, err := terminalSnapshotFromMessages(idmap.NativeSessionID, messages)
+	if err != nil {
+		return err
+	}
+
+	if requirement != nil && terminal.MessageID == "" {
+		return errors.New("completed Hermes turn is missing a durable terminal assistant identity")
+	}
+
+	nextTerminal := publicTerminalState(terminal)
+	if transitionErr := validateTerminalTransition(s.committedTerminalState(), nextTerminal, false); transitionErr != nil {
+		return transitionErr
+	}
+
+	if requirement != nil {
+		if transitionErr := validateTerminalTransition(requirement.baseline, nextTerminal, true); transitionErr != nil {
+			return transitionErr
+		}
+	}
+
 	main := stateSnapshot{
 		Format:              SessionStoreFormat,
 		CapturedAtUnixMilli: now,
@@ -188,8 +283,9 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 				Agent:      snapshot.mode,
 			},
 		},
+		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
-		Wrapper: stateSnapshotWrapper{
+		Wrapper: &stateSnapshotWrapper{
 			Todos:        todos,
 			PendingInput: false,
 		},
@@ -199,8 +295,8 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 	mainKey := SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}
 
 	xdg := snapshot.client.XDGDirs()
-	if archive, sha, ok, err := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); err != nil {
-		return err
+	if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
+		return archiveErr
 	} else if ok {
 		main.Archives["state-db"] = archiveInfo{
 			Subpath: stateDBSubpath,
@@ -208,9 +304,9 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 			Bytes:   len(archive),
 		}
 
-		entries, err := encodeArchiveEntries(archive, sha)
-		if err != nil {
-			return err
+		entries, encodeErr := encodeArchiveEntries(archive, sha)
+		if encodeErr != nil {
+			return encodeErr
 		}
 
 		replacements = append(replacements, SessionStoreReplacement{
@@ -234,10 +330,62 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 		SessionStoreReplacement{Key: SessionKey{SessionID: string(s.id), Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
 	)
 
-	storeCtx, cancel := sessionStoreWriteContext(ctx)
-	defer cancel()
+	if requirement != nil {
+		// Stop propagating cancellation into the capture context before claiming
+		// the commit. The state transition below then orders a racing routed or
+		// parent-context cancellation against Replace without making Cancel wait
+		// for store I/O.
+		stopTurnCancellation()
 
-	return s.agent.sessionStore().Replace(storeCtx, mainKey, replacements)
+		if err := snapshotCtx.Err(); err != nil {
+			return err
+		}
+
+		if err := s.claimTerminalCommit(turnCtx, requirement.turnEpoch); err != nil {
+			return err
+		}
+	}
+
+	if err := s.agent.sessionStore().Replace(snapshotCtx, mainKey, replacements); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.committedTerminal = nextTerminal
+	s.mu.Unlock()
+
+	return nil
+}
+
+func (s *session) claimTerminalCommit(turnCtx context.Context, turnEpoch uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.turnEpoch != turnEpoch || !s.turnInFlight {
+		return routeInvalid("stale turn epoch at terminal commit")
+	}
+
+	if s.turnSettlement == turnSettlementCancelled || turnCtx.Err() != nil {
+		s.turnSettlement = turnSettlementCancelled
+
+		return errPromptCancelled
+	}
+
+	if s.turnSettlement != turnSettlementOpen {
+		return errors.New("hermes turn terminal commit was already claimed")
+	}
+
+	s.turnSettlement = turnSettlementCommitting
+
+	return nil
+}
+
+func (s *session) terminalCommitCancelled(turnCtx context.Context, turnEpoch uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return !s.closed && s.turnEpoch == turnEpoch &&
+		(s.turnSettlement == turnSettlementCancelled || turnCtx.Err() != nil)
 }
 
 func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
@@ -369,12 +517,18 @@ func decodeArchiveEntries(entries []SessionStoreEntry, info archiveInfo) ([]byte
 }
 
 func (s *session) snapshotBlockedReason() string {
+	return s.snapshotBlockedReasonForTerminalCommit(false)
+}
+
+func (s *session) snapshotBlockedReasonForTerminalCommit(allowOwningTurn bool) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	switch {
-	case s.turnInFlight || s.cancel != nil:
+	case !allowOwningTurn && (s.turnInFlight || s.cancel != nil):
 		return reasonTurn
+	case s.runtimeNeedsResume:
+		return "runtime resume"
 	case len(s.pending) > 0:
 		return reasonPermission
 	case len(s.questions) > 0:
@@ -384,6 +538,13 @@ func (s *session) snapshotBlockedReason() string {
 	default:
 		return ""
 	}
+}
+
+func (s *session) closedForSnapshot() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.closed
 }
 
 func encodeHermesStateDBArchive(scratchDir string, root string) ([]byte, string, bool, error) {
@@ -625,6 +786,10 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 
 	if snapshot.Session.NativeParentSessionID != idmap.NativeParentSessionID {
 		return fmt.Errorf("hermes store idmap/main native parent session mismatch")
+	}
+
+	if err := validateStateSnapshotRequiredSections(snapshot); err != nil {
+		return fmt.Errorf("hermes store main snapshot: %w", err)
 	}
 
 	return nil

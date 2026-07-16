@@ -99,6 +99,12 @@ implementation. Supporting types: `SessionKey`, `SessionSummary`,
 `SessionStoreReplacement`, and the `SessionStoreMainSubpath` /
 `SessionStoreFormat` constants.
 
+`InspectSessionStoreTerminalState(logicalSessionID, entries)` strictly
+validates exactly one current-format main snapshot and returns its
+`SessionStoreTerminalState`. The `MessageID` is empty before the first completed
+assistant turn and otherwise contains the latest replay-stable `history-N`
+identity.
+
 ## Session Hermes options
 
 `HermesOptions` carries the `Model`, `Env`, and `OutputSchema` fields;

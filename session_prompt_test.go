@@ -1143,9 +1143,21 @@ func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
 func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	session.cwd = t.TempDir()
+	if err := session.snapshotToStore(t.Context()); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	resumedClient := newFakeHermesClient()
+	resumedClient.getSession = testNativeSession("native-1")
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+		resumedClient.xdg = opts.ExistingXDG
+
+		return resumedClient, nil
+	}
 	started := make(chan struct{})
 	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		close(started)
@@ -1192,9 +1204,6 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 		Type:        "message.part.created",
 		StreamEpoch: 7,
 		Properties:  json.RawMessage(`{"id":"late-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"late"}`),
-	}
-	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-2", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 	}
 	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}}); err != nil {
 		t.Fatalf("second Prompt: %v", err)
@@ -3060,6 +3069,9 @@ func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 	if data[jsonFieldProviderCode] != "overloaded" {
 		t.Fatalf("providerCode = %v, want overloaded", data[jsonFieldProviderCode])
 	}
+	if client.closeCount() != 1 || !session.needsRuntimeResume() {
+		t.Fatalf("provider failure close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
+	}
 }
 
 // nativehermes.TurnFailureError.Error falls back to a cause-derived string only when no
@@ -3134,26 +3146,32 @@ func TestTurnFailureStreamErrorWhileCancelledStaysCancelled(t *testing.T) {
 // poisoned nor removed and a follow-up prompt re-drives the turn.
 func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 	client := newFakeHermesClient()
-	attempt := 0
-	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-		attempt++
-		if attempt == 1 {
-			return nativehermes.NativeMessage{}, nativehermes.NewTurnFailure(nativehermes.CauseTransport, "hermes gateway disconnected: unexpected EOF")
-		}
-
-		return nativehermes.NativeMessage{
-			Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"},
-			Parts: []nativehermes.Part{{ID: "final", SessionID: id, MessageID: "assistant", Type: "text", Text: "ok"}},
-		}, nil
+	client.sendMessage = func(_ context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		return nativehermes.NativeMessage{}, nativehermes.NewTurnFailure(nativehermes.CauseTransport, "hermes gateway disconnected: unexpected EOF")
 	}
 
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	store := NewInMemorySessionStore()
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	session.cwd = t.TempDir()
+	if err := session.snapshotToStore(t.Context()); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	resumedClient := newFakeHermesClient()
+	resumedClient.getSession = testNativeSession("native-1")
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+		resumedClient.xdg = opts.ExistingXDG
+
+		return resumedClient, nil
+	}
 
 	_, err := promptOnce(context.Background(), session, "first")
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "unexpected EOF")
+	if client.closeCount() != 1 || !session.needsRuntimeResume() {
+		t.Fatalf("transport failure close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
+	}
 
 	// The session is neither poisoned nor removed: a follow-up prompt re-drives
 	// the turn and succeeds, never returning the unknown-session error.
@@ -3817,16 +3835,59 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 }
 
 func TestFailedTurnResultGatewayDisconnectMarksStream(t *testing.T) {
-	session := testSession(NewAgent(), newFakeHermesClient())
+	client := newFakeHermesClient()
+	session := testSession(NewAgent(), client)
+	turnCtx := session.beginTurn(t.Context(), "gateway-disconnect")
+	turnEpoch := session.currentTurnEpoch()
+	defer session.finishTurn()
 
-	aborted := false
 	sendErr := fmt.Errorf("send frame: %w", nativehermes.ErrGatewayDisconnected)
-	_, err := session.failedTurnResult(sendErr, func() { aborted = true })
+	_, err := session.failedTurnResult(turnCtx, turnEpoch, sendErr)
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "send frame")
-	if !aborted {
-		t.Fatal("gateway disconnect did not abort the native turn")
+	if client.closeCount() != 1 || !session.needsRuntimeResume() {
+		t.Fatalf("gateway disconnect close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
 	}
 	if !session.suppressBacklog() {
 		t.Fatal("gateway disconnect did not mark the stream failed for backlog suppression")
+	}
+}
+
+func TestFailedTurnResultReturnsFenceFailure(t *testing.T) {
+	wantErr := errors.New("close proof failed")
+	client := newFakeHermesClient()
+	client.closeErr = wantErr
+	session := testSession(NewAgent(), client)
+	turnCtx := session.beginTurn(t.Context(), "failed-fence")
+	turnEpoch := session.currentTurnEpoch()
+	defer session.finishTurn()
+
+	_, err := session.failedTurnResult(turnCtx, turnEpoch, nativehermes.NewTurnFailure(nativehermes.CauseProvider, "provider failed"))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("failedTurnResult fence error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestAdmittedUpdateFailureReturnsFenceFailure(t *testing.T) {
+	wantErr := errors.New("close proof failed")
+	client := newFakeHermesClient()
+	client.closeErr = wantErr
+	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		return nativehermes.NativeMessage{
+			Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: valAssistant, Finish: "stop"},
+			Parts: []nativehermes.Part{{ID: "part", SessionID: id, MessageID: "assistant", Type: valText, Text: "done"}},
+		}, nil
+	}
+	conn := newRecordingAgentClient()
+	conn.updateErr = errors.New("update failed")
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+
+	_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "update-fence-failure", "reply"))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("admitted update fence error = %v, want %v", err, wantErr)
+	}
+	if poisonErr := session.ensureNotPoisoned(); poisonErr == nil || !strings.Contains(poisonErr.Error(), "session_poisoned") {
+		t.Fatalf("admitted update fence poison error = %v", poisonErr)
 	}
 }
