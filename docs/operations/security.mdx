@@ -20,8 +20,10 @@ leaves background servers and watchers running. The adapter therefore treats
 the whole per-session native process tree as the cancellation boundary. On
 Linux, a dedicated self-executed subreaper owns Hermes and every orphaned tool
 descendant, including processes that detach with `setsid(2)`; pidfd-bound
-signals, reaping, and an explicit proof pipe make supervisor death fail closed.
-On Windows, a kill-on-close Job Object supplies the equivalent boundary.
+signals, an authoritative kernel `ECHILD` fence after the direct root waiter
+settles, and an explicit proof pipe make fork/reparent races and supervisor
+death fail closed. On Windows, a kill-on-close Job Object supplies the
+equivalent boundary.
 
 Native session startup fails with `ErrProcessTreeUnproven` on operating systems
 where the adapter cannot establish an authoritative detached-descendant

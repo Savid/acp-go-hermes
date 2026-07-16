@@ -26,7 +26,8 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 	}
 
 	pidFile := filepath.Join(t.TempDir(), "detached.pid")
-	script := strconv.Quote(setsid) + " sh -c 'trap \"\" TERM; echo $$ > " + strconv.Quote(pidFile) + "; while :; do sleep 30; done' & wait"
+	sentinel := filepath.Join(t.TempDir(), "detached-survived")
+	script := strconv.Quote(setsid) + " sh -c 'trap \"\" INT TERM; echo $$ > " + strconv.Quote(pidFile) + "; sleep 2; echo survived > " + strconv.Quote(sentinel) + "; while :; do sleep 30; done' & wait"
 	cmd := exec.Command("sh", "-c", script)
 	configureHermesProcess(cmd)
 	tree, err := startContainedProcess(cmd)
@@ -43,7 +44,18 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 		t.Fatalf("detached descendant pgid: %v", err)
 	}
 	if pgid == cmd.Process.Pid {
-		t.Fatalf("descendant %d did not detach from supervisor pgid %d", detachedPID, pgid)
+		t.Fatalf("descendant %d did not detach from supervisor pgid %d", detachedPID, cmd.Process.Pid)
+	}
+	detachedSID, err := unix.Getsid(detachedPID)
+	if err != nil {
+		t.Fatalf("detached descendant sid: %v", err)
+	}
+	supervisorSID, err := unix.Getsid(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("supervisor sid: %v", err)
+	}
+	if detachedSID == supervisorSID || detachedSID != detachedPID || pgid != detachedPID {
+		t.Fatalf("descendant identity pid/pgid/sid=%d/%d/%d supervisor sid=%d", detachedPID, pgid, detachedSID, supervisorSID)
 	}
 	if count, ok := process.ProviderDescendantCount(); !ok || count < 2 {
 		t.Fatalf("supervised descendant inventory = %d/%v", count, ok)
@@ -65,6 +77,10 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 	}
 	if processAlive(detachedPID) {
 		t.Fatalf("detached descendant %d survived proved Close", detachedPID)
+	}
+	time.Sleep(2200 * time.Millisecond)
+	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("detached descendant reached delayed side effect: %v", err)
 	}
 }
 
@@ -139,16 +155,31 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 
 	t.Run("plain stop failure", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
-		stopSupervisorDescendants = func(targetPID int, _ <-chan error) error {
+		stopSupervisorDescendants = func(targetPID int, _ <-chan error) (error, bool) {
 			_ = signalPIDFD(targetPID, syscall.SIGKILL)
 
-			return errors.New("stop")
+			return errors.New("stop"), true
 		}
 		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "while :; do sleep 30; done"}, func(control *os.File) {
 			_ = control.Close()
 		})
 		if code != 1 || proof != 1 {
 			t.Fatalf("core result code/proof = %d/%d", code, proof)
+		}
+	})
+
+	t.Run("unsettled root fails without proof", func(t *testing.T) {
+		restoreLinuxSupervisorSeams(t)
+		stopSupervisorDescendants = func(targetPID int, _ <-chan error) (error, bool) {
+			_ = signalPIDFD(targetPID, syscall.SIGKILL)
+
+			return errors.New("unsettled"), false
+		}
+		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "while :; do sleep 30; done"}, func(control *os.File) {
+			_ = control.Close()
+		})
+		if code != 126 || proof != 0 {
+			t.Fatalf("unsettled core result code/proof = %d/%d", code, proof)
 		}
 	})
 }
@@ -188,7 +219,7 @@ func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
 	if err := signalSupervisorDescendants(0); err != nil {
 		t.Fatalf("signal empty descendants: %v", err)
 	}
-	reapSupervisorChildren()
+	_, _ = reapSupervisorChildren()
 
 	if _, err := startUnixContainedProcess(nil); err == nil {
 		t.Fatal("nil target accepted")
@@ -392,6 +423,7 @@ func TestLinuxSupervisorErrorAndFallbackBranches(t *testing.T) { //nolint:gocycl
 	}
 
 	listSupervisorDescendants = func(int) (map[int]byte, error) { return map[int]byte{123: 'Z'}, nil }
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) { return 0, nil }
 	if err := proveAndReapSupervisorDescendants(0); err == nil || !strings.Contains(err.Error(), "retained descendants") {
 		t.Fatalf("retained descendant error = %v", err)
 	}
@@ -407,6 +439,13 @@ func TestLinuxSupervisorErrorAndFallbackBranches(t *testing.T) { //nolint:gocycl
 		}
 
 		return nil, nil //nolint:nilnil // An empty successful scan completes the transient-descendant seam.
+	}
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		if descendantScans == 1 {
+			return 0, nil
+		}
+
+		return -1, syscall.ECHILD
 	}
 	supervisorPollInterval = 0
 	if err := proveAndReapSupervisorDescendants(time.Second); err != nil {
@@ -450,8 +489,65 @@ func TestLinuxSupervisorErrorAndFallbackBranches(t *testing.T) { //nolint:gocycl
 
 	supervisorTermGrace = 0
 	supervisorKillGrace = 0
-	if err := stopSupervisedDescendants(123, make(chan error)); err == nil || !strings.Contains(err.Error(), "did not exit") {
-		t.Fatalf("stop timeout error = %v", err)
+	if err, settled := stopSupervisedDescendants(123, make(chan error)); err == nil || settled || !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("stop timeout result = %v/%v", err, settled)
+	}
+}
+
+func TestLinuxSupervisorKernelChildProofBranches(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	listSupervisorDescendants = func(int) (map[int]byte, error) { return map[int]byte{}, nil }
+	supervisorPollInterval = 0
+
+	waitResults := []struct {
+		pid int
+		err error
+	}{
+		{pid: -1, err: syscall.EINTR},
+		{pid: 4321},
+		{pid: -1, err: syscall.ECHILD},
+	}
+	waitCalls := 0
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		result := waitResults[waitCalls]
+		waitCalls++
+
+		return result.pid, result.err
+	}
+	if err := proveAndReapSupervisorDescendants(time.Second); err != nil || waitCalls != len(waitResults) {
+		t.Fatalf("drain-to-ECHILD proof = %v after %d waits", err, waitCalls)
+	}
+
+	inventories := 0
+	listSupervisorDescendants = func(int) (map[int]byte, error) {
+		inventories++
+
+		return map[int]byte{}, nil
+	}
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		if inventories == 1 {
+			return 0, nil
+		}
+
+		return -1, syscall.ECHILD
+	}
+	if err := proveAndReapSupervisorDescendants(time.Second); err != nil || inventories != 2 {
+		t.Fatalf("running-child proof retry = %v after %d inventories", err, inventories)
+	}
+
+	want := errors.New("wait4")
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		return -1, want
+	}
+	if err := proveAndReapSupervisorDescendants(time.Second); !errors.Is(err, want) {
+		t.Fatalf("wait4 error = %v", err)
+	}
+
+	supervisorWait4 = func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		return -1, nil
+	}
+	if err := proveAndReapSupervisorDescendants(time.Second); err == nil || !strings.Contains(err.Error(), "invalid wait4 result") {
+		t.Fatalf("invalid wait4 result = %v", err)
 	}
 }
 
@@ -470,6 +566,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 	oldEnviron := supervisorEnviron
 	oldReadDir := supervisorReadDir
 	oldReadFile := supervisorReadFile
+	oldWait4 := supervisorWait4
 	oldList := listSupervisorDescendants
 	oldStop := stopSupervisorDescendants
 	oldProve := proveSupervisorDescendants
@@ -491,6 +588,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 		supervisorEnviron = oldEnviron
 		supervisorReadDir = oldReadDir
 		supervisorReadFile = oldReadFile
+		supervisorWait4 = oldWait4
 		listSupervisorDescendants = oldList
 		stopSupervisorDescendants = oldStop
 		proveSupervisorDescendants = oldProve

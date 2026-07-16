@@ -40,6 +40,7 @@ var (
 	supervisorEnviron          = os.Environ
 	supervisorReadDir          = os.ReadDir
 	supervisorReadFile         = os.ReadFile
+	supervisorWait4            = syscall.Wait4
 	listSupervisorDescendants  = supervisorDescendants
 	stopSupervisorDescendants  = stopSupervisedDescendants
 	proveSupervisorDescendants = proveAndReapSupervisorDescendants
@@ -245,13 +246,24 @@ func runHermesProcessSupervisorCore(targetPath string, args []string, env []stri
 
 	defer signal.Stop(signals)
 
-	var targetErr error
+	var (
+		targetErr     error
+		targetSettled bool
+	)
 	select {
 	case targetErr = <-targetDone:
+		targetSettled = true
 	case <-shutdown:
-		targetErr = stopSupervisorDescendants(target.Process.Pid, targetDone)
+		targetErr, targetSettled = stopSupervisorDescendants(target.Process.Pid, targetDone)
 	case <-signals:
-		targetErr = stopSupervisorDescendants(target.Process.Pid, targetDone)
+		targetErr, targetSettled = stopSupervisorDescendants(target.Process.Pid, targetDone)
+	}
+
+	// target.Wait is the sole waiter for the direct root. Descendant proof may
+	// call wait4(-1) only after that result was consumed; otherwise the two
+	// waiters can race and a root-timeout path could manufacture false proof.
+	if !targetSettled {
+		return 126
 	}
 
 	if err := proveSupervisorDescendants(5 * time.Second); err != nil {
@@ -288,14 +300,14 @@ func supervisorTargetEnv(env []string) []string {
 	return out
 }
 
-func stopSupervisedDescendants(targetPID int, targetDone <-chan error) error {
+func stopSupervisedDescendants(targetPID int, targetDone <-chan error) (error, bool) {
 	termDeadline := time.Now().Add(supervisorTermGrace)
 	for time.Now().Before(termDeadline) {
 		_ = signalSupervisorDescendants(syscall.SIGTERM)
 
 		select {
 		case err := <-targetDone:
-			return err
+			return err, true
 		case <-time.After(supervisorPollInterval):
 		}
 	}
@@ -306,33 +318,36 @@ func stopSupervisedDescendants(targetPID int, targetDone <-chan error) error {
 
 		select {
 		case err := <-targetDone:
-			return err
+			return err, true
 		case <-time.After(supervisorPollInterval):
 		}
 	}
 
-	return fmt.Errorf("supervised Hermes root %d did not exit", targetPID)
+	return fmt.Errorf("supervised Hermes root %d did not exit", targetPID), false
 }
 
 func proveAndReapSupervisorDescendants(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		reapSupervisorChildren()
-
 		descendants, err := listSupervisorDescendants(os.Getpid())
 		if err != nil {
 			return err
-		}
-
-		if len(descendants) == 0 {
-			return nil
 		}
 
 		for pid, state := range descendants {
 			if state != 'Z' {
 				_ = signalPIDFD(pid, syscall.SIGKILL)
 			}
+		}
+
+		empty, err := reapSupervisorChildren()
+		if err != nil {
+			return fmt.Errorf("inspect Hermes supervisor child set: %w", err)
+		}
+
+		if empty {
+			return nil
 		}
 
 		if !time.Now().Before(deadline) {
@@ -458,14 +473,35 @@ func supervisorProcStat(stat string) (int, byte, bool) {
 	return parent, fields[0][0], true
 }
 
-func reapSupervisorChildren() {
+// reapSupervisorChildren drains every waitable adopted child and returns true
+// only when the kernel reports ECHILD. An empty /proc inventory is not proof:
+// a descendant can be between fork, parent death, and subreaper reparenting.
+func reapSupervisorChildren() (bool, error) {
 	for {
 		var status syscall.WaitStatus
 
-		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
-		if pid <= 0 || err != nil {
-			return
+		pid, err := supervisorWait4(-1, &status, syscall.WNOHANG, nil)
+		if pid > 0 {
+			continue
 		}
+
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+
+		if errors.Is(err, syscall.ECHILD) {
+			return true, nil
+		}
+
+		if err != nil {
+			return false, err
+		}
+
+		if pid == 0 {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("invalid wait4 result %d", pid)
 	}
 }
 
