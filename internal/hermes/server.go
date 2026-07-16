@@ -696,27 +696,41 @@ func (e *TurnFailureError) StatusCode() int { return e.statusCode }
 func (e *TurnFailureError) ProviderCode() string { return e.providerCode }
 
 // gatewayCompleteFailure inspects a message.complete payload and returns a
-// provider turn failure when the native turn finished in error, wiring
-// assistantMessageError into the gateway submit path. It returns nil for a
-// clean completion (or a payload that fails to decode).
+// provider turn failure when the native turn finished in error. Hermes' TUI
+// gateway reports the authoritative terminal state in status; finish/error are
+// also accepted when the gateway supplies its richer provider error shape. It
+// returns nil for a clean completion (or a payload that fails to decode).
 func gatewayCompleteFailure(payload json.RawMessage) *TurnFailureError {
 	var info struct {
 		Finish string       `json:"finish"`
+		Status string       `json:"status"`
+		Text   string       `json:"text"`
 		Error  *nativeError `json:"error"`
 	}
 
 	_ = json.Unmarshal(payload, &info)
 
 	failErr := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: info.Finish, Error: info.Error}})
-	if failErr == nil {
+	if failErr == nil && !strings.EqualFold(info.Status, jsonFieldError) {
 		return nil
 	}
 
-	failure := &TurnFailureError{cause: CauseProvider, message: failErr.Error()}
+	failure := &TurnFailureError{cause: CauseProvider}
 	if info.Error != nil {
+		failure.message = firstNonEmpty(info.Error.Message, info.Error.Name, info.Error.Type)
 		failure.statusCode = info.Error.StatusCode
 		failure.providerCode = info.Error.ProviderCode
 	}
+
+	if failure.message == "" && strings.EqualFold(info.Status, jsonFieldError) {
+		failure.message = info.Text
+	}
+
+	if failure.message == "" && failErr != nil {
+		failure.message = failErr.Error()
+	}
+
+	failure.message = firstNonEmpty(failure.message, "hermes provider error")
 
 	return failure
 }

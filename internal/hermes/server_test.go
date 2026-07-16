@@ -2319,6 +2319,14 @@ func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
 			provider: "rate_limit",
 		},
 		{
+			name: "message.complete status error (billing)",
+			events: []Event{{
+				Type:    evtMessageComplete,
+				Payload: json.RawMessage(`{"text":"HTTP 402: This request requires more credits","usage":{"total_tokens":0},"status":"error"}`),
+			}},
+			message: "HTTP 402: This request requires more credits",
+		},
+		{
 			name: "session.error event (auth)",
 			events: []Event{{
 				Type:    evtSessionError,
@@ -2368,6 +2376,32 @@ func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
 				t.Fatalf("providerCode = %q, want %q", failure.providerCode, tt.provider)
 			}
 		})
+	}
+}
+
+// Provider-looking assistant text is not itself an error. Only Hermes' native
+// terminal status (or its structured finish/error fields) classifies the turn,
+// so ordinary model content can contain the same words without brittle text
+// matching in the adapter.
+func TestTurnFailureProviderTextWithCompleteStatusSucceeds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(Event{
+		Type:    evtMessageComplete,
+		Payload: json.RawMessage(`{"text":"HTTP 402: This request requires more credits","usage":{"total_tokens":4},"status":"complete"}`),
+	})
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if err != nil {
+		t.Fatalf("complete turn failed from assistant text: %v", err)
+	}
+
+	if message.Info.Finish != valStop || message.Info.Tokens.Total != 4 || len(message.Parts) != 1 || message.Parts[0].Text != "HTTP 402: This request requires more credits" {
+		t.Fatalf("complete turn = %#v, want exact assistant text", message)
 	}
 }
 
