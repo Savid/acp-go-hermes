@@ -1488,9 +1488,16 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		return nil
 	}
 
+	// Serialize reservation through delivery so successful notifications cannot
+	// reorder and a failed attempt leaves the next contiguous sequence reusable.
+	s.rawEventMu.Lock()
+	defer s.rawEventMu.Unlock()
+
+	sequence := s.rawSeq + 1
+
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
-		keySequence:        s.nextRawEventSequence(),
+		keySequence:        sequence,
 		keySource:          valHermesServeSource,
 		keyEvent:           raw,
 	}
@@ -1503,7 +1510,13 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		return err
 	}
 
-	return conn.NotifyExtension(ctx, RawEventMethod, capped)
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
+		return err
+	}
+
+	s.rawSeq = sequence
+
+	return nil
 }
 
 // usageUpdateFromTokens builds a usage_update. size is the model's true context

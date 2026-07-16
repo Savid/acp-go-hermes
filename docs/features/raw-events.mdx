@@ -26,7 +26,9 @@ Set the flag in the session's `_meta.hermes.rawEvent` block:
 Events are then delivered as `_hermes/rawEvent` notifications, each carrying
 `sessionId`, `sequence`, `source`, and the native `event` payload. A native
 event without a payload is skipped entirely: no notification is emitted and no
-sequence number is consumed, so the per-session sequence stays contiguous.
+sequence number is consumed. A sequence number is committed only after its
+notification is delivered successfully; failed delivery consumes no number,
+and the next successful event reuses the next contiguous value.
 
 ## Size cap and truncation
 
@@ -43,5 +45,6 @@ and route envelopes:
 | `maxBytes` | The 64 KiB cap. |
 | `sizeBytes` | The event's encoded size (present only for `oversize`). |
 
-The marker is always valid JSON, so a consumer never receives an invalid payload
-and never sees an unexplained gap in the sequence.
+The marker is always valid JSON. A successfully delivered marker consumes its
+reserved sequence, so a consumer never receives an invalid payload and never
+sees an unexplained gap in the sequence.

@@ -67,11 +67,11 @@ func (c rawMessageConfig) Enabled() bool {
 
 // capRawEventPayload returns the complete routed payload unchanged when it
 // marshals within the size limit. Otherwise it replaces only the event with the
-// fixed truncation marker, consuming the sequence rather than dropping the
-// notification: an oversize event keeps its byte size, a marshal failure is
-// reported as unserializable. It then proves the final marker envelope also
-// fits; the route nonce bound ensures route metadata alone cannot make the
-// marker exceed the cap.
+// fixed truncation marker rather than dropping the notification: an oversize
+// event keeps its byte size, a marshal failure is reported as unserializable.
+// A successfully delivered marker consumes the reserved sequence. It then
+// proves the final marker envelope also fits; the route nonce bound ensures
+// route metadata alone cannot make the marker exceed the cap.
 func capRawEventPayload(payload map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(payload)
 	if err == nil && len(encoded) <= rawEventMaxBytes {

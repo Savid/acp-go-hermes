@@ -40,6 +40,7 @@ type session struct {
 	turn                chan struct{}
 	cancelMu            sync.Mutex
 	toolMu              sync.Mutex
+	rawEventMu          sync.Mutex
 	mu                  sync.Mutex
 	turnInFlight        bool
 	cancel              context.CancelFunc
@@ -599,15 +600,6 @@ func (s *session) currentMode() string {
 	defer s.mu.Unlock()
 
 	return s.mode
-}
-
-func (s *session) nextRawEventSequence() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.rawSeq++
-
-	return s.rawSeq
 }
 
 func (s *session) markPart(part nativehermes.Part) bool {
