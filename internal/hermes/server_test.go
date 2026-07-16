@@ -390,7 +390,7 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 	}
 
 	return []Event{
-		{Type: "tool.start", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"write"}`)},
+		{Type: "tool.start", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"write","args_text":"terminal(command=write)"}`)},
 		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"command":"write","description":"Edit file"}`)},
 		{Type: "clarify.request", SessionID: live, Payload: json.RawMessage(`{"id":"clarify-1","question":"Continue?"}`)},
 		{Type: "terminal.read.request", SessionID: live, Payload: json.RawMessage(`{}`)},
@@ -401,7 +401,7 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":""}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"delta":"hello "}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`["world"]`)},
-		{Type: "tool.complete", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","result":"done"}`)},
+		{Type: "tool.complete", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","args":{"command":"write"},"result":"done"}`)},
 		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1,"context_max":200000}}`)},
 	}
 }
@@ -754,9 +754,13 @@ func assertGatewayTextMessage(ctx context.Context, t *testing.T, server *hermesS
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if got := [2]string{message.Parts[0].Text, message.Parts[0].StreamedText}; got != [2]string{"hello world", "hello world"} {
+	if len(message.Parts) != 3 {
+		t.Fatalf("message parts = %#v, want tool start, tool completion, and text", message.Parts)
+	}
+	if got := [2]string{message.Parts[2].Text, message.Parts[2].StreamedText}; got != [2]string{"hello world", "hello world"} {
 		t.Fatalf("message and streamed text = %q", got)
 	}
+	assertGatewayNativeToolParts(t, message.Parts[:2])
 	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
 		t.Fatalf("tokens = %#v", message.Info.Tokens)
 	}
@@ -769,19 +773,73 @@ func assertGatewayPermissionCorrelation(t *testing.T, events <-chan TurnEvent) {
 	t.Helper()
 
 	var permission PermissionRequest
-	select {
-	case event := <-events:
-		if event.Type != evtApprovalRequest {
-			t.Fatalf("first forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+	toolStartSeen := false
+	for {
+		select {
+		case event := <-events:
+			if event.Type == evtMessagePartUpdated {
+				var part Part
+				if err := json.Unmarshal(event.Properties, &part); err != nil {
+					t.Fatalf("decode tool part: %v", err)
+				}
+				if part.Type == valTool && part.CallID == "native-tool-1" {
+					toolStartSeen = true
+				}
+
+				continue
+			}
+			if event.Type != evtApprovalRequest {
+				t.Fatalf("forwarded event before approval = %q", event.Type)
+			}
+			if decodeErr := json.Unmarshal(event.Properties, &permission); decodeErr != nil {
+				t.Fatalf("decode permission: %v", decodeErr)
+			}
+		default:
+			t.Fatal("missing forwarded approval.request")
 		}
-		if decodeErr := json.Unmarshal(event.Properties, &permission); decodeErr != nil {
-			t.Fatalf("decode permission: %v", decodeErr)
-		}
-	default:
-		t.Fatal("missing forwarded approval.request")
+
+		break
+	}
+	if !toolStartSeen {
+		t.Fatal("approval was not preceded by the native tool start")
 	}
 	if permission.ID != "approval:native-tool-1" || permission.Tool.CallID != "native-tool-1" || !strings.HasPrefix(permission.Tool.MessageID, "hermes-live-") {
 		t.Fatalf("permission correlation = %#v", permission)
+	}
+}
+
+func assertGatewayNativeToolParts(t *testing.T, parts []Part) {
+	t.Helper()
+
+	if len(parts) != 2 {
+		t.Fatalf("tool parts = %#v", parts)
+	}
+	if parts[0].Type != valTool || parts[0].CallID != "native-tool-1" || parts[0].Tool != "terminal" ||
+		parts[1].Type != valTool || parts[1].CallID != parts[0].CallID || parts[1].Tool != parts[0].Tool {
+		t.Fatalf("tool identity was not stable: %#v", parts)
+	}
+	if !json.Valid(parts[0].Raw) || !json.Valid(parts[1].Raw) || string(parts[0].Raw) == string(parts[1].Raw) {
+		t.Fatalf("tool part raw values = %q, %q", parts[0].Raw, parts[1].Raw)
+	}
+
+	var startState, completeState map[string]any
+	if err := json.Unmarshal(parts[0].State, &startState); err != nil {
+		t.Fatalf("decode start state: %v", err)
+	}
+	if err := json.Unmarshal(parts[1].State, &completeState); err != nil {
+		t.Fatalf("decode complete state: %v", err)
+	}
+	if startState["status"] != "running" || completeState["status"] != valCompleted {
+		t.Fatalf("tool statuses = %#v, %#v", startState, completeState)
+	}
+	if input, _ := startState["rawInput"].(map[string]any); input["context"] != "write" {
+		t.Fatalf("tool raw input = %#v", startState["rawInput"])
+	}
+	if input, _ := completeState["rawInput"].(map[string]any); input["command"] != "write" {
+		t.Fatalf("completed tool raw input = %#v", completeState["rawInput"])
+	}
+	if completeState["rawOutput"] != "done" {
+		t.Fatalf("tool raw output = %#v", completeState["rawOutput"])
 	}
 }
 
@@ -929,6 +987,249 @@ func testGatewayContextAndToolHelpers(t *testing.T) {
 	if got := uniqueGatewayToolCallID(map[string]struct{}{"one": {}, "two": {}}); got != "" {
 		t.Fatalf("ambiguous tool call = %q", got)
 	}
+	testGatewayToolPartMapping(t)
+}
+
+func testGatewayToolPartMapping(t *testing.T) {
+	t.Helper()
+
+	for _, event := range []Event{
+		{Type: evtToolStart, Payload: json.RawMessage(`{`)},
+		{Type: evtToolStart, Payload: json.RawMessage(`{"name":"missing-id"}`)},
+	} {
+		if part, ok := gatewayToolPart("stored", "message", event, gatewayActiveTool{}); ok || !reflect.DeepEqual(part, Part{}) {
+			t.Fatalf("invalid gateway tool event mapped to %#v", part)
+		}
+	}
+
+	startPayload := json.RawMessage(`{"tool_id":"actual","name":"terminal","context":"preview only","args_text":"terminal(command=pwd)"}`)
+	start, ok := gatewayToolPart("stored", "message", Event{Type: evtToolStart, Payload: startPayload}, gatewayActiveTool{})
+	if !ok {
+		t.Fatal("actual Hermes tool.start was not mapped")
+	}
+	if start.Tool != "terminal" {
+		t.Fatalf("actual Hermes tool.start name = %q", start.Tool)
+	}
+
+	active := gatewayActiveTool{rawInput: startPayload, name: "terminal"}
+	complete, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","args":{"command":"pwd"},"result":{"stdout":"/repo","exit_code":0}}`),
+	}, active)
+	if !ok {
+		t.Fatal("actual Hermes tool.complete was not mapped")
+	}
+	var state map[string]any
+	if err := json.Unmarshal(complete.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if complete.Tool != "terminal" {
+		t.Fatalf("completion missing name did not preserve start name: %q", complete.Tool)
+	}
+	if input, _ := state["rawInput"].(map[string]any); input["command"] != "pwd" || input["context"] != nil {
+		t.Fatalf("completion did not prefer authoritative args: %#v", state["rawInput"])
+	}
+	if output, _ := state["rawOutput"].(map[string]any); output["stdout"] != "/repo" {
+		t.Fatalf("actual Hermes raw output = %#v", state["rawOutput"])
+	}
+
+	conflict, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","name":"read_file","args":{"command":"pwd"},"result":"done"}`),
+	}, active)
+	if !ok || conflict.Tool != "terminal" {
+		t.Fatalf("conflicting completion name changed lifecycle identity: %#v", conflict)
+	}
+
+	withoutArgs, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","result":"done"}`),
+	}, active)
+	if !ok {
+		t.Fatal("completion without args was not mapped")
+	}
+	if err := json.Unmarshal(withoutArgs.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if input, _ := state["rawInput"].(map[string]any); input["context"] != "preview only" {
+		t.Fatalf("completion without args did not retain start input: %#v", state["rawInput"])
+	}
+	testGatewayToolFailureMapping(t)
+
+	noOutput, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"no-output","args":{"command":"true"}}`),
+	}, gatewayActiveTool{})
+	if !ok {
+		t.Fatal("completion without output was not mapped")
+	}
+	state = map[string]any{}
+	if err := json.Unmarshal(noOutput.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := state["rawOutput"]; exists {
+		t.Fatalf("completion envelope leaked as raw output: %#v", state["rawOutput"])
+	}
+
+	explicitOutput, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"output","output":{"text":"explicit"}}`),
+	}, gatewayActiveTool{})
+	if !ok || !strings.Contains(string(explicitOutput.State), `"text":"explicit"`) {
+		t.Fatalf("explicit output was not preserved: %#v", explicitOutput)
+	}
+
+	unnamed, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolStart,
+		Payload: json.RawMessage(`{"tool_id":"unnamed"}`),
+	}, gatewayActiveTool{})
+	if !ok || unnamed.Tool != "tool" {
+		t.Fatalf("unnamed start fallback = %#v", unnamed)
+	}
+	unnamedCompletion, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"unnamed","name":"terminal","result":"done"}`),
+	}, gatewayActiveTool{name: unnamed.Tool})
+	if !ok || unnamedCompletion.Tool != "tool" {
+		t.Fatalf("completion changed unnamed start identity: %#v", unnamedCompletion)
+	}
+}
+
+func testGatewayToolFailureMapping(t *testing.T) {
+	t.Helper()
+
+	for _, test := range []struct {
+		name    string
+		payload string
+		active  gatewayActiveTool
+	}{
+		{name: "canonical executor error", payload: `{"tool_id":"failed","name":"terminal","result":"Error executing tool 'terminal': boom"}`},
+		{name: "structured success false", payload: `{"tool_id":"failed","result":{"success":false}}`},
+		{name: "structured ok false", payload: `{"tool_id":"failed","result":{"ok":false}}`},
+		{name: "integer exit code", payload: `{"tool_id":"failed","result":{"exit_code":1}}`},
+		{name: "integer return code", payload: `{"tool_id":"failed","result":{"returncode":2}}`},
+		{name: "polished error", payload: `{"tool_id":"failed","name":"terminal","result":{"error":{"message":"structured"}}}`},
+		{
+			name:    "preserved polished name",
+			payload: `{"tool_id":"failed","name":"plugin_tool","result":{"error":"structured"}}`,
+			active:  gatewayActiveTool{name: "terminal"},
+		},
+		{name: "JSON string", payload: `{"tool_id":"failed","result":"{\"success\":false}"}`},
+		{
+			name:    "JSON string with appended hint",
+			payload: `{"tool_id":"failed","result":"  {\"ok\":false}\n\n[Hint: Results truncated]"}`,
+		},
+		{name: "output fallback", payload: `{"tool_id":"failed","output":{"success":false}}`},
+	} {
+		part, mapped := gatewayToolPart(
+			"stored",
+			"message",
+			Event{Type: evtToolComplete, Payload: json.RawMessage(test.payload)},
+			test.active,
+		)
+		if !mapped || !strings.Contains(string(part.State), `"status":"failed"`) {
+			t.Fatalf("%s payload %s mapped to %#v", test.name, test.payload, part)
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "successful result",
+			payload: `{"tool_id":"success","name":"terminal","result":{"success":true,"ok":true,"error":null,"exit_code":0,"returncode":1}}`,
+		},
+		{name: "generic plain error", payload: `{"tool_id":"success","name":"plugin_tool","result":"plugin error: optional diagnostic"}`},
+		{name: "generic structured error", payload: `{"tool_id":"success","name":"plugin_tool","result":{"error":"optional diagnostic"}}`},
+		{
+			name:    "polished error with content",
+			payload: `{"tool_id":"success","name":"terminal","result":{"error":"command diagnostic","content":"useful output"}}`,
+		},
+		{name: "noncanonical error string", payload: `{"tool_id":"success","name":"terminal","result":"error executing tool 'terminal': boom"}`},
+		{name: "float exit code", payload: `{"tool_id":"success","result":{"exit_code":1.0}}`},
+		{name: "result preferred to output", payload: `{"tool_id":"success","result":{"success":true},"output":{"success":false}}`},
+		{name: "is error is not classifier contract", payload: `{"tool_id":"success","result":{"is_error":true}}`},
+		{name: "nonobject JSON string", payload: `{"tool_id":"success","result":"[1,2] trailing hint"}`},
+	} {
+		part, ok := gatewayToolPart("stored", "message", Event{
+			Type:    evtToolComplete,
+			Payload: json.RawMessage(test.payload),
+		}, gatewayActiveTool{})
+		if !ok || strings.Contains(string(part.State), `"status":"failed"`) {
+			t.Fatalf("%s classified as failed: %#v", test.name, part)
+		}
+	}
+
+	testGatewayToolFailureHelpers(t)
+}
+
+func testGatewayToolFailureHelpers(t *testing.T) {
+	t.Helper()
+
+	value, ok := gatewayJSONValue([]byte(`{"value":1} trailing hint`))
+	object, isObject := value.(map[string]any)
+	if !ok || !isObject || object["value"] != json.Number("1") {
+		t.Fatalf("prefixed JSON value = %#v, %v", value, ok)
+	}
+	if value, ok := gatewayJSONValue([]byte(`not JSON`)); ok || value != nil {
+		t.Fatalf("invalid JSON value = %#v, %v", value, ok)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "nil", value: nil, want: false},
+		{name: "false", value: false, want: false},
+		{name: "true", value: true, want: true},
+		{name: "empty string", value: "", want: false},
+		{name: "string", value: "error", want: true},
+		{name: "integer zero", value: json.Number("0"), want: false},
+		{name: "decimal zero", value: json.Number("-0.0"), want: false},
+		{name: "exponent zero", value: json.Number("0e20"), want: false},
+		{name: "nonzero number", value: json.Number("1e-999"), want: true},
+		{name: "empty array", value: []any{}, want: false},
+		{name: "array", value: []any{"error"}, want: true},
+		{name: "empty object", value: map[string]any{}, want: false},
+		{name: "object", value: map[string]any{"message": "error"}, want: true},
+		{name: "other", value: struct{}{}, want: true},
+	} {
+		if got := gatewayTruthy(test.value); got != test.want {
+			t.Fatalf("%s gatewayTruthy(%#v) = %v, want %v", test.name, test.value, got, test.want)
+		}
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "not number", value: "1", want: false},
+		{name: "boolean true is a Python integer", value: true, want: true},
+		{name: "boolean false is a Python integer", value: false, want: false},
+		{name: "zero", value: json.Number("0"), want: false},
+		{name: "negative zero", value: json.Number("-0"), want: false},
+		{name: "positive", value: json.Number("1"), want: true},
+		{name: "negative", value: json.Number("-2"), want: true},
+		{name: "float", value: json.Number("1.0"), want: false},
+		{name: "exponent", value: json.Number("1e0"), want: false},
+	} {
+		if got := gatewayNonzeroInteger(test.value); got != test.want {
+			t.Fatalf("%s gatewayNonzeroInteger(%#v) = %v, want %v", test.name, test.value, got, test.want)
+		}
+	}
+
+	if gatewayToolResultFailed(nil, "terminal") {
+		t.Fatal("missing result classified as failed")
+	}
+	if gatewayToolResultFailed(json.RawMessage(`{`), "terminal") {
+		t.Fatal("malformed result classified as failed")
+	}
+	if !gatewayPolishedTool("yb_send_sticker") || gatewayPolishedTool("plugin_tool") {
+		t.Fatal("installed Hermes polished-tool set was not mirrored")
+	}
 }
 
 func TestHermesGatewayCompletionOnlyText(t *testing.T) {
@@ -968,20 +1269,81 @@ func TestHermesGatewayApprovalRequiresUniqueActiveNativeTool(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	select {
-	case event := <-server.events:
-		var permission PermissionRequest
-		if event.Type != evtApprovalRequest {
-			t.Fatalf("forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+	for {
+		select {
+		case event := <-server.events:
+			if event.Type == evtMessagePartUpdated {
+				continue
+			}
+			var permission PermissionRequest
+			if event.Type != evtApprovalRequest {
+				t.Fatalf("forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+			}
+			if err := json.Unmarshal(event.Properties, &permission); err != nil {
+				t.Fatalf("decode permission: %v", err)
+			}
+			if permission.ID != "approval-unbound" || permission.Tool.CallID != "" {
+				t.Fatalf("ambiguous permission correlation = %#v", permission)
+			}
+		default:
+			t.Fatal("missing forwarded approval.request")
 		}
-		if err := json.Unmarshal(event.Properties, &permission); err != nil {
-			t.Fatalf("decode permission: %v", err)
-		}
-		if permission.ID != "approval-unbound" || permission.Tool.CallID != "" {
-			t.Fatalf("ambiguous permission correlation = %#v", permission)
-		}
-	default:
-		t.Fatal("missing forwarded approval.request")
+
+		break
+	}
+}
+
+func TestHermesGatewaySaturatedAuthoritativePublicationFailsTurn(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		freeSlots int
+		events    []Event
+	}{
+		{
+			name: "tool start",
+			events: []Event{
+				{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"pwd"}`)},
+			},
+		},
+		{
+			name:      "tool completion",
+			freeSlots: 1,
+			events: []Event{
+				{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"pwd"}`)},
+				{Type: evtToolComplete, Payload: json.RawMessage(`{"tool_id":"native-tool-1","args":{"command":"pwd"},"result":"done"}`)},
+			},
+		},
+		{
+			name: "permission",
+			events: []Event{
+				{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"pwd"}`)},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := newFakeGatewayServer(t)
+			fake.setPromptEvents(append(test.events,
+				Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"must not complete"}`)},
+			)...)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			server.rememberGatewaySession("stored", "live-stored")
+			for range cap(server.events) - test.freeSlots {
+				server.events <- TurnEvent{Type: "saturated"}
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			if _, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("saturated authoritative publication error = %v, want deadline", err)
+			}
+			if !containsString(fake.callMethods(), "prompt.submit") {
+				t.Fatalf("saturation failed before gateway prompt submission: %v", fake.callMethods())
+			}
+		})
 	}
 }
 
@@ -1572,16 +1934,62 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("nonblocking event drops", func(t *testing.T) {
+	t.Run("non-authoritative event drops", func(t *testing.T) {
 		server := &hermesServer{events: make(chan TurnEvent, 1)}
 		server.events <- TurnEvent{Type: "filled"}
 		server.forwardGatewayPart("stored", "message", Event{Type: "message.delta"}, "text")
-		server.forwardGatewayPermission("stored", "live", "message", "tool", Event{Payload: json.RawMessage(`{}`)})
 		server.forwardGatewayQuestion("stored", "live", Event{Payload: json.RawMessage(`{}`)})
 		if got := len(server.events); got != 1 {
 			t.Fatalf("event channel len = %d", got)
 		}
 	})
+}
+
+func TestHermesGatewayAuthoritativePublicationBackpressure(t *testing.T) {
+	server := &hermesServer{events: make(chan TurnEvent, 1)}
+	server.events <- TurnEvent{Type: "filled"}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		err := server.forwardGatewayToolPart(ctx, Part{Raw: json.RawMessage(`{"type":"tool"}`)}, Event{})
+		if err == nil {
+			err = server.forwardGatewayPermission(ctx, "stored", "live", "message", "tool", Event{Payload: json.RawMessage(`{}`)})
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("authoritative publication did not backpressure: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	if event := <-server.events; event.Type != "filled" {
+		t.Fatalf("saturated sentinel = %#v", event)
+	}
+	if event := <-server.events; event.Type != evtMessagePartUpdated {
+		t.Fatalf("first authoritative event = %#v", event)
+	}
+	if event := <-server.events; event.Type != evtApprovalRequest {
+		t.Fatalf("permission was starved behind tool event: %#v", event)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("authoritative publication: %v", err)
+	}
+}
+
+func TestHermesGatewayAuthoritativePublicationCancellation(t *testing.T) {
+	server := &hermesServer{events: make(chan TurnEvent, 1)}
+	server.events <- TurnEvent{Type: "filled"}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := server.forwardGatewayToolPart(ctx, Part{}, Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("saturated tool cancellation = %v", err)
+	}
+	if err := server.forwardGatewayPermission(ctx, "stored", "live", "message", "tool", Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("saturated permission cancellation = %v", err)
+	}
 }
 
 func TestHermesGatewayServerFailureBranches(t *testing.T) {

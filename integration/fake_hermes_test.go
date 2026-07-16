@@ -59,12 +59,52 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	if got := client.agentText(); got != "fake response" {
 		t.Fatalf("completion-only ACP text = %q, want %q\nstderr:\n%s", got, "fake response", agent.stderrString())
 	}
+	assertFakeGatewayToolLifecycle(t, client)
 	fork, err := hermesacp.CallForkSession(ctx, conn, hermesacp.ForkSessionRequest(session.SessionId, t.TempDir()))
 	if err != nil {
 		t.Fatalf("extension fork through fake gateway: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	if fork.SessionId == "" || fork.SessionId == session.SessionId {
 		t.Fatalf("fake fork response = %#v", fork)
+	}
+}
+
+func assertFakeGatewayToolLifecycle(t *testing.T, client *recordingClient) {
+	t.Helper()
+
+	client.mu.Lock()
+	updates := append([]acp.SessionNotification(nil), client.updates...)
+	client.mu.Unlock()
+
+	var starts []*acp.SessionUpdateToolCall
+	var completions []*acp.SessionToolCallUpdate
+	for index := range updates {
+		if start := updates[index].Update.ToolCall; start != nil {
+			starts = append(starts, start)
+		}
+		if update := updates[index].Update.ToolCallUpdate; update != nil {
+			completions = append(completions, update)
+		}
+	}
+	if len(starts) != 1 || len(completions) != 1 {
+		t.Fatalf("gateway ACP tool lifecycle starts=%#v completions=%#v", starts, completions)
+	}
+	if starts[0].ToolCallId != "native-tool-1" || starts[0].Title != "terminal" ||
+		starts[0].Kind != acp.ToolKindExecute || starts[0].Status != acp.ToolCallStatusInProgress {
+		t.Fatalf("gateway ACP tool start = %#v", starts[0])
+	}
+	if input, _ := starts[0].RawInput.(map[string]any); input["context"] != "mcp__wagie__execute" {
+		t.Fatalf("gateway ACP tool input = %#v", starts[0].RawInput)
+	}
+	if completions[0].ToolCallId != "native-tool-1" || completions[0].Status == nil ||
+		*completions[0].Status != acp.ToolCallStatusCompleted {
+		t.Fatalf("gateway ACP tool completion = %#v", completions[0])
+	}
+	if input, _ := completions[0].RawInput.(map[string]any); input["command"] != "mcp__wagie__execute" || input["context"] != nil {
+		t.Fatalf("gateway ACP authoritative completion input = %#v", completions[0].RawInput)
+	}
+	if output, _ := completions[0].RawOutput.(map[string]any); output["probe"] != "authorized" || output["status"] != "ok" {
+		t.Fatalf("gateway ACP tool output = %#v", completions[0].RawOutput)
 	}
 }
 
@@ -337,6 +377,17 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			return
 		}
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
+		writeFakeGatewayEvent(ctx, conn, "tool.start", live, map[string]any{
+			"tool_id": "native-tool-1",
+			"name":    "terminal",
+			"context": "mcp__wagie__execute",
+		})
+		writeFakeGatewayEvent(ctx, conn, "tool.complete", live, map[string]any{
+			"tool_id": "native-tool-1",
+			"name":    "terminal",
+			"args":    map[string]any{"command": "mcp__wagie__execute"},
+			"result":  map[string]any{"probe": "authorized", "status": "ok"},
+		})
 		// Hermes 0.18.2 may deliver the entire assistant reply only on the
 		// authoritative completion event, with no preceding message.delta.
 		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{

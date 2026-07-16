@@ -330,11 +330,12 @@ func TestPermissionToolStateRemainingBranches(t *testing.T) {
 
 		next := hermesToolState{
 			title: "renamed", kind: acp.ToolKindEdit,
-			status: acp.ToolCallStatusPending, rawInput: map[string]any{"next": true},
+			status: acp.ToolCallStatusPending, rawInput: map[string]any{"next": true}, rawOutput: map[string]any{"done": true},
 		}
 		update, merged, changed := updateHermesToolCall("tool", previous, next)
 		if !changed || update.ToolCallUpdate == nil || merged.status != acp.ToolCallStatusInProgress ||
-			merged.title != next.title || merged.kind != next.kind || !reflect.DeepEqual(merged.rawInput, next.rawInput) {
+			merged.title != next.title || merged.kind != next.kind || !reflect.DeepEqual(merged.rawInput, next.rawInput) ||
+			!reflect.DeepEqual(update.ToolCallUpdate.RawOutput, next.rawOutput) {
 			t.Fatalf("merged update = %#v update=%#v changed=%v", merged, update, changed)
 		}
 	})
@@ -779,7 +780,7 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.updated", Properties: reasoningProps}); err != nil {
 		t.Fatalf("reasoning event: %v", err)
 	}
-	toolProps := json.RawMessage(`{"id":"part-3","sessionID":"native-1","messageID":"message-1","type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","title":"Run"}}`)
+	toolProps := json.RawMessage(`{"id":"part-3","sessionID":"native-1","messageID":"message-1","type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","title":"Run","rawOutput":{"result":"done"}}}`)
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.created", Properties: toolProps}); err != nil {
 		t.Fatalf("tool event: %v", err)
 	}
@@ -810,11 +811,92 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 	if conn.updates[3].Update.ToolCall == nil {
 		t.Fatalf("fourth update = %#v, want tool", conn.updates[3].Update)
 	}
+	if output, _ := conn.updates[3].Update.ToolCall.RawOutput.(map[string]any); output["result"] != "done" {
+		t.Fatalf("tool start raw output = %#v", conn.updates[3].Update.ToolCall.RawOutput)
+	}
 	if conn.updates[4].Update.UsageUpdate == nil || conn.updates[5].Update.UsageUpdate == nil {
 		t.Fatalf("usage updates missing: %#v", conn.updates)
 	}
 	if len(conn.extensions) == 0 || conn.extensions[0].method != RawEventMethod {
 		t.Fatalf("raw events = %#v", conn.extensions)
+	}
+}
+
+func TestGatewayToolPartsEmitACPStartAndResult(t *testing.T) {
+	client := newFakeHermesClient()
+	conn := newRecordingAgentClient()
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+
+	startProperties := json.RawMessage(`{"id":"hermes-live-tool-native-1","sessionID":"native-1","messageID":"hermes-live","type":"tool","callID":"native-1","tool":"terminal","state":{"status":"running","rawInput":{"tool_id":"native-1","name":"terminal","context":"mcp__wagie__execute"}}}`)
+	completeProperties := json.RawMessage(`{"id":"hermes-live-tool-native-1","sessionID":"native-1","messageID":"hermes-live","type":"tool","callID":"native-1","tool":"terminal","state":{"status":"completed","rawInput":{"tool_id":"native-1","name":"terminal","context":"mcp__wagie__execute"},"rawOutput":{"probe":"authorized","status":"ok"}}}`)
+
+	if err := session.handleEvent(t.Context(), nativehermes.TurnEvent{Type: evtMessagePartUpdated, Properties: startProperties}); err != nil {
+		t.Fatalf("gateway tool start: %v", err)
+	}
+
+	startPart, ok := eventPart(startProperties)
+	if !ok {
+		t.Fatal("gateway start part did not decode")
+	}
+	completePart, ok := eventPart(completeProperties)
+	if !ok {
+		t.Fatal("gateway completion part did not decode")
+	}
+	if err := session.emitMessage(t.Context(), nativehermes.NativeMessage{
+		Info:  nativehermes.NativeMessageInfo{ID: "hermes-live", SessionID: "native-1", Role: valAssistant},
+		Parts: []nativehermes.Part{startPart, completePart},
+	}, false); err != nil {
+		t.Fatalf("gateway message retrieval: %v", err)
+	}
+
+	if conn.updateCount() != 2 {
+		t.Fatalf("gateway tool updates = %#v, want one start and one completion", conn.updates)
+	}
+	start := conn.updates[0].Update.ToolCall
+	if start == nil || start.ToolCallId != "native-1" || start.Title != "terminal" ||
+		start.Kind != acp.ToolKindExecute || start.Status != acp.ToolCallStatusInProgress {
+		t.Fatalf("ACP tool start = %#v", start)
+	}
+	if input, _ := start.RawInput.(map[string]any); input["context"] != "mcp__wagie__execute" {
+		t.Fatalf("ACP tool raw input = %#v", start.RawInput)
+	}
+
+	complete := conn.updates[1].Update.ToolCallUpdate
+	if complete == nil || complete.ToolCallId != "native-1" || complete.Status == nil ||
+		*complete.Status != acp.ToolCallStatusCompleted {
+		t.Fatalf("ACP tool completion = %#v", complete)
+	}
+	if output, _ := complete.RawOutput.(map[string]any); output["probe"] != "authorized" || output["status"] != "ok" {
+		t.Fatalf("ACP tool raw output = %#v", complete.RawOutput)
+	}
+}
+
+func TestHermesToolKindMap(t *testing.T) {
+	t.Parallel()
+
+	tests := map[acp.ToolKind][]string{
+		acp.ToolKindRead: {
+			"read_file", "skill_view", "skills_list", "browser_snapshot", "browser_vision", "browser_get_images", "vision_analyze",
+		},
+		acp.ToolKindEdit:   {"write_file", "patch", "skill_manage"},
+		acp.ToolKindSearch: {"search_files"},
+		acp.ToolKindExecute: {
+			"terminal", "process", "execute_code", "browser_click", "browser_type", "browser_scroll", "browser_press", "browser_back",
+			"delegate_task", "image_generate", "text_to_speech",
+		},
+		acp.ToolKindFetch: {"web_search", "web_extract", "browser_navigate"},
+		acp.ToolKindThink: {"_thinking"},
+		acp.ToolKindOther: {"todo", "browser_console", "memory", "plugin_tool", "TERMINAL", ""},
+	}
+
+	for want, tools := range tests {
+		for _, tool := range tools {
+			if got := toolKind(tool); got != want {
+				t.Errorf("toolKind(%q) = %q, want %q", tool, got, want)
+			}
+		}
 	}
 }
 

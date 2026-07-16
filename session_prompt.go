@@ -41,7 +41,9 @@ const (
 	valHigh       = "high"
 	valLow        = "low"
 	valSuccess    = "success"
+	valDone       = "done"
 	valFile       = "file"
+	valTerminal   = "terminal"
 
 	defaultMimeType = "application/octet-stream"
 
@@ -667,10 +669,11 @@ func unstreamedText(complete string, streamed string) string {
 }
 
 type hermesToolState struct {
-	title    string
-	kind     acp.ToolKind
-	status   acp.ToolCallStatus
-	rawInput any
+	title     string
+	kind      acp.ToolKind
+	status    acp.ToolCallStatus
+	rawInput  any
+	rawOutput any
 }
 
 func (s *session) emitPartUpdates(ctx context.Context, role string, part nativehermes.Part) error {
@@ -738,19 +741,30 @@ func hermesToolPartState(part nativehermes.Part) (acp.ToolCallId, hermesToolStat
 		if titleValue, _ := nativeState[keyTitle].(string); titleValue != "" {
 			state.title = titleValue
 		}
+
+		if rawInput, ok := nativeState["rawInput"]; ok {
+			state.rawInput = rawInput
+		}
+
+		if rawOutput, ok := nativeState["rawOutput"]; ok {
+			state.rawOutput = rawOutput
+		}
 	}
 
 	return id, state
 }
 
 func startHermesToolCall(id acp.ToolCallId, state hermesToolState) acp.SessionUpdate {
-	return acp.StartToolCall(
-		id,
-		state.title,
+	opts := []acp.ToolCallStartOpt{
 		acp.WithStartKind(state.kind),
 		acp.WithStartStatus(state.status),
 		acp.WithStartRawInput(state.rawInput),
-	)
+	}
+	if state.rawOutput != nil {
+		opts = append(opts, acp.WithStartRawOutput(state.rawOutput))
+	}
+
+	return acp.StartToolCall(id, state.title, opts...)
 }
 
 func updateHermesToolCall(
@@ -782,6 +796,10 @@ func updateHermesToolCall(
 
 	if !reflect.DeepEqual(merged.rawInput, previous.rawInput) {
 		opts = append(opts, acp.WithUpdateRawInput(merged.rawInput))
+	}
+
+	if !reflect.DeepEqual(merged.rawOutput, previous.rawOutput) {
+		opts = append(opts, acp.WithUpdateRawOutput(merged.rawOutput))
 	}
 
 	if len(opts) == 0 {
@@ -1592,22 +1610,19 @@ func toolStatus(value string) acp.ToolCallStatus {
 }
 
 func toolKind(tool string) acp.ToolKind {
-	switch strings.ToLower(tool) {
-	case valRead, "view":
+	switch tool {
+	case "read_file", "skill_view", "skills_list", "browser_snapshot", "browser_vision", "browser_get_images", "vision_analyze":
 		return acp.ToolKindRead
-	case valEdit, "write":
+	case "write_file", "patch", "skill_manage":
 		return acp.ToolKindEdit
-	case valDelete, "remove":
-		return acp.ToolKindDelete
-	case "move", "rename":
-		return acp.ToolKindMove
-	case "grep", "search", "find":
+	case "search_files":
 		return acp.ToolKindSearch
-	case "bash", "shell", "run":
+	case valTerminal, "process", "execute_code", "browser_click", "browser_type", "browser_scroll", "browser_press", "browser_back",
+		"delegate_task", "image_generate", "text_to_speech":
 		return acp.ToolKindExecute
-	case "fetch", "webfetch":
+	case "web_search", "web_extract", "browser_navigate":
 		return acp.ToolKindFetch
-	case "think":
+	case "_thinking":
 		return acp.ToolKindThink
 	default:
 		return acp.ToolKindOther
@@ -1627,7 +1642,7 @@ func planPriority(value string) acp.PlanEntryPriority {
 
 func planStatus(value string) acp.PlanEntryStatus {
 	switch strings.ToLower(value) {
-	case valCompleted, "done":
+	case valCompleted, valDone:
 		return acp.PlanEntryStatusCompleted
 	case "in_progress", "running":
 		return acp.PlanEntryStatusInProgress

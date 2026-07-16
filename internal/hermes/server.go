@@ -39,11 +39,15 @@ const (
 	valAssistant        = "assistant"
 	valStop             = "stop"
 	valText             = "text"
+	valTool             = "tool"
+	valCompleted        = "completed"
+	valFailed           = "failed"
 	valReasoning        = "reasoning"
 	valFile             = "file"
 	valAlways           = "always"
 	valServe            = "serve"
 	valHermes           = "hermes"
+	valTerminal         = "terminal"
 	argPort             = "--port"
 	valOnce             = "once"
 	valUnsupported      = "unsupported"
@@ -1246,6 +1250,8 @@ func (s *hermesServer) submitGatewayTextForLive(
 	var textBuilder strings.Builder
 
 	activeToolCalls := map[string]struct{}{}
+	toolCallStates := map[string]gatewayActiveTool{}
+	toolParts := make([]Part, 0)
 
 	for {
 		select {
@@ -1263,7 +1269,9 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 			switch event.Type {
 			case evtApprovalRequest:
-				s.forwardGatewayPermission(stored, live, messageID, uniqueGatewayToolCallID(activeToolCalls), event)
+				if err := s.forwardGatewayPermission(ctx, stored, live, messageID, uniqueGatewayToolCallID(activeToolCalls), event); err != nil {
+					return NativeMessage{}, err
+				}
 			case evtClarifyRequest:
 				s.forwardGatewayQuestion(stored, live, event)
 			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
@@ -1271,12 +1279,29 @@ func (s *hermesServer) submitGatewayTextForLive(
 			case evtSessionError:
 				return NativeMessage{}, gatewayEventFailure(event.Payload)
 			case evtToolStart:
-				if toolCallID := gatewayToolCallID(event.Payload); toolCallID != "" {
-					activeToolCalls[toolCallID] = struct{}{}
+				if part, ok := gatewayToolPart(stored, messageID, event, gatewayActiveTool{}); ok {
+					activeToolCalls[part.CallID] = struct{}{}
+
+					toolCallStates[part.CallID] = gatewayActiveTool{
+						rawInput: append(json.RawMessage(nil), event.Payload...),
+						name:     part.Tool,
+					}
+
+					toolParts = append(toolParts, part)
+					if err := s.forwardGatewayToolPart(ctx, part, event); err != nil {
+						return NativeMessage{}, err
+					}
 				}
 			case evtToolComplete:
-				if toolCallID := gatewayToolCallID(event.Payload); toolCallID != "" {
-					delete(activeToolCalls, toolCallID)
+				toolCallID := gatewayToolCallID(event.Payload)
+				if part, ok := gatewayToolPart(stored, messageID, event, toolCallStates[toolCallID]); ok {
+					delete(activeToolCalls, part.CallID)
+					delete(toolCallStates, part.CallID)
+
+					toolParts = append(toolParts, part)
+					if err := s.forwardGatewayToolPart(ctx, part, event); err != nil {
+						return NativeMessage{}, err
+					}
 				}
 			case evtMessageDelta, evtThinkingDelta:
 				chunk := gatewayEventText(event.Payload)
@@ -1302,6 +1327,16 @@ func (s *hermesServer) submitGatewayTextForLive(
 					completeText = streamedText
 				}
 
+				parts := append([]Part(nil), toolParts...)
+				parts = append(parts, Part{
+					ID:           messageID + "-text",
+					SessionID:    stored,
+					MessageID:    messageID,
+					Type:         valText,
+					Text:         completeText,
+					StreamedText: streamedText,
+				})
+
 				return NativeMessage{
 					Info: NativeMessageInfo{
 						ID:            messageID,
@@ -1311,14 +1346,7 @@ func (s *hermesServer) submitGatewayTextForLive(
 						Tokens:        tokens,
 						ContextWindow: gatewayContextWindow(event.Payload),
 					},
-					Parts: []Part{{
-						ID:           messageID + "-text",
-						SessionID:    stored,
-						MessageID:    messageID,
-						Type:         valText,
-						Text:         completeText,
-						StreamedText: streamedText,
-					}},
+					Parts: parts,
 				}, nil
 			}
 		case <-ctx.Done():
@@ -1367,13 +1395,240 @@ func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event
 	}
 }
 
+func (s *hermesServer) forwardGatewayToolPart(ctx context.Context, part Part, event Event) error {
+	data := append(json.RawMessage(nil), part.Raw...)
+	select {
+	case s.events <- TurnEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type gatewayActiveTool struct {
+	rawInput json.RawMessage
+	name     string
+}
+
+type gatewayToolPayload struct {
+	ToolID string          `json:"tool_id"`
+	Name   string          `json:"name"`
+	Args   json.RawMessage `json:"args"`
+	Result json.RawMessage `json:"result"`
+	Output json.RawMessage `json:"output"`
+}
+
+func gatewayToolPart(
+	stored string,
+	messageID string,
+	event Event,
+	active gatewayActiveTool,
+) (Part, bool) {
+	var payload gatewayToolPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.ToolID == "" {
+		return Part{}, false
+	}
+
+	toolName := payload.Name
+	if active.name != "" {
+		toolName = active.name
+	}
+
+	status := "running"
+	if event.Type == evtToolComplete {
+		status = valCompleted
+		if gatewayToolFailed(payload, toolName) {
+			status = valFailed
+		}
+	}
+
+	state := map[string]any{"status": status}
+
+	switch {
+	case event.Type == evtToolComplete && len(payload.Args) > 0:
+		state["rawInput"] = payload.Args
+	case event.Type == evtToolStart:
+		state["rawInput"] = event.Payload
+	case len(active.rawInput) > 0:
+		state["rawInput"] = active.rawInput
+	}
+
+	if event.Type == evtToolComplete {
+		if len(payload.Result) > 0 {
+			state["rawOutput"] = payload.Result
+		} else if len(payload.Output) > 0 {
+			state["rawOutput"] = payload.Output
+		}
+	}
+
+	stateData, _ := json.Marshal(state)
+	part := Part{
+		ID:        messageID + "-tool-" + payload.ToolID,
+		SessionID: stored,
+		MessageID: messageID,
+		Type:      valTool,
+		CallID:    payload.ToolID,
+		Tool:      firstNonEmpty(toolName, "tool"),
+		State:     stateData,
+	}
+	data, _ := json.Marshal(part)
+	part.Raw = data
+
+	return part, true
+}
+
+func gatewayToolFailed(payload gatewayToolPayload, toolName string) bool {
+	raw := payload.Result
+	if len(raw) == 0 {
+		raw = payload.Output
+	}
+
+	return gatewayToolResultFailed(raw, toolName)
+}
+
+func gatewayToolResultFailed(raw json.RawMessage, toolName string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+
+	value, ok := gatewayJSONValue(raw)
+	if !ok {
+		return false
+	}
+
+	if text, isText := value.(string); isText {
+		if strings.HasPrefix(text, "Error executing tool '") {
+			return true
+		}
+
+		value, ok = gatewayJSONValue([]byte(text))
+		if !ok {
+			return false
+		}
+	}
+
+	result, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	if success, exists := result["success"]; exists && success == false {
+		return true
+	}
+
+	if resultOK, exists := result["ok"]; exists && resultOK == false {
+		return true
+	}
+
+	exitCode, exists := result["exit_code"]
+	if !exists {
+		exitCode = result["returncode"]
+	}
+
+	if gatewayNonzeroInteger(exitCode) {
+		return true
+	}
+
+	return gatewayPolishedTool(toolName) && gatewayTruthy(result[jsonFieldError]) && !gatewayTruthy(result["content"])
+}
+
+func gatewayJSONValue(raw []byte) (any, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
+	var value any
+	if decoder.Decode(&value) != nil {
+		return nil, false
+	}
+
+	return value, true
+}
+
+func gatewayNonzeroInteger(value any) bool {
+	if boolean, ok := value.(bool); ok {
+		return boolean
+	}
+
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+
+	text := number.String()
+	if strings.ContainsAny(text, ".eE") {
+		return false
+	}
+
+	text = strings.TrimPrefix(text, "-")
+	for _, digit := range text {
+		if digit != '0' {
+			return true
+		}
+	}
+
+	return false
+}
+
+func gatewayTruthy(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return typed
+	case string:
+		return typed != ""
+	case json.Number:
+		mantissa, _, _ := strings.Cut(typed.String(), "e")
+		if mantissa == typed.String() {
+			mantissa, _, _ = strings.Cut(typed.String(), "E")
+		}
+
+		for _, digit := range mantissa {
+			if digit >= '1' && digit <= '9' {
+				return true
+			}
+		}
+
+		return false
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func gatewayPolishedTool(toolName string) bool {
+	switch toolName {
+	case "todo", "memory", "session_search", "delegate_task",
+		"read_file", "write_file", "patch", "search_files", valTerminal, "process", "execute_code",
+		"skill_view", "skills_list", "skill_manage", "web_search", "web_extract",
+		"browser_navigate", "browser_click", "browser_type", "browser_press", "browser_scroll",
+		"browser_back", "browser_snapshot", "browser_console", "browser_get_images", "browser_vision",
+		"vision_analyze", "image_generate", "text_to_speech",
+		"cronjob", "send_message", "clarify", "discord", "discord_admin",
+		"ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+		"feishu_doc_read", "feishu_drive_list_comments", "feishu_drive_list_comment_replies",
+		"feishu_drive_reply_comment", "feishu_drive_add_comment",
+		"kanban_create", "kanban_show", "kanban_comment", "kanban_complete",
+		"kanban_block", "kanban_link", "kanban_heartbeat",
+		"yb_query_group_info", "yb_query_group_members", "yb_search_sticker",
+		"yb_send_dm", "yb_send_sticker":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *hermesServer) forwardGatewayPermission(
+	ctx context.Context,
 	stored string,
 	live string,
 	messageID string,
 	toolCallID string,
 	event Event,
-) {
+) error {
 	requestID := "approval-unbound"
 	if toolCallID != "" {
 		requestID = "approval:" + toolCallID
@@ -1391,7 +1646,9 @@ func (s *hermesServer) forwardGatewayPermission(
 	data, _ := json.Marshal(req)
 	select {
 	case s.events <- TurnEvent{Type: evtApprovalRequest, Properties: data, Raw: event.Raw}:
-	default:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
