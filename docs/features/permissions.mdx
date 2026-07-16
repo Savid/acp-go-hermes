@@ -12,6 +12,14 @@ load-bearing for user trust and is never silently auto-approved.
 A native `approval.request` gateway event maps to an ACP
 `session/request_permission` request. The adapter presents three options:
 
+The ACP permission request uses the native tool `callID` as its exact
+`toolCallId`. If the approval arrives before the native tool-start event, the
+adapter first publishes that ID as a pending tool call with the active turn's
+route envelope. A later native start advances the same ID to `in_progress`
+instead of publishing a duplicate start. Missing IDs, terminal IDs, and
+callbacks outside their exact active turn are rejected without invoking the
+ACP permission callback.
+
 | Option id | ACP kind | Native reply |
 |---|---|---|
 | `once` | `allow_once` | `once` |

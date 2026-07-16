@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -562,10 +563,8 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 			continue
 		}
 
-		for _, update := range partUpdates(message.Info.Role, *part) {
-			if err := s.emitUpdate(ctx, update); err != nil {
-				return err
-			}
+		if err := s.emitPartUpdates(ctx, message.Info.Role, *part); err != nil {
+			return err
 		}
 
 		if part.Type == valStepFinish {
@@ -640,8 +639,6 @@ func partUpdates(role string, part nativehermes.Part) []acp.SessionUpdate {
 			MessageId:     &messageID,
 			Content:       acp.TextBlock(part.Text),
 		}}}
-	case valTool:
-		return toolPartUpdates(part)
 	default:
 		return nil
 	}
@@ -666,31 +663,146 @@ func unstreamedText(complete string, streamed string) string {
 	return ""
 }
 
-func toolPartUpdates(part nativehermes.Part) []acp.SessionUpdate {
-	id := acp.ToolCallId(firstNonEmpty(part.CallID, part.ID, "hermes-tool"))
-	title := firstNonEmpty(part.Tool, string(id))
-	status := acp.ToolCallStatusInProgress
+type hermesToolState struct {
+	title    string
+	kind     acp.ToolKind
+	status   acp.ToolCallStatus
+	rawInput any
+}
 
-	if len(part.State) > 0 {
-		var state map[string]any
+func (s *session) emitPartUpdates(ctx context.Context, role string, part nativehermes.Part) error {
+	if part.Type == valTool {
+		return s.emitToolPartUpdate(ctx, part)
+	}
 
-		_ = json.Unmarshal(part.State, &state)
-		if stateStatus, _ := state["status"].(string); stateStatus != "" {
-			status = toolStatus(stateStatus)
-		}
-
-		if titleValue, _ := state[keyTitle].(string); titleValue != "" {
-			title = titleValue
+	for _, update := range partUpdates(role, part) {
+		if err := s.emitUpdate(ctx, update); err != nil {
+			return err
 		}
 	}
 
-	return []acp.SessionUpdate{acp.StartToolCall(
+	return nil
+}
+
+func (s *session) emitToolPartUpdate(ctx context.Context, part nativehermes.Part) error {
+	id, next := hermesToolPartState(part)
+
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	previous, seen := s.toolStates[string(id)]
+	if !seen {
+		if err := s.emitUpdate(ctx, startHermesToolCall(id, next)); err != nil {
+			return err
+		}
+
+		s.toolStates[string(id)] = next
+
+		return nil
+	}
+
+	update, merged, changed := updateHermesToolCall(id, previous, next)
+	if !changed {
+		return nil
+	}
+
+	if err := s.emitUpdate(ctx, update); err != nil {
+		return err
+	}
+
+	s.toolStates[string(id)] = merged
+
+	return nil
+}
+
+func hermesToolPartState(part nativehermes.Part) (acp.ToolCallId, hermesToolState) {
+	id := acp.ToolCallId(firstNonEmpty(part.CallID, part.ID, "hermes-tool"))
+	state := hermesToolState{
+		title:    firstNonEmpty(part.Tool, string(id)),
+		kind:     toolKind(part.Tool),
+		status:   acp.ToolCallStatusInProgress,
+		rawInput: append(json.RawMessage(nil), part.Raw...),
+	}
+
+	if len(part.State) > 0 {
+		var nativeState map[string]any
+
+		_ = json.Unmarshal(part.State, &nativeState)
+		if stateStatus, _ := nativeState["status"].(string); stateStatus != "" {
+			state.status = toolStatus(stateStatus)
+		}
+
+		if titleValue, _ := nativeState[keyTitle].(string); titleValue != "" {
+			state.title = titleValue
+		}
+	}
+
+	return id, state
+}
+
+func startHermesToolCall(id acp.ToolCallId, state hermesToolState) acp.SessionUpdate {
+	return acp.StartToolCall(
 		id,
-		title,
-		acp.WithStartKind(toolKind(part.Tool)),
-		acp.WithStartStatus(status),
-		acp.WithStartRawInput(part.Raw),
-	)}
+		state.title,
+		acp.WithStartKind(state.kind),
+		acp.WithStartStatus(state.status),
+		acp.WithStartRawInput(state.rawInput),
+	)
+}
+
+func updateHermesToolCall(
+	id acp.ToolCallId,
+	previous hermesToolState,
+	next hermesToolState,
+) (acp.SessionUpdate, hermesToolState, bool) {
+	if hermesToolStatusTerminal(previous.status) {
+		return acp.SessionUpdate{}, previous, false
+	}
+
+	merged := next
+	if hermesToolStatusRank(next.status) < hermesToolStatusRank(previous.status) {
+		merged.status = previous.status
+	}
+
+	opts := make([]acp.ToolCallUpdateOpt, 0, 4)
+	if merged.status != previous.status {
+		opts = append(opts, acp.WithUpdateStatus(merged.status))
+	}
+
+	if merged.title != previous.title {
+		opts = append(opts, acp.WithUpdateTitle(merged.title))
+	}
+
+	if merged.kind != previous.kind {
+		opts = append(opts, acp.WithUpdateKind(merged.kind))
+	}
+
+	if !reflect.DeepEqual(merged.rawInput, previous.rawInput) {
+		opts = append(opts, acp.WithUpdateRawInput(merged.rawInput))
+	}
+
+	if len(opts) == 0 {
+		return acp.SessionUpdate{}, previous, false
+	}
+
+	return acp.UpdateToolCall(id, opts...), merged, true
+}
+
+func hermesToolStatusTerminal(status acp.ToolCallStatus) bool {
+	return status == acp.ToolCallStatusCompleted || status == acp.ToolCallStatusFailed
+}
+
+func hermesToolStatusRank(status acp.ToolCallStatus) int {
+	switch status {
+	case acp.ToolCallStatusPending:
+		return 1
+	case acp.ToolCallStatusInProgress:
+		return 2
+	case acp.ToolCallStatusCompleted, acp.ToolCallStatusFailed:
+		return 3
+	default:
+		return 0
+	}
 }
 
 func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent) error {
@@ -728,10 +840,8 @@ func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent)
 		if ok && part.SessionID == s.idmap.NativeSessionID && s.markPart(part) {
 			s.markActiveMessageID(part.MessageID)
 
-			for _, update := range partUpdates(valAssistant, part) {
-				if err := s.emitUpdate(ctx, update); err != nil {
-					return err
-				}
+			if err := s.emitPartUpdates(ctx, valAssistant, part); err != nil {
+				return err
 			}
 		}
 	case evtClarifyRequest:
@@ -822,36 +932,148 @@ func (s *session) reconcileQuestions(ctx context.Context) error {
 	return nil
 }
 
+type permissionTurnRoute struct {
+	nonce string
+	epoch uint64
+}
+
+func (s *session) permissionTurnRoute(ctx context.Context) (permissionTurnRoute, bool) {
+	if ctx == nil || ctx.Err() != nil {
+		return permissionTurnRoute{}, false
+	}
+
+	contextNonce := turnNonceFromContext(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	active := s.cancel != nil && s.turnDone != nil && !s.cancelled && !s.closed &&
+		contextNonce != "" && contextNonce == s.turnNonce
+
+	return permissionTurnRoute{nonce: s.turnNonce, epoch: s.turnEpoch}, active
+}
+
+func (s *session) permissionTurnRouteCurrent(ctx context.Context, route permissionTurnRoute) bool {
+	current, active := s.permissionTurnRoute(ctx)
+
+	return active && current == route
+}
+
+func (s *session) rejectInvalidPermission(
+	req nativehermes.PermissionRequest,
+	message string,
+	cause error,
+) error {
+	replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+
+	replyErr := s.poisonMissingLiveSessionMapping(
+		replyCtx,
+		s.client.ReplyPermission(replyCtx, req, valReject, "stale or unknown tool call"),
+	)
+
+	return errors.Join(routeInvalid(message), cause, replyErr)
+}
+
+func permissionToolRawInput(req nativehermes.PermissionRequest) map[string]any {
+	return map[string]any{
+		"action":       req.ActionName(),
+		"resources":    req.ResourceList(),
+		"metadata":     req.Metadata,
+		keySource:      req.Source,
+		"save":         req.Save,
+		valAlways:      req.Always,
+		routeFieldTool: req.Tool.CallID,
+		keyMessageID:   req.Tool.MessageID,
+	}
+}
+
+func permissionHermesToolState(req nativehermes.PermissionRequest) hermesToolState {
+	title := req.ActionName()
+	if title == "" {
+		title = "Hermes permission"
+	}
+
+	return hermesToolState{
+		title:    title,
+		kind:     acp.ToolKindOther,
+		status:   acp.ToolCallStatusPending,
+		rawInput: permissionToolRawInput(req),
+	}
+}
+
+func (s *session) ensurePermissionToolPending(
+	ctx context.Context,
+	req nativehermes.PermissionRequest,
+	route permissionTurnRoute,
+) error {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	if !s.permissionTurnRouteCurrent(ctx, route) {
+		return errors.New("permission callback crossed its active turn")
+	}
+
+	toolCallID := acp.ToolCallId(req.Tool.CallID)
+	if current, exists := s.toolStates[req.Tool.CallID]; exists {
+		if hermesToolStatusTerminal(current.status) {
+			return errors.New("permission callback targets a terminal tool call")
+		}
+
+		return nil
+	}
+
+	state := permissionHermesToolState(req)
+
+	routedCtx := withTurnRoute(ctx, route.nonce)
+	if err := s.emitUpdate(routedCtx, startHermesToolCall(toolCallID, state)); err != nil {
+		return err
+	}
+
+	s.toolStates[req.Tool.CallID] = state
+
+	return nil
+}
+
 func (s *session) handlePermission(ctx context.Context, req nativehermes.PermissionRequest) error {
 	if req.ID == "" || req.SessionID == "" {
 		return nil
+	}
+
+	if req.Tool.CallID == "" {
+		return s.rejectInvalidPermission(req, "permission request is missing its native tool call id", nil)
+	}
+
+	route, active := s.permissionTurnRoute(ctx)
+	if !active {
+		return s.rejectInvalidPermission(req, "permission callback arrived outside its active turn", nil)
 	}
 
 	if !s.claimPermissionRequest(req.ID) {
 		return nil
 	}
 
+	if err := s.ensurePermissionToolPending(ctx, req, route); err != nil {
+		return s.rejectInvalidPermission(req, "permission tool call is not pending in its active turn", err)
+	}
+
+	if !s.permissionTurnRouteCurrent(ctx, route) {
+		return s.rejectInvalidPermission(req, "permission callback crossed its active turn", nil)
+	}
+
 	s.addPendingPermission(req)
 
 	conn := s.agent.connection()
 	if conn == nil {
-		_, _, cancelled := s.takePendingPermission(req.ID)
+		_, _, _ = s.takePendingPermission(req.ID)
 
-		replyCtx := ctx
-		if cancelled || ctx.Err() != nil {
-			backgroundCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-			defer cancel()
-
-			replyCtx = backgroundCtx
-		}
+		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
 
 		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, "client unavailable"))
 	}
 
-	title := req.ActionName()
-	if title == "" {
-		title = "Hermes permission"
-	}
+	toolState := permissionHermesToolState(req)
 
 	status := acp.ToolCallStatusPending
 	kind := acp.ToolKindOther
@@ -859,20 +1081,11 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
-			ToolCallId: acp.ToolCallId(firstNonEmpty(req.ID, "hermes-permission")),
-			Title:      &title,
+			ToolCallId: acp.ToolCallId(req.Tool.CallID),
+			Title:      &toolState.title,
 			Kind:       &kind,
 			Status:     &status,
-			RawInput: map[string]any{
-				"action":       req.ActionName(),
-				"resources":    req.ResourceList(),
-				"metadata":     req.Metadata,
-				keySource:      req.Source,
-				"save":         req.Save,
-				valAlways:      req.Always,
-				routeFieldTool: req.Tool.CallID,
-				keyMessageID:   req.Tool.MessageID,
-			},
+			RawInput:   toolState.rawInput,
 		},
 		Options: []acp.PermissionOption{
 			{OptionId: valOnce, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
@@ -887,7 +1100,7 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 			return errPromptCancelled
 		}
 
-		if cancelled || s.wasCancelled() || ctx.Err() != nil {
+		if cancelled || s.wasCancelled() || ctx.Err() != nil || !s.permissionTurnRouteCurrent(ctx, route) {
 			replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 			_ = s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, valCancelled))
 
@@ -926,7 +1139,7 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 		return errPromptCancelled
 	}
 
-	if cancelled || ctx.Err() != nil {
+	if cancelled || ctx.Err() != nil || !s.permissionTurnRouteCurrent(ctx, route) {
 		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
 

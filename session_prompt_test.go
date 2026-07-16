@@ -16,6 +16,519 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+type strictHermesPermissionClient struct {
+	*recordingAgentClient
+
+	expectedTurnNonce string
+	toolStates        map[acp.ToolCallId]acp.ToolCallStatus
+	order             []string
+}
+
+type sessionUpdateHookClient struct {
+	*recordingAgentClient
+	afterUpdate func()
+}
+
+func (c *sessionUpdateHookClient) SessionUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	err := c.recordingAgentClient.SessionUpdate(ctx, notification)
+	if err == nil && c.afterUpdate != nil {
+		c.afterUpdate()
+	}
+
+	return err
+}
+
+func newStrictHermesPermissionClient(turnNonce string) *strictHermesPermissionClient {
+	return &strictHermesPermissionClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		expectedTurnNonce:    turnNonce,
+		toolStates:           map[acp.ToolCallId]acp.ToolCallStatus{},
+	}
+}
+
+func (c *strictHermesPermissionClient) SessionUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	if !reflect.DeepEqual(notification.Meta, turnRouteMeta(c.expectedTurnNonce)) {
+		return fmt.Errorf("session update route = %#v, want %#v", notification.Meta, turnRouteMeta(c.expectedTurnNonce))
+	}
+
+	c.mu.Lock()
+	if start := notification.Update.ToolCall; start != nil {
+		c.toolStates[start.ToolCallId] = start.Status
+		c.order = append(c.order, fmt.Sprintf("start:%s:%s", start.ToolCallId, start.Status))
+	}
+
+	if update := notification.Update.ToolCallUpdate; update != nil && update.Status != nil {
+		c.toolStates[update.ToolCallId] = *update.Status
+		c.order = append(c.order, fmt.Sprintf("update:%s:%s", update.ToolCallId, *update.Status))
+	}
+	c.mu.Unlock()
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+func (c *strictHermesPermissionClient) RequestPermission(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	c.mu.Lock()
+	status, exists := c.toolStates[request.ToolCall.ToolCallId]
+	if !exists || hermesToolStatusTerminal(status) {
+		c.mu.Unlock()
+
+		return acp.RequestPermissionResponse{}, fmt.Errorf(
+			"permission tool %q is not pending",
+			request.ToolCall.ToolCallId,
+		)
+	}
+
+	c.order = append(c.order, "permission:"+string(request.ToolCall.ToolCallId))
+	c.mu.Unlock()
+
+	return c.recordingAgentClient.RequestPermission(ctx, request)
+}
+
+func (c *strictHermesPermissionClient) orderSnapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]string(nil), c.order...)
+}
+
+func testHermesPermissionRequest(t *testing.T, requestID string, toolCallID string) nativehermes.PermissionRequest {
+	t.Helper()
+
+	raw := fmt.Sprintf(
+		`{"id":%q,"sessionID":"native-1","action":"edit","tool":{"messageID":"message-1","callID":%q}}`,
+		requestID,
+		toolCallID,
+	)
+
+	var req nativehermes.PermissionRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("decode permission request: %v", err)
+	}
+
+	return req
+}
+
+func TestPermissionPublishesExactNativeToolPendingBeforeCallback(t *testing.T) {
+	const turnNonce = "permission-turn"
+
+	client := newFakeHermesClient()
+	conn := newStrictHermesPermissionClient(turnNonce)
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+	turnCtx := session.beginTurn(t.Context(), turnNonce)
+	defer session.finishTurn()
+
+	req := testHermesPermissionRequest(t, "native-request-distinct", "native-tool-distinct")
+	if err := session.handlePermission(turnCtx, req); err != nil {
+		t.Fatalf("handlePermission: %v", err)
+	}
+
+	if got := conn.orderSnapshot(); !reflect.DeepEqual(got, []string{
+		"start:native-tool-distinct:pending",
+		"permission:native-tool-distinct",
+	}) {
+		t.Fatalf("permission order = %#v", got)
+	}
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if len(conn.permissions) != 1 || conn.permissions[0].ToolCall.ToolCallId != "native-tool-distinct" {
+		t.Fatalf("permission request = %#v", conn.permissions)
+	}
+
+	if len(conn.updates) != 1 || !reflect.DeepEqual(conn.updates[0].Meta, turnRouteMeta(turnNonce)) {
+		t.Fatalf("pending notification = %#v", conn.updates)
+	}
+}
+
+func TestPermissionNativeStartAndSyntheticPendingShareOneLifecycle(t *testing.T) {
+	const turnNonce = "permission-turn"
+
+	t.Run("native start wins", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newStrictHermesPermissionClient(turnNonce)
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), turnNonce)
+		defer session.finishTurn()
+
+		part := nativehermes.Part{
+			ID:     "part-native-first",
+			CallID: "native-tool-first",
+			Type:   valTool,
+			Tool:   valEdit,
+			State:  json.RawMessage(`{"status":"pending"}`),
+			Raw:    json.RawMessage(`{"callID":"native-tool-first"}`),
+		}
+		if err := session.emitPartUpdates(turnCtx, valAssistant, part); err != nil {
+			t.Fatalf("emit native pending: %v", err)
+		}
+
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request-first", "native-tool-first")); err != nil {
+			t.Fatalf("handlePermission: %v", err)
+		}
+
+		if got := conn.orderSnapshot(); !reflect.DeepEqual(got, []string{
+			"start:native-tool-first:pending",
+			"permission:native-tool-first",
+		}) {
+			t.Fatalf("permission order = %#v", got)
+		}
+	})
+
+	t.Run("permission start wins", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newStrictHermesPermissionClient(turnNonce)
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), turnNonce)
+		defer session.finishTurn()
+
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request-synthetic", "native-tool-synthetic")); err != nil {
+			t.Fatalf("handlePermission: %v", err)
+		}
+
+		part := nativehermes.Part{
+			ID:     "part-synthetic-first",
+			CallID: "native-tool-synthetic",
+			Type:   valTool,
+			Tool:   valEdit,
+			State:  json.RawMessage(`{"status":"running"}`),
+			Raw:    json.RawMessage(`{"callID":"native-tool-synthetic"}`),
+		}
+		if err := session.emitPartUpdates(turnCtx, valAssistant, part); err != nil {
+			t.Fatalf("emit native running: %v", err)
+		}
+
+		if got := conn.orderSnapshot(); !reflect.DeepEqual(got, []string{
+			"start:native-tool-synthetic:pending",
+			"permission:native-tool-synthetic",
+			"update:native-tool-synthetic:in_progress",
+		}) {
+			t.Fatalf("permission order = %#v", got)
+		}
+	})
+}
+
+func TestPermissionRejectsMissingStaleAndTerminalToolRoutes(t *testing.T) {
+	const turnNonce = "permission-turn"
+
+	for _, test := range []struct {
+		name  string
+		ctx   func(context.Context) context.Context
+		setup func(*testing.T, *session, context.Context)
+		req   func(*testing.T) nativehermes.PermissionRequest
+	}{
+		{
+			name: "missing native tool id",
+			ctx:  func(ctx context.Context) context.Context { return ctx },
+			req: func(t *testing.T) nativehermes.PermissionRequest {
+				t.Helper()
+
+				req := testHermesPermissionRequest(t, "request-missing", "tool-placeholder")
+				req.Tool.CallID = ""
+
+				return req
+			},
+		},
+		{
+			name: "missing turn route",
+			ctx:  func(context.Context) context.Context { return context.Background() },
+			req: func(t *testing.T) nativehermes.PermissionRequest {
+				t.Helper()
+
+				return testHermesPermissionRequest(t, "request-missing-route", "tool-missing-route")
+			},
+		},
+		{
+			name: "stale turn route",
+			ctx:  func(ctx context.Context) context.Context { return withTurnRoute(ctx, "stale-turn") },
+			req: func(t *testing.T) nativehermes.PermissionRequest {
+				t.Helper()
+
+				return testHermesPermissionRequest(t, "request-stale", "tool-stale")
+			},
+		},
+		{
+			name: "terminal tool",
+			ctx:  func(ctx context.Context) context.Context { return ctx },
+			setup: func(t *testing.T, session *session, ctx context.Context) {
+				t.Helper()
+				part := nativehermes.Part{CallID: "tool-terminal", Type: valTool, Tool: valEdit, State: json.RawMessage(`{"status":"completed"}`)}
+				if err := session.emitPartUpdates(ctx, valAssistant, part); err != nil {
+					t.Fatalf("emit terminal tool: %v", err)
+				}
+			},
+			req: func(t *testing.T) nativehermes.PermissionRequest {
+				t.Helper()
+
+				return testHermesPermissionRequest(t, "request-terminal", "tool-terminal")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeHermesClient()
+			conn := newStrictHermesPermissionClient(turnNonce)
+			agent := NewAgent()
+			agent.setAgentClient(conn)
+			session := testSession(agent, client)
+			turnCtx := session.beginTurn(t.Context(), turnNonce)
+			defer session.finishTurn()
+
+			if test.setup != nil {
+				test.setup(t, session, turnCtx)
+			}
+
+			err := session.handlePermission(test.ctx(turnCtx), test.req(t))
+			if err == nil {
+				t.Fatal("invalid permission succeeded")
+			}
+
+			if conn.permissionRequestCount() != 0 {
+				t.Fatalf("permission callback count = %d", conn.permissionRequestCount())
+			}
+		})
+	}
+}
+
+func TestPermissionToolStateRemainingBranches(t *testing.T) {
+	t.Run("route and status helpers", func(t *testing.T) {
+		var nilContext context.Context
+		if turnNonceFromContext(nilContext) != "" {
+			t.Fatal("nil context produced a turn nonce")
+		}
+		if hermesToolStatusRank(acp.ToolCallStatusCompleted) != 3 ||
+			hermesToolStatusRank(acp.ToolCallStatusFailed) != 3 ||
+			hermesToolStatusRank(acp.ToolCallStatus("unknown")) != 0 {
+			t.Fatal("tool status ranks are incomplete")
+		}
+
+		terminal := hermesToolState{status: acp.ToolCallStatusCompleted}
+		if _, merged, changed := updateHermesToolCall("tool", terminal, hermesToolState{status: acp.ToolCallStatusInProgress}); changed || merged != terminal {
+			t.Fatalf("terminal state regressed: changed=%v merged=%#v", changed, merged)
+		}
+
+		previous := hermesToolState{
+			title: "same", kind: acp.ToolKindOther,
+			status: acp.ToolCallStatusInProgress, rawInput: map[string]any{"same": true},
+		}
+		if _, merged, changed := updateHermesToolCall("tool", previous, previous); changed || !reflect.DeepEqual(merged, previous) {
+			t.Fatalf("identical state emitted update: changed=%v merged=%#v", changed, merged)
+		}
+
+		next := hermesToolState{
+			title: "renamed", kind: acp.ToolKindEdit,
+			status: acp.ToolCallStatusPending, rawInput: map[string]any{"next": true},
+		}
+		update, merged, changed := updateHermesToolCall("tool", previous, next)
+		if !changed || update.ToolCallUpdate == nil || merged.status != acp.ToolCallStatusInProgress ||
+			merged.title != next.title || merged.kind != next.kind || !reflect.DeepEqual(merged.rawInput, next.rawInput) {
+			t.Fatalf("merged update = %#v update=%#v changed=%v", merged, update, changed)
+		}
+	})
+
+	t.Run("tool publication failures and duplicate", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newRecordingAgentClient()
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), "tool-turn")
+		defer session.finishTurn()
+
+		part := nativehermes.Part{CallID: "tool", Type: valTool, Tool: valEdit, State: json.RawMessage(`{"status":"running"}`)}
+		conn.updateErr = errors.New("start failed")
+		if err := session.emitToolPartUpdate(turnCtx, part); err == nil || !strings.Contains(err.Error(), "start failed") {
+			t.Fatalf("start publication error = %v", err)
+		}
+
+		conn.updateErr = nil
+		if err := session.emitToolPartUpdate(turnCtx, part); err != nil {
+			t.Fatalf("start publication: %v", err)
+		}
+		if err := session.emitToolPartUpdate(turnCtx, part); err != nil {
+			t.Fatalf("identical duplicate: %v", err)
+		}
+
+		conn.updateErr = errors.New("update failed")
+		part.State = json.RawMessage(`{"status":"completed","title":"done"}`)
+		if err := session.emitToolPartUpdate(turnCtx, part); err == nil || !strings.Contains(err.Error(), "update failed") {
+			t.Fatalf("update publication error = %v", err)
+		}
+	})
+}
+
+func TestPermissionAdmissionRemainingBranches(t *testing.T) {
+	t.Run("pending admission stale and publication error", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newRecordingAgentClient()
+		agent := NewAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		route, active := session.permissionTurnRoute(turnCtx)
+		if !active {
+			t.Fatal("permission turn was not active")
+		}
+		req := testHermesPermissionRequest(t, "request", "tool")
+
+		session.mu.Lock()
+		session.turnNonce = "new-turn"
+		session.turnEpoch++
+		session.mu.Unlock()
+		if err := session.ensurePermissionToolPending(turnCtx, req, route); err == nil || !strings.Contains(err.Error(), "crossed") {
+			t.Fatalf("stale pending admission error = %v", err)
+		}
+
+		session.mu.Lock()
+		session.turnNonce = "permission-turn"
+		session.turnEpoch = route.epoch
+		session.mu.Unlock()
+		conn.updateErr = errors.New("pending failed")
+		if err := session.ensurePermissionToolPending(turnCtx, req, route); err == nil || !strings.Contains(err.Error(), "pending failed") {
+			t.Fatalf("pending publication error = %v", err)
+		}
+		session.finishTurn()
+	})
+
+	t.Run("route changes after pending publication", func(t *testing.T) {
+		client := newFakeHermesClient()
+		agent := NewAgent()
+		session := testSession(agent, client)
+		base := newRecordingAgentClient()
+		conn := &sessionUpdateHookClient{recordingAgentClient: base}
+		conn.afterUpdate = func() {
+			session.mu.Lock()
+			session.turnNonce = "replacement-turn"
+			session.turnEpoch++
+			session.mu.Unlock()
+		}
+		agent.setAgentClient(conn)
+		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		defer session.finishTurn()
+
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request", "tool"))
+		if err == nil || !strings.Contains(err.Error(), "crossed its active turn") {
+			t.Fatalf("post-publication route error = %v", err)
+		}
+		if base.permissionRequestCount() != 0 {
+			t.Fatalf("stale callback reached permission client: %d", base.permissionRequestCount())
+		}
+	})
+
+	t.Run("connection disappears after pending publication", func(t *testing.T) {
+		client := newFakeHermesClient()
+		agent := NewAgent()
+		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		defer session.finishTurn()
+		conn := &sessionUpdateHookClient{recordingAgentClient: newRecordingAgentClient()}
+		conn.afterUpdate = func() {
+			agent.setAgentClient(nil)
+		}
+		agent.setAgentClient(conn)
+
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request", "tool")); err != nil {
+			t.Fatalf("missing connection rejection: %v", err)
+		}
+		if got := client.permissionReply(0); got.message != "client unavailable" || got.reply != valReject {
+			t.Fatalf("missing connection reply = %#v", got)
+		}
+	})
+}
+
+func TestPermissionCallbackRouteChangeBranches(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		permErr  error
+		replyErr error
+	}{
+		{name: "permission error after route change", permErr: errors.New("permission failed")},
+		{name: "successful response after route change"},
+		{name: "successful response after route change with reply failure", replyErr: errors.New("reply failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeHermesClient()
+			client.replyErr = test.replyErr
+			conn := newRecordingAgentClient()
+			conn.permErr = test.permErr
+			conn.permissionStarted = make(chan struct{}, 1)
+			conn.permissionRelease = make(chan struct{})
+			conn.permissionIgnoreContext = true
+			agent := NewAgent()
+			agent.setAgentClient(conn)
+			session := testSession(agent, client)
+			turnCtx := session.beginTurn(t.Context(), "permission-turn")
+			defer session.finishTurn()
+			done := make(chan error, 1)
+			go func() {
+				done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request", "tool"))
+			}()
+			<-conn.permissionStarted
+			session.mu.Lock()
+			session.turnNonce = "replacement-turn"
+			session.turnEpoch++
+			session.mu.Unlock()
+			close(conn.permissionRelease)
+			err := <-done
+			if test.replyErr != nil {
+				if err == nil || !strings.Contains(err.Error(), test.replyErr.Error()) {
+					t.Fatalf("late response reply error = %v", err)
+				}
+			} else if !errors.Is(err, errPromptCancelled) {
+				t.Fatalf("late permission error = %v", err)
+			}
+			if got := client.permissionReply(0); got.reply != valReject || got.message != valCancelled {
+				t.Fatalf("late reply = %#v", got)
+			}
+		})
+	}
+
+	t.Run("empty native permission identity is ignored", func(t *testing.T) {
+		session := testSession(NewAgent(), newFakeHermesClient())
+		if err := session.handlePermission(t.Context(), nativehermes.PermissionRequest{}); err != nil {
+			t.Fatalf("empty permission request: %v", err)
+		}
+	})
+}
+
+func TestPromptBacklogQuestionCancellationBeforeTurn(t *testing.T) {
+	client := newFakeHermesClient()
+	conn := newRecordingAgentClient()
+	conn.elicitErr = context.Canceled
+	agent := NewAgent()
+	agent.setAgentClient(conn)
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	session := testSession(agent, client)
+	session.mu.Lock()
+	session.cancelled = true
+	session.mu.Unlock()
+	client.events <- nativehermes.TurnEvent{
+		Type:       evtClarifyRequest,
+		Properties: json.RawMessage(`{"id":"question","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
+	}
+
+	resp, err := session.Prompt(t.Context(), acp.PromptRequest{
+		Meta: turnRouteMeta("prompt-turn"), SessionId: session.id,
+		Prompt: []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil || resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("cancelled backlog response = %#v err=%v", resp, err)
+	}
+}
+
 func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 	ctx := context.Background()
 
@@ -162,20 +675,18 @@ func TestQuestionToolReconcileAndCancelRejectsPending(t *testing.T) {
 }
 
 func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
-	ctx := context.Background()
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	agent := NewAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	ctx := session.beginTurn(t.Context(), "permission-turn")
+	defer session.finishTurn()
 
-	if err := session.handlePermission(ctx, nativehermes.PermissionRequest{
-		ID:        "perm-1",
-		SessionID: "native-1",
-		Action:    "edit",
-		Resources: []string{"file.txt"},
-		Metadata:  map[string]any{"path": "file.txt"},
-	}); err != nil {
+	req := testHermesPermissionRequest(t, "perm-1", "tool-1")
+	req.Resources = []string{"file.txt"}
+	req.Metadata = map[string]any{"path": "file.txt"}
+	if err := session.handlePermission(ctx, req); err != nil {
 		t.Fatalf("handlePermission: %v", err)
 	}
 	reply := client.permissionReply(0)
@@ -187,17 +698,16 @@ func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
 	}
 
 	conn.permission = acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}
-	if err := session.handlePermission(ctx, nativehermes.PermissionRequest{ID: "perm-2", SessionID: "native-1"}); err != nil {
+	if err := session.handlePermission(ctx, testHermesPermissionRequest(t, "perm-2", "tool-2")); err != nil {
 		t.Fatalf("handlePermission cancelled: %v", err)
 	}
 	if got := client.permissionReply(1).reply; got != "reject" {
 		t.Fatalf("cancelled reply = %q, want reject", got)
 	}
 
-	client.pendingPermissions = []nativehermes.PermissionRequest{
-		{ID: "foreign", SessionID: "other"},
-		{ID: "perm-3", SessionID: "native-1"},
-	}
+	foreign := testHermesPermissionRequest(t, "foreign", "tool-foreign")
+	foreign.SessionID = "other"
+	client.pendingPermissions = []nativehermes.PermissionRequest{foreign, testHermesPermissionRequest(t, "perm-3", "tool-3")}
 	if err := session.reconcilePermissions(ctx); err != nil {
 		t.Fatalf("reconcilePermissions: %v", err)
 	}
@@ -207,21 +717,22 @@ func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
 }
 
 func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
-	ctx := context.Background()
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	agent := NewAgent()
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	ctx := session.beginTurn(t.Context(), "permission-turn")
+	defer session.finishTurn()
 
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
 		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit"}`),
+		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit","tool":{"callID":"tool-dup"}}`),
 	}); err != nil {
 		t.Fatalf("permission event: %v", err)
 	}
-	client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "perm-dup", SessionID: "native-1", Action: "edit"}}
+	client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm-dup", "tool-dup")}
 	if err := session.reconcilePermissions(ctx); err != nil {
 		t.Fatalf("permission reconcile: %v", err)
 	}
@@ -647,7 +1158,7 @@ func TestPromptServerReconnectReconcilesPendingPermissionAndQuestion(t *testing.
 	case <-ctx.Done():
 		t.Fatal("Prompt did not start")
 	}
-	client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "perm", SessionID: "native-1", Action: "edit"}}
+	client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
 	client.pendingQuestions = []nativehermes.QuestionRequest{{
 		ID:        "question",
 		SessionID: "native-1",
@@ -695,7 +1206,7 @@ func TestPromptServerReconnectReconcileFailures(t *testing.T) {
 				return nil
 			},
 			pending: func(client *fakeHermesClient) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "perm", SessionID: "native-1", Action: "edit"}}
+				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
 			},
 			wantErr: "permission failed",
 		},
@@ -708,7 +1219,7 @@ func TestPromptServerReconnectReconcileFailures(t *testing.T) {
 				return conn.permissionStarted
 			},
 			pending: func(client *fakeHermesClient) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "perm", SessionID: "native-1", Action: "edit"}}
+				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
 			},
 			cancel:        true,
 			wantCancelled: true,
@@ -834,7 +1345,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 			sendEvent: func(client *fakeHermesClient) {
 				client.events <- nativehermes.TurnEvent{
 					Type:       "approval.request",
-					Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","action":"edit"}`),
+					Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","action":"edit","tool":{"callID":"tool-perm"}}`),
 				}
 			},
 			assertDone: func(t *testing.T, client *fakeHermesClient, conn *recordingAgentClient) {
@@ -945,17 +1456,18 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 }
 
 func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
-	ctx := context.Background()
 	client := newFakeHermesClient()
 	client.replyErr = nativehermes.MissingLiveSessionMappingError{StoredSessionID: "native-1"}
 	conn := newRecordingAgentClient()
 	agent := NewAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	ctx := session.beginTurn(t.Context(), "missing-live-turn")
+	defer session.finishTurn()
 
 	err := session.handleEvent(ctx, nativehermes.TurnEvent{
 		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm-missing-live","sessionID":"native-1","action":"edit"}`),
+		Properties: json.RawMessage(`{"id":"perm-missing-live","sessionID":"native-1","action":"edit","tool":{"callID":"tool-missing-live"}}`),
 	})
 	if err == nil {
 		t.Fatal("missing live mapping did not fail permission handling")
@@ -973,7 +1485,7 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 	}
 }
 
-func TestPromptBacklogCancelledBeforeTurn(t *testing.T) {
+func TestPromptBacklogPermissionBeforeTurnFailsClosed(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	conn.permErr = context.Canceled
@@ -985,11 +1497,17 @@ func TestPromptBacklogCancelledBeforeTurn(t *testing.T) {
 	session.mu.Unlock()
 	client.events <- nativehermes.TurnEvent{
 		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1"}`),
+		Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","tool":{"callID":"tool-perm"}}`),
 	}
-	resp, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-	if err != nil || resp.StopReason != acp.StopReasonCancelled {
-		t.Fatalf("resp=%#v err=%v", resp, err)
+	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
+		!strings.Contains(err.Error(), "outside its active turn") {
+		t.Fatalf("Prompt error = %v, want inactive-turn rejection", err)
+	}
+	if conn.permissionRequestCount() != 0 {
+		t.Fatalf("permission requests = %d, want 0", conn.permissionRequestCount())
+	}
+	if got := client.permissionReply(0).message; got != "stale or unknown tool call" {
+		t.Fatalf("permission reply = %q", got)
 	}
 }
 
@@ -1014,7 +1532,7 @@ func TestPromptReconcileCancelledBeforeSend(t *testing.T) {
 		{
 			name: "permission",
 			setup: func(client *fakeHermesClient, conn *recordingAgentClient, _ *Agent) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "perm", SessionID: "native-1"}}
+				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
 				conn.permissionStarted = make(chan struct{}, 1)
 				conn.permissionRelease = make(chan struct{})
 			},
@@ -1076,13 +1594,11 @@ func TestPromptReconcileCancelledBeforeSend(t *testing.T) {
 }
 
 func TestPermissionCancelledReplyBranches(t *testing.T) {
-	t.Run("permission without connection uses background when context cancelled", func(t *testing.T) {
+	t.Run("permission without connection rejects native request", func(t *testing.T) {
 		client := newFakeHermesClient()
 		session := testSession(NewAgent(), client)
-		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
-		cancel()
-		if err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"}); err != nil {
+		turnCtx := session.beginTurn(t.Context(), "test-turn")
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err != nil {
 			t.Fatalf("handlePermission: %v", err)
 		}
 		if got := client.permissionReply(0).message; got != "client unavailable" {
@@ -1091,7 +1607,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		session.finishTurn()
 	})
 
-	t.Run("permission client error after context cancellation resolves native request", func(t *testing.T) {
+	t.Run("permission arriving after context cancellation fails closed", func(t *testing.T) {
 		client := newFakeHermesClient()
 		conn := newRecordingAgentClient()
 		conn.permErr = context.Canceled
@@ -1101,17 +1617,20 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
-		err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
-		if !errors.Is(err, errPromptCancelled) {
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
+		if err == nil || !strings.Contains(err.Error(), "outside its active turn") {
 			t.Fatalf("handlePermission err = %v", err)
 		}
-		if got := client.permissionReply(0).message; got != "cancelled" {
+		if got := client.permissionReply(0).message; got != "stale or unknown tool call" {
 			t.Fatalf("permission reply = %q", got)
+		}
+		if conn.permissionRequestCount() != 0 {
+			t.Fatalf("permission requests = %d, want 0", conn.permissionRequestCount())
 		}
 		session.finishTurn()
 	})
 
-	t.Run("permission client response after context cancellation is rejected", func(t *testing.T) {
+	t.Run("permission selected response after context cancellation is rejected before callback", func(t *testing.T) {
 		client := newFakeHermesClient()
 		conn := newRecordingAgentClient()
 		agent := NewAgent()
@@ -1120,12 +1639,15 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
-		err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
-		if !errors.Is(err, errPromptCancelled) {
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
+		if err == nil || !strings.Contains(err.Error(), "outside its active turn") {
 			t.Fatalf("handlePermission err = %v", err)
 		}
-		if got := client.permissionReply(0).message; got != "cancelled" {
+		if got := client.permissionReply(0).message; got != "stale or unknown tool call" {
 			t.Fatalf("permission reply = %q", got)
+		}
+		if conn.permissionRequestCount() != 0 {
+			t.Fatalf("permission requests = %d, want 0", conn.permissionRequestCount())
 		}
 		session.finishTurn()
 	})
@@ -1140,7 +1662,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := session.beginTurn(ctx, "test-turn")
 		cancel()
-		if err := session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"}); err == nil {
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err == nil {
 			t.Fatal("reply error was ignored")
 		}
 		session.finishTurn()
@@ -1153,7 +1675,11 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		err := session.handlePermission(context.Background(), nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1", ReplyRoute: nativehermes.PermissionRouteSession})
+		turnCtx := session.beginTurn(t.Context(), "test-turn")
+		defer session.finishTurn()
+		req := testHermesPermissionRequest(t, "perm", "tool-perm")
+		req.ReplyRoute = nativehermes.PermissionRouteSession
+		err := session.handlePermission(turnCtx, req)
 		if err == nil || !strings.Contains(err.Error(), "permission failed") {
 			t.Fatalf("handlePermission err = %v", err)
 		}
@@ -1171,7 +1697,9 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		err := session.handlePermission(context.Background(), nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
+		turnCtx := session.beginTurn(t.Context(), "test-turn")
+		defer session.finishTurn()
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "permission failed") || !strings.Contains(err.Error(), "reply failed") {
 			t.Fatalf("handlePermission err = %v", err)
 		}
@@ -1189,7 +1717,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
+			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		}()
 		<-conn.permissionStarted
 		session.cancelTurn()
@@ -1217,7 +1745,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		turnCtx := session.beginTurn(context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handlePermission(turnCtx, nativehermes.PermissionRequest{ID: "perm", SessionID: "native-1"})
+			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		}()
 		<-conn.permissionStarted
 		session.cancelTurn()
@@ -2073,9 +2601,11 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 		t.Fatalf("empty permission: %v", err)
 	}
 	noConnSession.pending = nil
-	if err := noConnSession.handlePermission(ctx, nativehermes.PermissionRequest{ID: "p", SessionID: "native-1"}); err != nil {
+	noConnTurnCtx := noConnSession.beginTurn(t.Context(), "no-connection-turn")
+	if err := noConnSession.handlePermission(noConnTurnCtx, testHermesPermissionRequest(t, "p", "tool-p")); err != nil {
 		t.Fatalf("nil conn permission: %v", err)
 	}
+	noConnSession.finishTurn()
 	if got := noConnClient.permissionReply(0).message; got != "client unavailable" {
 		t.Fatalf("nil conn permission reply = %q", got)
 	}
@@ -2089,7 +2619,9 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 		t.Fatal("elicitation error was ignored")
 	}
 	conn.elicitErr = nil
-	testApprovalAndClarifyEventBranches(t, ctx, session, client, conn)
+	turnCtx := session.beginTurn(t.Context(), "event-edge-turn")
+	testApprovalAndClarifyEventBranches(t, turnCtx, session, client, conn)
+	session.finishTurn()
 	testForeignEventAndPartHelperBranches(t, ctx, session)
 }
 
@@ -2285,15 +2817,17 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		agent := NewAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
+		turnCtx := session.beginTurn(t.Context(), "same-session-turn")
+		defer session.finishTurn()
 		conn.permErr = errors.New("permission failed")
-		if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+		if err := session.handleEvent(turnCtx, nativehermes.TurnEvent{
 			Type:       "approval.request",
-			Properties: json.RawMessage(`{"id":"p","sessionID":"native-1"}`),
+			Properties: json.RawMessage(`{"id":"p","sessionID":"native-1","tool":{"callID":"tool-p"}}`),
 		}); err == nil {
 			t.Fatal("permission event ignored client error")
 		}
-		client.pendingPermissions = []nativehermes.PermissionRequest{{ID: "p2", SessionID: "native-1"}}
-		if err := session.reconcilePermissions(ctx); err == nil {
+		client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "p2", "tool-p2")}
+		if err := session.reconcilePermissions(turnCtx); err == nil {
 			t.Fatal("reconcilePermissions ignored handle error")
 		}
 		conn.permErr = nil

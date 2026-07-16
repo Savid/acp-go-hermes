@@ -39,6 +39,7 @@ type session struct {
 
 	turn                chan struct{}
 	cancelMu            sync.Mutex
+	toolMu              sync.Mutex
 	mu                  sync.Mutex
 	turnInFlight        bool
 	cancel              context.CancelFunc
@@ -53,6 +54,7 @@ type session struct {
 	turnEpoch           uint64
 	turnNonce           string
 	activeMessageIDs    map[string]struct{}
+	toolStates          map[string]hermesToolState
 	failedStreamEpochs  map[uint64]struct{}
 	failedMessageIDs    map[string]struct{}
 	suppressNextBacklog bool
@@ -176,6 +178,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		processedPermission:   map[string]struct{}{},
 		processedQuestion:     map[string]struct{}{},
 		activeMessageIDs:      map[string]struct{}{},
+		toolStates:            map[string]hermesToolState{},
 		failedStreamEpochs:    map[uint64]struct{}{},
 		failedMessageIDs:      map[string]struct{}{},
 	}
@@ -226,6 +229,9 @@ func (s *session) turnQueue() chan struct{} {
 }
 
 func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Context {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
@@ -240,11 +246,15 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 	s.turnEpoch++
 	s.turnNonce = turnNonce
 	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
 
 	return turnCtx
 }
 
 func (s *session) finishTurn() {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
@@ -259,6 +269,7 @@ func (s *session) finishTurn() {
 	s.pending = map[string]nativehermes.PermissionRequest{}
 	s.questions = map[string]nativehermes.QuestionRequest{}
 	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
 	s.mu.Unlock()
 
 	if cancel != nil {
