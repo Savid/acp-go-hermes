@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	MinimumVersion        = "0.18.2"
+	MinimumVersion = "0.18.2"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the compatibility sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
