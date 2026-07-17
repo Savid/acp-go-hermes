@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	MinimumVersion    = "0.18.2"
-	fieldCwd          = "cwd"
-	fieldTitle        = "title"
-	eventGatewayReady = "gateway.ready"
+	MinimumVersion        = "0.18.2"
+	// A cold Hermes gateway may spend more than 15 seconds loading its model
+	// catalog before the compatibility sweep reaches model.options.
+	defaultProcessTimeout = 60 * time.Second
+	fieldCwd              = "cwd"
+	fieldTitle            = "title"
+	eventGatewayReady     = "gateway.ready"
 )
 
 // ErrProcessTreeUnproven means a launched Hermes process tree could not be
@@ -92,7 +95,7 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
-		timeout = 15 * time.Second
+		timeout = defaultProcessTimeout
 	}
 
 	executable := opts.ExecutablePath
