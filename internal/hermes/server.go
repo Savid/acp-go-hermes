@@ -162,9 +162,10 @@ type XDGDirs struct {
 }
 
 type hermesServer struct {
-	cmd *exec.Cmd
-	xdg XDGDirs
-	log *slog.Logger
+	cmd   *exec.Cmd
+	xdg   XDGDirs
+	log   *slog.Logger
+	lease ServerLease
 
 	events chan TurnEvent
 	errs   chan error
@@ -473,6 +474,7 @@ var (
 	hermesMarshalIndent = json.MarshalIndent
 	hermesUnmarshalYAML = yaml.Unmarshal
 	hermesWriteLease    = WriteLease
+	hermesReapLeaseFile = ReapLeaseFile
 	InspectProcess      = inspectHermesProcess
 )
 
@@ -484,10 +486,6 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	root := options.Root
 	if root == "" {
 		root = filepath.Join(options.ScratchParent, valACPGoHermes)
-	}
-
-	if err := reapStaleLeases(root, options.Logger); err != nil {
-		return nil, err
 	}
 
 	xdg := options.ExistingXDG
@@ -502,6 +500,13 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 
 	if err := ensureXDGDirs(xdg); err != nil {
 		return nil, err
+	}
+
+	// A server owns exactly one session XDG root. Recover only a predecessor
+	// that owned this same root: sweeping root/* here would treat every other
+	// live session in the shared agent home as stale and terminate its process.
+	if retained := hermesReapLeaseFile(filepath.Join(xdg.State, LeaseFileName), options.Logger); retained {
+		return nil, fmt.Errorf("previous Hermes process for %q remains live", xdg.Root)
 	}
 
 	configurationStarted := time.Now()
@@ -571,6 +576,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		cmd:          proc.Cmd,
 		xdg:          xdg,
 		log:          options.Logger,
+		lease:        lease,
 		events:       make(chan TurnEvent, 256),
 		errs:         make(chan error, 8),
 		closed:       make(chan struct{}),
@@ -609,15 +615,36 @@ func (s *hermesServer) Close(ctx context.Context) error {
 			err = s.process.Close(ctx)
 		}
 
-		removeErr := os.Remove(filepath.Join(s.xdg.State, LeaseFileName))
-		if errors.Is(removeErr, os.ErrNotExist) {
-			removeErr = nil
-		}
-
-		err = errors.Join(err, removeErr)
+		err = errors.Join(err, removeLeaseFileIfOwned(filepath.Join(s.xdg.State, LeaseFileName), s.lease))
 	})
 
 	return err
+}
+
+// removeLeaseFileIfOwned removes path only when its immutable contents still
+// identify the closing server. A same-session replacement writes a new lease
+// before the predecessor object can be closed, and the predecessor must never
+// unlink that replacement's live ownership record.
+func removeLeaseFileIfOwned(path string, owner ServerLease) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	var current ServerLease
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+
+	if current != owner {
+		return nil
+	}
+
+	return os.Remove(path)
 }
 
 func (s *hermesServer) Events() <-chan TurnEvent {
@@ -2545,23 +2572,6 @@ func WriteLease(stateDir string, lease ServerLease) error {
 	}
 
 	return os.WriteFile(filepath.Join(stateDir, LeaseFileName), data, 0o600)
-}
-
-func reapStaleLeases(root string, log *slog.Logger) error {
-	if root == "" {
-		return nil
-	}
-
-	matches, err := filepath.Glob(filepath.Join(root, "*", "state", LeaseFileName))
-	if err != nil {
-		return err
-	}
-
-	for _, match := range matches {
-		ReapLeaseFile(match, log)
-	}
-
-	return nil
 }
 
 var (

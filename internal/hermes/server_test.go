@@ -2426,13 +2426,164 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	}
 }
 
+func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
+	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
+	root := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	start := func(id ACPSessionIDString) Server {
+		t.Helper()
+
+		server, err := StartServer(ctx, StartOptions{
+			ACPSessionID:   id,
+			Root:           root,
+			Cwd:            t.TempDir(),
+			ExecutablePath: helper,
+			HealthTimeout:  5 * time.Second,
+			Logger:         slog.New(slog.DiscardHandler),
+		})
+		if err != nil {
+			t.Fatalf("StartServer(%q): %v", id, err)
+		}
+
+		return server
+	}
+
+	first := start("session-a")
+	firstClosed := false
+	defer func() {
+		if !firstClosed {
+			_ = first.Close(context.Background())
+		}
+	}()
+	if _, err := first.CreateSession(ctx, "first-before-second"); err != nil {
+		t.Fatalf("first CreateSession before second startup: %v", err)
+	}
+
+	firstLease := readServerLease(t, first.XDGDirs())
+	second := start("session-b")
+	secondClosed := false
+	defer func() {
+		if !secondClosed {
+			_ = second.Close(context.Background())
+		}
+	}()
+
+	if _, err := InspectProcess(firstLease.PID); err != nil {
+		t.Fatalf("distinct session startup reaped first process: %v", err)
+	}
+	if got := readServerLease(t, first.XDGDirs()); got.PID != firstLease.PID || got.ProcessStartTime != firstLease.ProcessStartTime {
+		t.Fatalf("first lease changed across distinct session startup: before=%#v after=%#v", firstLease, got)
+	}
+	if _, err := first.CreateSession(ctx, "first-after-second"); err != nil {
+		t.Fatalf("first CreateSession after second startup: %v", err)
+	}
+	if _, err := second.CreateSession(ctx, "second"); err != nil {
+		t.Fatalf("second CreateSession: %v", err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	secondClosed = true
+	if _, err := first.CreateSession(ctx, "first-after-second-close"); err != nil {
+		t.Fatalf("first CreateSession after second close: %v", err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	firstClosed = true
+}
+
+func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
+	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
+	root := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	options := StartOptions{
+		ACPSessionID:   "same-session",
+		Root:           root,
+		Cwd:            t.TempDir(),
+		ExecutablePath: helper,
+		HealthTimeout:  5 * time.Second,
+		Logger:         slog.New(slog.DiscardHandler),
+	}
+	first, err := StartServer(ctx, options)
+	if err != nil {
+		t.Fatalf("first StartServer: %v", err)
+	}
+	firstClosed := false
+	defer func() {
+		if !firstClosed {
+			_ = first.Close(context.Background())
+		}
+	}()
+	oldLease := readServerLease(t, first.XDGDirs())
+
+	replacement, err := StartServer(ctx, options)
+	if err != nil {
+		t.Fatalf("replacement StartServer: %v", err)
+	}
+	replacementClosed := false
+	defer func() {
+		if !replacementClosed {
+			_ = replacement.Close(context.Background())
+		}
+	}()
+	newLease := readServerLease(t, replacement.XDGDirs())
+
+	if newLease.PID == oldLease.PID && newLease.ProcessStartTime == oldLease.ProcessStartTime {
+		t.Fatalf("same-session replacement retained old process identity: old=%#v new=%#v", oldLease, newLease)
+	}
+	if identity, inspectErr := InspectProcess(oldLease.PID); inspectErr == nil && identity.StartTime == oldLease.ProcessStartTime {
+		t.Fatalf("same-session predecessor process %d remains live", oldLease.PID)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("predecessor Close: %v", err)
+	}
+	firstClosed = true
+	if got := readServerLease(t, replacement.XDGDirs()); got != newLease {
+		t.Fatalf("predecessor Close changed replacement lease: want=%#v got=%#v", newLease, got)
+	}
+	if _, err := replacement.CreateSession(ctx, "replacement"); err != nil {
+		t.Fatalf("replacement CreateSession: %v", err)
+	}
+	if _, err := first.CreateSession(ctx, "predecessor"); err == nil {
+		t.Fatal("reaped predecessor gateway remained usable")
+	}
+	if err := replacement.Close(ctx); err != nil {
+		t.Fatalf("replacement Close: %v", err)
+	}
+	replacementClosed = true
+	if _, err := os.Stat(filepath.Join(replacement.XDGDirs().State, LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement lease after owner Close = %v", err)
+	}
+}
+
+func readServerLease(t *testing.T, dirs XDGDirs) ServerLease {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(dirs.State, LeaseFileName))
+	if err != nil {
+		t.Fatalf("read server lease: %v", err)
+	}
+
+	var lease ServerLease
+	if err := json.Unmarshal(data, &lease); err != nil {
+		t.Fatalf("decode server lease: %v", err)
+	}
+
+	return lease
+}
+
 func TestStartHermesServerGatewayFaults(t *testing.T) {
 	ctx := context.Background()
 	if _, err := StartServer(ctx, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")}); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
-	if _, err := StartServer(ctx, StartOptions{Root: "["}); err == nil {
-		t.Fatal("invalid reap glob unexpectedly succeeded")
+	if _, err := StartServer(ctx, StartOptions{Root: string([]byte{0})}); err == nil {
+		t.Fatal("invalid root unexpectedly succeeded")
 	}
 	if _, err := StartServer(ctx, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))}); err == nil {
 		t.Fatal("invalid session path unexpectedly succeeded")
@@ -2442,6 +2593,12 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 
 	restoreHermesClientSeams(t)
+	hermesReapLeaseFile = func(string, *slog.Logger) bool { return true }
+	if _, err := StartServer(ctx, StartOptions{ExistingXDG: testXDGDirs(t)}); err == nil || !strings.Contains(err.Error(), "remains live") {
+		t.Fatalf("retained lease error = %v", err)
+	}
+	hermesReapLeaseFile = ReapLeaseFile
+
 	hermesWriteLease = func(string, ServerLease) error {
 		return errors.New("lease failed")
 	}
@@ -2618,6 +2775,13 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	if err := WriteLease(xdg.State, ServerLease{PID: 0, Port: 1, TokenHash: PasswordHash("token")}); err != nil {
 		t.Fatalf("WriteLease: %v", err)
 	}
+	zeroPIDLease := filepath.Join(xdg.State, LeaseFileName)
+	if retained := ReapLeaseFile(zeroPIDLease, nil); retained {
+		t.Fatal("zero-PID lease was retained")
+	}
+	if _, err := os.Stat(zeroPIDLease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("zero-PID lease after reap = %v", err)
+	}
 	badRoot := string([]byte{0})
 	if err := WriteLease(badRoot, ServerLease{}); err == nil {
 		t.Fatal("WriteLease accepted invalid path")
@@ -2625,14 +2789,15 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "bad", "state"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "bad", "state", LeaseFileName), []byte("{"), 0o600); err != nil {
+	malformedLease := filepath.Join(root, "bad", "state", LeaseFileName)
+	if err := os.WriteFile(malformedLease, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := reapStaleLeases(root, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("reapStaleLeases: %v", err)
+	if retained := ReapLeaseFile(malformedLease, nil); retained {
+		t.Fatal("malformed lease was retained")
 	}
-	if err := reapStaleLeases("", nil); err != nil {
-		t.Fatalf("empty reapStaleLeases: %v", err)
+	if _, err := os.Stat(malformedLease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed lease after reap = %v", err)
 	}
 	if got := SafePathName("../a:b"); got != "__a_b" {
 		t.Fatalf("SafePathName = %q", got)
@@ -2644,6 +2809,54 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	}
 	if got, ok := IntFromNumber(json.Number("12")); !ok || got != 12 {
 		t.Fatalf("IntFromNumber json number = %d, %v", got, ok)
+	}
+}
+
+func TestRemoveLeaseFileIfOwned(t *testing.T) {
+	owner := ServerLease{
+		PID:              123,
+		Port:             456,
+		StartedAt:        789,
+		TokenHash:        PasswordHash("owner"),
+		XDGRoot:          t.TempDir(),
+		ProcessStartTime: "start",
+	}
+	state := t.TempDir()
+	leasePath := filepath.Join(state, LeaseFileName)
+
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove absent lease: %v", err)
+	}
+	if err := removeLeaseFileIfOwned(state, owner); err == nil {
+		t.Fatal("remove directory lease unexpectedly succeeded")
+	}
+	if err := os.WriteFile(leasePath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err == nil {
+		t.Fatal("remove malformed lease unexpectedly succeeded")
+	}
+
+	other := owner
+	other.TokenHash = PasswordHash("other")
+	if err := WriteLease(state, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove foreign lease: %v", err)
+	}
+	if got := readServerLease(t, XDGDirs{State: state}); got != other {
+		t.Fatalf("foreign lease changed: want=%#v got=%#v", other, got)
+	}
+
+	if err := WriteLease(state, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove owned lease: %v", err)
+	}
+	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned lease after remove = %v", err)
 	}
 }
 
@@ -2905,10 +3118,12 @@ func restoreHermesClientSeams(t *testing.T) {
 	t.Helper()
 	marshalIndent := hermesMarshalIndent
 	writeLease2 := hermesWriteLease
+	reapLeaseFile := hermesReapLeaseFile
 	inspectProcess := InspectProcess
 	t.Cleanup(func() {
 		hermesMarshalIndent = marshalIndent
 		hermesWriteLease = writeLease2
+		hermesReapLeaseFile = reapLeaseFile
 		InspectProcess = inspectProcess
 	})
 }
