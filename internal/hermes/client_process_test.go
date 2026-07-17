@@ -122,6 +122,8 @@ func resultForMethod(method string, params map[string]any) any {
 		return map[string]any{"session_id": "live-branch", "title": "Branch", "parent": "stored"}
 	case "session.resume":
 		return map[string]any{"session_id": "live-resume", "session_key": params["session_id"]}
+	case "session.title":
+		return map[string]any{"pending": false, "title": params["title"]}
 	case "session.history":
 		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
 	case "session.active_list":
@@ -295,6 +297,9 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	}
 	if out, err := client.ResumeSession(ctx, "stored", nil); err != nil || out.SessionKey != "stored" {
 		t.Fatalf("ResumeSession nil params = %#v err=%v", out, err)
+	}
+	if out, err := client.SetSessionTitle(ctx, "live", "Durable"); err != nil || out.Pending || out.Title != "Durable" {
+		t.Fatalf("SetSessionTitle = %#v err=%v", out, err)
 	}
 	if out, err := client.History(ctx, "live"); err != nil || out.Count != 1 || len(out.Messages) != 1 {
 		t.Fatalf("History = %#v err=%v", out, err)

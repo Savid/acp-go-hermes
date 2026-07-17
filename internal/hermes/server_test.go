@@ -45,17 +45,27 @@ type fakeGatewayServer struct {
 	branchNoKey         bool
 	createNoLive        bool
 	createNoStored      bool
+	titlePending        bool
+	titleMissing        bool
+	durableCreated      bool
+	requireDurable      bool
 	resumeNoLive        bool
 	resumeNoKey         bool
 	resumeKey           string
 	reloadStatus        string
 	activeNoID          bool
 	activeNoKey         bool
+	activeEmpty         bool
+	notFoundMethods     map[string]int
 }
 
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	t.Helper()
-	fake := &fakeGatewayServer{t: t, failMethods: map[string]struct{}{}}
+	fake := &fakeGatewayServer{
+		t:               t,
+		failMethods:     map[string]struct{}{},
+		notFoundMethods: map[string]int{},
+	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.server.Close)
 
@@ -165,9 +175,18 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		closeAfterResult := s.closeAfterResult == req.Method
 		closeNowAfterResult := s.closeNowAfterResult == req.Method
 		_, fail := s.failMethods[req.Method]
+		notFound := s.notFoundMethods[req.Method] > 0
+		if notFound {
+			s.notFoundMethods[req.Method]--
+		}
 		s.mu.Unlock()
 		if fail {
 			s.writeError(r.Context(), conn, req.ID, -32000, req.Method+" failed")
+
+			continue
+		}
+		if notFound {
+			s.writeError(r.Context(), conn, req.ID, 4007, "session not found")
 
 			continue
 		}
@@ -212,7 +231,14 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		resumeNoLive := s.resumeNoLive
 		resumeNoKey := s.resumeNoKey
 		resumeKey := s.resumeKey
+		requireDurable := s.requireDurable
+		durableCreated := s.durableCreated
 		s.mu.Unlock()
+		if requireDurable && !durableCreated {
+			s.writeError(ctx, conn, id, 4007, "session not found")
+
+			return
+		}
 		if resumeKey == "" {
 			resumeKey = stored
 		}
@@ -234,7 +260,13 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		branchNoKey := s.branchNoKey
 		activeNoID := s.activeNoID
 		activeNoKey := s.activeNoKey
+		activeEmpty := s.activeEmpty
 		s.mu.Unlock()
+		if activeEmpty {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{}})
+
+			return
+		}
 		sessionID := "live-1"
 		if activeNoID {
 			sessionID = ""
@@ -278,6 +310,20 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			status = "reloaded"
 		}
 		s.writeResult(ctx, conn, id, map[string]any{"status": status})
+	case "session.title":
+		title, _ := params["title"].(string)
+		s.mu.Lock()
+		pending := s.titlePending
+		missing := s.titleMissing
+		if !pending {
+			s.durableCreated = true
+		}
+		s.mu.Unlock()
+		result := map[string]any{"pending": pending, "title": title}
+		if missing {
+			delete(result, "title")
+		}
+		s.writeResult(ctx, conn, id, result)
 	case "image.attach_bytes":
 		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
 	case "prompt.submit":
@@ -468,6 +514,12 @@ func (s *fakeGatewayServer) setCloseNowAfterResult(method string) {
 func (s *fakeGatewayServer) setFail(method string) {
 	s.mu.Lock()
 	s.failMethods[method] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setNotFound(method string, count int) {
+	s.mu.Lock()
+	s.notFoundMethods[method] = count
 	s.mu.Unlock()
 }
 
@@ -737,13 +789,133 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 
 	methods := fake.callMethods()
 	for _, want := range []string{
-		"session.create", "session.resume", "session.active_list", "session.delete", "prompt.submit", "image.attach_bytes",
+		"session.create", "session.title", "session.resume", "session.active_list", "session.delete", "prompt.submit", "image.attach_bytes",
 		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond",
 		"session.interrupt", "session.history", "session.branch", "model.options",
 	} {
 		if !containsString(methods, want) {
 			t.Fatalf("method %q not called; methods=%v", want, methods)
 		}
+	}
+}
+
+func TestHermesGatewayCreatePublishesOnlyDurableSession(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.mu.Lock()
+	fake.requireDurable = true
+	fake.activeEmpty = true
+	fake.mu.Unlock()
+
+	creator := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	created, err := creator.CreateSession(t.Context(), "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.ID != "stored-1" || created.Title != "Hermes session" {
+		t.Fatalf("created session = %#v", created)
+	}
+
+	// A second server has no runtime-only live-id map. It can recover only if
+	// session.create forced Hermes's native DB row before returning.
+	loader := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	loaded, err := loader.GetSession(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("fresh-process GetSession: %v", err)
+	}
+	if loaded.ID != created.ID {
+		t.Fatalf("loaded session = %#v", loaded)
+	}
+
+	methods := fake.callMethods()
+	for _, want := range []string{"session.create", "session.title", "session.active_list", "session.resume"} {
+		if !containsString(methods, want) {
+			t.Fatalf("durability method %q missing from %v", want, methods)
+		}
+	}
+}
+
+func TestHermesGatewayCreateRejectsUnprovenDurability(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*fakeGatewayServer)
+		want      string
+	}{
+		{
+			name: "title rpc error",
+			configure: func(fake *fakeGatewayServer) {
+				fake.setFail("session.title")
+			},
+			want: "persist Hermes session",
+		},
+		{
+			name: "title pending",
+			configure: func(fake *fakeGatewayServer) {
+				fake.titlePending = true
+			},
+			want: "remained pending",
+		},
+		{
+			name: "title schema drift",
+			configure: func(fake *fakeGatewayServer) {
+				fake.titleMissing = true
+			},
+			want: "missing durable title",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			tc.configure(fake)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			if _, err := server.CreateSession(t.Context(), ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CreateSession error = %v, want %q", err, tc.want)
+			}
+			if live := server.liveSessionID("stored-1"); live != "" {
+				t.Fatalf("failed create retained live mapping %q", live)
+			}
+		})
+	}
+}
+
+func TestHermesGatewayRebindsStaleLiveSessionAtReloadAndPromptAdmission(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.mu.Lock()
+	fake.activeEmpty = true
+	fake.durableCreated = true
+	fake.mu.Unlock()
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+
+	if _, err := server.GetSession(t.Context(), "stored"); err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	fake.setNotFound("reload.mcp", 1)
+	if err := server.ReloadMCP(t.Context(), "stored"); err != nil {
+		t.Fatalf("ReloadMCP stale live rebind: %v", err)
+	}
+
+	fake.setNotFound("prompt.submit", 1)
+	message, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "after rebind"}}})
+	if err != nil {
+		t.Fatalf("SendMessage stale live rebind: %v", err)
+	}
+	if message.Info.SessionID != "stored" {
+		t.Fatalf("rebound message = %#v", message)
+	}
+
+	methods := fake.callMethods()
+	wantSubsequence := []string{
+		"session.active_list", "session.resume",
+		"reload.mcp", "session.resume", "reload.mcp",
+		"prompt.submit", "session.resume", "prompt.submit",
+	}
+	position := 0
+	for _, method := range methods {
+		if position < len(wantSubsequence) && method == wantSubsequence[position] {
+			position++
+		}
+	}
+	if position != len(wantSubsequence) {
+		t.Fatalf("rebind calls = %v, missing subsequence %v at %d", methods, wantSubsequence, position)
 	}
 }
 
@@ -2700,6 +2872,8 @@ func gatewayProcessResult(method string, params map[string]any) any {
 		stored, _ := params["session_id"].(string)
 
 		return map[string]any{"session_id": "live-" + stored, "session_key": stored}
+	case "session.title":
+		return map[string]any{"pending": false, "title": params["title"]}
 	case "session.active_list":
 		return map[string]any{"sessions": []any{}}
 	case "session.history":

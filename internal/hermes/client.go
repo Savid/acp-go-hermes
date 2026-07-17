@@ -317,6 +317,11 @@ type SessionResumeResult struct {
 	Info         json.RawMessage `json:"info"`
 }
 
+type SessionTitleResult struct {
+	Pending bool   `json:"pending"`
+	Title   string `json:"title"`
+}
+
 type SessionHistoryResult struct {
 	Count    int       `json:"count"`
 	Messages []Message `json:"messages"`
@@ -478,6 +483,17 @@ func (c *Client) ResumeSession(ctx context.Context, storedSessionID string, para
 	var out SessionResumeResult
 
 	err := c.Call(ctx, "session.resume", params, &out)
+
+	return out, err
+}
+
+func (c *Client) SetSessionTitle(ctx context.Context, liveSessionID string, title string) (SessionTitleResult, error) {
+	var out SessionTitleResult
+
+	err := c.Call(ctx, "session.title", map[string]any{
+		fieldSessionID: liveSessionID,
+		fieldTitle:     title,
+	}, &out)
 
 	return out, err
 }

@@ -942,7 +942,34 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session
 
 	s.rememberGatewaySession(result.StoredSessionID, result.SessionID)
 
-	return s.nativeSessionFromGateway(result.StoredSessionID, title), nil
+	// Hermes session.create intentionally leaves a draft only in the live
+	// gateway. session.title is the native persistence boundary for an otherwise
+	// empty session: it creates the state.db row synchronously. The ACP session
+	// store snapshots immediately after this method returns, so returning before
+	// that row exists would publish an idmap whose native session cannot be
+	// resumed after an interrupt or process restart.
+	durableTitle := firstNonEmpty(title, "Hermes session")
+
+	titleResult, err := s.gatewayClient().SetSessionTitle(ctx, result.SessionID, durableTitle)
+	if err != nil {
+		s.forgetGatewaySession(result.StoredSessionID)
+
+		return Session{}, fmt.Errorf("persist Hermes session: %w", err)
+	}
+
+	if titleResult.Pending {
+		s.forgetGatewaySession(result.StoredSessionID)
+
+		return Session{}, fmt.Errorf("persist Hermes session: session.title remained pending")
+	}
+
+	if titleResult.Title != durableTitle {
+		s.forgetGatewaySession(result.StoredSessionID)
+
+		return Session{}, fmt.Errorf("persist Hermes session: session.title response missing durable title")
+	}
+
+	return s.nativeSessionFromGateway(result.StoredSessionID, durableTitle), nil
 }
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, error) {
@@ -1028,28 +1055,39 @@ func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 // the native process starts, which is too early for hosts that arm an
 // authorization-scoped MCP endpoint only after session/new has returned.
 func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
-	live, err := s.ensureLiveGatewaySession(ctx, id)
-	if err != nil {
-		return err
-	}
+	for attempt := 0; ; attempt++ {
+		live, err := s.ensureLiveGatewaySession(ctx, id)
+		if err != nil {
+			return err
+		}
 
-	var result struct {
-		Status string `json:"status"`
-	}
+		var result struct {
+			Status string `json:"status"`
+		}
 
-	err = s.gatewayClient().Call(ctx, "reload.mcp", map[string]any{
-		keySessionIDSnake: live,
-		"confirm":         true,
-	}, &result)
-	if err != nil {
-		return err
-	}
+		err = s.gatewayClient().Call(ctx, "reload.mcp", map[string]any{
+			keySessionIDSnake: live,
+			"confirm":         true,
+		}, &result)
+		if IsNotFound(err) && attempt == 0 {
+			// A reconnect or native reload can retire the runtime-only live id.
+			// Forget only that routing cache entry, resume the durable key once,
+			// and repeat the idempotent reload against the rebound live session.
+			s.forgetGatewaySession(id)
 
-	if result.Status != "reloaded" {
-		return fmt.Errorf("hermes reload.mcp returned status %q", result.Status)
-	}
+			continue
+		}
 
-	return nil
+		if err != nil {
+			return err
+		}
+
+		if result.Status != "reloaded" {
+			return fmt.Errorf("hermes reload.mcp returned status %q", result.Status)
+		}
+
+		return nil
+	}
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {
@@ -1212,17 +1250,30 @@ func imageAttachmentsFromHermesParts(parts []map[string]any) ([]gatewayImageAtta
 }
 
 func (s *hermesServer) submitGatewayParts(ctx context.Context, stored string, parts []map[string]any) (NativeMessage, error) {
-	live, err := s.ensureLiveGatewaySession(ctx, stored)
-	if err != nil {
-		return NativeMessage{}, err
-	}
-
 	attachments, err := imageAttachmentsFromHermesParts(parts)
 	if err != nil {
 		return NativeMessage{}, err
 	}
 
-	return s.submitGatewayTextForLive(ctx, stored, live, textFromHermesParts(parts), attachments)
+	for attempt := 0; ; attempt++ {
+		live, liveErr := s.ensureLiveGatewaySession(ctx, stored)
+		if liveErr != nil {
+			return NativeMessage{}, liveErr
+		}
+
+		message, submitErr := s.submitGatewayTextForLive(ctx, stored, live, textFromHermesParts(parts), attachments)
+		if IsNotFound(submitErr) && attempt == 0 {
+			// A 4007 RPC response means Hermes rejected the prompt before
+			// admission. Re-resume the durable session and retry exactly once;
+			// errors after admission are event/transport failures and never enter
+			// this branch, so a model turn cannot be duplicated.
+			s.forgetGatewaySession(stored)
+
+			continue
+		}
+
+		return message, submitErr
+	}
 }
 
 func (s *hermesServer) submitGatewayTextForLive(
