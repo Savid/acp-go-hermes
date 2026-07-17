@@ -6,12 +6,19 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+const liveTokenHermesConfig = `model:
+  provider: openrouter
+  default: openrouter/free
+  max_tokens: 1024
+`
 
 // liveAgent holds a launched acp-go-hermes subprocess and its stdio pipes.
 //
@@ -54,6 +61,27 @@ func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ..
 		_ = cmd.Wait()
 	}
 	return agent
+}
+
+// startLiveTokenAgent caps only token-spending integration sessions through
+// Hermes' native isolated config. Production defaults and the caller's real
+// Hermes home remain untouched.
+func startLiveTokenAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
+	t.Helper()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(liveTokenHermesConfig), 0o600); err != nil {
+		t.Fatalf("write live-test Hermes config: %v", err)
+	}
+
+	args := append([]string(nil), extraArgs...)
+	args = append(args, "-seed-file", "config.yaml="+configPath)
+
+	return startLiveAgent(t, ctx, home, args...)
+}
+
+func liveTokenSeedFiles() map[string]string {
+	return map[string]string{"config.yaml": liveTokenHermesConfig}
 }
 
 func (a *liveAgent) stderrString() string {

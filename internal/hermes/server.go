@@ -184,6 +184,9 @@ type hermesServer struct {
 	turnBusy int
 	turnIdle *sync.Cond
 	redial   func(context.Context) (*Client, error)
+
+	supervisorWG  sync.WaitGroup
+	afterTurnIdle func()
 }
 
 func (s *hermesServer) ProviderDescendantCount() (int, bool) {
@@ -603,6 +606,11 @@ func (s *hermesServer) Close(ctx context.Context) error {
 
 	s.once.Do(func() {
 		close(s.closed)
+		s.connMu.Lock()
+		if s.turnIdle != nil {
+			s.turnIdle.Broadcast()
+		}
+		s.connMu.Unlock()
 
 		if gw := s.gatewayClient(); gw != nil {
 			gwErr := gw.Close(1000, "closing")
@@ -614,6 +622,8 @@ func (s *hermesServer) Close(ctx context.Context) error {
 		if s.process != nil {
 			err = s.process.Close(ctx)
 		}
+
+		s.supervisorWG.Wait()
 
 		err = errors.Join(err, removeLeaseFileIfOwned(filepath.Join(s.xdg.State, LeaseFileName), s.lease))
 	})
@@ -841,8 +851,14 @@ func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, er
 		s.turnIdle = sync.NewCond(&s.connMu)
 	}
 
+	s.supervisorWG.Add(1)
 	s.connMu.Unlock()
-	go s.superviseGateway()
+
+	go func() {
+		defer s.supervisorWG.Done()
+
+		s.superviseGateway()
+	}()
 }
 
 func (s *hermesServer) beginGatewayTurn() {
@@ -879,12 +895,20 @@ func (s *hermesServer) superviseGateway() {
 		}
 
 		s.connMu.Lock()
-		for s.turnBusy > 0 {
+		for s.turnBusy > 0 && !s.serverClosed() {
 			s.turnIdle.Wait()
 		}
+
+		closed := s.serverClosed()
 		s.connMu.Unlock()
 
-		superviseGatewayAfterTurnIdle()
+		if closed {
+			return
+		}
+
+		if s.afterTurnIdle != nil {
+			s.afterTurnIdle()
+		}
 
 		if s.serverClosed() {
 			return
@@ -2575,11 +2599,10 @@ func WriteLease(stateDir string, lease ServerLease) error {
 }
 
 var (
-	LeaseReapTimeout              = 3 * time.Second
-	LeaseReapPollInterval         = 20 * time.Millisecond
-	leaseReapSleep                = time.Sleep
-	leaseReapNow                  = time.Now
-	superviseGatewayAfterTurnIdle = func() {}
+	LeaseReapTimeout      = 3 * time.Second
+	LeaseReapPollInterval = 20 * time.Millisecond
+	leaseReapSleep        = time.Sleep
+	leaseReapNow          = time.Now
 )
 
 func ReapLeaseFile(path string, log *slog.Logger) bool {

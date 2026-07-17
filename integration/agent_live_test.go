@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
@@ -32,7 +33,11 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	defer cancel()
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(hermesacp.WithScratchDir(home), hermesacp.WithSessionStore(store))
+	agent := hermesacp.NewAgent(
+		hermesacp.WithScratchDir(home),
+		hermesacp.WithSessionStore(store),
+		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
+	)
 	cwd := t.TempDir()
 	newResp, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
@@ -52,19 +57,22 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(hermesacp.WithScratchDir(restoreHome), hermesacp.WithSessionStore(store))
+	restored := hermesacp.NewAgent(
+		hermesacp.WithScratchDir(restoreHome),
+		hermesacp.WithSessionStore(store),
+		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
+	)
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession after native delete: %v", err)
 	}
+	restoredRoot := requireRestoredHermesStateDB(t, restoreHome, newResp.SessionId)
 	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-two", "Reply with exactly ACP_HERMES_STORE_TWO.")); err != nil {
 		t.Fatalf("Prompt after restore: %v", err)
 	}
 	if err := restored.Close(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "acp-go-hermes", "*", "state.db")); len(matches) == 0 {
-		t.Fatalf("restored home did not contain state.db under %s", restoreHome)
-	}
+	requireRemovedHermesRoot(t, restoredRoot)
 }
 
 func TestLiveAgentForkStoreRestore(t *testing.T) {
@@ -75,7 +83,11 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(hermesacp.WithScratchDir(home), hermesacp.WithSessionStore(store))
+	agent := hermesacp.NewAgent(
+		hermesacp.WithScratchDir(home),
+		hermesacp.WithSessionStore(store),
+		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
+	)
 	cwd := t.TempDir()
 	parent, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
@@ -124,17 +136,43 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(hermesacp.WithScratchDir(restoreHome), hermesacp.WithSessionStore(store))
+	restored := hermesacp.NewAgent(
+		hermesacp.WithScratchDir(restoreHome),
+		hermesacp.WithSessionStore(store),
+		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
+	)
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession fork after native delete: %v", err)
 	}
+	restoredRoot := requireRestoredHermesStateDB(t, restoreHome, fork.SessionId)
 	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-restored", "Reply with exactly ACP_HERMES_FORK_RESTORED.")); err != nil {
 		t.Fatalf("Prompt fork after restore: %v", err)
 	}
 	if err := restored.Close(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(restoreHome, "acp-go-hermes", "*", "state.db")); len(matches) == 0 {
-		t.Fatalf("restored fork home did not contain state.db under %s", restoreHome)
+	requireRemovedHermesRoot(t, restoredRoot)
+}
+
+func requireRestoredHermesStateDB(t *testing.T, scratch string, sessionID acp.SessionId) string {
+	t.Helper()
+	root := filepath.Join(scratch, "acp-go-hermes", nativehermes.SafePathName(string(sessionID)))
+	path := filepath.Join(root, "state.db")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored Hermes state DB %s: %v", path, err)
+	}
+	const sqliteHeader = "SQLite format 3\x00"
+	if len(contents) < len(sqliteHeader) || string(contents[:len(sqliteHeader)]) != sqliteHeader {
+		t.Fatalf("restored Hermes state DB %s is not SQLite (size=%d)", path, len(contents))
+	}
+
+	return root
+}
+
+func requireRemovedHermesRoot(t *testing.T, root string) {
+	t.Helper()
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("Hermes runtime root %s remained after Close: %v", root, err)
 	}
 }

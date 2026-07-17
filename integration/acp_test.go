@@ -141,7 +141,7 @@ func TestHermesACPAgentLiveCompletionText(t *testing.T) {
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}
-	agent := startLiveAgent(t, ctx, t.TempDir(), args...)
+	agent := startLiveTokenAgent(t, ctx, t.TempDir(), args...)
 	defer agent.close()
 
 	client := newRecordingClient()
@@ -177,7 +177,7 @@ func TestHermesACPAgentLiveAuthorizedMCPReload(t *testing.T) {
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}
-	agent := startLiveAgent(t, ctx, t.TempDir(), args...)
+	agent := startLiveTokenAgent(t, ctx, t.TempDir(), args...)
 	defer agent.close()
 
 	client := newRecordingClient()
@@ -287,7 +287,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}
-	agent := startLiveAgent(t, ctx, home, args...)
+	agent := startLiveTokenAgent(t, ctx, home, args...)
 	defer agent.close()
 
 	client := newRecordingClient()

@@ -17,11 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
-	hermesacp "github.com/savid/acp-go-hermes"
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-func TestHermesACPAgentFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T) {
+func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T) {
 	requireRunIntegration(t)
 	if runtime.GOOS != "linux" {
 		t.Skip("Hermes lease process identity reads /proc on Linux")
@@ -80,16 +79,18 @@ func TestHermesACPAgentFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *te
 		t.Fatalf("write lease: %v", err)
 	}
 
-	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeOK), home)
-	defer agent.close()
-
-	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
+	server, err := nativehermes.StartServer(ctx, nativehermes.StartOptions{
+		ACPSessionID:   "orphan",
+		Root:           filepath.Join(home, "acp-go-hermes"),
+		ScratchParent:  home,
+		Cwd:            t.TempDir(),
+		ExecutablePath: fakeHermesExecutable(t, fakeModeOK),
+		HealthTimeout:  5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("start replacement Hermes server: %v", err)
 	}
-	if _, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir())); err != nil {
-		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
-	}
+	defer func() { _ = server.Close(context.Background()) }()
 
 	select {
 	case err := <-waitOrphan:
@@ -100,8 +101,18 @@ func TestHermesACPAgentFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *te
 	case <-time.After(5 * time.Second):
 		t.Fatal("matching stale-lease process was not reaped")
 	}
-	if _, err := os.Stat(leasePath); !os.IsNotExist(err) {
-		t.Fatalf("lease file stat after reaping err=%v", err)
+	leaseData, err := os.ReadFile(leasePath)
+	if err != nil {
+		t.Fatalf("read replacement lease: %v", err)
+	}
+	var replacementLease struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal(leaseData, &replacementLease); err != nil {
+		t.Fatalf("decode replacement lease: %v", err)
+	}
+	if replacementLease.PID <= 0 || replacementLease.PID == orphan.Process.Pid {
+		t.Fatalf("replacement lease pid = %d, predecessor pid = %d", replacementLease.PID, orphan.Process.Pid)
 	}
 }
 

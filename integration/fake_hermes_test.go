@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +112,7 @@ func assertFakeGatewayToolLifecycle(t *testing.T, client *recordingClient) {
 	}
 }
 
-func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
+func TestHermesACPAgentFakeExecutableLeaseRecoveryIsSessionScoped(t *testing.T) {
 	requireRunIntegration(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("lease reaper signal semantics are platform-specific")
@@ -162,23 +163,12 @@ func TestHermesACPAgentFakeExecutableLeaseReaper(t *testing.T) {
 	}
 
 	leasePath := filepath.Join(leaseDir, "server.lease")
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := os.Stat(leasePath); os.IsNotExist(err) {
-			break
-		}
-		select {
-		case err := <-waitOrphan:
-			t.Fatalf("unrelated stale-lease process was killed: %v", err)
-		case <-deadline:
-			t.Fatalf("stale lease file still present")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	if _, err := os.Stat(leasePath); err != nil {
+		t.Fatalf("unrelated session lease was changed: %v", err)
 	}
 	select {
 	case err := <-waitOrphan:
-		t.Fatalf("unrelated stale-lease process exited: %v", err)
+		t.Fatalf("unrelated session process exited: %v", err)
 	default:
 	}
 }
@@ -278,6 +268,7 @@ func runFakeHermesServer(args []string, mode string) error {
 	}
 
 	_, _ = fmt.Fprintln(os.Stdout, "native stdout noise before websocket readiness")
+	state := &fakeGatewayState{}
 	handler := http.NewServeMux()
 	handler.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -285,14 +276,35 @@ func runFakeHermesServer(args []string, mode string) error {
 	})
 	if mode != fakeModeStatusOnly {
 		handler.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
-			handleFakeGatewayWS(w, r, mode)
+			handleFakeGatewayWS(w, r, mode, state)
 		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return server.ListenAndServe()
 }
 
-func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request, mode string) {
+type fakeGatewayState struct {
+	mu       sync.Mutex
+	messages []map[string]any
+}
+
+func (s *fakeGatewayState) recordAssistant(text string) {
+	s.mu.Lock()
+	s.messages = append(s.messages, map[string]any{
+		"role":    "assistant",
+		"content": map[string]any{"text": text},
+	})
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayState) history() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]map[string]any(nil), s.messages...)
+}
+
+func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request, mode string, state *fakeGatewayState) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -317,11 +329,19 @@ func handleFakeGatewayWS(w http.ResponseWriter, r *http.Request, mode string) {
 		}
 		params := map[string]any{}
 		_ = json.Unmarshal(req.Params, &params)
-		handleFakeGatewayRPC(r.Context(), conn, req.ID, req.Method, params, mode)
+		handleFakeGatewayRPC(r.Context(), conn, req.ID, req.Method, params, mode, state)
 	}
 }
 
-func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any, mode string) {
+func handleFakeGatewayRPC(
+	ctx context.Context,
+	conn *websocket.Conn,
+	id int64,
+	method string,
+	params map[string]any,
+	mode string,
+	state *fakeGatewayState,
+) {
 	switch method {
 	case "session.create":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
@@ -333,6 +353,11 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
 			"session_id":  "live-" + stored,
 			"session_key": stored,
+		})
+	case "session.title":
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{
+			"pending": false,
+			"title":   params["title"],
 		})
 	case "session.active_list":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{
@@ -350,7 +375,8 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			},
 		}})
 	case "session.history":
-		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": 0, "messages": []any{}})
+		messages := state.history()
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": len(messages), "messages": messages})
 	case "session.branch":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
 			"session_id": "live-branch",
@@ -402,6 +428,7 @@ func handleFakeGatewayRPC(ctx context.Context, conn *websocket.Conn, id int64, m
 			"args":    map[string]any{"command": "mcp__wagie__execute"},
 			"result":  map[string]any{"probe": "authorized", "status": "ok"},
 		})
+		state.recordAssistant("fake response")
 		// Hermes 0.18.2 may deliver the entire assistant reply only on the
 		// authoritative completion event, with no preceding message.delta.
 		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{

@@ -2694,16 +2694,16 @@ func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
 }
 
 func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
-	restoreLeaseReapSeams(t)
 	reachedIdle := make(chan struct{})
 	releaseIdle := make(chan struct{})
-	superviseGatewayAfterTurnIdle = func() {
+
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.afterTurnIdle = func() {
 		close(reachedIdle)
 		<-releaseIdle
 	}
 
-	fake := newFakeGatewayServer(t)
-	server := newGatewayBackedHermesServer(t, fake, "")
 	reconnied := make(chan struct{}, 1)
 	server.enableReconnect(func(context.Context) (*Client, error) {
 		reconnied <- struct{}{}
@@ -2721,6 +2721,7 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	// redial; the supervisor must stop without reconnecting.
 	close(server.closed)
 	close(releaseIdle)
+	server.supervisorWG.Wait()
 
 	select {
 	case <-reconnied:
@@ -3134,13 +3135,11 @@ func restoreLeaseReapSeams(t *testing.T) {
 	interval := LeaseReapPollInterval
 	sleep := leaseReapSleep
 	now := leaseReapNow
-	afterTurnIdle := superviseGatewayAfterTurnIdle
 	t.Cleanup(func() {
 		LeaseReapTimeout = timeout
 		LeaseReapPollInterval = interval
 		leaseReapSleep = sleep
 		leaseReapNow = now
-		superviseGatewayAfterTurnIdle = afterTurnIdle
 	})
 }
 
