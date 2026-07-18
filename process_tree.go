@@ -2,7 +2,6 @@ package hermesacp
 
 import nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
-// ErrProcessTreeUnproven reports that the adapter could not prove every
-// native descendant exited. Callers must retain resources that may still be
-// reachable by the process tree.
-var ErrProcessTreeUnproven = nativehermes.ErrProcessTreeUnproven
+// ErrProcessContainmentIncomplete reports that the selected native containment
+// boundary did not complete. Callers must retain its quarantined resources.
+var ErrProcessContainmentIncomplete = nativehermes.ErrProcessContainmentIncomplete

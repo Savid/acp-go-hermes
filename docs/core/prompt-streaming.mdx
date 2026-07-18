@@ -51,15 +51,18 @@ A timeout is a failure, not a user cancel, so it surfaces as
 `hermes_turn_failed` with `cause: "timeout"` — never the `cancelled` stop
 reason. A turn cancelled by the client returns the `cancelled` stop reason
 instead. Neither result settles after Hermes' cooperative interrupt alone.
-The adapter closes the isolated native runtime and proves its entire process
-boundary empty first, including background tools that Hermes intentionally
-leaves running. If that proof fails, the prompt fails and the session is
-poisoned instead of reporting a normal timeout or cancellation.
+The adapter first completes the selected native containment boundary. Linux
+and Windows authoritatively empty the native tree, including background tools
+that Hermes intentionally leaves running. Darwin best effort only reaps the
+direct child and observes the captured original process group absent; a
+`setsid(2)` descendant may remain live. If the selected boundary does not
+complete, the prompt fails and the session is poisoned instead of reporting a
+normal timeout or cancellation.
 </Note>
 
-After a proved cancellation, timeout, provider/transport failure, or outbound
-update failure, the next authorized prompt lazily materializes a fresh isolated
-home from the last committed
+After cancellation, timeout, provider/transport failure, or outbound update
+failure whose selected containment boundary completed, the next authorized
+prompt lazily materializes a fresh isolated home from the last committed
 `hermes-state-db-v1` snapshot and resumes the exact stored native session key.
 The interrupted turn is never snapshotted. Turn nonces and adapter event
 sequences remain monotonic across the native-runtime replacement, and MCP is

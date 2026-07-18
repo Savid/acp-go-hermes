@@ -10,10 +10,11 @@ import (
 )
 
 type runtimeObserver struct {
-	admissions metric.Int64Counter
-	resources  metric.Int64UpDownCounter
-	processes  metric.Int64UpDownCounter
-	stages     metric.Float64Histogram
+	admissions  metric.Int64Counter
+	resources   metric.Int64UpDownCounter
+	processes   metric.Int64UpDownCounter
+	stages      metric.Float64Histogram
+	containment metric.Int64Gauge
 
 	mu        sync.Mutex
 	snapshots map[string]int
@@ -21,12 +22,21 @@ type runtimeObserver struct {
 
 func newRuntimeObserver(meter metric.Meter, prefix string) *runtimeObserver {
 	return &runtimeObserver{
-		admissions: mustInt64Counter(meter, prefix+".runtime.resource.admission.count", "Runtime resource admission decisions."),
-		resources:  mustInt64UpDownCounter(meter, prefix+".runtime.resource.active", "Live native-root permits and adapter scratch-root reservations."),
-		processes:  mustInt64UpDownCounter(meter, prefix+".runtime.process.active", "Live home-lock supervisors and proven provider descendants."),
-		stages:     mustFloat64Histogram(meter, prefix+".runtime.startup.stage.duration", "Native startup stage duration."),
-		snapshots:  make(map[string]int),
+		admissions:  mustInt64Counter(meter, prefix+".runtime.resource.admission.count", "Runtime resource admission decisions."),
+		resources:   mustInt64UpDownCounter(meter, prefix+".runtime.resource.active", "Live native-root permits and adapter scratch-root reservations."),
+		processes:   mustInt64UpDownCounter(meter, prefix+".runtime.process.active", "Live home-lock supervisors and authoritative provider-descendant inventory."),
+		stages:      mustFloat64Histogram(meter, prefix+".runtime.startup.stage.duration", "Native startup stage duration."),
+		containment: mustInt64Gauge(meter, prefix+".runtime.containment", "Selected runtime containment mode."),
+		snapshots:   make(map[string]int),
 	}
+}
+
+func (o *Observer) ObserveRuntimeContainment(ctx context.Context, mode string) {
+	if o == nil || o.runtime == nil || mode == "" {
+		return
+	}
+
+	o.runtime.containment.Record(ctx, 1, metric.WithAttributes(attribute.String("containment", mode)))
 }
 
 func (o *Observer) RecordRuntimeResourceAdmission(ctx context.Context, resource, lifecycle, outcome string) {

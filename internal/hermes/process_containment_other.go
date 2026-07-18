@@ -14,11 +14,11 @@ func configureHermesProcess(*exec.Cmd) {}
 
 type processContainment struct{}
 
-func startContainedProcess(*exec.Cmd) (*processContainment, error) {
+func startContainedProcess(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
 	return nil, fmt.Errorf("hermes runtime containment is unsupported on %s", runtime.GOOS)
 }
 
-func (*processContainment) quiesce(time.Duration) error {
+func (*processContainment) complete(time.Duration) error {
 	return errors.New("hermes runtime containment is unavailable")
 }
 
@@ -29,3 +29,5 @@ func (*processContainment) terminate(cmd *exec.Cmd) error { return terminateProc
 func (*processContainment) kill(cmd *exec.Cmd) error { return killProcess(cmd) }
 
 func (*processContainment) close() error { return nil }
+
+func (*processContainment) directChild(*exec.Cmd) *directChildWait { return nil }

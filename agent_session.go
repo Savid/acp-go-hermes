@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Session lifecycle code keeps fail-closed acquisitions adjacent.
 package hermesacp
 
 import (
@@ -20,6 +21,7 @@ import (
 )
 
 var reapHermesLeaseFile = nativehermes.ReapLeaseFile
+var createHermesGeneration = nativehermes.CreateGenerationXDGDirs
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	if err := a.ensureOpen(); err != nil {
@@ -55,6 +57,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}
 
 	id := acp.SessionId(idValue)
+	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+		return acp.NewSessionResponse{}, constructionErr
+	}
+	defer a.endSessionConstruction()
 
 	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, nativehermes.XDGDirs{}, params.McpServers)
 	if err != nil {
@@ -67,6 +73,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
@@ -80,6 +87,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, params.McpServers, native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
 		closeErr := session.Close(context.Background())
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
@@ -112,8 +120,9 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 	err := session.DeleteNativeAndClose(closeCtx)
 
 	cancel()
+	a.recordIncompleteContainment(err, session.id, record.XDGRoot)
 
-	if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 		return err
 	}
 
@@ -213,9 +222,13 @@ func (a *Agent) loadOrResumeSession(
 
 		return existing, nil
 	}
+	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+		return nil, constructionErr
+	}
+	defer a.endSessionConstruction()
 
-	if proofErr := a.rejectUnprovenHermesRoot(a.hermesXDGRoot(id, nativehermes.XDGDirs{})); proofErr != nil {
-		return nil, proofErr
+	if incompleteErr := a.rejectIncompleteHermesSession(id); incompleteErr != nil {
+		return nil, incompleteErr
 	}
 
 	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
@@ -233,7 +246,11 @@ func (a *Agent) loadOrResumeSession(
 		}
 	}()
 
-	xdg, err = nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
+	parent, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return nil, err
+	}
+	xdg, err = createHermesGeneration(parent)
 	if err != nil {
 		return nil, err
 	}
@@ -257,10 +274,10 @@ func (a *Agent) loadOrResumeSession(
 
 	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, xdg, scratchRelease, mcpServers)
 	if err != nil {
-		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 			keepScratch = true
 
-			a.retainUnprovenHermesRoot(xdg.Root)
+			a.retainIncompleteHermesRoot(id, xdg.Root)
 		}
 
 		return nil, err
@@ -271,6 +288,7 @@ func (a *Agent) loadOrResumeSession(
 	native, err := client.GetSession(ctx, idmap.NativeSessionID)
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return nil, errors.Join(err, closeErr)
 	}
@@ -284,6 +302,7 @@ func (a *Agent) loadOrResumeSession(
 	session.committedTerminal = publicTerminalState(snapshot.Terminal)
 	if err := a.storeStartedSession(session); err != nil {
 		closeErr := session.Close(context.Background())
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return nil, errors.Join(err, closeErr)
 	}
@@ -322,10 +341,8 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	if !needsResume {
 		return nil
 	}
-
-	root := s.agent.hermesXDGRoot(id, nativehermes.XDGDirs{})
-	if err := s.agent.rejectUnprovenHermesRoot(root); err != nil {
-		return s.poisonWithError(ctx, "hermes_process_tree_unproven", err.Error())
+	if err := s.agent.rejectIncompleteHermesSession(id); err != nil {
+		return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
 	}
 
 	scratchRelease, err := reserveScratchRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
@@ -343,7 +360,11 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		}
 	}()
 
-	xdg, err = nativehermes.CreateXDGDirs(s.agent.homeRoot(), string(id))
+	parent, err := ensureScratchParent(s.agent.options.ScratchDir)
+	if err != nil {
+		return err
+	}
+	xdg, err = createHermesGeneration(parent)
 	if err != nil {
 		return err
 	}
@@ -381,12 +402,12 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 
 	client, err := s.agent.newHermesClientWithScratch(ctx, id, cwd, meta, xdg, scratchRelease, mcpServers)
 	if err != nil {
-		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 			keepScratch = true
 
-			s.agent.retainUnprovenHermesRoot(xdg.Root)
+			s.agent.retainIncompleteHermesRoot(id, xdg.Root)
 
-			return s.poisonWithError(ctx, "hermes_process_tree_unproven", err.Error())
+			return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
 		}
 
 		return err
@@ -397,12 +418,14 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	native, err := client.GetSession(ctx, wantIDMap.NativeSessionID)
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return errors.Join(err, closeErr)
 	}
 
 	if native.ID != wantIDMap.NativeSessionID {
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 		driftErr := s.poisonNativeSessionDrift(ctx, "runtime resume", native.ID)
 
 		return errors.Join(driftErr, closeErr)
@@ -413,6 +436,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		s.mu.Unlock()
 
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return errors.Join(acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed}), closeErr)
 	}
@@ -627,6 +651,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 
 	closeCancel()
 	session.lifecycleMu.Unlock()
+	a.recordIncompleteContainment(closeErr, params.SessionId, session.client.XDGDirs().Root)
 
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)
@@ -677,10 +702,11 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		err = session.DeleteNativeAndClose(closeCtx)
 
 		closeCancel()
+		a.recordIncompleteContainment(err, params.SessionId, record.XDGRoot)
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 		a.mu.Lock()
 		delete(a.deleteCleanup, record.SessionID)
 		a.mu.Unlock()
@@ -713,6 +739,10 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+		return acp.UnstableForkSessionResponse{}, constructionErr
+	}
+	defer a.endSessionConstruction()
 
 	parent, err := a.session(params.SessionId)
 	if err != nil {
@@ -733,8 +763,8 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	id := acp.SessionId(idValue)
 
-	if proofErr := a.rejectUnprovenHermesRoot(a.hermesXDGRoot(id, nativehermes.XDGDirs{})); proofErr != nil {
-		return acp.UnstableForkSessionResponse{}, proofErr
+	if incompleteErr := a.rejectIncompleteHermesSession(id); incompleteErr != nil {
+		return acp.UnstableForkSessionResponse{}, incompleteErr
 	}
 
 	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
@@ -752,7 +782,11 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		}
 	}()
 
-	xdg, err = nativehermes.CreateXDGDirs(a.homeRoot(), string(id))
+	parentRoot, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+	xdg, err = createHermesGeneration(parentRoot)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -767,10 +801,10 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	client, err := a.newHermesClientWithScratch(ctx, id, params.Cwd, meta, xdg, scratchRelease, stableMCPServersFromUnstable(params.McpServers))
 	if err != nil {
-		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 			keepScratch = true
 
-			a.retainUnprovenHermesRoot(xdg.Root)
+			a.retainIncompleteHermesRoot(id, xdg.Root)
 		}
 
 		return acp.UnstableForkSessionResponse{}, err
@@ -781,6 +815,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	native, err := client.GetSession(ctx, nativeChild.ID)
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
 	}
@@ -796,6 +831,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, stableMCPServersFromUnstable(params.McpServers), native, client, meta, idmap)
 	if err := a.storeStartedSession(session); err != nil {
 		closeErr := session.Close(context.Background())
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
 		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
 	}
@@ -814,20 +850,34 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 }
 
 func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, mcpServers ...[]acp.McpServer) (nativehermes.Server, error) {
-	root := a.hermesXDGRoot(id, existing)
-	if err := a.rejectUnprovenHermesRoot(root); err != nil {
+	if err := a.rejectIncompleteHermesSession(id); err != nil {
 		return nil, err
 	}
-
 	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
 	if err != nil {
 		return nil, err
 	}
+	if existing.Root == "" {
+		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		if parentErr != nil {
+			scratchRelease()
+
+			return nil, parentErr
+		}
+
+		existing, err = createHermesGeneration(parent)
+		if err != nil {
+			scratchRelease()
+
+			return nil, err
+		}
+	}
+	root := existing.Root
 
 	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, existing, scratchRelease, mcpServers...)
 	if err != nil {
-		if errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
-			a.retainUnprovenHermesRoot(root)
+		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+			a.retainIncompleteHermesRoot(id, root)
 
 			return nil, err
 		}
@@ -836,14 +886,6 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 	}
 
 	return client, nil
-}
-
-func (a *Agent) hermesXDGRoot(id acp.SessionId, existing nativehermes.XDGDirs) string {
-	if existing.Root != "" {
-		return existing.Root
-	}
-
-	return filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id)))
 }
 
 func closeHermesClientAfterStartupFailure(client nativehermes.Server) error {
@@ -904,11 +946,31 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 				observe(stageCtx, RuntimeResourceKind(lifecycle), RuntimeStartupStage(stage), elapsed, stageErr)
 			}
 		},
+		AcquireDiscoveryResources: func(discoveryCtx context.Context) (func(), func(), error) {
+			discoveryScratchRelease, discoveryErr := reserveScratchRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+			if discoveryErr != nil {
+				return nil, nil, discoveryErr
+			}
+
+			discoveryNativeRelease, discoveryErr := acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+			if discoveryErr != nil {
+				discoveryScratchRelease()
+
+				return nil, nil, discoveryErr
+			}
+
+			return discoveryNativeRelease, discoveryScratchRelease, nil
+		},
+		RetainDiscoveryRoot: func(root string, discoveryErr error) {
+			a.recordIncompleteContainment(discoveryErr, id, root)
+		},
+		DarwinBestEffortContainment: a.options.DarwinBestEffortContainment,
 	})
 	if err != nil {
 		processRoot.retire(ctx, providerProcessTreeProven(err))
+		a.recordIncompleteContainment(err, id, existing.Root)
 
-		if !errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		if !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 			nativeRelease()
 		}
 
@@ -917,22 +979,16 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 
 	processRoot.observe(ctx, client)
 
-	root := client.XDGDirs().Root
-	if root == "" {
-		root = existing.Root
-	}
-
-	if root == "" {
-		root = filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id)))
-	}
+	root := existing.Root
 
 	return &managedHermesServer{
-		Server:         client,
-		root:           root,
-		nativeRelease:  nativeRelease,
-		scratchRelease: scratchRelease,
-		retainUnproven: a.retainUnprovenHermesRoot,
-		processRoot:    processRoot,
+		Server:           client,
+		root:             root,
+		sessionID:        id,
+		nativeRelease:    nativeRelease,
+		scratchRelease:   scratchRelease,
+		retainIncomplete: a.recordIncompleteContainment,
+		processRoot:      processRoot,
 	}, nil
 }
 

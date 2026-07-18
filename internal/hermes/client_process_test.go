@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -490,7 +491,7 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	usedConfigure := false
-	proc, startErr := Start(ctx, ProcessOptions{
+	proc, startErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
 		Home:           t.TempDir(),
 		Cwd:            t.TempDir(),
@@ -501,7 +502,7 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 			usedConfigure = true
 			cmd.Env = append(cmd.Env, "CONFIGURED=1")
 		},
-	})
+	}))
 	if startErr != nil {
 		t.Fatalf("Start: %v", startErr)
 	}
@@ -514,22 +515,22 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	if err := proc.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	resumeDomainProc, resumeErr := Start(ctx, ProcessOptions{
+	resumeDomainProc, resumeErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.resume"),
 		Home:           t.TempDir(),
 		Timeout:        5 * time.Second,
-	})
+	}))
 	if resumeErr != nil {
 		t.Fatalf("Start with resume domain probe: %v", resumeErr)
 	}
 	if err := resumeDomainProc.Close(ctx); err != nil {
 		t.Fatalf("Close resume domain proc: %v", err)
 	}
-	deleteDomainProc, deleteErr := Start(ctx, ProcessOptions{
+	deleteDomainProc, deleteErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, "probe-domain:session.delete"),
 		Home:           t.TempDir(),
 		Timeout:        5 * time.Second,
-	})
+	}))
 	if deleteErr != nil {
 		t.Fatalf("Start with delete domain probe: %v", deleteErr)
 	}
@@ -548,12 +549,12 @@ func TestProcessFailsClosedWhenSupervisorDiesBeforeProof(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	proc, err := Start(ctx, ProcessOptions{
+	proc, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
 		Home:           t.TempDir(),
 		Timeout:        5 * time.Second,
 		LogWriter:      io.Discard,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -572,8 +573,13 @@ func TestProcessFailsClosedWhenSupervisorDiesBeforeProof(t *testing.T) {
 	if proc.Cmd.ProcessState == nil {
 		t.Fatal("process waiter completed without recording process state")
 	}
-	if err := proc.Close(ctx); !errors.Is(err, ErrProcessTreeUnproven) {
-		t.Fatalf("Close after forced supervisor death = %v, want process-tree proof failure", err)
+	closeErr := proc.Close(ctx)
+	if runtime.GOOS == "darwin" {
+		if closeErr != nil {
+			t.Fatalf("Darwin best-effort Close after completed boundary = %v", closeErr)
+		}
+	} else if !errors.Is(closeErr, ErrProcessContainmentIncomplete) {
+		t.Fatalf("Close after forced supervisor death = %v, want containment failure", closeErr)
 	}
 }
 
@@ -593,7 +599,7 @@ func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
 		t.Fatal("compareVersions mismatch")
 	}
 	markExecutableProbed("already-probed")
-	if needed, err := ensureExecutableVersion(ctx, "already-probed"); err != nil || needed {
+	if needed, err := ensureExecutableVersion(ctx, "already-probed", ProcessOptions{}); err != nil || needed {
 		t.Fatalf("cached executable probe needed=%v err=%v", needed, err)
 	}
 	if err := methodPresent("domain.method", &RPCError{Code: 4001, Message: "domain"}); err != nil {
@@ -618,7 +624,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
 	}
-	if _, err := Start(ctx, ProcessOptions{Home: t.TempDir()}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{Home: t.TempDir()})); err == nil {
 		t.Fatal("Start default executable seam unexpectedly succeeded")
 	}
 
@@ -630,7 +636,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: "start-fails", Home: t.TempDir()}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: "start-fails", Home: t.TempDir()})); err == nil {
 		t.Fatal("Start command failure was ignored")
 	}
 }
@@ -642,7 +648,7 @@ func TestProcessFaultBranches(t *testing.T) {
 
 	restoreProcessSeams(t)
 	mkdirTemp = func(string, string) (string, error) { return "", errors.New("mktemp failed") }
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK)}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK)})); err == nil {
 		t.Fatal("mktemp error ignored")
 	}
 
@@ -651,7 +657,7 @@ func TestProcessFaultBranches(t *testing.T) {
 	if _, err := freePort(); err == nil {
 		t.Fatal("freePort listen error ignored")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()})); err == nil {
 		t.Fatal("Start ignored freePort error")
 	}
 
@@ -661,7 +667,7 @@ func TestProcessFaultBranches(t *testing.T) {
 	if _, err := randomToken(); err == nil {
 		t.Fatal("randomToken entropy error ignored")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()})); err == nil {
 		t.Fatal("Start ignored randomToken error")
 	}
 
@@ -698,34 +704,34 @@ func TestProcessFaultBranches(t *testing.T) {
 func assertStartFaultModes(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes"), Home: t.TempDir()}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes"), Home: t.TempDir()})); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
 	fileHome := filepath.Join(t.TempDir(), "home-file")
 	if err := os.WriteFile(fileHome, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: fileHome}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: fileHome})); err == nil {
 		t.Fatal("file home unexpectedly started")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeStatusOnly), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeStatusOnly), Home: t.TempDir(), Timeout: 5 * time.Second})); err == nil {
 		t.Fatal("missing websocket unexpectedly passed")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeNoGatewayReady), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeNoGatewayReady), Home: t.TempDir(), Timeout: 5 * time.Second})); err == nil {
 		t.Fatal("missing gateway.ready unexpectedly passed")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadStatus), Home: t.TempDir(), Timeout: 5 * time.Second}); err == nil {
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadStatus), Home: t.TempDir(), Timeout: 5 * time.Second})); err == nil {
 		t.Fatal("bad status unexpectedly passed")
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOldVersion), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOldVersion), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 		!strings.Contains(err.Error(), "below minimum") {
 		t.Fatalf("old version error = %v", err)
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadVersion), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeBadVersion), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 		!strings.Contains(err.Error(), "missing semantic version") {
 		t.Fatalf("bad version error = %v", err)
 	}
-	if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeMissingMethod), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeMissingMethod), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 		!strings.Contains(err.Error(), "model.options") {
 		t.Fatalf("missing method probe error = %v", err)
 	}
@@ -749,7 +755,7 @@ func assertStartFaultModes(t *testing.T, ctx context.Context) {
 		{"probe-error:session.delete", "session.delete"},
 	} {
 		t.Run(tt.mode, func(t *testing.T) {
-			if _, err := Start(ctx, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, tt.mode), Home: t.TempDir(), Timeout: 10 * time.Second}); err == nil ||
+			if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, tt.mode), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 				!strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("probe mode %s error = %v", tt.mode, err)
 			}
@@ -1071,3 +1077,32 @@ func (f fakeFileInfo) Mode() os.FileMode  { return 0 }
 func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (f fakeFileInfo) IsDir() bool        { return f.dir }
 func (f fakeFileInfo) Sys() any           { return nil }
+
+func darwinTestProcessOptions(t *testing.T, options ProcessOptions) ProcessOptions {
+	t.Helper()
+	if options.AcquireDiscoveryResources == nil {
+		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
+	}
+	if options.RetainDiscoveryRoot == nil {
+		options.RetainDiscoveryRoot = func(string, error) {}
+	}
+	if runtime.GOOS != "darwin" {
+		return options
+	}
+	parent := t.TempDir()
+	if info, err := os.Stat(options.Home); options.Home != "" && err == nil && info.IsDir() {
+		dirs, createErr := CreateGenerationXDGDirs(parent)
+		if createErr != nil {
+			t.Fatalf("CreateGenerationXDGDirs: %v", createErr)
+		}
+		options.Home = dirs.Root
+	}
+	options.ScratchParent = parent
+	options.DarwinBestEffortContainment = true
+
+	return options
+}
+
+func testDiscoveryResourceAdmission(context.Context) (func(), func(), error) {
+	return func() {}, func() {}, nil
+}

@@ -17,8 +17,8 @@ err := hermesacp.Serve(ctx, input, output, opts...)
 `NewAgent` builds an `Agent` you own; `Serve` runs the ACP loop over a
 reader/writer pair.
 
-`ErrProcessTreeUnproven` is the stable `errors.Is` discriminator returned
-when shutdown cannot prove that every Hermes descendant exited. `Serve`
+`ErrProcessContainmentIncomplete` is the stable `errors.Is` discriminator returned
+when the selected native containment boundary cannot be completed. `Serve`
 returns an `Agent.Close` error carrying this sentinel even when the stream
 loop would otherwise return normally or with context cancellation. A host that
 receives it must retain or quarantine any resources the native process tree may
@@ -39,17 +39,28 @@ still reach.
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
+| `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin. |
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
 
 `WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
-before the adapter interrupts it, closes and proves its native process boundary,
-and fails the prompt with the uniform
+before the adapter interrupts it, completes its selected native containment
+boundary, and fails the prompt with the uniform
 `hermes_turn_failed` error whose `cause` is `timeout`. The default `0` disables
 the deadline. A timeout is a failure, not a user cancel, so it is never reported
 as the `cancelled` stop reason — see
 [Prompt streaming](/docs/core/prompt-streaming).
+
+Linux and Windows completion authoritatively empties the native tree. Darwin
+best-effort completion means only direct-child reaping plus absence of the
+captured original process group; it does not establish that escaped descendants
+are gone.
+
+`RuntimeContainmentMode` reports `authoritative`, `best_effort`, or
+`unavailable`. Embedded hosts can observe it through the runtime-resource
+hooks. In best-effort mode provider-process snapshots are non-authoritative and
+therefore suppressed, including zero-valued snapshots.
 
 `WithSeedFiles` confines paths to the config root: absolute paths, `..`
 segments, and empty keys are rejected at session start. `config.yaml` is the one

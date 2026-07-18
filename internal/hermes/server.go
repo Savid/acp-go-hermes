@@ -138,17 +138,20 @@ type StartOptions struct {
 	// ScratchParent is the resolved parent directory for ephemeral on-disk
 	// materialization, supplied by the caller. The internal package never
 	// consults the system temp directory itself.
-	ScratchParent       string
-	Cwd                 string
-	ExecutablePath      string
-	DefaultModel        string
-	Env                 map[string]string
-	HealthTimeout       time.Duration
-	Logger              *slog.Logger
-	ExistingXDG         XDGDirs
-	MCPServers          []acp.McpServer
-	SeedFiles           map[string]string
-	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
+	ScratchParent               string
+	Cwd                         string
+	ExecutablePath              string
+	DefaultModel                string
+	Env                         map[string]string
+	HealthTimeout               time.Duration
+	Logger                      *slog.Logger
+	ExistingXDG                 XDGDirs
+	MCPServers                  []acp.McpServer
+	SeedFiles                   map[string]string
+	ObserveStartupStage         func(context.Context, string, string, time.Duration, error)
+	AcquireDiscoveryResources   func(context.Context) (func(), func(), error)
+	RetainDiscoveryRoot         func(string, error)
+	DarwinBestEffortContainment bool
 }
 
 type ACPSessionIDString string
@@ -482,8 +485,16 @@ var (
 )
 
 func StartServer(ctx context.Context, options StartOptions) (Server, error) {
+	if options.AcquireDiscoveryResources == nil || options.RetainDiscoveryRoot == nil {
+		return nil, errors.New("hermes version discovery resource callbacks are required")
+	}
+
 	if options.Logger == nil {
 		options.Logger = slog.Default()
+	}
+
+	if strings.ContainsRune(string(options.ACPSessionID), '\x00') {
+		return nil, errors.New("ACP session id contains NUL")
 	}
 
 	root := options.Root
@@ -495,7 +506,12 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	if xdg.Root == "" {
 		var err error
 
-		xdg, err = CreateXDGDirs(root, string(options.ACPSessionID))
+		parent := options.ScratchParent
+		if parent == "" {
+			parent = root
+		}
+
+		xdg, err = CreateGenerationXDGDirs(parent)
 		if err != nil {
 			return nil, err
 		}
@@ -545,14 +561,17 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	processEnv["HERMES_TUI_TOOL_PROGRESS"] = "all"
 
 	proc, err := Start(ctx, ProcessOptions{
-		ExecutablePath:      options.ExecutablePath,
-		Home:                xdg.Root,
-		ScratchParent:       options.ScratchParent,
-		Cwd:                 options.Cwd,
-		Env:                 processEnv,
-		Timeout:             options.HealthTimeout,
-		Configure:           configureHermesProcess,
-		ObserveStartupStage: options.ObserveStartupStage,
+		ExecutablePath:              options.ExecutablePath,
+		Home:                        xdg.Root,
+		ScratchParent:               options.ScratchParent,
+		Cwd:                         options.Cwd,
+		Env:                         processEnv,
+		Timeout:                     options.HealthTimeout,
+		Configure:                   configureHermesProcess,
+		ObserveStartupStage:         options.ObserveStartupStage,
+		AcquireDiscoveryResources:   options.AcquireDiscoveryResources,
+		RetainDiscoveryRoot:         options.RetainDiscoveryRoot,
+		DarwinBestEffortContainment: options.DarwinBestEffortContainment,
 	})
 	if err != nil {
 		return nil, err
@@ -1536,7 +1555,7 @@ func gatewayToolPart(
 		toolName = active.name
 	}
 
-	status := "running"
+	status := containmentStateRunning
 	if event.Type == evtToolComplete {
 		status = valCompleted
 		if gatewayToolFailed(payload, toolName) {
@@ -2181,19 +2200,49 @@ func CreateXDGDirs(root string, sessionID string) (XDGDirs, error) {
 	return dirs, ensureXDGDirs(dirs)
 }
 
+// CreateGenerationXDGDirs creates the actual wrapper-owned writable state for
+// one Hermes runtime incarnation in a fresh, non-reused scratch generation.
+func CreateGenerationXDGDirs(scratchParent string) (XDGDirs, error) {
+	base, err := generationMkdirTemp(scratchParent, "acp-go-hermes-runtime-")
+	if err != nil {
+		return XDGDirs{}, err
+	}
+
+	dirs := XDGDirs{
+		Root:   base,
+		Data:   filepath.Join(base, "data"),
+		Config: filepath.Join(base, "config"),
+		Cache:  filepath.Join(base, "cache"),
+		State:  filepath.Join(base, "state"),
+	}
+	if err := ensureXDGDirs(dirs); err != nil {
+		_ = generationRemoveAll(base)
+
+		return XDGDirs{}, err
+	}
+
+	return dirs, nil
+}
+
 func ensureXDGDirs(dirs XDGDirs) error {
 	for _, dir := range []string{dirs.Root, dirs.Data, dirs.Config, dirs.Cache, dirs.State} {
 		if dir == "" {
 			return fmt.Errorf("xdg directory is empty")
 		}
 
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := xdgMkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
 
 	return nil
 }
+
+var (
+	generationMkdirTemp = os.MkdirTemp
+	generationRemoveAll = os.RemoveAll
+	xdgMkdirAll         = os.MkdirAll
+)
 
 const (
 	hermesConfigFileName   = "config.yaml"
@@ -2537,7 +2586,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	// Reject any ".." segment so the cleaned join can never escape home; a
 	// relative path without ".." segments always stays confined under home.
 	for _, segment := range strings.Split(filepath.ToSlash(relative), "/") {
-		if segment == ".." {
+		if segment == containmentParentPath {
 			return "", "", invalid()
 		}
 	}

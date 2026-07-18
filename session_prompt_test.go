@@ -3408,7 +3408,7 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
-	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	client.closeErr = nativehermes.ErrProcessContainmentIncomplete
 	session := testSession(NewAgent(), client)
 	promptDone := make(chan error, 1)
 	go func() {
@@ -3418,10 +3418,10 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 	<-started
 
 	cancelErr := session.cancelRouted(turnRouteMeta("unproven-fence"))
-	if !errors.Is(cancelErr, nativehermes.ErrProcessTreeUnproven) {
+	if !errors.Is(cancelErr, nativehermes.ErrProcessContainmentIncomplete) {
 		t.Fatalf("Cancel error = %v, want process-tree proof failure", cancelErr)
 	}
-	if promptErr := <-promptDone; !errors.Is(promptErr, nativehermes.ErrProcessTreeUnproven) {
+	if promptErr := <-promptDone; !errors.Is(promptErr, nativehermes.ErrProcessContainmentIncomplete) {
 		t.Fatalf("Prompt error = %v, want process-tree proof failure", promptErr)
 	}
 	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), "session_poisoned") {

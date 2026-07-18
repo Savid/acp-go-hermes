@@ -68,6 +68,14 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 			externalStage(ctx, lifecycle, stage, elapsed, err)
 		}
 	}
+	externalContainment := hooks.ObserveContainment
+	hooks.ObserveContainment = func(ctx context.Context, mode RuntimeContainmentMode) {
+		observe.ObserveRuntimeContainment(ctx, string(mode))
+
+		if externalContainment != nil {
+			externalContainment(ctx, mode)
+		}
+	}
 
 	return hooks
 }

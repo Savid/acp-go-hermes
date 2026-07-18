@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,11 +53,11 @@ func TestProcessCloseKillsProcessGroupGrandchild(t *testing.T) {
 	}
 }
 
-func TestProcessCloseProvesQuiescenceAfterRootExit(t *testing.T) {
+func TestProcessCloseCompletesContainmentAfterRootExit(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command("sh", "-c", "(trap '' TERM; sleep 30) & echo $! > "+strconv.Quote(pidFile)+"; exit 0")
 	configureHermesProcess(cmd)
-	tree, err := startContainedProcess(cmd)
+	tree, err := startContainedProcess(cmd, darwinTestContainmentSpec(t))
 	if err != nil {
 		t.Fatalf("start contained process: %v", err)
 	}
@@ -120,22 +121,22 @@ func TestSignalProcessBranches(t *testing.T) {
 	}
 }
 
-func TestUnixProcessContainmentProofBranches(t *testing.T) {
+func TestUnixProcessContainmentCompletionBranches(t *testing.T) {
 	if _, err := startContainedProcess(exec.Command("sh", "-c", "exit 0")); err == nil {
 		t.Fatal("startContainedProcess accepted a command without a process group")
 	}
 
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
 	configureHermesProcess(missing)
-	if _, err := startContainedProcess(missing); err == nil {
+	if _, err := startContainedProcess(missing, darwinTestContainmentSpec(t)); err == nil {
 		t.Fatal("startContainedProcess accepted a missing executable")
 	}
 
-	if err := (*processContainment)(nil).quiesce(time.Millisecond); err == nil {
-		t.Fatal("nil containment quiesced")
+	if err := (*processContainment)(nil).complete(time.Millisecond); err == nil {
+		t.Fatal("nil containment completed")
 	}
-	if err := (&processContainment{}).quiesce(time.Millisecond); err == nil {
-		t.Fatal("zero containment quiesced")
+	if err := (&processContainment{}).complete(time.Millisecond); err == nil {
+		t.Fatal("zero containment completed")
 	}
 
 	oldKill := processKill
@@ -166,8 +167,8 @@ func TestUnixProcessContainmentProofBranches(t *testing.T) {
 	if err := tree.signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal gone tree: %v", err)
 	}
-	if err := tree.quiesce(0); err != nil {
-		t.Fatalf("quiesce gone tree: %v", err)
+	if err := tree.complete(0); err != nil {
+		t.Fatalf("complete gone tree: %v", err)
 	}
 
 	processKill = func(int, syscall.Signal) error { return errors.New("signal failed") }
@@ -182,8 +183,8 @@ func TestUnixProcessContainmentProofBranches(t *testing.T) {
 	if err := tree.waitUntilEmpty(time.Now().Add(-time.Second)); err == nil {
 		t.Fatal("expired deadline ignored")
 	}
-	if err := tree.quiesce(time.Nanosecond); err == nil {
-		t.Fatal("non-quiescent tree reported quiescent")
+	if err := tree.complete(time.Nanosecond); err == nil {
+		t.Fatal("incomplete tree reported complete")
 	}
 
 	probeCalls := 0
@@ -199,31 +200,45 @@ func TestUnixProcessContainmentProofBranches(t *testing.T) {
 
 		return syscall.ESRCH
 	}
-	if err := tree.quiesce(time.Second); err != nil {
-		t.Fatalf("fallback quiescence: %v", err)
+	if err := tree.complete(time.Second); err != nil {
+		t.Fatalf("fallback completion: %v", err)
 	}
 }
 
-func TestProcessQuiescenceProofFailures(t *testing.T) {
+func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return ContainmentSpec{}
+	}
+	parent := t.TempDir()
+	dirs, err := CreateGenerationXDGDirs(parent)
+	if err != nil {
+		t.Fatalf("CreateGenerationXDGDirs: %v", err)
+	}
+
+	return ContainmentSpec{DarwinBestEffort: true, ScratchParent: parent, GenerationRoot: dirs.Root, LifecycleKind: "session"}
+}
+
+func TestProcessContainmentCompletionFailures(t *testing.T) {
 	oldKill := processKill
 	oldClose := processTreeClose
 	t.Cleanup(func() {
 		processKill = oldKill
 		processTreeClose = oldClose
 	})
-	if err := (&Process{}).quiesceProcessTree(); err != nil {
+	if err := (&Process{}).completeProcessContainment(); err != nil {
 		t.Fatalf("nil process tree: %v", err)
 	}
 
 	process := &Process{tree: &processContainment{processGroupID: 123}}
 	processKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
-	if err := process.quiesceProcessTree(); !errors.Is(err, ErrProcessTreeUnproven) {
-		t.Fatalf("quiesce error = %v", err)
+	if err := process.completeProcessContainment(); !errors.Is(err, ErrProcessContainmentIncomplete) {
+		t.Fatalf("completion error = %v", err)
 	}
 
 	processKill = func(int, syscall.Signal) error { return syscall.ESRCH }
 	processTreeClose = func(*processContainment) error { return errors.New("close failed") }
-	if err := process.quiesceProcessTree(); err == nil || !strings.Contains(err.Error(), "close Hermes process containment") {
+	if err := process.completeProcessContainment(); err == nil || !strings.Contains(err.Error(), "close Hermes process containment") {
 		t.Fatalf("close containment error = %v", err)
 	}
 }

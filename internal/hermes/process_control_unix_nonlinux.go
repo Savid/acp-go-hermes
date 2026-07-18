@@ -1,4 +1,4 @@
-//go:build unix && !linux
+//go:build unix && !linux && !darwin
 
 package hermes
 
@@ -8,6 +8,6 @@ import (
 	"runtime"
 )
 
-func startUnixContainedProcess(*exec.Cmd) (*processContainment, error) {
-	return nil, fmt.Errorf("%w: detached native descendants cannot be proved on %s", ErrProcessTreeUnproven, runtime.GOOS)
+func startUnixContainedProcess(*exec.Cmd, ContainmentSpec) (*processContainment, error) {
+	return nil, fmt.Errorf("%w: detached native descendants cannot be proved on %s", ErrProcessContainmentIncomplete, runtime.GOOS)
 }

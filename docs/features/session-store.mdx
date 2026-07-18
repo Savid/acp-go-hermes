@@ -86,11 +86,13 @@ Restore after native deletion hydrates `state-db` into a fresh home, calls nativ
 `session.resume`, and — for `session/load` — replays `session.history` to the ACP
 client.
 
-The same restore path is the recovery boundary after a proved turn cancellation
-or timeout. The interrupted native runtime is destroyed without a fresh
-snapshot; the next authorized prompt hydrates the last completed-turn commit
-and resumes the exact native session key. Partially emitted or partially
-persisted native state from the interrupted turn is never adopted.
+The same restore path is the recovery boundary after a turn cancellation or
+timeout whose selected containment boundary completed. The interrupted native
+runtime is closed without a fresh snapshot; the next authorized prompt hydrates
+the last completed-turn commit and resumes the exact native session key.
+Partially emitted or partially persisted native state from the interrupted turn
+is never adopted. On Darwin best effort, completion does not establish that a
+`setsid(2)` descendant outside the captured original process group exited.
 
 `session/close` captures its final eligible snapshot before stopping the native
 client, because managed client shutdown removes the isolated XDG root. Close

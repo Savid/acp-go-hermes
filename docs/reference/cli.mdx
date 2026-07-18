@@ -17,6 +17,7 @@ acp-go-hermes [flags]
 | `-model` | Default model value passed as `provider/model`. |
 | `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
 | `-debug` | Enable debug logging on stderr. |
+| `-darwin-best-effort-containment` | On Darwin only, accept process-group containment despite escaped-descendant, marker-scrubbing, and PGID-reuse risks. Emits an unconditional stderr warning before serving. |
 | `-version` | Print the adapter version and exit. |
 
 `-seed-file` reads the host file at startup and writes its contents to
@@ -33,4 +34,22 @@ Pointing Hermes at a LiteLLM gateway:
 acp-go-hermes -seed-file config.yaml=./hermes-config.yaml
 ```
 
-No vendor-specific process flags are exposed in v1.
+## Darwin containment operations
+
+Diagnosis is read-only and emits exactly one JSON object:
+
+```sh
+acp-go-hermes containment diagnose -scratch-dir /path/to/scratch
+```
+
+After reviewing its correlated and ambiguous PIDs, cleanup requires an exact
+128-bit lowercase hexadecimal runtime ID and explicit force:
+
+```sh
+acp-go-hermes containment cleanup \
+  -scratch-dir /path/to/scratch \
+  -runtime-id 0123456789abcdef0123456789abcdef \
+  -force
+```
+
+Cleanup signals only freshly revalidated, same-UID marker matches. PID-by-PID cleanup has a PID-reuse time-of-check/time-of-use race and can signal an unrelated reused PID; correlation is not ownership or proof of absence; inherited markers can be scrubbed. Both diagnose and cleanup include that exact risk in their JSON warning and command help. A partial cleanup emits its JSON result on stdout and an operational error on stderr.

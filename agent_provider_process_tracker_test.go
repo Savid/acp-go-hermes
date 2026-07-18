@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestProviderProcessTrackerAggregatesOnlyCompleteInventories(t *testing.T) {
 			snapshots = append(snapshots, count)
 			mu.Unlock()
 		},
-	})
+	}, true)
 
 	unknown := tracker.register()
 	known := tracker.register()
@@ -75,7 +76,7 @@ func TestProviderProcessTrackerAggregatesOnlyCompleteInventories(t *testing.T) {
 
 	unknown.retire(t.Context(), false)
 	require.Equal(t, []int{5}, snapshots)
-	require.False(t, providerProcessTreeProven(nativehermes.ErrProcessTreeUnproven))
+	require.False(t, providerProcessTreeProven(nativehermes.ErrProcessContainmentIncomplete))
 	require.True(t, providerProcessTreeProven(errors.New("ordinary close error")))
 
 	unknown.retire(t.Context(), true)
@@ -98,7 +99,7 @@ func TestProviderProcessTrackerConcurrentLifecycle(t *testing.T) {
 			snapshots = append(snapshots, count)
 			mu.Unlock()
 		},
-	})
+	}, true)
 	registered := make([]*providerProcessRoot, roots)
 	for index := range registered {
 		registered[index] = tracker.register()
@@ -137,7 +138,7 @@ func TestProviderProcessTrackerRequeriesEveryRoot(t *testing.T) {
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 		},
-	})
+	}, true)
 	rootA := tracker.register()
 	rootB := tracker.register()
 	inventoryA := &mutableProviderInventory{count: 1, available: true}
@@ -173,7 +174,7 @@ func TestProviderProcessTrackerHookCanReenter(t *testing.T) {
 				root.retire(ctx, true)
 			}
 		},
-	})
+	}, true)
 	root = tracker.register()
 	root.observe(t.Context(), testProviderInventory{count: 1, available: true})
 
@@ -204,7 +205,7 @@ func TestHermesProductionProcessSnapshotLifecycle(t *testing.T) {
 		{name: "proven close resets zero", wantSnapshots: []int{4, 4, 0}},
 		{
 			name:          "unproven close preserves nonzero",
-			closeErr:      nativehermes.ErrProcessTreeUnproven,
+			closeErr:      nativehermes.ErrProcessContainmentIncomplete,
 			wantSnapshots: []int{4, 4},
 		},
 	}
@@ -216,7 +217,7 @@ func TestHermesProductionProcessSnapshotLifecycle(t *testing.T) {
 			fake := newFakeHermesClient()
 			fake.xdg.Root = root
 			fake.closeErr = test.closeErr
-			agent := NewAgent(
+			options := []Option{
 				WithScratchDir(t.TempDir()),
 				WithRuntimeResourceHooks(RuntimeResourceHooks{
 					ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
@@ -228,7 +229,12 @@ func TestHermesProductionProcessSnapshotLifecycle(t *testing.T) {
 						return inventoryHermesServer{Server: fake, count: 4}, nil
 					}
 				},
-			)
+			}
+			if runtime.GOOS == "darwin" {
+				options = append(options, WithDarwinBestEffortContainment())
+				test.wantSnapshots = nil
+			}
+			agent := NewAgent(options...)
 
 			server, err := agent.newHermesClient(
 				t.Context(), "snapshot-session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{Root: root},

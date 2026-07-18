@@ -24,6 +24,8 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		Env: map[string]string{
 			"NO_COLOR": "1",
 		},
+		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
+		RetainDiscoveryRoot:       func(string, error) {},
 	})
 	if err != nil {
 		t.Fatalf("start hermes serve: %v", err)

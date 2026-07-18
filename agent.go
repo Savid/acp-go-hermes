@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Agent construction keeps dependent lifecycle state adjacent.
 package hermesacp
 
 import (
@@ -23,10 +24,11 @@ const (
 	closeTimeout                    = 5 * time.Second
 	mcpReloadTimeout                = 2 * time.Minute
 
-	valElicitation    = "elicitation"
-	valBackpressure   = "backpressure"
-	valUnknownSession = "unknown session"
-	keyLimit          = "limit"
+	valElicitation     = "elicitation"
+	valBackpressure    = "backpressure"
+	valUnknownSession  = "unknown session"
+	agentClosedMessage = "agent closed"
+	keyLimit           = "limit"
 )
 
 var (
@@ -37,19 +39,24 @@ var (
 
 // Agent exposes Hermes through ACP.
 type Agent struct {
-	options    Options
-	log        *slog.Logger
-	observe    *observer.Observer
-	optionsErr error
-	processes  *providerProcessTracker
+	options         Options
+	log             *slog.Logger
+	observe         *observer.Observer
+	optionsErr      error
+	processes       *providerProcessTracker
+	containmentMode RuntimeContainmentMode
 
 	mu                 sync.Mutex
 	closed             bool
+	closeOnce          sync.Once
+	closeErr           error
+	containmentErr     error
+	constructions      sync.WaitGroup
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
 	deleteCleanup      map[acp.SessionId]deleteCleanupRecord
-	unprovenRoots      map[string]struct{}
+	incompleteRoots    map[acp.SessionId]map[string]struct{}
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -64,6 +71,7 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
+	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -82,21 +90,39 @@ func NewAgent(opts ...Option) *Agent {
 		Version:        options.AgentVersion,
 	})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+	mode := containmentMode(options)
+	if options.RuntimeResourceHooks.ObserveContainment != nil {
+		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
+	}
+	if mode == RuntimeContainmentBestEffort {
+		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
+			slog.String("containment", string(mode)),
+		)
+	}
 
 	agent := &Agent{
-		options:       options,
-		log:           log,
-		optionsErr:    optionsErr,
-		observe:       observe,
-		sessions:      make(map[acp.SessionId]*session),
-		deleted:       make(map[acp.SessionId]struct{}),
-		deleteCleanup: make(map[acp.SessionId]deleteCleanupRecord),
-		unprovenRoots: make(map[string]struct{}),
-		clientCalls:   make(chan struct{}, limits.MaxConcurrentClientCalls),
+		options:         options,
+		log:             log,
+		optionsErr:      optionsErr,
+		observe:         observe,
+		sessions:        make(map[acp.SessionId]*session),
+		deleted:         make(map[acp.SessionId]struct{}),
+		deleteCleanup:   make(map[acp.SessionId]deleteCleanupRecord),
+		incompleteRoots: make(map[acp.SessionId]map[string]struct{}),
+		clientCalls:     make(chan struct{}, limits.MaxConcurrentClientCalls),
+		containmentMode: mode,
 	}
-	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks)
+	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
 
 	return agent
+}
+
+func (a *Agent) ContainmentMode() RuntimeContainmentMode {
+	if a == nil {
+		return RuntimeContainmentUnavailable
+	}
+
+	return a.containmentMode
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
@@ -143,15 +169,25 @@ func (a *Agent) turnTimeout() time.Duration {
 }
 
 func (a *Agent) Close() error {
-	a.mu.Lock()
+	a.closeOnce.Do(func() { a.closeErr = a.close() })
 
+	return a.closeErr
+}
+
+func (a *Agent) close() error {
+	a.mu.Lock()
+	a.closed = true
+	a.mu.Unlock()
+
+	a.constructions.Wait()
+
+	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
 
 	a.sessions = make(map[acp.SessionId]*session)
-	a.closed = true
 	a.conn = nil
 	a.mu.Unlock()
 
@@ -159,14 +195,36 @@ func (a *Agent) Close() error {
 
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, session.Close(ctx))
+		closeErr := session.Close(ctx)
+		a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
+		err = errors.Join(err, closeErr)
 
 		cancel()
 	}
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
+	a.mu.Lock()
+	err = errors.Join(err, a.containmentErr)
+	a.mu.Unlock()
 
 	return err
+}
+
+func (a *Agent) beginSessionConstruction() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	a.constructions.Add(1)
+
+	return nil
+}
+
+func (a *Agent) endSessionConstruction() {
+	a.constructions.Done()
 }
 
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -278,7 +336,7 @@ func (a *Agent) ensureOpen() error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
 	return nil
@@ -340,7 +398,7 @@ func (a *Agent) storeStartedSession(session *session) error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "agent closed"})
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {

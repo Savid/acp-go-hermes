@@ -16,20 +16,35 @@ listens off-host.
 ## Native process containment
 
 Hermes' cooperative interrupt stops its foreground command but intentionally
-leaves background servers and watchers running. The adapter therefore treats
-the whole per-session native process tree as the cancellation boundary. On
-Linux, a dedicated self-executed subreaper owns Hermes and every orphaned tool
+leaves background servers and watchers running. The adapter therefore closes
+the selected native containment boundary before cancellation settles. On Linux,
+a dedicated self-executed subreaper owns Hermes and every orphaned tool
 descendant, including processes that detach with `setsid(2)`; pidfd-bound
 signals, an authoritative kernel `ECHILD` fence after the direct root waiter
 settles, and an explicit proof pipe make fork/reparent races and supervisor
 death fail closed. On Windows, a kill-on-close Job Object supplies the
 equivalent boundary.
 
-Native session startup fails with `ErrProcessTreeUnproven` on operating systems
-where the adapter cannot establish an authoritative detached-descendant
-boundary. A cancellation, timeout, or close also fails closed if the active
-boundary cannot prove that every process exited; its isolated root and host
-admission ownership remain quarantined.
+Native session startup fails with `ErrProcessContainmentIncomplete` where the
+adapter cannot establish its selected boundary. On Darwin the default is to
+reject startup. `WithDarwinBestEffortContainment` (or the CLI
+`-darwin-best-effort-containment` flag) explicitly accepts a weaker boundary:
+the adapter controls only the original process group. A descendant that calls
+`setsid(2)` can escape and survive; numeric PGID reuse can make later group
+signals collateral; environment-marker correlation is neither ownership nor
+proof of absence and can be scrubbed.
+
+Every opted-in Darwin launch gets a fresh mode-0700 generation root and an
+atomic mode-0600 record under `acp-go-hermes-containment` in the scratch parent.
+The contained `hermes --version` discovery launch has its own discovery native-
+root admission and scratch reservation, separate from the session server's
+admissions and generation.
+Incomplete cleanup quarantines that root and its host admission ownership.
+Operators can inspect records with `acp-go-hermes containment diagnose` and may
+run the explicitly forced cleanup command after reviewing correlated and
+ambiguous PIDs. Cleanup revalidates UID, process start identity, and both exact
+markers before every individual PID signal; it never treats a recorded PID or
+PGID as signal authority. PID-by-PID cleanup has a PID-reuse time-of-check/time-of-use race and can signal an unrelated reused PID; correlation is not ownership or proof of absence; inherited markers can be scrubbed.
 
 ## Stdout discipline
 

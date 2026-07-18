@@ -15,6 +15,7 @@ type providerProcessInventory interface {
 type providerProcessTracker struct {
 	mu         sync.Mutex
 	hooks      RuntimeResourceHooks
+	enabled    bool
 	nextID     uint64
 	entries    map[uint64]providerProcessEntry
 	publishing bool
@@ -30,9 +31,10 @@ type providerProcessRoot struct {
 	id      uint64
 }
 
-func newProviderProcessTracker(hooks RuntimeResourceHooks) *providerProcessTracker {
+func newProviderProcessTracker(hooks RuntimeResourceHooks, enabled bool) *providerProcessTracker {
 	return &providerProcessTracker{
 		hooks:   hooks,
+		enabled: enabled,
 		entries: make(map[uint64]providerProcessEntry),
 	}
 }
@@ -115,6 +117,15 @@ func (t *providerProcessTracker) markDirtyLocked() bool {
 }
 
 func (t *providerProcessTracker) publish(ctx context.Context) {
+	if !t.enabled {
+		t.mu.Lock()
+		t.dirty = false
+		t.publishing = false
+		t.mu.Unlock()
+
+		return
+	}
+
 	for {
 		t.mu.Lock()
 		if !t.dirty {
@@ -154,5 +165,5 @@ func (t *providerProcessTracker) snapshotLocked() (int, bool) {
 }
 
 func providerProcessTreeProven(err error) bool {
-	return !errors.Is(err, nativehermes.ErrProcessTreeUnproven)
+	return !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete)
 }

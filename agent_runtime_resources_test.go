@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -93,7 +94,7 @@ func TestManagedHermesServerResourceRelease(t *testing.T) {
 		}
 		nativeReleases, scratchReleases := 0, 0
 		client := newFakeHermesClient()
-		client.closeErr = errors.Join(errors.New("shutdown failed"), nativehermes.ErrProcessTreeUnproven)
+		client.closeErr = errors.Join(errors.New("shutdown failed"), nativehermes.ErrProcessContainmentIncomplete)
 		server := &managedHermesServer{
 			Server:         client,
 			root:           t.TempDir(),
@@ -101,7 +102,7 @@ func TestManagedHermesServerResourceRelease(t *testing.T) {
 			scratchRelease: func() { scratchReleases++ },
 		}
 
-		require.ErrorIs(t, server.Close(t.Context()), nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, server.Close(t.Context()), nativehermes.ErrProcessContainmentIncomplete)
 		require.Zero(t, removeCalls)
 		require.Zero(t, nativeReleases)
 		require.Zero(t, scratchReleases)
@@ -167,6 +168,119 @@ func TestHermesSessionResourceAdmission(t *testing.T) {
 	require.ErrorContains(t, err, "live lease")
 }
 
+func TestHermesVersionDiscoveryHasIndependentAdmissions(t *testing.T) {
+	var nativeKinds, scratchKinds []RuntimeResourceKind
+	var startOptions nativehermes.StartOptions
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+			scratchKinds = append(scratchKinds, kind)
+
+			return func() {}, nil
+		},
+		AcquireNativeRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
+			nativeKinds = append(nativeKinds, kind)
+
+			return func() {}, nil
+		},
+	}))
+	agent.options.clientFactory = func(ctx context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		startOptions = options
+		require.NotNil(t, options.AcquireDiscoveryResources)
+		require.NotNil(t, options.RetainDiscoveryRoot)
+		nativeRelease, scratchRelease, err := options.AcquireDiscoveryResources(ctx)
+		require.NoError(t, err)
+		nativeRelease()
+		scratchRelease()
+		client := newFakeHermesClient()
+		client.xdg = options.ExistingXDG
+
+		return client, nil
+	}
+
+	client, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+	require.NoError(t, err)
+	require.Equal(t, []RuntimeResourceKind{RuntimeResourceSession, RuntimeResourceDiscovery}, nativeKinds)
+	require.Equal(t, []RuntimeResourceKind{RuntimeResourceSession, RuntimeResourceDiscovery}, scratchKinds)
+	require.NoError(t, client.Close(t.Context()))
+	require.Empty(t, hermesServerRoot(nil))
+
+	wantErr := errors.New("discovery rejected")
+	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
+		return nil, wantErr
+	}
+	_, _, err = startOptions.AcquireDiscoveryResources(t.Context())
+	require.ErrorIs(t, err, wantErr)
+
+	discoveryScratchReleases := 0
+	agent.options.RuntimeResourceHooks.ReserveScratchRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
+		return func() { discoveryScratchReleases++ }, nil
+	}
+	agent.options.RuntimeResourceHooks.AcquireNativeRoot = func(context.Context, RuntimeResourceKind) (func(), error) {
+		return nil, wantErr
+	}
+	_, _, err = startOptions.AcquireDiscoveryResources(t.Context())
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, 1, discoveryScratchReleases)
+
+	startOptions.RetainDiscoveryRoot("/scratch/acp-go-hermes-runtime-retained", nativehermes.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
+}
+
+func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
+	wantErr := errors.New("generation failed")
+	previousCreate := createHermesGeneration
+	createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+		return nativehermes.XDGDirs{}, wantErr
+	}
+	t.Cleanup(func() { createHermesGeneration = previousCreate })
+
+	t.Run("new client", func(t *testing.T) {
+		agent := NewAgent(WithScratchDir(t.TempDir()))
+		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
+		require.ErrorIs(t, err, wantErr)
+	})
+
+	t.Run("load", func(t *testing.T) {
+		agent := NewAgent(
+			WithScratchDir(t.TempDir()),
+			WithSessionStore(validHydrateStore(t, t.Context())),
+		)
+		_, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
+		require.ErrorIs(t, err, wantErr)
+	})
+
+	t.Run("resume runtime", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		require.ErrorIs(t, session.resumeRuntimeForTurnLocked(t.Context()), wantErr)
+	})
+
+	t.Run("fork", func(t *testing.T) {
+		agent := NewAgent(WithScratchDir(t.TempDir()))
+		parentClient := newFakeHermesClient()
+		parentClient.forkSession = testNativeSession("native-child")
+		parent := testSession(agent, parentClient)
+		agent.sessions[parent.id] = parent
+
+		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		require.ErrorIs(t, err, wantErr)
+	})
+
+	t.Run("new client with scratch", func(t *testing.T) {
+		blockedRoot := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(blockedRoot, []byte("blocked"), 0o600))
+		agent := NewAgent(WithScratchDir(blockedRoot))
+		_, err := agent.newHermesClientWithScratch(
+			t.Context(),
+			"session-1",
+			t.TempDir(),
+			sessionMeta{},
+			nativehermes.XDGDirs{Root: t.TempDir()},
+			func() {},
+		)
+		require.Error(t, err)
+	})
+}
+
 func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.T) {
 	previousRemove := runtimeRemoveAll
 	t.Cleanup(func() { runtimeRemoveAll = previousRemove })
@@ -187,20 +301,19 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 		factoryCalls := 0
 		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryCalls++
-			var err error
-			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
-			require.NoError(t, err)
+			xdg = options.ExistingXDG
+			require.NotEmpty(t, xdg.Root)
 
-			return nil, nativehermes.ErrProcessTreeUnproven
+			return nil, nativehermes.ErrProcessContainmentIncomplete
 		}
 
 		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
-		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 		require.DirExists(t, xdg.Root)
 		require.Zero(t, nativeReleases)
 		require.Zero(t, scratchReleases)
 		_, retryErr := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
-		require.ErrorIs(t, retryErr, nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, retryErr, nativehermes.ErrProcessContainmentIncomplete)
 		require.Equal(t, 1, factoryCalls)
 		require.NoError(t, previousRemove(xdg.Root))
 	})
@@ -220,9 +333,8 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 
 		var xdg nativehermes.XDGDirs
 		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
-			var err error
-			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
-			require.NoError(t, err)
+			xdg = options.ExistingXDG
+			require.NotEmpty(t, xdg.Root)
 
 			return nil, startupErr
 		}
@@ -250,9 +362,8 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 
 		var xdg nativehermes.XDGDirs
 		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
-			var err error
-			xdg, err = nativehermes.CreateXDGDirs(options.Root, string(options.ACPSessionID))
-			require.NoError(t, err)
+			xdg = options.ExistingXDG
+			require.NotEmpty(t, xdg.Root)
 
 			return nil, startupErr
 		}
@@ -287,11 +398,11 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
 			root = options.ExistingXDG.Root
 
-			return nil, nativehermes.ErrProcessTreeUnproven
+			return nil, nativehermes.ErrProcessContainmentIncomplete
 		}
 
 		_, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
-		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 		require.DirExists(t, root)
 		require.Zero(t, nativeReleases)
 		require.Zero(t, scratchReleases)
@@ -317,11 +428,11 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 		agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
 			root = options.ExistingXDG.Root
 
-			return nil, nativehermes.ErrProcessTreeUnproven
+			return nil, nativehermes.ErrProcessContainmentIncomplete
 		}
 
 		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
-		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 		require.DirExists(t, root)
 		require.Zero(t, nativeReleases)
 		require.Zero(t, scratchReleases)
@@ -345,10 +456,10 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		parent := testSession(agent, parentClient)
 		agent.sessions[parent.id] = parent
-		agent.retainUnprovenHermesRoot(agent.hermesXDGRoot("00000000-0000-4000-8000-000000000000", nativehermes.XDGDirs{}))
+		agent.retainIncompleteHermesRoot("00000000-0000-4000-8000-000000000000", filepath.Join(agent.homeRoot(), "retained"))
 
 		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
-		require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 		require.Zero(t, scratchAcquires)
 	})
 }
@@ -367,7 +478,7 @@ func TestHermesLoadGetSessionFailureUnwind(t *testing.T) {
 		wantRoot            bool
 	}{
 		{name: "ordinary close error unwinds", closeErr: errors.New("close"), wantNativeReleases: 1, wantScratchReleases: 1},
-		{name: "proof sentinel retains all ownership", closeErr: errors.Join(errors.New("close"), nativehermes.ErrProcessTreeUnproven), wantSentinel: true, wantRoot: true},
+		{name: "proof sentinel retains all ownership", closeErr: errors.Join(errors.New("close"), nativehermes.ErrProcessContainmentIncomplete), wantSentinel: true, wantRoot: true},
 		{name: "delete failure retains scratch", closeErr: errors.New("close"), deleteErr: errors.New("delete"), wantNativeReleases: 1, wantRoot: true},
 	}
 
@@ -410,9 +521,9 @@ func TestHermesLoadGetSessionFailureUnwind(t *testing.T) {
 			require.ErrorIs(t, err, getErr)
 			require.ErrorIs(t, err, test.closeErr)
 			if test.wantSentinel {
-				require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+				require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 				_, retryErr := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
-				require.ErrorIs(t, retryErr, nativehermes.ErrProcessTreeUnproven)
+				require.ErrorIs(t, retryErr, nativehermes.ErrProcessContainmentIncomplete)
 				require.Equal(t, 1, factoryCalls)
 			}
 			if test.deleteErr != nil {
@@ -449,7 +560,7 @@ func TestHermesForkGetSessionProofFailureRetainsOwnership(t *testing.T) {
 	getErr := errors.New("get")
 	child := newFakeHermesClient()
 	child.getErr = getErr
-	child.closeErr = errors.Join(errors.New("close"), nativehermes.ErrProcessTreeUnproven)
+	child.closeErr = errors.Join(errors.New("close"), nativehermes.ErrProcessContainmentIncomplete)
 	var root string
 	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
 		root = options.ExistingXDG.Root
@@ -460,10 +571,11 @@ func TestHermesForkGetSessionProofFailureRetainsOwnership(t *testing.T) {
 
 	_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
 	require.ErrorIs(t, err, getErr)
-	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 	require.DirExists(t, root)
 	require.Zero(t, nativeReleases)
 	require.Zero(t, scratchReleases)
+	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
 	require.NoError(t, os.RemoveAll(root))
 }
 
@@ -474,7 +586,7 @@ func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
 	require.NoError(t, err)
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	client.closeErr = nativehermes.ErrProcessContainmentIncomplete
 	managed := &managedHermesServer{
 		Server:         client,
 		root:           xdg.Root,
@@ -486,11 +598,12 @@ func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
 	agent.sessions[session.id] = session
 
 	err = agent.cleanupFailedStartedSession(t.Context(), session)
-	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 	require.Nil(t, agent.activeSession(session.id))
 	require.DirExists(t, xdg.Root)
 	require.Zero(t, nativeReleases)
 	require.Zero(t, scratchReleases)
+	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
 	require.NoError(t, os.RemoveAll(xdg.Root))
 }
 
@@ -501,7 +614,7 @@ func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
 	require.NoError(t, err)
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	client.closeErr = nativehermes.ErrProcessTreeUnproven
+	client.closeErr = nativehermes.ErrProcessContainmentIncomplete
 	managed := &managedHermesServer{
 		Server:         client,
 		root:           xdg.Root,
@@ -513,12 +626,13 @@ func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
 	agent.sessions[session.id] = session
 
 	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
-	require.ErrorIs(t, err, nativehermes.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
 	require.Nil(t, agent.activeSession(session.id))
 	require.Contains(t, agent.deleted, session.id)
 	require.NotContains(t, agent.deleteCleanup, session.id)
 	require.DirExists(t, xdg.Root)
 	require.Zero(t, nativeReleases)
 	require.Zero(t, scratchReleases)
+	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
 	require.NoError(t, os.RemoveAll(xdg.Root))
 }

@@ -21,9 +21,19 @@ binary configures adapter exporters from the standard `OTEL_*` environment
 variables.
 
 Telemetry records ACP request outcomes, prompt-turn timing, token usage, active
-sessions, and `hermes serve` process starts. Inbound ACP `_meta` W3C trace
+sessions, and `hermes serve` process starts. A contained `hermes --version`
+probe is admitted separately as `discovery` for both native-root and scratch-
+root resource hooks; it is not hidden beneath the session admission. Inbound
+ACP `_meta` W3C trace
 context is extracted for adapter spans and injected into each launched
 `hermes serve` process as `TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
+
+`acp_go_hermes.runtime.containment` records the selected `containment` mode as
+`authoritative`, `best_effort`, or `unavailable`. Darwin best-effort startup
+also emits a structured warning with `containment=best_effort`. Because that
+mode cannot authoritatively enumerate escaped descendants, provider-process
+snapshots are suppressed rather than publishing a misleading count, even when
+the observed count would be zero.
 
 <Note>
 Telemetry avoids recording prompt text, tool inputs, tool outputs, and raw

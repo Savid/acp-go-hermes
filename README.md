@@ -99,10 +99,10 @@ materialized.
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
   delete, and fork.
-- One isolated, OS-contained `hermes serve` tree per session, each with a
-  dedicated `HERMES_HOME`; cancellation and timeout prove every native
-  descendant dead before settling, then lazily resume from the last committed
-  snapshot on the next prompt.
+- One isolated `hermes serve` runtime per session, each with a dedicated,
+  freshly generated `HERMES_HOME`. Linux and Windows use authoritative OS
+  containment. Darwin is disabled unless its explicitly risky best-effort
+  process-group mode is selected.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session

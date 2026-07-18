@@ -401,8 +401,8 @@ func (s *session) cancelTurnLocked(client nativehermes.Server, markCancelled boo
 // fenceTurnLocked is the single destructive turn fence. cancelMu must be held.
 // It memoizes by epoch so Cancel, the prompt context, and the deadline can all
 // race without issuing duplicate shutdowns. A normal cancellation/timeout is
-// returned only after Close proves the entire native containment boundary is
-// quiescent and releases its isolated root.
+// returned only after Close completes the selected native containment boundary
+// and releases its isolated root.
 func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancelled bool) error {
 	if epoch == 0 {
 		return nil
@@ -452,8 +452,8 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 
 	if closeErr != nil {
 		name := "hermes_runtime_fence_failed"
-		if errors.Is(closeErr, nativehermes.ErrProcessTreeUnproven) {
-			name = "hermes_process_tree_unproven"
+		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+			name = "hermes_process_containment_incomplete"
 		}
 
 		err := errors.Join(s.poisonWithError(ctx, name, closeErr.Error()), closeErr)

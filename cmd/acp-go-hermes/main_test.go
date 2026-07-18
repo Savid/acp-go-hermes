@@ -96,6 +96,38 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	}
 }
 
+func TestRunContainmentAndDarwinBestEffortFlag(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"containment"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
+		t.Fatalf("containment dispatch code = %d", code)
+	}
+
+	mainRuntimePlatform = "linux"
+	stderr.Reset()
+	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
+		t.Fatalf("off-Darwin flag code = %d", code)
+	}
+
+	mainRuntimePlatform = "darwin"
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...hermesacp.Option) error {
+		agent := hermesacp.NewAgent(options...)
+		if agent.ContainmentMode() != hermesacp.RuntimeContainmentBestEffort {
+			t.Fatalf("containment mode = %q", agent.ContainmentMode())
+		}
+
+		return nil
+	}
+	stderr.Reset()
+	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 0 {
+		t.Fatalf("Darwin flag code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "containment=best_effort") || !strings.Contains(stderr.String(), "PGID reuse") {
+		t.Fatalf("Darwin warning = %q", stderr.String())
+	}
+}
+
 func TestSeedFileFlag(t *testing.T) {
 	var flag seedFileFlag
 	if err := flag.Set("config.yaml=/host/config.yaml"); err != nil {
@@ -226,11 +258,13 @@ func replaceGlobals(t *testing.T) func() {
 	oldServe := serve
 	oldVersion := agentVersion
 	oldExit := exit
+	oldRuntime := mainRuntimePlatform
 
 	return func() {
 		serve = oldServe
 		agentVersion = oldVersion
 		exit = oldExit
+		mainRuntimePlatform = oldRuntime
 	}
 }
 

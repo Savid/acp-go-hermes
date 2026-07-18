@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // CLI parsing keeps dependent validation and warnings adjacent.
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 
 	hermesacp "github.com/savid/acp-go-hermes"
@@ -17,6 +19,7 @@ var serve = hermesacp.Serve
 var agentVersion = version
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
+var mainRuntimePlatform = runtime.GOOS
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -25,12 +28,16 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "containment" {
+		return runContainmentCommand(args[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("acp-go-hermes", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
 	hermesPath := flags.String("path", "", "path to hermes CLI")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	hermesHome := flags.String("home", "", "unsupported: Hermes has no native config or auth root; a non-empty value is rejected when a session is established (use -scratch-dir)")
+	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "opt into Darwin process-group containment with residual escape and PGID-reuse risks")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
@@ -42,11 +49,19 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if *darwinBestEffort && mainRuntimePlatform != "darwin" {
+		_, _ = fmt.Fprintln(stderr, "acp-go-hermes: -darwin-best-effort-containment is valid only on darwin")
+
+		return 2
+	}
 
 	if *printVersion {
 		_, _ = fmt.Fprintln(stdout, agentVersion())
 
 		return 0
+	}
+	if *darwinBestEffort {
+		_, _ = fmt.Fprintln(stderr, "WARNING: containment=best_effort on Darwin; setsid descendants can escape and survive, marker correlation is not ownership and markers can be scrubbed, numeric PGID reuse can cause collateral signalling, and native-root permits do not bound escaped provider work")
 	}
 
 	seeded, err := seedFiles.contents()
@@ -93,6 +108,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	)
 	if len(seeded) > 0 {
 		opts = append(opts, hermesacp.WithSeedFiles(seeded))
+	}
+	if *darwinBestEffort {
+		opts = append(opts, hermesacp.WithDarwinBestEffortContainment())
 	}
 
 	opts = append(opts, telemetry.options...)

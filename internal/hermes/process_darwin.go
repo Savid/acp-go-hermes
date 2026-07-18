@@ -1,5 +1,6 @@
 //go:build darwin
 
+//nolint:wsl_v5,nlreturn // Strict procargs parsing stages intentionally remain contiguous.
 package hermes
 
 import (
@@ -60,11 +61,29 @@ func inspectHermesProcess(pid int) (ProcessIdentity, error) {
 // executable path, NUL padding, argc NUL-terminated argv entries, then
 // NUL-terminated environment entries terminated by an empty entry.
 func parseProcArgs2(data []byte) ([]string, map[string]string, error) {
+	cmdline, entries, err := parseDarwinProcArgs(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	env := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			env[key] = value
+		}
+	}
+	return cmdline, env, nil
+}
+
+func parseDarwinProcArgs(data []byte) ([]string, []string, error) {
 	if len(data) < 4 {
 		return nil, nil, errors.New("procargs2 buffer too short")
 	}
 
 	argc := int(binary.NativeEndian.Uint32(data[:4]))
+	if argc <= 0 || argc > len(data)-4 {
+		return nil, nil, errors.New("procargs2 argument count is invalid")
+	}
 	rest := data[4:]
 
 	execEnd := bytes.IndexByte(rest, 0)
@@ -80,7 +99,7 @@ func parseProcArgs2(data []byte) ([]string, map[string]string, error) {
 	cmdline := make([]string, 0, argc)
 	for len(cmdline) < argc {
 		end := bytes.IndexByte(rest, 0)
-		if end < 0 {
+		if end <= 0 {
 			return nil, nil, errors.New("procargs2 truncated argv")
 		}
 
@@ -88,27 +107,26 @@ func parseProcArgs2(data []byte) ([]string, map[string]string, error) {
 		rest = rest[end+1:]
 	}
 
-	env := map[string]string{}
-
+	env := make([]string, 0)
+	terminated := false
 	for len(rest) > 0 {
 		end := bytes.IndexByte(rest, 0)
-
-		var entry string
 		if end < 0 {
-			entry, rest = string(rest), nil
-		} else {
-			entry, rest = string(rest[:end]), rest[end+1:]
+			return nil, nil, errors.New("procargs2 environment is incomplete")
 		}
-
+		entry := string(rest[:end])
+		rest = rest[end+1:]
 		if entry == "" {
+			if len(env) == 0 {
+				return nil, nil, errors.New("procargs2 environment boundary is ambiguous")
+			}
+			terminated = true
 			break
 		}
-
-		key, value, ok := strings.Cut(entry, "=")
-		if ok && key != "" {
-			env[key] = value
-		}
+		env = append(env, entry)
 	}
-
+	if !terminated {
+		return nil, nil, errors.New("procargs2 environment is incomplete")
+	}
 	return cmdline, env, nil
 }

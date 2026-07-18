@@ -1,6 +1,8 @@
+//nolint:wsl_v5 // Startup and probe cleanup are linear fail-closed sequences.
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -30,16 +32,18 @@ const (
 	eventGatewayReady     = "gateway.ready"
 )
 
-// ErrProcessTreeUnproven means a launched Hermes process tree could not be
-// proven quiescent. Callers that hold native-root admission must retain it.
-var ErrProcessTreeUnproven = errors.New("hermes process tree quiescence is unproven")
+// ErrProcessContainmentIncomplete means the selected native containment
+// boundary did not complete. Callers retaining native resources must keep them.
+var ErrProcessContainmentIncomplete = errors.New("hermes process containment incomplete")
 
 var (
 	commandContext      = exec.CommandContext
+	command             = exec.Command
 	listenTCP           = net.Listen
 	randReader          = rand.Reader
 	mkdirTemp           = os.MkdirTemp
 	mkdirAll            = os.MkdirAll
+	removeAll           = os.RemoveAll
 	userHomeDir         = os.UserHomeDir
 	statPath            = os.Stat
 	after               = time.After
@@ -57,13 +61,26 @@ type ProcessOptions struct {
 	// ScratchParent is the resolved parent directory used to materialize an
 	// isolated home when Home is empty. The internal package never consults the
 	// system temp directory itself.
-	ScratchParent       string
-	Cwd                 string
-	Env                 map[string]string
-	Timeout             time.Duration
-	Configure           func(*exec.Cmd)
-	LogWriter           io.Writer
-	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
+	ScratchParent               string
+	Cwd                         string
+	Env                         map[string]string
+	Timeout                     time.Duration
+	Configure                   func(*exec.Cmd)
+	LogWriter                   io.Writer
+	ObserveStartupStage         func(context.Context, string, string, time.Duration, error)
+	AcquireDiscoveryResources   func(context.Context) (func(), func(), error)
+	RetainDiscoveryRoot         func(string, error)
+	DarwinBestEffortContainment bool
+}
+
+// ContainmentSpec identifies the wrapper-owned scratch generation used by one
+// native launch. Darwin records this identity before spawning.
+type ContainmentSpec struct {
+	DarwinBestEffort bool
+	ScratchParent    string
+	GenerationRoot   string
+	RuntimeID        string
+	LifecycleKind    string
 }
 
 type Process struct {
@@ -93,6 +110,9 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 }
 
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
+	if err := validateProcessContainment(opts.DarwinBestEffortContainment); err != nil {
+		return nil, err
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = defaultProcessTimeout
@@ -107,7 +127,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if home == "" {
 		var err error
 
-		home, err = mkdirTemp(opts.ScratchParent, "acp-go-hermes-*")
+		home, err = mkdirTemp(opts.ScratchParent, "acp-go-hermes-runtime-")
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +138,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	}
 
 	versionCtx, versionCancel := context.WithTimeout(ctx, timeout)
-	probeNeeded, err := ensureExecutableVersion(versionCtx, executable)
+	probeNeeded, err := ensureExecutableVersion(versionCtx, executable, opts)
 
 	versionCancel()
 
@@ -172,7 +192,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	spawnStarted := time.Now()
 
-	tree, startErr := startContainedProcess(cmd)
+	tree, startErr := startContainedProcess(cmd, ContainmentSpec{
+		DarwinBestEffort: opts.DarwinBestEffortContainment,
+		ScratchParent:    opts.ScratchParent,
+		GenerationRoot:   home,
+		LifecycleKind:    containmentSessionKind,
+	})
 	if startErr != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, startErr)
 		cancel()
@@ -232,7 +257,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	return process, nil
 }
 
-func ensureExecutableVersion(ctx context.Context, executable string) (bool, error) {
+func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) (bool, error) {
 	executableProbeMu.Lock()
 	_, ok := executableProbed[executable]
 	executableProbeMu.Unlock()
@@ -240,17 +265,71 @@ func ensureExecutableVersion(ctx context.Context, executable string) (bool, erro
 	if ok {
 		return false, nil
 	}
-
-	cmd := commandContext(ctx, executable, "--version")
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("hermes --version probe failed: %w: %s", err, string(out))
+	if opts.AcquireDiscoveryResources == nil || opts.RetainDiscoveryRoot == nil {
+		return false, errors.New("hermes version discovery resource callbacks are required")
 	}
 
-	version, ok := parseVersion(string(out))
+	nativeRelease, scratchRelease, err := opts.AcquireDiscoveryResources(ctx)
+	if err != nil {
+		return false, fmt.Errorf("admit Hermes version probe: %w", err)
+	}
+	if nativeRelease == nil || scratchRelease == nil {
+		if nativeRelease != nil {
+			nativeRelease()
+		}
+		if scratchRelease != nil {
+			scratchRelease()
+		}
+
+		return false, errors.New("hermes version discovery resource callback returned a nil release")
+	}
+
+	probeRoot, err := mkdirTemp(opts.ScratchParent, "acp-go-hermes-runtime-")
+	if err != nil {
+		nativeRelease()
+		scratchRelease()
+
+		return false, fmt.Errorf("create Hermes version-probe generation: %w", err)
+	}
+
+	var output bytes.Buffer
+	cmd := command(executable, "--version")
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	configureHermesProcess(cmd)
+
+	tree, err := startContainedProcess(cmd, ContainmentSpec{
+		DarwinBestEffort: opts.DarwinBestEffortContainment,
+		ScratchParent:    opts.ScratchParent,
+		GenerationRoot:   probeRoot,
+		LifecycleKind:    "discovery",
+	})
+	if err == nil {
+		wait := tree.directChild(cmd)
+		select {
+		case <-wait.done:
+			err = errors.Join(wait.err, tree.complete(5*time.Second))
+		case <-ctx.Done():
+			err = errors.Join(ctx.Err(), tree.complete(5*time.Second))
+		}
+	}
+	if errors.Is(err, ErrProcessContainmentIncomplete) {
+		opts.RetainDiscoveryRoot(probeRoot, err)
+	} else {
+		nativeRelease()
+		removeErr := removeAll(probeRoot)
+		err = errors.Join(err, removeErr)
+		if removeErr == nil {
+			scratchRelease()
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("hermes --version probe failed: %w: %s", err, output.String())
+	}
+
+	version, ok := parseVersion(output.String())
 	if !ok {
-		return false, fmt.Errorf("hermes --version output missing semantic version: %s", string(out))
+		return false, fmt.Errorf("hermes --version output missing semantic version: %s", output.String())
 	}
 
 	if compareVersions(version, MinimumVersion) < 0 {
@@ -403,7 +482,7 @@ func (p *Process) Close(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return p.quiesceProcessTree()
+		return p.completeProcessContainment()
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-afterFn(5 * time.Second):
@@ -421,7 +500,7 @@ func (p *Process) Close(ctx context.Context) error {
 	case <-afterFn(time.Second):
 	}
 
-	return errors.Join(err, p.quiesceProcessTree())
+	return errors.Join(err, p.completeProcessContainment())
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.
@@ -430,27 +509,26 @@ func (p *Process) Close(ctx context.Context) error {
 // as a zombie until the session was eventually released.
 func (p *Process) beginWait() <-chan struct{} {
 	p.waitOnce.Do(func() {
-		p.waitDone = make(chan struct{})
-		waitFn := waitProcessCommand
-
-		go func() {
-			_ = waitFn(p.Cmd)
-			close(p.waitDone)
-		}()
+		if p.tree != nil {
+			p.waitDone = p.tree.directChild(p.Cmd).done
+		} else {
+			wait := installDirectChildWait(p.Cmd, false)
+			p.waitDone = wait.done
+		}
 	})
 
 	return p.waitDone
 }
 
-func (p *Process) quiesceProcessTree() error {
+func (p *Process) completeProcessContainment() error {
 	if p.tree == nil {
 		// Start always installs containment. A nil tree is only possible for
 		// package-internal tests that wrap an already-started command.
 		return nil
 	}
 
-	if err := p.tree.quiesce(5 * time.Second); err != nil {
-		return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
+	if err := p.tree.complete(5 * time.Second); err != nil {
+		return fmt.Errorf("%w: %v", ErrProcessContainmentIncomplete, err)
 	}
 
 	if err := processTreeClose(p.tree); err != nil {

@@ -115,12 +115,13 @@ func TestParseProcArgs2Branches(t *testing.T) {
 	}
 
 	data = append([]byte{0, 0, 0, 0}, "/bin/x\x00C=3"...)
-	cmdline, env, err = parseProcArgs2(data)
-	if err != nil || len(cmdline) != 0 {
-		t.Fatalf("cmdline = %#v err = %v", cmdline, err)
+	if _, _, err = parseProcArgs2(data); err == nil {
+		t.Fatal("zero argc with unterminated environment was accepted")
 	}
-	if env["C"] != "3" {
-		t.Fatalf("env = %#v, want unterminated trailing entry", env)
+
+	data = append([]byte{1, 0, 0, 0}, "/bin/x\x00\x00hermes\x00C=3"...)
+	if _, _, err = parseProcArgs2(data); err == nil {
+		t.Fatal("unterminated environment was accepted")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -109,7 +110,7 @@ func TestMCPServersWithSecretEnv(t *testing.T) {
 }
 
 func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
-	_, err := StartServer(t.Context(), StartOptions{
+	_, err := StartServer(t.Context(), darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:  "session-1",
 		Root:          t.TempDir(),
 		ScratchParent: t.TempDir(),
@@ -118,7 +119,7 @@ func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
 		MCPServers: []acp.McpServer{{Http: &acp.McpServerHttpInline{
 			Name: "http", Url: "https://example.test", Headers: []acp.HttpHeader{{Name: "Authorization", Value: "secret"}},
 		}}},
-	})
+	}))
 	if err == nil || !strings.Contains(err.Error(), "collision") {
 		t.Fatalf("StartServer collision error = %v", err)
 	}
@@ -2376,7 +2377,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := StartServer(ctx, StartOptions{
+	client, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:   "session/one",
 		Root:           root,
 		Cwd:            cwd,
@@ -2389,7 +2390,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 			stdioMCPServer("stdio", "cmd", []string{"arg"}, map[string]string{"A": "1"}),
 			httpMCPServer("http", "https://example.test/mcp", map[string]string{"Authorization": "token"}),
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}
@@ -2397,7 +2398,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if !serverOK {
 		t.Fatalf("client type = %T", client)
 	}
-	if server.xdg.Root == "" || !strings.Contains(filepath.Base(server.xdg.Root), "session_one") {
+	if server.xdg.Root == "" || !strings.HasPrefix(filepath.Base(server.xdg.Root), "acp-go-hermes-runtime-") {
 		t.Fatalf("xdg dirs = %#v", server.xdg)
 	}
 	leasePath := filepath.Join(server.xdg.State, LeaseFileName)
@@ -2435,14 +2436,14 @@ func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
 	start := func(id ACPSessionIDString) Server {
 		t.Helper()
 
-		server, err := StartServer(ctx, StartOptions{
+		server, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 			ACPSessionID:   id,
 			Root:           root,
 			Cwd:            t.TempDir(),
 			ExecutablePath: helper,
 			HealthTimeout:  5 * time.Second,
 			Logger:         slog.New(slog.DiscardHandler),
-		})
+		}))
 		if err != nil {
 			t.Fatalf("StartServer(%q): %v", id, err)
 		}
@@ -2495,7 +2496,7 @@ func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
 	firstClosed = true
 }
 
-func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
+func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
 	root := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -2509,7 +2510,7 @@ func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
 		HealthTimeout:  5 * time.Second,
 		Logger:         slog.New(slog.DiscardHandler),
 	}
-	first, err := StartServer(ctx, options)
+	first, err := StartServer(ctx, darwinTestStartOptions(t, options))
 	if err != nil {
 		t.Fatalf("first StartServer: %v", err)
 	}
@@ -2521,7 +2522,7 @@ func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
 	}()
 	oldLease := readServerLease(t, first.XDGDirs())
 
-	replacement, err := StartServer(ctx, options)
+	replacement, err := StartServer(ctx, darwinTestStartOptions(t, options))
 	if err != nil {
 		t.Fatalf("replacement StartServer: %v", err)
 	}
@@ -2532,12 +2533,18 @@ func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
 		}
 	}()
 	newLease := readServerLease(t, replacement.XDGDirs())
+	if first.XDGDirs().Root == replacement.XDGDirs().Root {
+		t.Fatalf("same-session replacement reused generation root %q", first.XDGDirs().Root)
+	}
 
 	if newLease.PID == oldLease.PID && newLease.ProcessStartTime == oldLease.ProcessStartTime {
 		t.Fatalf("same-session replacement retained old process identity: old=%#v new=%#v", oldLease, newLease)
 	}
-	if identity, inspectErr := InspectProcess(oldLease.PID); inspectErr == nil && identity.StartTime == oldLease.ProcessStartTime {
-		t.Fatalf("same-session predecessor process %d remains live", oldLease.PID)
+	if identity, inspectErr := InspectProcess(oldLease.PID); inspectErr != nil || identity.StartTime != oldLease.ProcessStartTime {
+		t.Fatalf("fresh generation disturbed predecessor process %d: %#v, %v", oldLease.PID, identity, inspectErr)
+	}
+	if _, err := first.CreateSession(ctx, "predecessor"); err != nil {
+		t.Fatalf("independent predecessor gateway became unusable: %v", err)
 	}
 	if err := first.Close(ctx); err != nil {
 		t.Fatalf("predecessor Close: %v", err)
@@ -2549,15 +2556,19 @@ func TestStartHermesServerReapsSameSessionLease(t *testing.T) {
 	if _, err := replacement.CreateSession(ctx, "replacement"); err != nil {
 		t.Fatalf("replacement CreateSession: %v", err)
 	}
-	if _, err := first.CreateSession(ctx, "predecessor"); err == nil {
-		t.Fatal("reaped predecessor gateway remained usable")
-	}
 	if err := replacement.Close(ctx); err != nil {
 		t.Fatalf("replacement Close: %v", err)
 	}
 	replacementClosed = true
 	if _, err := os.Stat(filepath.Join(replacement.XDGDirs().State, LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement lease after owner Close = %v", err)
+	}
+}
+
+func TestStartHermesServerRequiresDiscoveryResourceCallbacks(t *testing.T) {
+	_, err := StartServer(t.Context(), StartOptions{})
+	if err == nil || !strings.Contains(err.Error(), "resource callbacks are required") {
+		t.Fatalf("StartServer missing discovery callbacks error = %v", err)
 	}
 }
 
@@ -2579,22 +2590,22 @@ func readServerLease(t *testing.T, dirs XDGDirs) ServerLease {
 
 func TestStartHermesServerGatewayFaults(t *testing.T) {
 	ctx := context.Background()
-	if _, err := StartServer(ctx, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")}); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")})); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
-	if _, err := StartServer(ctx, StartOptions{Root: string([]byte{0})}); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: string([]byte{0})})); err == nil {
 		t.Fatal("invalid root unexpectedly succeeded")
 	}
-	if _, err := StartServer(ctx, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))}); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
 		t.Fatal("invalid session path unexpectedly succeeded")
 	}
-	if _, err := StartServer(ctx, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}}); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}})); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")
 	}
 
 	restoreHermesClientSeams(t)
 	hermesReapLeaseFile = func(string, *slog.Logger) bool { return true }
-	if _, err := StartServer(ctx, StartOptions{ExistingXDG: testXDGDirs(t)}); err == nil || !strings.Contains(err.Error(), "remains live") {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil || !strings.Contains(err.Error(), "remains live") {
 		t.Fatalf("retained lease error = %v", err)
 	}
 	hermesReapLeaseFile = ReapLeaseFile
@@ -2602,19 +2613,19 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	hermesWriteLease = func(string, ServerLease) error {
 		return errors.New("lease failed")
 	}
-	if _, err := StartServer(ctx, StartOptions{
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeOK),
 		ExistingXDG:    testXDGDirs(t),
 		HealthTimeout:  5 * time.Second,
-	}); err == nil || !strings.Contains(err.Error(), "lease failed") {
+	})); err == nil || !strings.Contains(err.Error(), "lease failed") {
 		t.Fatalf("lease failure error = %v", err)
 	}
 
-	if _, err := StartServer(ctx, StartOptions{
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeStatusOnly),
 		ExistingXDG:    testXDGDirs(t),
 		HealthTimeout:  500 * time.Millisecond,
-	}); err == nil {
+	})); err == nil {
 		t.Fatal("gateway readiness failure unexpectedly succeeded")
 	}
 }
@@ -2729,6 +2740,23 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 	_ = original.Close(websocket.StatusNormalClosure, "done")
+}
+
+func TestSuperviseGatewayStopsWhileWaitingForClosedTurn(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.enableReconnect(func(context.Context) (*Client, error) {
+		return fake.dialClient(t), nil
+	})
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	if err := original.Close(websocket.StatusNormalClosure, "drop"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	close(server.closed)
+	server.endGatewayTurn()
+	server.supervisorWG.Wait()
 }
 
 func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
@@ -3145,15 +3173,36 @@ func restoreLeaseReapSeams(t *testing.T) {
 
 func testXDGDirs(t *testing.T) XDGDirs {
 	t.Helper()
-	root := t.TempDir()
-
-	return XDGDirs{
-		Root:   root,
-		Data:   filepath.Join(root, "data"),
-		Config: filepath.Join(root, "config"),
-		Cache:  filepath.Join(root, "cache"),
-		State:  filepath.Join(root, "state"),
+	dirs, err := CreateGenerationXDGDirs(t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateGenerationXDGDirs: %v", err)
 	}
+
+	return dirs
+}
+
+func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
+	t.Helper()
+	if options.AcquireDiscoveryResources == nil {
+		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
+	}
+	if options.RetainDiscoveryRoot == nil {
+		options.RetainDiscoveryRoot = func(string, error) {}
+	}
+	if runtime.GOOS != "darwin" {
+		return options
+	}
+	options.DarwinBestEffortContainment = true
+	if strings.ContainsRune(options.Root, '\x00') {
+		return options
+	}
+	if options.ExistingXDG.Root != "" {
+		options.ScratchParent = filepath.Dir(options.ExistingXDG.Root)
+	} else if options.ScratchParent == "" {
+		options.ScratchParent = t.TempDir()
+	}
+
+	return options
 }
 
 func containsString(values []string, want string) bool {

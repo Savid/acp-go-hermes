@@ -42,6 +42,14 @@ const (
 	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
 )
 
+type RuntimeContainmentMode string
+
+const (
+	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
+	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
+	RuntimeContainmentUnavailable   RuntimeContainmentMode = "unavailable"
+)
+
 type RuntimeStartupStage string
 
 const (
@@ -59,6 +67,7 @@ type RuntimeResourceHooks struct {
 	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
 	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
 	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+	ObserveContainment     func(context.Context, RuntimeContainmentMode)
 }
 
 type promptTimer struct {
@@ -91,12 +100,13 @@ type Options struct {
 	MeterProvider     metric.MeterProvider
 	TextMapPropagator propagation.TextMapPropagator
 
-	SessionStore            SessionStore
-	SessionStoreLoadTimeout time.Duration
-	ConcurrencyLimits       ConcurrencyLimits
-	SeedFiles               map[string]string
-	TurnTimeout             time.Duration
-	RuntimeResourceHooks    RuntimeResourceHooks
+	SessionStore                SessionStore
+	SessionStoreLoadTimeout     time.Duration
+	ConcurrencyLimits           ConcurrencyLimits
+	SeedFiles                   map[string]string
+	TurnTimeout                 time.Duration
+	RuntimeResourceHooks        RuntimeResourceHooks
+	DarwinBestEffortContainment bool
 
 	clientFactory        func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
 	newPromptTimer       func(time.Duration) promptTimer
@@ -172,6 +182,12 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+func WithDarwinBestEffortContainment() Option {
+	return func(options *Options) {
+		options.DarwinBestEffortContainment = true
 	}
 }
 

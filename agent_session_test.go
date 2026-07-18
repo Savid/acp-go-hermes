@@ -248,7 +248,10 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	if _, err := agent.LoadSession(ctx, LoadSessionRequest(forkResp.SessionId, cwd)); err == nil {
 		t.Fatal("deleted session loaded")
 	}
-	if parent.xdg.Root == "" || child.xdg.Root == "" || filepath.Dir(parent.xdg.Root) != agent.homeRoot() {
+	if parent.xdg.Root == "" || child.xdg.Root == "" || parent.xdg.Root == child.xdg.Root ||
+		filepath.Dir(parent.xdg.Root) != agent.options.ScratchDir ||
+		!strings.HasPrefix(filepath.Base(parent.xdg.Root), "acp-go-hermes-runtime-") ||
+		!strings.HasPrefix(filepath.Base(child.xdg.Root), "acp-go-hermes-runtime-") {
 		t.Fatalf("xdg roots parent=%#v child=%#v home=%q", parent.xdg, child.xdg, agent.homeRoot())
 	}
 }
@@ -363,8 +366,8 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 
 	t.Run("retained unproven root", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
-		agent.retainUnprovenHermesRoot(agent.hermesXDGRoot(session.id, nativehermes.XDGDirs{}))
-		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_tree_unproven") {
+		agent.retainIncompleteHermesRoot(session.id, session.client.XDGDirs().Root)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_containment_incomplete") {
 			t.Fatalf("unproven-root resume error = %v", err)
 		}
 	})
@@ -446,12 +449,12 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 	t.Run("unproven startup failure", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
 		agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
-			return nil, nativehermes.ErrProcessTreeUnproven
+			return nil, nativehermes.ErrProcessContainmentIncomplete
 		}
-		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_tree_unproven") {
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_containment_incomplete") {
 			t.Fatalf("unproven startup error = %v", err)
 		}
-		if err := agent.rejectUnprovenHermesRoot(agent.hermesXDGRoot(session.id, nativehermes.XDGDirs{})); !errors.Is(err, nativehermes.ErrProcessTreeUnproven) {
+		if err := agent.rejectIncompleteHermesSession(session.id); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
 			t.Fatalf("unproven root was not retained: %v", err)
 		}
 	})

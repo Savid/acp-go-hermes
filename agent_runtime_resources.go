@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
@@ -14,13 +15,14 @@ var runtimeRemoveAll = os.RemoveAll
 
 type managedHermesServer struct {
 	nativehermes.Server
-	root           string
-	nativeRelease  func()
-	scratchRelease func()
-	retainUnproven func(string)
-	processRoot    *providerProcessRoot
-	once           sync.Once
-	closeErr       error
+	root             string
+	sessionID        acp.SessionId
+	nativeRelease    func()
+	scratchRelease   func()
+	retainIncomplete func(error, acp.SessionId, string)
+	processRoot      *providerProcessRoot
+	once             sync.Once
+	closeErr         error
 }
 
 func (s *managedHermesServer) Close(ctx context.Context) error {
@@ -34,9 +36,9 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 			s.processRoot.retire(ctx, providerProcessTreeProven(s.closeErr))
 		}
 
-		if errors.Is(s.closeErr, nativehermes.ErrProcessTreeUnproven) {
-			if s.retainUnproven != nil {
-				s.retainUnproven(s.root)
+		if errors.Is(s.closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+			if s.retainIncomplete != nil {
+				s.retainIncomplete(s.closeErr, s.sessionID, s.root)
 			}
 
 			return
@@ -63,19 +65,45 @@ func (s *managedHermesServer) ProviderDescendantCount() (int, bool) {
 	return inventory.ProviderDescendantCount()
 }
 
-func (a *Agent) retainUnprovenHermesRoot(root string) {
+func (a *Agent) retainIncompleteHermesRoot(id acp.SessionId, root string) {
+	a.recordIncompleteContainment(nativehermes.ErrProcessContainmentIncomplete, id, root)
+}
+
+func (a *Agent) recordIncompleteContainment(err error, id acp.SessionId, root string) {
+	if !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		return
+	}
+
 	a.mu.Lock()
-	a.unprovenRoots[root] = struct{}{}
+	if a.incompleteRoots[id] == nil {
+		a.incompleteRoots[id] = make(map[string]struct{})
+	}
+
+	if root != "" {
+		a.incompleteRoots[id][root] = struct{}{}
+	}
+
+	if a.containmentErr == nil {
+		a.containmentErr = err
+	}
 	a.mu.Unlock()
 }
 
-func (a *Agent) rejectUnprovenHermesRoot(root string) error {
+func hermesServerRoot(server nativehermes.Server) string {
+	if server == nil {
+		return ""
+	}
+
+	return server.XDGDirs().Root
+}
+
+func (a *Agent) rejectIncompleteHermesSession(id acp.SessionId) error {
 	a.mu.Lock()
-	_, retained := a.unprovenRoots[root]
+	roots, retained := a.incompleteRoots[id]
 	a.mu.Unlock()
 
 	if retained {
-		return fmt.Errorf("%w: Hermes XDG root %q remains owned by an unproven process tree", nativehermes.ErrProcessTreeUnproven, root)
+		return fmt.Errorf("%w: Hermes session %q retains incomplete containment at %d generation roots", nativehermes.ErrProcessContainmentIncomplete, id, len(roots))
 	}
 
 	return nil

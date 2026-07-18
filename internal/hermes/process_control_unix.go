@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -18,18 +19,46 @@ var (
 
 type processContainment struct {
 	processGroupID    int
+	process           *os.Process
 	terminateFn       func() error
 	killFn            func() error
 	proof             <-chan bool
 	closeFn           func() error
 	descendantCountFn func() (int, bool)
+	direct            *directChildWait
+	completeFn        func(time.Duration) error
+	cleanupOnce       sync.Once
+	cleanupErr        error
 }
 
-func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
-	return startUnixContainedProcess(cmd)
+func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processContainment, error) {
+	var spec ContainmentSpec
+	if len(specs) > 0 {
+		spec = specs[0]
+	}
+
+	return startUnixContainedProcess(cmd, spec)
 }
 
-func (c *processContainment) quiesce(timeout time.Duration) error {
+func (c *processContainment) directChild(cmd *exec.Cmd) *directChildWait {
+	if c.direct == nil {
+		c.direct = installDirectChildWait(cmd, false)
+	}
+
+	c.direct.begin()
+
+	return c.direct
+}
+
+func (c *processContainment) complete(timeout time.Duration) error {
+	if c != nil && c.completeFn != nil {
+		return c.completeFn(timeout)
+	}
+
+	return c.completeAuthoritative(timeout)
+}
+
+func (c *processContainment) completeAuthoritative(timeout time.Duration) error {
 	if c == nil || c.processGroupID <= 0 {
 		return errors.New("hermes process-group identity is unavailable")
 	}

@@ -66,7 +66,7 @@ func runHermesSupervisorInit() {
 // tool can call setsid(2) and escape. The subreaper remains the parent of every
 // orphaned native descendant, kills/reaps that complete tree, and emits a proof
 // byte before it exits. Absence of that byte is fail-closed.
-func startUnixContainedProcess(target *exec.Cmd) (*processContainment, error) {
+func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processContainment, error) {
 	if target == nil || target.Path == "" || len(target.Args) == 0 {
 		return nil, errors.New("hermes supervisor target is unavailable")
 	}

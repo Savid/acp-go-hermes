@@ -15,7 +15,8 @@ import (
 )
 
 type processContainment struct {
-	job windows.Handle
+	job    windows.Handle
+	direct *directChildWait
 }
 
 type jobBasicAccounting struct {
@@ -31,7 +32,7 @@ type jobBasicAccounting struct {
 
 func configureHermesProcess(*exec.Cmd) {}
 
-func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
+func startContainedProcess(cmd *exec.Cmd, _ ...ContainmentSpec) (*processContainment, error) {
 	job, err := createProcessJob()
 	if err != nil {
 		return nil, err
@@ -66,13 +67,25 @@ func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
 	if err != nil {
 		cleanupErr := cleanupSuspendedProcess(cmd, containment)
 		if cleanupErr != nil {
-			return nil, fmt.Errorf("%w: assign suspended Hermes root to Windows Job Object: %v; cleanup: %v", ErrProcessTreeUnproven, err, cleanupErr)
+			return nil, fmt.Errorf("%w: assign suspended Hermes root to Windows Job Object: %v; cleanup: %v", ErrProcessContainmentIncomplete, err, cleanupErr)
 		}
 
 		return nil, fmt.Errorf("assign suspended Hermes root to Windows Job Object: %w", err)
 	}
 
 	return containment, nil
+}
+
+func (c *processContainment) directChild(cmd *exec.Cmd) *directChildWait {
+	if c.direct == nil {
+		c.direct = installDirectChildWait(cmd, false)
+	}
+	c.direct.begin()
+	return c.direct
+}
+
+func (c *processContainment) complete(timeout time.Duration) error {
+	return c.completeAuthoritative(timeout)
 }
 
 func createProcessJob() (windows.Handle, error) {
@@ -147,7 +160,7 @@ func cleanupSuspendedProcess(cmd *exec.Cmd, containment *processContainment) err
 			cleanupErr = errors.Join(cleanupErr, waitErr)
 		}
 	}
-	cleanupErr = errors.Join(cleanupErr, containment.quiesce(time.Second))
+	cleanupErr = errors.Join(cleanupErr, containment.complete(time.Second))
 	cleanupErr = errors.Join(cleanupErr, containment.close())
 
 	return cleanupErr
@@ -171,7 +184,7 @@ func killProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
-func (c *processContainment) quiesce(timeout time.Duration) error {
+func (c *processContainment) completeAuthoritative(timeout time.Duration) error {
 	active, err := c.activeProcesses()
 	if err != nil {
 		return err
