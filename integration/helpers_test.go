@@ -180,6 +180,38 @@ func (c *recordingClient) elicitationCount() int {
 	return len(c.elicitations)
 }
 
+func (c *recordingClient) updatesSummary() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var out strings.Builder
+	for _, notification := range c.updates {
+		u := notification.Update
+		switch {
+		case u.ToolCall != nil:
+			out.WriteString("toolCall title=" + u.ToolCall.Title + " kind=" + string(u.ToolCall.Kind) + " status=" + string(u.ToolCall.Status) + "\n")
+		case u.ToolCallUpdate != nil:
+			title := ""
+			if u.ToolCallUpdate.Title != nil {
+				title = *u.ToolCallUpdate.Title
+			}
+			status := ""
+			if u.ToolCallUpdate.Status != nil {
+				status = string(*u.ToolCallUpdate.Status)
+			}
+			out.WriteString("toolCallUpdate title=" + title + " status=" + status + "\n")
+		case u.AgentMessageChunk != nil && u.AgentMessageChunk.Content.Text != nil:
+			out.WriteString("agentText " + u.AgentMessageChunk.Content.Text.Text + "\n")
+		case u.AgentThoughtChunk != nil:
+			out.WriteString("agentThought\n")
+		case u.Plan != nil:
+			out.WriteString("plan\n")
+		}
+	}
+
+	return out.String()
+}
+
 func (c *recordingClient) agentText() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

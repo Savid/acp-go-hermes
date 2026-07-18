@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -283,11 +284,49 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	defer cancel()
 
 	home := t.TempDir()
-	args := []string{}
+
+	// Wire this live turn to the operator's xAI login: seed a config selecting
+	// the tool-capable grok-4.5/xai-oauth provider plus the ambient Hermes auth
+	// into the isolated HERMES_HOME. The default openrouter/free router is not
+	// reliably tool-capable and never issues the terminal / question tool calls
+	// that this test asserts on.
+	//
+	// Hermes's approval.request flow is architecturally scoped to TERMINAL
+	// COMMANDS: the write_file tool is never approval-gated, so a file-write
+	// probe can never surface a permission request. The permission probe below
+	// therefore drives a terminal command that Hermes classifies as dangerous
+	// (`chmod 777 ...` matches the "world/other-writable permissions" rule in
+	// tools/approval.py's DANGEROUS_PATTERNS). To make the approval deterministic
+	// rather than a gamble on Hermes's default "smart" risk classifier (an
+	// auxiliary LLM that auto-approves low-risk commands), the seeded config pins
+	// approvals.mode: manual. In manual mode Hermes always routes a
+	// dangerous-classified command to the gateway approval callback, which the
+	// adapter converts to session/request_permission — the exact surface this
+	// test asserts on. Approvals are never auto-granted by this config.
+	hermesAuth := filepath.Join(os.Getenv("HOME"), ".hermes", "auth.json")
+	if _, statErr := os.Stat(hermesAuth); statErr != nil {
+		t.Skipf("ambient Hermes auth not available: %v", statErr)
+	}
+	xaiConfig := filepath.Join(t.TempDir(), "config.yaml")
+	const hermesProbeConfig = "model:\n" +
+		"  provider: xai-oauth\n" +
+		"  default: grok-4.5\n" +
+		"  base_url: https://api.x.ai/v1\n" +
+		"  max_tokens: 4096\n" +
+		"approvals:\n" +
+		"  mode: manual\n"
+	if err := os.WriteFile(xaiConfig, []byte(hermesProbeConfig), 0o600); err != nil {
+		t.Fatalf("write xai config: %v", err)
+	}
+	args := []string{
+		"-debug",
+		"-seed-file", "config.yaml=" + xaiConfig,
+		"-seed-file", "auth.json=" + hermesAuth,
+	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}
-	agent := startLiveTokenAgent(t, ctx, home, args...)
+	agent := startLiveAgent(t, ctx, home, args...)
 	defer agent.close()
 
 	client := newRecordingClient()
@@ -306,19 +345,19 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 
-	permissionPrompt := envOrDefault("ACP_GO_HERMES_PERMISSION_PROMPT", "Create a file named acp-permission-probe.txt in the working directory, then stop.")
+	permissionPrompt := envOrDefault("ACP_GO_HERMES_PERMISSION_PROMPT", "Your only task this turn is to run a single shell command. As your very first action, and without emitting any explanatory prose, call your terminal tool exactly once to run this exact command verbatim, without modifying, wrapping, or substituting any part of it: chmod 777 acp-permission-probe.txt . Do not ask any clarifying question, do not describe what you are about to do, and do not use any other tool: issue exactly one terminal tool call with that exact command, then stop.")
 	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-permission", permissionPrompt)); err != nil {
 		t.Fatalf("permission prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	if client.permissionCount() == 0 {
-		t.Skipf("native Hermes prompt did not emit approval.request in this environment; stderr:\n%s", agent.stderrString())
+		t.Fatalf("native Hermes prompt did not emit approval.request; adapter surfaced no permission request for a dangerous terminal command; updates:\n%s\nagentText:\n%s\nstderr:\n%s", client.updatesSummary(), client.agentText(), agent.stderrString())
 	}
 
-	questionPrompt := envOrDefault("ACP_GO_HERMES_QUESTION_PROMPT", `Use the question tool to ask the user "Continue?" with options "Yes" and "No", then stop after receiving the answer.`)
+	questionPrompt := envOrDefault("ACP_GO_HERMES_QUESTION_PROMPT", `Before doing anything else, you MUST use your question tool to ask the user exactly one question: "Continue?" offering the two options "Yes" and "No". Do not answer, explain, or take any other action until you have asked this question through the question tool and received the user's selection. After you receive the answer, stop.`)
 	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-question", questionPrompt)); err != nil {
 		t.Fatalf("question prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	if client.elicitationCount() == 0 {
-		t.Skipf("native Hermes prompt did not emit clarify.request in this environment; stderr:\n%s", agent.stderrString())
+		t.Fatalf("native Hermes prompt did not emit clarify.request, or the adapter did not convert it to elicitation/create; stderr:\n%s", agent.stderrString())
 	}
 }

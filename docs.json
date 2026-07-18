@@ -70,7 +70,8 @@
             "icon": "shield",
             "pages": [
               "docs/operations/observability",
-              "docs/operations/security"
+              "docs/operations/security",
+              "docs/operations/troubleshooting"
             ]
           }
         ]
