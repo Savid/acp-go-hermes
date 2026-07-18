@@ -122,6 +122,11 @@ func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processCon
 	supervisor.Stderr = target.Stderr
 	supervisor.ExtraFiles = []*os.File{controlRead, proofWrite}
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Install the wrapper command before launch. exec.Cmd must not be copied
+	// after Start: its private waiter and pipe-copy state belong to the exact
+	// value that was started, and copying it races version-probe output drains.
+	*target = *supervisor
+	supervisor = target
 
 	if err := supervisor.Start(); err != nil {
 		cleanupPipes()
@@ -178,8 +183,6 @@ func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processCon
 			return closeErr
 		},
 	}
-
-	*target = *supervisor
 
 	return containment, nil
 }

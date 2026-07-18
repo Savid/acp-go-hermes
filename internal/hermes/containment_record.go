@@ -9,7 +9,3 @@ const (
 	envRuntimeID            = "ACP_GO_HERMES_RUNTIME_ID"
 	envScratchRoot          = "ACP_GO_HERMES_SCRATCH_ROOT"
 )
-
-type containmentRecord struct {
-	path string
-}

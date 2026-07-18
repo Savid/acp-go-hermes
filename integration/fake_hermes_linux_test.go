@@ -113,7 +113,7 @@ func waitSessionLeasePID(t *testing.T, home string) int {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		matches, _ := filepath.Glob(filepath.Join(home, "acp-go-hermes", "*", "state", "server.lease"))
+		matches, _ := filepath.Glob(filepath.Join(home, "acp-go-hermes-runtime-*", "state", "server.lease"))
 		for _, match := range matches {
 			data, err := os.ReadFile(match)
 			if err != nil {

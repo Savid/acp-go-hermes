@@ -1014,6 +1014,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldAfter := after
 	oldHTTPClient := newStatusHTTPClient
 	oldWait := waitProcessCommand
+	oldStartContained := startHermesContainedProcess
 	oldProbed := cloneExecutableProbeCache()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
@@ -1026,6 +1027,7 @@ func restoreProcessSeams(t *testing.T) {
 		after = oldAfter
 		newStatusHTTPClient = oldHTTPClient
 		waitProcessCommand = oldWait
+		startHermesContainedProcess = oldStartContained
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
 		executableProbeMu.Unlock()

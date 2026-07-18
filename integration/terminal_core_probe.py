@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically characterize Hermes terminal-core session isolation.
-
-This provider-free probe forces the owner-update interleaving in Hermes
-0.18.2's terminal_tool that lets one top-level session reuse another session's
-cwd on the shared ``default`` environment.
-"""
+"""Deterministically verify Hermes terminal-core session CWD isolation."""
 
 from __future__ import annotations
 
@@ -82,7 +77,7 @@ def main() -> None:
     release_b = threading.Event()
     failures: list[BaseException] = []
 
-    def forced_resolve(*, workdir, env, default_cwd, prev_owner=None):
+    def forced_resolve(*, workdir, default_cwd, session_key=None):
         if default_cwd == str(WORK_A):
             a_at_resolve.set()
             if not b_claimed_owner.wait(timeout=5):
@@ -93,9 +88,8 @@ def main() -> None:
                 fail("B was not released after A completed")
         return original_resolve(
             workdir=workdir,
-            env=env,
             default_cwd=default_cwd,
-            prev_owner=prev_owner,
+            session_key=session_key,
         )
 
     def run(task_id: str, filename: str) -> None:
@@ -140,14 +134,14 @@ def main() -> None:
     a_in_a = (WORK_A / "deterministic-a.txt").is_file()
     a_in_b = (WORK_B / "deterministic-a.txt").is_file()
     b_in_b = (WORK_B / "deterministic-b.txt").is_file()
-    if a_in_a or not a_in_b or not b_in_b:
+    if not a_in_a or a_in_b or not b_in_b:
         fail(
-            "forced interleaving did not reproduce the expected cwd crossing: "
+            "forced interleaving violated session-keyed cwd isolation: "
             f"a_in_a={a_in_a} a_in_b={a_in_b} b_in_b={b_in_b}"
         )
 
-    print("TERMINAL_CORE_CWD_CROSSED=true")
-    print("VERDICT=shared-default-terminal-not-session-isolated")
+    print("TERMINAL_CORE_CWD_ISOLATED=true")
+    print("VERDICT=session-keyed-terminal-cwd-isolated")
 
 
 if __name__ == "__main__":

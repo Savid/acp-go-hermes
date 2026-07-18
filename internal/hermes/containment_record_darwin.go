@@ -70,6 +70,10 @@ type containmentRecordData struct {
 	State                string `json:"state"`
 }
 
+type containmentRecord struct {
+	path string
+}
+
 func prepareContainmentRecord(spec ContainmentSpec) (containmentRecord, error) {
 	if !spec.DarwinBestEffort {
 		return containmentRecord{}, nil

@@ -112,9 +112,12 @@ func TestRunContainmentAndDarwinBestEffortFlag(t *testing.T) {
 
 	mainRuntimePlatform = "darwin"
 	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...hermesacp.Option) error {
-		agent := hermesacp.NewAgent(options...)
-		if agent.ContainmentMode() != hermesacp.RuntimeContainmentBestEffort {
-			t.Fatalf("containment mode = %q", agent.ContainmentMode())
+		var configured hermesacp.Options
+		for _, option := range options {
+			option(&configured)
+		}
+		if !configured.DarwinBestEffortContainment {
+			t.Fatal("Darwin best-effort containment option was not applied")
 		}
 
 		return nil

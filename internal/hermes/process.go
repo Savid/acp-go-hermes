@@ -37,22 +37,23 @@ const (
 var ErrProcessContainmentIncomplete = errors.New("hermes process containment incomplete")
 
 var (
-	commandContext      = exec.CommandContext
-	command             = exec.Command
-	listenTCP           = net.Listen
-	randReader          = rand.Reader
-	mkdirTemp           = os.MkdirTemp
-	mkdirAll            = os.MkdirAll
-	removeAll           = os.RemoveAll
-	userHomeDir         = os.UserHomeDir
-	statPath            = os.Stat
-	after               = time.After
-	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
-	waitProcessCommand  = func(cmd *exec.Cmd) error { return cmd.Wait() }
-	processTreeClose    = func(tree *processContainment) error { return tree.close() }
-	executableProbeMu   sync.Mutex
-	executableProbed    = map[string]struct{}{}
-	versionPattern      = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
+	commandContext              = exec.CommandContext
+	command                     = exec.Command
+	listenTCP                   = net.Listen
+	randReader                  = rand.Reader
+	mkdirTemp                   = os.MkdirTemp
+	mkdirAll                    = os.MkdirAll
+	removeAll                   = os.RemoveAll
+	userHomeDir                 = os.UserHomeDir
+	statPath                    = os.Stat
+	after                       = time.After
+	newStatusHTTPClient         = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
+	waitProcessCommand          = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	processTreeClose            = func(tree *processContainment) error { return tree.close() }
+	startHermesContainedProcess = startContainedProcess
+	executableProbeMu           sync.Mutex
+	executableProbed            = map[string]struct{}{}
+	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
 )
 
 type ProcessOptions struct {
@@ -81,6 +82,28 @@ type ContainmentSpec struct {
 	GenerationRoot   string
 	RuntimeID        string
 	LifecycleKind    string
+}
+
+// synchronizedBuffer is used where exec may still be retiring its pipe-copy
+// goroutine while containment proof is being collected. Keep bytes.Buffer's
+// ReaderFrom method hidden so every copy write takes the same lock as String.
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buffer.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buffer.String()
 }
 
 type Process struct {
@@ -192,7 +215,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	spawnStarted := time.Now()
 
-	tree, startErr := startContainedProcess(cmd, ContainmentSpec{
+	tree, startErr := startHermesContainedProcess(cmd, ContainmentSpec{
 		DarwinBestEffort: opts.DarwinBestEffortContainment,
 		ScratchParent:    opts.ScratchParent,
 		GenerationRoot:   home,
@@ -292,13 +315,13 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		return false, fmt.Errorf("create Hermes version-probe generation: %w", err)
 	}
 
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	cmd := command(executable, "--version")
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	configureHermesProcess(cmd)
 
-	tree, err := startContainedProcess(cmd, ContainmentSpec{
+	tree, err := startHermesContainedProcess(cmd, ContainmentSpec{
 		DarwinBestEffort: opts.DarwinBestEffortContainment,
 		ScratchParent:    opts.ScratchParent,
 		GenerationRoot:   probeRoot,

@@ -34,8 +34,13 @@ test-cross-compile:
 	mkdir -p .tmp/cross
 	GOOS=linux GOARCH=amd64 go test -c -o .tmp/cross/hermes-linux.test .
 	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/hermes-darwin.test .
+	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/hermes-internal-darwin.test ./internal/hermes
+	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/hermes-cmd-darwin.test ./cmd/acp-go-hermes
+	GOOS=darwin GOARCH=arm64 go build ./...
 	GOOS=freebsd GOARCH=amd64 go build ./...
 	GOOS=openbsd GOARCH=amd64 go build ./...
+	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/hermes-internal-windows.test ./internal/hermes
+	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/hermes-cmd-windows.test ./cmd/acp-go-hermes
 	GOOS=windows GOARCH=amd64 go build ./...
 
 ## coverage-check: require 100% statement coverage with race instrumentation

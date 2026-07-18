@@ -30,11 +30,12 @@ func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T)
 	defer cancel()
 
 	home := t.TempDir()
-	sessionRoot := filepath.Join(home, "acp-go-hermes", "orphan")
-	stateDir := filepath.Join(sessionRoot, "state")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatalf("mkdir state dir: %v", err)
+	xdg, err := nativehermes.CreateXDGDirs(filepath.Join(home, "acp-go-hermes"), "orphan")
+	if err != nil {
+		t.Fatalf("create orphan XDG dirs: %v", err)
 	}
+	sessionRoot := xdg.Root
+	stateDir := xdg.State
 
 	processPath := filepath.Join(t.TempDir(), "fake-hermes-orphan")
 	if err := os.WriteFile(processPath, []byte("#!/bin/sh\nwhile :; do sleep 10; done\n"), 0o700); err != nil {
@@ -86,6 +87,11 @@ func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T)
 		Cwd:            t.TempDir(),
 		ExecutablePath: fakeHermesExecutable(t, fakeModeOK),
 		HealthTimeout:  5 * time.Second,
+		ExistingXDG:    xdg,
+		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
+			return func() {}, func() {}, nil
+		},
+		RetainDiscoveryRoot: func(string, error) {},
 	})
 	if err != nil {
 		t.Fatalf("start replacement Hermes server: %v", err)

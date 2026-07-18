@@ -221,21 +221,21 @@ func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
 	}
 	_, _ = reapSupervisorChildren()
 
-	if _, err := startUnixContainedProcess(nil); err == nil {
+	if _, err := startUnixContainedProcess(nil, ContainmentSpec{}); err == nil {
 		t.Fatal("nil target accepted")
 	}
-	if _, err := startUnixContainedProcess(exec.Command("sh", "-c", "exit 0")); err == nil {
+	if _, err := startUnixContainedProcess(exec.Command("sh", "-c", "exit 0"), ContainmentSpec{}); err == nil {
 		t.Fatal("unconfigured target accepted")
 	}
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
 	configureHermesProcess(missing)
-	if _, err := startUnixContainedProcess(missing); err == nil {
+	if _, err := startUnixContainedProcess(missing, ContainmentSpec{}); err == nil {
 		t.Fatal("missing target accepted")
 	}
 	extra := exec.Command("sh", "-c", "exit 0")
 	configureHermesProcess(extra)
 	extra.ExtraFiles = []*os.File{os.Stdin}
-	if _, err := startUnixContainedProcess(extra); err == nil {
+	if _, err := startUnixContainedProcess(extra, ContainmentSpec{}); err == nil {
 		t.Fatal("target ExtraFiles accepted")
 	}
 
@@ -310,13 +310,13 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 	supervisorExecutable = func() (string, error) { return "", errors.New("executable") }
 	configured := exec.Command("sh", "-c", "exit 0")
 	configureHermesProcess(configured)
-	if _, err := startUnixContainedProcess(configured); err == nil || !strings.Contains(err.Error(), "resolve Hermes supervisor executable") {
+	if _, err := startUnixContainedProcess(configured, ContainmentSpec{}); err == nil || !strings.Contains(err.Error(), "resolve Hermes supervisor executable") {
 		t.Fatalf("executable error = %v", err)
 	}
 
 	supervisorExecutable = os.Executable
 	supervisorPipe = func() (*os.File, *os.File, error) { return nil, nil, errors.New("pipe") }
-	if _, err := startUnixContainedProcess(configured); err == nil || !strings.Contains(err.Error(), "control pipe") {
+	if _, err := startUnixContainedProcess(configured, ContainmentSpec{}); err == nil || !strings.Contains(err.Error(), "control pipe") {
 		t.Fatalf("control pipe error = %v", err)
 	}
 
@@ -329,13 +329,13 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := startUnixContainedProcess(configured); err == nil || !strings.Contains(err.Error(), "proof pipe") {
+	if _, err := startUnixContainedProcess(configured, ContainmentSpec{}); err == nil || !strings.Contains(err.Error(), "proof pipe") {
 		t.Fatalf("proof pipe error = %v", err)
 	}
 
 	supervisorPipe = os.Pipe
 	supervisorExecutable = func() (string, error) { return filepath.Join(t.TempDir(), "missing-supervisor"), nil }
-	if _, err := startUnixContainedProcess(configured); err == nil {
+	if _, err := startUnixContainedProcess(configured, ContainmentSpec{}); err == nil {
 		t.Fatal("supervisor start failure was ignored")
 	}
 }
@@ -345,7 +345,7 @@ func TestLinuxSupervisorErrorAndFallbackBranches(t *testing.T) { //nolint:gocycl
 
 	proof := make(chan bool)
 	tree := &processContainment{processGroupID: 123, proof: proof}
-	if err := tree.quiesce(time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not prove") {
+	if err := tree.complete(time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not prove") {
 		t.Fatalf("proof timeout error = %v", err)
 	}
 
@@ -353,7 +353,7 @@ func TestLinuxSupervisorErrorAndFallbackBranches(t *testing.T) { //nolint:gocycl
 	proof <- true
 	processKill = func(int, syscall.Signal) error { return errors.New("probe") }
 	tree = &processContainment{processGroupID: 123, proof: proof}
-	if err := tree.quiesce(time.Second); err == nil || !strings.Contains(err.Error(), "did not become quiescent") {
+	if err := tree.complete(time.Second); err == nil || !strings.Contains(err.Error(), "did not become quiescent") {
 		t.Fatalf("proof group error = %v", err)
 	}
 

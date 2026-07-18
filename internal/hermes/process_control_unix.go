@@ -19,7 +19,7 @@ var (
 
 type processContainment struct {
 	processGroupID    int
-	process           *os.Process
+	process           *os.Process //nolint:unused // Darwin cleanup owns the captured direct child.
 	terminateFn       func() error
 	killFn            func() error
 	proof             <-chan bool
@@ -27,8 +27,8 @@ type processContainment struct {
 	descendantCountFn func() (int, bool)
 	direct            *directChildWait
 	completeFn        func(time.Duration) error
-	cleanupOnce       sync.Once
-	cleanupErr        error
+	cleanupOnce       sync.Once //nolint:unused // Darwin cleanup memoizes the best-effort boundary.
+	cleanupErr        error     //nolint:unused // Darwin cleanup memoizes the best-effort boundary.
 }
 
 func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processContainment, error) {
