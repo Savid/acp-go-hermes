@@ -19,7 +19,7 @@ details live in `internal/`.
   OpenTelemetry setup, and signal handling.
 - **ACP agent surface** (root package, e.g. `agent.go`,
   `agent_connection.go`, `agent_session.go`, `options.go`, `ids.go`,
-  `request_builders.go`, `validation.go`): ACP method handlers, request
+  `request_builders.go`, `session_validation.go`): ACP method handlers, request
   dispatch, agent options, request builders, and ID helpers.
 - **Session orchestration** (`session.go`, `session_prompt.go`,
   `session_config.go`, `session_meta.go`, `raw_events.go`): Hermes turn
@@ -27,9 +27,10 @@ details live in `internal/`.
   native message replay, config options, and raw gateway event handling.
 - **Session storage** (`session_store.go`, `session_state_store.go`): the
   host-facing `SessionStore` API and the `hermes-state-db-v1` durable store.
-- **Hermes gateway client** (`hermes_client.go`, `hermes_process_*.go`,
-  `internal/hermes`): loopback WebSocket JSON-RPC client, process launch, and
-  platform-specific process control for the `hermes serve` subprocess.
+- **Hermes gateway client** (`internal/hermes/client.go`,
+  `internal/hermes/process*.go`): loopback WebSocket JSON-RPC client, process
+  launch, and platform-specific process control for the `hermes serve`
+  subprocess.
 - **Observability** (`internal/observer`): OpenTelemetry span, metric, and
   trace-context propagation helpers.
 - **Live tests** (`integration`): integration tests that launch the real local
