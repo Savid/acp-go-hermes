@@ -9,8 +9,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// Family contract pins: capability surface, stable-route rejection, and the
-// uniform unknown-session error shape.
+// Contract pins: capability surface, stable-route rejection, and the uniform
+// unknown-session error shape.
 
 func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 	agent := NewAgent()

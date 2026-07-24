@@ -36,6 +36,15 @@ const (
 	mimeWebP = "image/webp"
 )
 
+// maxDecodableImageBytes is the most decoded bytes a base64 image can carry
+// inside the pinned ACP SDK's 10 MiB inbound frame once the enclosing JSON-RPC
+// envelope is accounted for. Decode retention is bounded here rather than by
+// the configurable per-image policy limit so structural inspection always walks
+// the whole decodable payload; the policy limit governs only the too_large
+// verdict, which reads the full decoded size. The process has already received
+// at most one 10 MiB frame, so retaining the whole image is memory-safe.
+const maxDecodableImageBytes int64 = 7_864_155
+
 // errImageStructure signals that a sniffed raster's header yields no valid
 // dimensions or cannot complete the structural walk needed to read them.
 var errImageStructure = errors.New("image structure invalid")
@@ -83,7 +92,7 @@ func (b *imagePromptBudget) validate(data, mimeType string) ([]byte, error) {
 		return nil, imageInputError(imageErrInvalidMediaType, index)
 	}
 
-	decoded, size, err := decodeImageBase64(data, b.limits.MaxInputBytesPerImage)
+	decoded, size, err := decodeImageBase64(data, maxDecodableImageBytes)
 	if err != nil {
 		return nil, imageInputError(imageErrInvalidBase64, index)
 	}

@@ -214,6 +214,58 @@ func TestImageInputStructuralDefectsPrecedeTooLarge(t *testing.T) {
 	}
 }
 
+func TestImageInputAnimationSurvivesDeepTruncation(t *testing.T) {
+	gif := paddedAnimatedGIF(4096)
+	size := int64(len(gif))
+	limit := int64(1024)
+
+	if secondDescriptor := bytes.LastIndexByte(gif, 0x2C); int64(secondDescriptor) <= limit || limit >= size {
+		t.Fatalf("fixture invariants: second descriptor at %d, limit %d, size %d", secondDescriptor, limit, size)
+	}
+
+	_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
+		Data: base64.StdEncoding.EncodeToString(gif), MimeType: mimeGIF,
+	}}}, ImageLimits{MaxInputBytesPerImage: limit})
+	requireImageInputError(t, err, map[string]any{
+		keyField:       acpFieldPromptImage,
+		jsonFieldError: imageErrAnimatedNotSupported,
+		keyIndex:       0,
+	})
+}
+
+// paddedAnimatedGIF builds a two-frame GIF whose first frame is padded so the
+// second image descriptor sits well past firstFramePad bytes, letting a test
+// place a policy limit between the header and the animation-proving descriptor.
+func paddedAnimatedGIF(firstFramePad int) []byte {
+	var b bytes.Buffer
+
+	b.WriteString("GIF89a")
+	b.Write([]byte{0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00})
+	writeGIFFrame(&b, firstFramePad)
+	writeGIFFrame(&b, 0)
+	b.WriteByte(0x3B)
+
+	return b.Bytes()
+}
+
+func writeGIFFrame(b *bytes.Buffer, pad int) {
+	b.Write([]byte{0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00})
+	b.WriteByte(0x02)
+
+	for pad > 0 {
+		n := pad
+		if n > 255 {
+			n = 255
+		}
+
+		b.WriteByte(byte(n))
+		b.Write(make([]byte, n))
+		pad -= n
+	}
+
+	b.WriteByte(0x00)
+}
+
 func TestPromptImageValidationPrecedesNativeTurnAndUnknownModelForwards(t *testing.T) {
 	client := newFakeHermesClient()
 	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
