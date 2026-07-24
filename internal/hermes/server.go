@@ -1292,7 +1292,7 @@ func textFromHermesParts(parts []map[string]any) string {
 }
 
 type gatewayImageAttachment struct {
-	data     string
+	data     []byte
 	filename string
 }
 
@@ -1305,15 +1305,13 @@ func imageAttachmentsFromHermesParts(parts []map[string]any) ([]gatewayImageAtta
 			continue
 		}
 
-		dataURL, _ := part[valURL].(string)
-
-		_, encoded, found := strings.Cut(dataURL, ";base64,")
-		if !found || !strings.HasPrefix(dataURL, "data:image/") || encoded == "" {
-			return nil, fmt.Errorf("hermes image part requires embedded base64 data")
+		data, _ := part["data"].([]byte)
+		if len(data) == 0 {
+			return nil, fmt.Errorf("hermes image part requires decoded image data")
 		}
 
-		filename, _ := part["filename"].(string)
-		attachments = append(attachments, gatewayImageAttachment{data: encoded, filename: filename})
+		filename, _ := part[fieldFilename].(string)
+		attachments = append(attachments, gatewayImageAttachment{data: data, filename: filename})
 	}
 
 	return attachments, nil

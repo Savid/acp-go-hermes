@@ -53,12 +53,14 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 	if got := meta["modelId"]; got != "openai/gpt-test" {
 		t.Fatalf("modelId = %#v", got)
 	}
-	if got := meta["capabilities"]; !containsStringAny(got, "tools") || !containsStringAny(got, "reasoning") ||
-		!containsStringAny(got, "image") || !containsStringAny(got, "pdf") {
-		t.Fatalf("capabilities meta = %#v", got)
+	if _, exists := meta["capabilities"]; exists {
+		t.Fatalf("capabilities metadata survived hard cutover: %#v", meta)
 	}
 	if got := meta["supportedEffortLevels"]; !containsStringAny(got, "low") || !containsStringAny(got, "medium") {
 		t.Fatalf("effort meta = %#v", got)
+	}
+	if len(meta) != 4 {
+		t.Fatalf("model metadata schema = %#v", meta)
 	}
 }
 

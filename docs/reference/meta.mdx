@@ -57,8 +57,9 @@ invalid-params `{"error":"unsupported"}` response.
 ## Response metadata
 
 Advertised model config options carry per-model `_meta.hermes` metadata:
-`contextWindow`, `maxOutputTokens`, `capabilities` (for example `tools`,
-`image`, `audio`), and `supportedEffortLevels` where the model exposes them.
+`modelId`, `contextWindow`, `maxOutputTokens`, and `supportedEffortLevels`
+where the model exposes them. They carry no generic `capabilities` list and no
+modality or generator fields.
 
 A successful `session/prompt` response carries exactly
 `_meta.hermes.messageId` under the Hermes namespace. The value is the

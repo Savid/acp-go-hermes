@@ -89,6 +89,24 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	}
 	testValidationSchemaAndCloneHelpers(t)
 }
+
+func TestValidateImageLimits(t *testing.T) {
+	if err := validateImageLimits(ImageLimits{}); err != nil {
+		t.Fatalf("zero image limits rejected: %v", err)
+	}
+	for name, limits := range map[string]ImageLimits{
+		"input image":  {MaxInputBytesPerImage: -1},
+		"input prompt": {MaxInputBytesPerPrompt: -1},
+		"output image": {MaxOutputBytesPerImage: -1},
+		"output tool":  {MaxOutputBytesPerToolCall: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateImageLimits(limits); err == nil {
+				t.Fatal("negative image limit accepted")
+			}
+		})
+	}
+}
 func testValidationSchemaAndCloneHelpers(t *testing.T) {
 	t.Helper()
 

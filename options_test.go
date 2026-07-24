@@ -29,6 +29,12 @@ func TestApplyOptions(t *testing.T) {
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 3}),
+		WithImageLimits(ImageLimits{
+			MaxInputBytesPerImage:     1,
+			MaxInputBytesPerPrompt:    2,
+			MaxOutputBytesPerImage:    3,
+			MaxOutputBytesPerToolCall: 4,
+		}),
 		WithSeedFiles(seed),
 	})
 	if opts.AgentName != "name" || opts.AgentTitle != "title" || opts.ExecutablePath != "hermes" ||
@@ -38,6 +44,14 @@ func TestApplyOptions(t *testing.T) {
 	if opts.Home != "/tmp/home" || opts.ScratchDir != "/tmp/scratch" {
 		t.Fatalf("home/scratch options = %q / %q", opts.Home, opts.ScratchDir)
 	}
+	if opts.ImageLimits != (ImageLimits{
+		MaxInputBytesPerImage:     1,
+		MaxInputBytesPerPrompt:    2,
+		MaxOutputBytesPerImage:    3,
+		MaxOutputBytesPerToolCall: 4,
+	}) {
+		t.Fatalf("image limits = %#v", opts.ImageLimits)
+	}
 	if opts.SeedFiles["config.yaml"] != "model: {}\n" {
 		t.Fatalf("seed files = %#v", opts.SeedFiles)
 	}
@@ -45,5 +59,18 @@ func TestApplyOptions(t *testing.T) {
 	seed["extra"] = "late"
 	if opts.SeedFiles["config.yaml"] != "model: {}\n" || len(opts.SeedFiles) != 1 {
 		t.Fatalf("WithSeedFiles did not clone source map: %#v", opts.SeedFiles)
+	}
+}
+
+func TestImageLimitDefaults(t *testing.T) {
+	limits := applyOptions(nil).ImageLimits
+	want := ImageLimits{
+		MaxInputBytesPerImage:     defaultImageLimitBytes,
+		MaxInputBytesPerPrompt:    defaultImageLimitBytes,
+		MaxOutputBytesPerImage:    defaultImageLimitBytes,
+		MaxOutputBytesPerToolCall: defaultImageLimitBytes,
+	}
+	if limits != want {
+		t.Fatalf("default image limits = %#v, want %#v", limits, want)
 	}
 }

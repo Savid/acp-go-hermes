@@ -17,10 +17,36 @@ advertised provider-model context limit; if neither source has one, the size is
 The adapter advertises `promptCapabilities` with both embedded context and image
 support enabled, so a prompt may carry text, resource links, embedded resources,
 and image blocks. Text and resource content is forwarded as native text parts.
-Inline base64 image data and image-MIME embedded blob resources are uploaded
-through Hermes' native `image.attach_bytes` route immediately before
-`prompt.submit`; non-embedded image URLs are rejected rather than fetched by
-the adapter. A prompt with no usable parts is rejected with `invalid_params`.
+An image requires embedded base64 data and one canonical MIME string:
+`image/png`, `image/jpeg`, `image/gif`, or `image/webp`. Data is authoritative
+when a URI is also present; the URI is never fetched and contributes only an
+optional filename hint.
+
+The adapter decodes and structurally validates every image before the native
+turn starts. MIME mismatches, invalid dimensions, animated GIF/WebP/APNG,
+per-image overflow, and aggregate prompt overflow fail as `invalid_params`.
+The error data carries `field: "prompt.image"`, the zero-based image `index`,
+and one of `missing_data`, `invalid_base64`, `invalid_media_type`,
+`media_type_mismatch`, `animated_not_supported`, `invalid_dimensions`, or
+`too_large`. Limit errors additionally carry decoded `sizeBytes` and
+`maxBytes`.
+
+Hermes' 25 MiB `image.attach_bytes` cap is above the ACP ingress envelope and
+the adapter's default limits, so there is no smaller observable native image
+envelope to enforce on this transport.
+
+Validated bytes are attached in image order through Hermes'
+`image.attach_bytes`, followed by exactly one `prompt.submit`. Hermes separates
+attachments from prompt text, so arbitrary text/image interleaving cannot
+survive the second hop: image order is preserved, text order is preserved and
+joined with blank lines, and all attachments precede the one native text
+submission. The driven gateway exposes no exhaustive selected-model image
+modality field, so the internal model gate is `unknown` and valid images
+forward to Hermes.
+
+Hermes image transport is input-only. Native image artifacts are not emitted
+as typed ACP image output. A prompt with no usable parts is rejected with
+`invalid_params`.
 
 Hermes' authoritative `message.complete` text is reconciled with the prefix
 already emitted by `message.delta`. The adapter emits only a missing completion

@@ -737,7 +737,7 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	t.Helper()
 
 	assertGatewayTextMessage(ctx, t, server)
-	assertGatewayImageMessage(ctx, t, server)
+	assertGatewayImageMessage(ctx, t, server, fake)
 	assertGatewayPermissionCorrelation(t, server.events)
 
 	for _, want := range []string{"clarify.request", "message.part.updated"} {
@@ -1016,23 +1016,42 @@ func assertGatewayNativeToolParts(t *testing.T, parts []Part) {
 	}
 }
 
-func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermesServer) {
+func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
 	t.Helper()
 
+	before := len(fake.callMethods())
 	imageMessage, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{
-		{"type": "file", "url": "data:image/png;base64,AA==", "filename": "image.png"},
+		{"type": "text", "text": "first"},
+		{"type": "file", "data": []byte{0, 1}, "filename": "first.png"},
+		{"type": "text", "text": "second"},
+		{"type": "file", "data": []byte{2, 3}, "filename": "second.webp"},
 	}})
 	if err != nil || imageMessage.Info.SessionID != "stored-1" {
 		t.Fatalf("image SendMessage = %#v err=%v", imageMessage, err)
 	}
 
-	if _, imageErr := imageAttachmentsFromHermesParts([]map[string]any{{"type": "file", "url": "https://example.test/image.png"}}); imageErr == nil {
-		t.Fatal("image parts accepted a non-embedded URL")
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls[before:]...)
+	fake.mu.Unlock()
+	if len(calls) < 3 || calls[0].Method != "image.attach_bytes" ||
+		calls[1].Method != "image.attach_bytes" || calls[2].Method != "prompt.submit" {
+		t.Fatalf("attach-then-submit calls = %#v", calls)
+	}
+	if calls[0].Params["content_base64"] != "AAE=" || calls[0].Params["filename"] != "first.png" ||
+		calls[1].Params["content_base64"] != "AgM=" || calls[1].Params["filename"] != "second.webp" {
+		t.Fatalf("attachment params = %#v", calls[:2])
+	}
+	if calls[2].Params["text"] != "first\n\nsecond" {
+		t.Fatalf("flattened prompt text = %#v", calls[2].Params)
+	}
+
+	if _, imageErr := imageAttachmentsFromHermesParts([]map[string]any{{"type": "file"}}); imageErr == nil {
+		t.Fatal("image parts accepted missing decoded data")
 	}
 	if _, imageErr := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
-		"type": "file", "url": "https://example.test/image.png",
+		"type": "file",
 	}}}); imageErr == nil {
-		t.Fatal("SendMessage accepted a non-embedded image URL")
+		t.Fatal("SendMessage accepted missing decoded image data")
 	}
 
 	failing := newFakeGatewayServer(t)
@@ -1040,7 +1059,7 @@ func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermes
 	failingServer := newGatewayBackedHermesServer(t, failing, "")
 	failingServer.rememberGatewaySession("stored-1", "live-1")
 	if _, imageErr := failingServer.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
-		"type": "file", "url": "data:image/png;base64,AA==",
+		"type": "file", "data": []byte{0},
 	}}}); imageErr == nil {
 		t.Fatal("SendMessage ignored image.attach_bytes failure")
 	}

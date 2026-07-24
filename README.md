@@ -107,8 +107,10 @@ materialized.
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session
   metadata.
-- Native image forwarding through Hermes `image.attach_bytes`, including
-  image-MIME embedded resource blobs.
+- Static PNG, JPEG, GIF, and WebP prompt images through Hermes
+  `image.attach_bytes`, including image-MIME embedded resource blobs.
+- Input-only image transport: Hermes image artifacts are not projected as
+  typed ACP image output.
 - Command, file, and generic permission prompts, plus MCP elicitation bridging.
 - MCP stdio and streamable HTTP server configuration through the session
   request builders.

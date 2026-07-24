@@ -16,6 +16,11 @@ import (
 // the per-session home root directory name under the scratch parent.
 const valACPGoHermes = "acp-go-hermes"
 
+// defaultImageLimitBytes is 6 MiB decoded, the default for every ImageLimits
+// field. It keeps a maximal single-image prompt inside the pinned ACP SDK's
+// 10 MiB frame bound with headroom for JSON overhead and surrounding text.
+const defaultImageLimitBytes int64 = 6 * 1024 * 1024
+
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
@@ -23,6 +28,21 @@ type Option func(*Options)
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
+}
+
+// ImageLimits bounds decoded image bytes. Every field counts decoded bytes,
+// never base64 characters or enclosing JSON, and defaults to 6 MiB decoded
+// (6,291,456 bytes). A field explicitly set to zero in a supplied ImageLimits
+// disables that adapter policy limit; it never bypasses native framing,
+// provider, memory, or host request limits. Negative fields are rejected at
+// agent construction. The two output fields are accepted for the uniform
+// option surface; this adapter emits no typed image output, so no output
+// limit is ever consulted.
+type ImageLimits struct {
+	MaxInputBytesPerImage     int64
+	MaxInputBytesPerPrompt    int64
+	MaxOutputBytesPerImage    int64
+	MaxOutputBytesPerToolCall int64
 }
 
 // RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
@@ -103,6 +123,7 @@ type Options struct {
 	SessionStore                SessionStore
 	SessionStoreLoadTimeout     time.Duration
 	ConcurrencyLimits           ConcurrencyLimits
+	ImageLimits                 ImageLimits
 	SeedFiles                   map[string]string
 	TurnTimeout                 time.Duration
 	RuntimeResourceHooks        RuntimeResourceHooks
@@ -120,8 +141,14 @@ func applyOptions(opts []Option) Options {
 		AgentTitle:              valACPGoHermes,
 		AgentVersion:            "0.1.0",
 		SessionStoreLoadTimeout: 10 * time.Second,
-		storeWriteTTL:           sessionStoreWriteTimeout,
-		clientFactory:           nativehermes.StartServer,
+		ImageLimits: ImageLimits{
+			MaxInputBytesPerImage:     defaultImageLimitBytes,
+			MaxInputBytesPerPrompt:    defaultImageLimitBytes,
+			MaxOutputBytesPerImage:    defaultImageLimitBytes,
+			MaxOutputBytesPerToolCall: defaultImageLimitBytes,
+		},
+		storeWriteTTL: sessionStoreWriteTimeout,
+		clientFactory: nativehermes.StartServer,
 		newPromptTimer: func(timeout time.Duration) promptTimer {
 			timer := time.NewTimer(timeout)
 
@@ -236,6 +263,16 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithImageLimits replaces every decoded-byte image limit with the supplied
+// values. A zero field disables that adapter policy limit; a negative field
+// is rejected at agent construction. Omitting the option leaves all four
+// fields at their default of 6 MiB decoded.
+func WithImageLimits(limits ImageLimits) Option {
+	return func(options *Options) {
+		options.ImageLimits = limits
 	}
 }
 

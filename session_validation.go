@@ -120,6 +120,17 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 	return name, nil
 }
 
+// validateImageLimits rejects negative decoded-byte limits. Zero fields stay
+// zero: an explicit zero disables that adapter policy limit.
+func validateImageLimits(limits ImageLimits) error {
+	if limits.MaxInputBytesPerImage < 0 || limits.MaxInputBytesPerPrompt < 0 ||
+		limits.MaxOutputBytesPerImage < 0 || limits.MaxOutputBytesPerToolCall < 0 {
+		return fmt.Errorf("image limits must be non-negative")
+	}
+
+	return nil
+}
+
 func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, error) {
 	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentClientCalls < 0 {
 		return limits, fmt.Errorf("concurrency limits must be non-negative")

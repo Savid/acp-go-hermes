@@ -3,6 +3,7 @@ package hermes
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ const (
 	jsonrpcVersion = "2.0"
 	methodEvent    = "event"
 	fieldSessionID = "session_id"
+	fieldFilename  = "filename"
 
 	// readLimitBytes caps a single inbound gateway frame. It must comfortably
 	// exceed the advertised rawEvent maxBytes (64 KiB) so an oversize native
@@ -541,15 +543,15 @@ func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text st
 
 // AttachImageBytes uploads one embedded image to the live session. Hermes
 // queues it for the immediately following prompt.submit call.
-func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, data string, filename string) error {
+func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, data []byte, filename string) error {
 	var result struct {
 		Attached bool `json:"attached"`
 	}
 
 	err := c.Call(ctx, "image.attach_bytes", map[string]any{
 		fieldSessionID:   liveSessionID,
-		"content_base64": data,
-		"filename":       filename,
+		"content_base64": base64.StdEncoding.EncodeToString(data),
+		fieldFilename:    filename,
 	}, &result)
 	if err != nil {
 		return err

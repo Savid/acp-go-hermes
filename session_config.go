@@ -14,8 +14,6 @@ import (
 // Session-config option vocabulary.
 const (
 	keyValue = "value"
-	valAudio = "audio"
-	valImage = "image"
 )
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
@@ -221,39 +219,12 @@ func modelMeta(providerID string, modelID string, model nativehermes.ProviderMod
 		meta["maxOutputTokens"] = n
 	}
 
-	capabilities := modelCapabilities(model)
-	if len(capabilities) > 0 {
-		meta["capabilities"] = capabilities
-	}
-
 	efforts := supportedEfforts(model)
 	if len(efforts) > 0 {
 		meta["supportedEffortLevels"] = efforts
 	}
 
 	return meta
-}
-
-func modelCapabilities(model nativehermes.ProviderModel) []string {
-	var caps []string
-	if model.Reasoning {
-		caps = append(caps, valReasoning)
-	}
-
-	if model.ToolCall {
-		caps = append(caps, "tools")
-	}
-
-	for _, value := range model.Modalities.Input {
-		switch strings.ToLower(value) {
-		case valImage, valAudio, "pdf", "video":
-			caps = append(caps, strings.ToLower(value))
-		}
-	}
-
-	slices.Sort(caps)
-
-	return slices.Compact(caps)
 }
 
 func supportedEfforts(model nativehermes.ProviderModel) []string {

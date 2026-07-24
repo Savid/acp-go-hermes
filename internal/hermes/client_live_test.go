@@ -46,7 +46,9 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	if _, err := proc.Client.ModelOptions(ctx, created.SessionID); err != nil {
 		t.Fatalf("model.options: %v", err)
 	}
-	if err := proc.Client.AttachImageBytes(ctx, created.SessionID, "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", "acp-probe.png"); err != nil {
+	if err := proc.Client.AttachImageBytes(ctx, created.SessionID, []byte(
+		"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
+	), "acp-probe.png"); err != nil {
 		t.Fatalf("image.attach_bytes: %v", err)
 	}
 	if os.Getenv("ACP_GO_HERMES_RUN_LIVE_TOKENS") != "" {

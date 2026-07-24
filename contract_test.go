@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -34,6 +35,13 @@ func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 	}
 	if !resp.AgentCapabilities.PromptCapabilities.EmbeddedContext {
 		t.Fatal("embedded context capability missing")
+	}
+	encodedMeta, err := json.Marshal(resp.AgentCapabilities.Meta)
+	if err != nil {
+		t.Fatalf("marshal capability metadata: %v", err)
+	}
+	if strings.Contains(string(encodedMeta), `"image`) {
+		t.Fatalf("image metadata advertised outside the standard prompt capability: %s", encodedMeta)
 	}
 	meta, _ := resp.AgentCapabilities.Meta[hermesMetaKey].(map[string]any)
 	if _, ok := meta["structuredOutput"]; ok {

@@ -1060,6 +1060,10 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	if _, err := invalidOptions.Initialize(ctx, acp.InitializeRequest{}); err == nil {
 		t.Fatal("invalid construction options were not reported during initialize")
 	}
+	invalidImageOptions := NewAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
+	if _, err := invalidImageOptions.Initialize(ctx, acp.InitializeRequest{}); err == nil {
+		t.Fatal("negative image limit was not reported during initialize")
+	}
 	invalidOptions.options.SessionStore = nil
 	if invalidOptions.sessionStore() == nil {
 		t.Fatal("nil session store did not fall back")

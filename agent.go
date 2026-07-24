@@ -71,7 +71,7 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options))
+	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
