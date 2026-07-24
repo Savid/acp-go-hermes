@@ -37,7 +37,7 @@ still reach.
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
-| `WithImageLimits` | Decoded-byte limits for prompt input and typed output; all four fields default to 6 MiB when omitted. |
+| `WithImageLimits` | Decoded-byte limits for image prompt input; all four fields default to 6 MiB when omitted. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin. |
@@ -63,8 +63,10 @@ are gone.
 `MaxOutputBytesPerImage`, and `MaxOutputBytesPerToolCall`. Limits count decoded
 bytes. Omitting the option defaults every field to 6 MiB (6,291,456 bytes);
 zero in a supplied struct disables that adapter policy limit, and a negative
-field is rejected at agent construction. Hermes currently implements image
-input only, but carries the complete family option surface.
+field is rejected at agent construction. Hermes implements image prompt input;
+it does not emit typed image output. The `MaxOutputBytesPerImage` and
+`MaxOutputBytesPerToolCall` fields exist for API symmetry but Hermes never
+consults them.
 
 `RuntimeContainmentMode` reports `authoritative`, `best_effort`, or
 `unavailable`. Embedded hosts can observe it through the runtime-resource
