@@ -187,6 +187,33 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 	}
 }
 
+func TestImageInputStructuralDefectsPrecedeTooLarge(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		fixture  string
+		mimeType string
+		want     string
+	}{
+		{name: "animated over image limit", fixture: "animated.gif", mimeType: mimeGIF, want: imageErrAnimatedNotSupported},
+		{name: "invalid dimensions over image limit", fixture: "truncated.png", mimeType: mimePNG, want: imageErrInvalidDimensions},
+		{name: "media type mismatch over image limit", fixture: "mismatch.png", mimeType: mimePNG, want: imageErrMediaTypeMismatch},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := fixtureBytes(t, test.fixture)
+			size := int64(len(raw))
+
+			_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
+				Data: base64.StdEncoding.EncodeToString(raw), MimeType: test.mimeType,
+			}}}, ImageLimits{MaxInputBytesPerImage: size - 1})
+			requireImageInputError(t, err, map[string]any{
+				keyField:       acpFieldPromptImage,
+				jsonFieldError: test.want,
+				keyIndex:       0,
+			})
+		})
+	}
+}
+
 func TestPromptImageValidationPrecedesNativeTurnAndUnknownModelForwards(t *testing.T) {
 	client := newFakeHermesClient()
 	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{

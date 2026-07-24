@@ -88,10 +88,6 @@ func (b *imagePromptBudget) validate(data, mimeType string) ([]byte, error) {
 		return nil, imageInputError(imageErrInvalidBase64, index)
 	}
 
-	if limit := b.limits.MaxInputBytesPerImage; limit > 0 && size > limit {
-		return nil, imageInputSizeError(index, size, limit)
-	}
-
 	sniffed := sniffImageMime(decoded)
 	if sniffed == "" {
 		return nil, imageInputError(imageErrMediaTypeMismatch, index)
@@ -108,6 +104,10 @@ func (b *imagePromptBudget) validate(data, mimeType string) ([]byte, error) {
 
 	if sniffed != mimeType {
 		return nil, imageInputError(imageErrMediaTypeMismatch, index)
+	}
+
+	if limit := b.limits.MaxInputBytesPerImage; limit > 0 && size > limit {
+		return nil, imageInputSizeError(index, size, limit)
 	}
 
 	b.totalBytes += size
