@@ -108,7 +108,12 @@ materialized.
 - Prompt streaming for messages, tool calls, diffs, usage, and session
   metadata.
 - Static PNG, JPEG, GIF, and WebP prompt images through Hermes
-  `image.attach_bytes`, including image-MIME embedded resource blobs.
+  `image.attach_bytes`, including image-MIME embedded resource blobs, with the
+  enforced byte and format bounds advertised at initialize under
+  `_meta["acp-go.dev/mediaEnvelope"]`.
+- Two inbound image transports: embedded base64, and — for a co-located host
+  that sets `WithInputHandoffRoot` — digest-verified local files read under that
+  read-only root, resolved symlink-safely and never named in the native request.
 - Input-only image transport: Hermes image artifacts are not projected as
   typed ACP image output.
 - Command, file, and generic permission prompts, plus MCP elicitation bridging.

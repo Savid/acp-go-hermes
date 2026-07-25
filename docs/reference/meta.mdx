@@ -6,9 +6,12 @@ description: The _meta.hermes vocabulary accepted on requests and emitted on res
 The adapter reads and writes vendor metadata under the `_meta.hermes` namespace.
 Unknown keys under `_meta.hermes` are rejected; foreign namespaces are ignored.
 
-Initialize separately advertises the reserved route capability as
-`_meta["acp-go.dev/route"] = {"versions":[1]}`. This key is not part of the
-Hermes namespace.
+Initialize separately advertises three reserved `acp-go.dev/` capability keys —
+the route capability, the media envelope, and local handoff support. None of
+them is part of the Hermes namespace.
+
+Initialize advertises the reserved route capability as
+`_meta["acp-go.dev/route"] = {"versions":[1]}`.
 
 `session/prompt` and cancellation of an active turn require exactly
 `{"version":1,"turnNonce":"..."}` under the reserved route key. The nonce is
@@ -24,6 +27,61 @@ Every outbound Hermes clarification preserves native metadata and adds
 `version`, `sessionId`, `turnNonce`, and its native `requestId` under the route
 key. The adapter rejects a pre-existing reserved key. Permission requests keep
 their structural session/tool-call correlation and do not use this envelope.
+
+## Media envelope
+
+Initialize always advertises the inbound media bounds the adapter enforces under
+the reserved capability key `_meta["acp-go.dev/mediaEnvelope"]`:
+
+```json
+{
+  "maxBytes": 6291456,
+  "maxPromptBytes": 6291456,
+  "maxDimension": 0,
+  "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+  "documentFormats": []
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `maxBytes` | Decoded bytes accepted per image. Reports `ImageLimits.MaxInputBytesPerImage`, the value the per-image gate enforces. |
+| `maxPromptBytes` | Decoded bytes accepted across one prompt. Reports `ImageLimits.MaxInputBytesPerPrompt`. |
+| `maxDimension` | Pixels accepted per dimension. Always `0`: Hermes enforces no pixel bound, and `0` means unbounded rather than zero. |
+| `imageFormats` | The inbound raster allowlist, in adapter order. |
+| `documentFormats` | MIME types mapped to a native document representation. Always an empty array: Hermes has none. |
+
+The byte values track `WithImageLimits`, so the advertisement and the rejection a
+host would receive always report the same number. A field set to `0` through
+`WithImageLimits` disables that policy limit and is advertised as `0`. Hermes'
+25 MiB native `image.attach_bytes` cap is looser than the policy defaults, so no
+native ceiling tightens these values and no `native_envelope_exceeded` verdict
+exists on this adapter. The envelope describes adapter bounds only; whether a
+selected model accepts an image at all stays a prompt-time result.
+
+## Local handoff
+
+When `WithInputHandoffRoot` is set, initialize additionally advertises
+`_meta["acp-go.dev/handoff"] = {"versions":[1]}`, and image blocks may use the
+[local handoff form](/core/prompt-streaming#local-handoff-image-input) with the
+per-block envelope:
+
+```json
+{
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "<sha256 hex>",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+The advertisement is the host's confirmation that its option reached this
+adapter: without a configured root the key is absent and every handoff-form
+block is rejected `invalid_handoff`. The envelope accepts exactly those three
+fields on a `session/prompt` image block and is read nowhere else.
 
 ## Request metadata
 

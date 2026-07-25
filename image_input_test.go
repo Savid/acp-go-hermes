@@ -49,7 +49,7 @@ func TestImageInputStaticFormatsAndDataAuthority(t *testing.T) {
 				Data:     base64.StdEncoding.EncodeToString(want),
 				MimeType: test.mimeType,
 				Uri:      &uri,
-			}}}, ImageLimits{})
+			}}}, ImageLimits{}, "")
 			if err != nil {
 				t.Fatalf("promptToHermesParts: %v", err)
 			}
@@ -87,7 +87,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 				Data: test.data, MimeType: test.mimeType,
-			}}}, ImageLimits{})
+			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
 				keyField:       acpFieldPromptImage,
 				jsonFieldError: test.want,
@@ -99,7 +99,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 	uriOnly := "data:image/png;base64," + png
 	_, uriErr := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Uri: &uriOnly, MimeType: mimePNG,
-	}}}, ImageLimits{})
+	}}}, ImageLimits{}, "")
 	requireImageInputError(t, uriErr, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrMissingData,
@@ -110,7 +110,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 		acp.TextBlock("before"),
 		{Image: &acp.ContentBlockImage{Data: png, MimeType: mimePNG}},
 		{Image: &acp.ContentBlockImage{Data: "!", MimeType: mimePNG}},
-	}, ImageLimits{})
+	}, ImageLimits{}, "")
 	requireImageInputError(t, err, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrInvalidBase64,
@@ -131,7 +131,7 @@ func TestImageInputRejectsAnimation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 				Data: fixtureBase64(t, test.name), MimeType: test.mimeType,
-			}}}, ImageLimits{})
+			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
 				keyField:       acpFieldPromptImage,
 				jsonFieldError: imageErrAnimatedNotSupported,
@@ -150,13 +150,13 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 
 	if _, err := promptToHermesParts([]acp.ContentBlock{block}, ImageLimits{
 		MaxInputBytesPerImage: size,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("per-image boundary rejected: %v", err)
 	}
 
 	_, err := promptToHermesParts([]acp.ContentBlock{block}, ImageLimits{
 		MaxInputBytesPerImage: size - 1,
-	})
+	}, "")
 	requireImageInputError(t, err, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
@@ -167,13 +167,13 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 
 	if _, aggregateErr := promptToHermesParts([]acp.ContentBlock{block, block}, ImageLimits{
 		MaxInputBytesPerPrompt: size * 2,
-	}); aggregateErr != nil {
+	}, ""); aggregateErr != nil {
 		t.Fatalf("aggregate boundary rejected: %v", aggregateErr)
 	}
 
 	_, err = promptToHermesParts([]acp.ContentBlock{block, block}, ImageLimits{
 		MaxInputBytesPerPrompt: size*2 - 1,
-	})
+	}, "")
 	requireImageInputError(t, err, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
@@ -182,7 +182,7 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 		keyMaxBytes:    size*2 - 1,
 	})
 
-	if _, err := promptToHermesParts([]acp.ContentBlock{block, block}, ImageLimits{}); err != nil {
+	if _, err := promptToHermesParts([]acp.ContentBlock{block, block}, ImageLimits{}, ""); err != nil {
 		t.Fatalf("zero limits did not disable adapter policy: %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestImageInputStructuralDefectsPrecedeTooLarge(t *testing.T) {
 
 			_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 				Data: base64.StdEncoding.EncodeToString(raw), MimeType: test.mimeType,
-			}}}, ImageLimits{MaxInputBytesPerImage: size - 1})
+			}}}, ImageLimits{MaxInputBytesPerImage: size - 1}, "")
 			requireImageInputError(t, err, map[string]any{
 				keyField:       acpFieldPromptImage,
 				jsonFieldError: test.want,
@@ -225,7 +225,7 @@ func TestImageInputAnimationSurvivesDeepTruncation(t *testing.T) {
 
 	_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Data: base64.StdEncoding.EncodeToString(gif), MimeType: mimeGIF,
-	}}}, ImageLimits{MaxInputBytesPerImage: limit})
+	}}}, ImageLimits{MaxInputBytesPerImage: limit}, "")
 	requireImageInputError(t, err, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrAnimatedNotSupported,
@@ -346,7 +346,7 @@ func TestImageInputBase64StreamingAndStructuralResidual(t *testing.T) {
 	corruptedTail[len(corruptedTail)-1] ^= 0xff
 	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Data: base64.StdEncoding.EncodeToString(corruptedTail), MimeType: mimePNG,
-	}}}, ImageLimits{}); err != nil {
+	}}}, ImageLimits{}, ""); err != nil {
 		t.Fatalf("corruption outside structural walk was rejected: %v", err)
 	}
 }
@@ -400,7 +400,7 @@ func TestImageStructureMalformedHeaders(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 				Data: base64.StdEncoding.EncodeToString(test.data), MimeType: test.mimeType,
-			}}}, ImageLimits{})
+			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
 				keyField:       acpFieldPromptImage,
 				jsonFieldError: imageErrInvalidDimensions,
@@ -411,7 +411,7 @@ func TestImageStructureMalformedHeaders(t *testing.T) {
 
 	if _, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Data: base64.StdEncoding.EncodeToString(badPNGChunk), MimeType: mimePNG,
-	}}}, ImageLimits{}); err != nil {
+	}}}, ImageLimits{}, ""); err != nil {
 		t.Fatalf("truncated chunk after a valid PNG header was rejected: %v", err)
 	}
 	for name, data := range map[string][]byte{

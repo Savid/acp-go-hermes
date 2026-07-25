@@ -2,7 +2,10 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,19 +39,137 @@ func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 	if !resp.AgentCapabilities.PromptCapabilities.EmbeddedContext {
 		t.Fatal("embedded context capability missing")
 	}
-	encodedMeta, err := json.Marshal(resp.AgentCapabilities.Meta)
-	if err != nil {
-		t.Fatalf("marshal capability metadata: %v", err)
-	}
-	if strings.Contains(string(encodedMeta), `"image`) {
-		t.Fatalf("image metadata advertised outside the standard prompt capability: %s", encodedMeta)
-	}
 	meta, _ := resp.AgentCapabilities.Meta[hermesMetaKey].(map[string]any)
+	encodedVendorMeta, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal vendor capability metadata: %v", err)
+	}
+	if strings.Contains(string(encodedVendorMeta), `"image`) {
+		t.Fatalf("image metadata advertised under the vendor namespace: %s", encodedVendorMeta)
+	}
 	if _, ok := meta["structuredOutput"]; ok {
 		t.Fatal("Hermes structured output advertised")
 	}
 	if store, _ := meta["sessionStore"].(map[string]any); store["format"] != SessionStoreFormat {
 		t.Fatalf("sessionStore meta = %#v", store)
+	}
+}
+
+func TestInitializeAdvertisesMediaEnvelope(t *testing.T) {
+	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	if err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	envelope, ok := resp.AgentCapabilities.Meta[mediaEnvelopeMetaKey].(map[string]any)
+	if !ok {
+		t.Fatalf("media envelope missing: %#v", resp.AgentCapabilities.Meta)
+	}
+	if !reflect.DeepEqual(envelope, map[string]any{
+		keyMaxBytes:                       defaultImageLimitBytes,
+		mediaEnvelopeFieldMaxPromptBytes:  defaultImageLimitBytes,
+		mediaEnvelopeFieldMaxDimension:    0,
+		mediaEnvelopeFieldImageFormats:    []string{mimePNG, mimeJPEG, mimeGIF, mimeWebP},
+		mediaEnvelopeFieldDocumentFormats: []string{},
+	}) {
+		t.Fatalf("media envelope = %#v", envelope)
+	}
+
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal media envelope: %v", err)
+	}
+	if want := `{"documentFormats":[],"imageFormats":["image/png","image/jpeg","image/gif","image/webp"],"maxBytes":6291456,"maxDimension":0,"maxPromptBytes":6291456}`; string(encoded) != want {
+		t.Fatalf("encoded media envelope = %s, want %s", encoded, want)
+	}
+}
+
+// TestMediaEnvelopeMatchesEnforcedGates pins the advertisement to the gate: a
+// host that pre-checks against the advertised values sees the same numbers the
+// rejection reports.
+func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
+	png := fixtureBytes(t, "valid.png")
+	limits := ImageLimits{
+		MaxInputBytesPerImage:  int64(len(png)) - 1,
+		MaxInputBytesPerPrompt: int64(len(png)) * 3,
+	}
+
+	resp, err := NewAgent(WithImageLimits(limits)).Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	if err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	envelope, _ := resp.AgentCapabilities.Meta[mediaEnvelopeMetaKey].(map[string]any)
+	if envelope[keyMaxBytes] != limits.MaxInputBytesPerImage || envelope[mediaEnvelopeFieldMaxPromptBytes] != limits.MaxInputBytesPerPrompt {
+		t.Fatalf("advertised bounds = %#v, want the configured limits %#v", envelope, limits)
+	}
+
+	block := acp.ContentBlock{Image: &acp.ContentBlockImage{
+		Data: base64.StdEncoding.EncodeToString(png), MimeType: mimePNG,
+	}}
+
+	_, imageErr := promptToHermesParts([]acp.ContentBlock{block}, limits, "")
+	requireImageInputError(t, imageErr, map[string]any{
+		keyField:       acpFieldPromptImage,
+		jsonFieldError: imageErrTooLarge,
+		keyIndex:       0,
+		keySizeBytes:   int64(len(png)),
+		keyMaxBytes:    envelope[keyMaxBytes],
+	})
+
+	_, promptErr := promptToHermesParts([]acp.ContentBlock{block, block, block, block}, ImageLimits{
+		MaxInputBytesPerPrompt: limits.MaxInputBytesPerPrompt,
+	}, "")
+	requireImageInputError(t, promptErr, map[string]any{
+		keyField:       acpFieldPromptImage,
+		jsonFieldError: imageErrTooLarge,
+		keyIndex:       3,
+		keySizeBytes:   int64(len(png)) * 4,
+		keyMaxBytes:    envelope[mediaEnvelopeFieldMaxPromptBytes],
+	})
+}
+
+// TestInitializeAdvertisesHandoffOnlyWhenRootConfigured pins the conditional
+// advertisement both ways: its absence is how a host learns its handoff option
+// never reached this adapter.
+func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
+	ctx := context.Background()
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+
+	withoutRoot, err := NewAgent().Initialize(ctx, request)
+	if err != nil {
+		t.Fatalf("Initialize without handoff root: %v", err)
+	}
+	if _, ok := withoutRoot.AgentCapabilities.Meta[handoffMetaKey]; ok {
+		t.Fatalf("handoff advertised without a configured root: %#v", withoutRoot.AgentCapabilities.Meta)
+	}
+
+	withRoot, err := NewAgent(WithInputHandoffRoot(t.TempDir())).Initialize(ctx, request)
+	if err != nil {
+		t.Fatalf("Initialize with handoff root: %v", err)
+	}
+	if !reflect.DeepEqual(withRoot.AgentCapabilities.Meta[handoffMetaKey], map[string]any{keyVersions: []int{handoffVersion}}) {
+		t.Fatalf("handoff advertisement = %#v", withRoot.AgentCapabilities.Meta[handoffMetaKey])
+	}
+	if _, ok := withRoot.AgentCapabilities.Meta[mediaEnvelopeMetaKey]; !ok {
+		t.Fatal("media envelope missing when a handoff root is configured")
+	}
+}
+
+func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
+	agent := NewAgent(WithInputHandoffRoot("relative/handoff"))
+
+	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) || requestErr.Code != -32602 {
+		t.Fatalf("Initialize error = %#v, want invalid params", err)
+	}
+	data, _ := requestErr.Data.(map[string]any)
+	message, _ := data[jsonFieldError].(string)
+
+	if !strings.Contains(message, "input handoff root must be an absolute path") {
+		t.Fatalf("error data = %#v", requestErr.Data)
 	}
 }
 

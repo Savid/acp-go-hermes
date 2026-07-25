@@ -46,6 +46,28 @@ ambiguous PIDs. Cleanup revalidates UID, process start identity, and both exact
 markers before every individual PID signal; it never treats a recorded PID or
 PGID as signal authority. PID-by-PID cleanup has a PID-reuse time-of-check/time-of-use race and can signal an unrelated reused PID; correlation is not ownership or proof of absence; inherited markers can be scrubbed.
 
+## Local read surface
+
+The adapter reads exactly one host-supplied location on disk, and only when the
+host opts in with `WithInputHandoffRoot`. Every other inbound payload arrives in
+the ACP frame; no prompt URI is ever fetched, local or remote.
+
+Inside that root the adapter is read-only and bounded. A handoff path is
+contained lexically, resolved through symlinks, and re-contained after
+resolution, so a symlink out of the root is rejected rather than followed, and a
+non-regular file is rejected rather than opened. Reads stop at the per-image byte
+bound, and bytes must hash to the digest the block declared or the turn is
+rejected — a file whose contents changed underneath the host is never forwarded.
+The adapter never writes, moves, or removes anything under the root, and the
+path never appears in the native request, so nothing about the host's layout
+reaches Hermes.
+
+<Warning>
+The handoff root is a read grant. Point it at a directory that holds only files
+intended for this adapter — not at a session workspace or a shared parent of
+other tenants' trees.
+</Warning>
+
 ## Stdout discipline
 
 Stdout is reserved exclusively for ACP JSON-RPC frames. Child process stdout and

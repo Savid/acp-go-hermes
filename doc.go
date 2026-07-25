@@ -22,6 +22,13 @@
 // adapter may target, so a non-empty Home is rejected when a session is
 // established.
 //
+// Prompt images arrive either as embedded base64 or, for a co-located host that
+// sets [WithInputHandoffRoot], as digest-verified files under that read-only
+// root. The adapter enforces the same gates on both transports and advertises
+// the bounds it enforces at initialize; the handoff root is read-only, so it
+// materializes nothing and [WithScratchDir] remains the only source of
+// ephemeral on-disk state.
+//
 // Hosts that need durable remote resume can provide [WithSessionStore]. A
 // session store receives `hermes-state-db-v1` snapshots keyed by the
 // ACP-visible session ID and subpath, can back session/list, and can hydrate

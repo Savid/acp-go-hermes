@@ -17,19 +17,36 @@ advertised provider-model context limit; if neither source has one, the size is
 The adapter advertises `promptCapabilities` with both embedded context and image
 support enabled, so a prompt may carry text, resource links, embedded resources,
 and image blocks. Text and resource content is forwarded as native text parts.
-An image requires embedded base64 data and one canonical MIME string:
-`image/png`, `image/jpeg`, `image/gif`, or `image/webp`. Data is authoritative
-when a URI is also present; the URI is never fetched and contributes only an
-optional filename hint.
+An image carries one canonical MIME string — `image/png`, `image/jpeg`,
+`image/gif`, or `image/webp` — and its bytes in one of two transports: embedded
+base64 `data`, or the [local handoff form](#local-handoff-image-input). Embedded
+data is authoritative when a URI is also present; that URI is never fetched and
+contributes only an optional filename hint.
+
+An embedded `resource` block carrying a blob is bounded like an image whatever
+it declares: its base64 must decode, its decoded bytes answer to the per-image
+limit, and they count toward the aggregate prompt total. A blob declaring a
+raster MIME runs the full image pipeline — the declaration is compared after
+case and parameters are normalized away, so `IMAGE/PNG` and
+`image/png; charset=binary` reach the image gates and are rejected as
+non-canonical rather than degrading to a URI reference. Any other conforming
+blob still forwards as its URI.
 
 The adapter decodes and structurally validates every image before the native
 turn starts. MIME mismatches, invalid dimensions, animated GIF/WebP/APNG,
 per-image overflow, and aggregate prompt overflow fail as `invalid_params`.
 The error data carries `field: "prompt.image"`, the zero-based image `index`,
 and one of `missing_data`, `invalid_base64`, `invalid_media_type`,
-`media_type_mismatch`, `animated_not_supported`, `invalid_dimensions`, or
-`too_large`. Limit errors additionally carry decoded `sizeBytes` and
-`maxBytes`.
+`media_type_mismatch`, `animated_not_supported`, `invalid_dimensions`,
+`too_large`, `invalid_handoff`, `path_not_allowed`, `missing_file`, or
+`handoff_digest_mismatch`. Limit errors additionally carry decoded `sizeBytes`
+and `maxBytes`; the four handoff verdicts additionally carry a human `message`
+naming the cause.
+
+The bounds the adapter enforces are advertised at initialize under
+`_meta["acp-go.dev/mediaEnvelope"]`, so a host can pre-check a send instead of
+discovering a limit through a rejection. See
+[Metadata](/reference/meta#media-envelope).
 
 Hermes' 25 MiB `image.attach_bytes` cap is above the ACP ingress envelope and
 the adapter's default limits, so there is no smaller observable native image
@@ -47,6 +64,52 @@ forward to Hermes.
 Hermes image transport is input-only. Native image artifacts are not emitted
 as typed ACP image output. A prompt with no usable parts is rejected with
 `invalid_params`.
+
+### Local handoff image input
+
+A co-located host can hand an image over as a file instead of base64, which
+keeps a multi-image prompt's ACP frame small. Set
+`WithInputHandoffRoot("/absolute/read/root")` and send an image block with empty
+`data`, a `file://` URI under that root, and the digest envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///absolute/read/root/session/turn/<digest>.png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "<sha256 hex>",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+The envelope carries exactly `version`, `digest` (64 lowercase hex characters),
+and `sizeBytes`; any other field, an unsupported version, a non-`file` URI, a
+URI naming a remote host, a relative path, or an unset handoff root is
+`invalid_handoff`. A block with empty `data` and neither a handoff envelope nor
+a `file://` URI is still `missing_data`, and non-empty `data` always wins over a
+URI.
+
+Resolution is bounded and symlink-safe: containment is checked on the cleaned
+path, symlinks are resolved, and containment is re-checked on the resolved path.
+A path outside the root, one that escapes through a symlink, and one that is not
+a regular file are `path_not_allowed`; a path inside the root that is absent or
+unopenable is `missing_file` — the expected outcome when a host cleans up early.
+The adapter then reads the file under the per-image byte bound and requires the
+bytes to hash to the declared digest, failing `handoff_digest_mismatch` rather
+than falling back to anything. Verified bytes run the same gate chain embedded
+bytes do and count toward the same aggregate total.
+
+Files under the root stay host-owned: the adapter only reads there, and it never
+writes, moves, or removes anything. The path itself never reaches Hermes — the
+native request a handoff block builds is identical to the one the same bytes
+build embedded — and the host may delete the file as soon as the prompt call
+returns.
 
 Hermes' authoritative `message.complete` text is reconciled with the prefix
 already emitted by `message.delta`. The adapter emits only a missing completion

@@ -120,6 +120,16 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 	return name, nil
 }
 
+// validateInputHandoffRoot rejects a relative handoff root. An empty root is
+// valid and leaves the local-handoff prompt form rejected.
+func validateInputHandoffRoot(root string) error {
+	if root != "" && !filepath.IsAbs(root) {
+		return fmt.Errorf("input handoff root must be an absolute path")
+	}
+
+	return nil
+}
+
 // validateImageLimits rejects negative decoded-byte limits. Zero fields stay
 // zero: an explicit zero disables that adapter policy limit.
 func validateImageLimits(limits ImageLimits) error {

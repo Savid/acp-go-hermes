@@ -38,6 +38,7 @@ still reach.
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithImageLimits` | Decoded-byte limits for image prompt input; all four fields default to 6 MiB when omitted. |
+| `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin. |
@@ -67,6 +68,16 @@ field is rejected at agent construction. Hermes implements image prompt input;
 it does not emit typed image output. The `MaxOutputBytesPerImage` and
 `MaxOutputBytesPerToolCall` fields exist for API symmetry but Hermes never
 consults them.
+
+`WithInputHandoffRoot(dir string)` names the absolute directory under which a
+co-located host has written handoff image files, enabling the
+[local handoff form](/core/prompt-streaming#local-handoff-image-input) and the
+`acp-go.dev/handoff` advertisement. It is a read root, not a scratch root: the
+adapter resolves, reads, and digest-verifies files there and never writes, moves,
+or removes anything, so it does not compete with `WithScratchDir` for ephemeral
+materialization. A relative path is rejected at agent construction. Omitting the
+option leaves every handoff-form block rejected as `invalid_handoff` and the
+capability unadvertised.
 
 `RuntimeContainmentMode` reports `authoritative`, `best_effort`, or
 `unavailable`. Embedded hosts can observe it through the runtime-resource

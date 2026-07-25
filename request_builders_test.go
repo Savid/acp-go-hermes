@@ -136,7 +136,7 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(`{"uri":"","text":""}`), &emptyTextResource); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if _, promptErr := promptToHermesParts([]acp.ContentBlock{acp.ResourceBlock(emptyTextResource)}, ImageLimits{}); promptErr == nil {
+	if _, promptErr := promptToHermesParts([]acp.ContentBlock{acp.ResourceBlock(emptyTextResource)}, ImageLimits{}, ""); promptErr == nil {
 		t.Fatal("prompt mapping accepted an empty embedded resource")
 	}
 	imageURI := "file:///tmp/image.png"

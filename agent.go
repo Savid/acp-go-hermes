@@ -71,7 +71,8 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits))
+	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
+		validateInputHandoffRoot(options.InputHandoffRoot))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -264,6 +265,10 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 	}
 
+	capabilityMeta := capabilityMediaMeta(a.options)
+	capabilityMeta[hermesMetaKey] = hermesMeta
+	capabilityMeta[routeMetaKey] = map[string]any{keyVersions: []int{routeVersion}}
+
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
@@ -273,10 +278,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta: map[string]any{
-				hermesMetaKey: hermesMeta,
-				routeMetaKey:  map[string]any{"versions": []int{routeVersion}},
-			},
+			Meta:        capabilityMeta,
 			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
 				Http: true,

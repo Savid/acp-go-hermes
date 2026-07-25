@@ -111,9 +111,14 @@ type Options struct {
 	// materialization: isolated per-session Hermes homes, sqlite temp
 	// directories, and process/server temp roots. An empty value means the
 	// system temp directory. It is created with 0700 permissions when missing.
-	ScratchDir   string
-	DefaultModel string
-	Env          map[string]string
+	ScratchDir string
+	// InputHandoffRoot is the read-only root under which the host materializes
+	// handoff image files. An empty value (the default) leaves the local-handoff
+	// prompt form rejected. It is not a materialization option: the adapter
+	// never writes, moves, or removes anything under it.
+	InputHandoffRoot string
+	DefaultModel     string
+	Env              map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -209,6 +214,21 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithInputHandoffRoot sets the read-only root under which the host has
+// materialized handoff image files, enabling the local-handoff prompt form: an
+// image block with empty data, a file URI under this root, and an
+// acp-go.dev/handoff envelope carrying the file's sha256 digest and size. The
+// path must be absolute; a relative path is rejected at agent construction.
+// Omitting the option leaves the form rejected as invalid_handoff, and the
+// acp-go.dev/handoff capability is then not advertised. Files under the root
+// stay host-owned: the adapter resolves, reads, and verifies them, and never
+// writes, moves, or removes anything there.
+func WithInputHandoffRoot(dir string) Option {
+	return func(options *Options) {
+		options.InputHandoffRoot = dir
 	}
 }
 
