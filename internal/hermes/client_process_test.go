@@ -320,7 +320,7 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	if err := client.SubmitPrompt(ctx, "live", "hello"); err != nil {
 		t.Fatalf("SubmitPrompt: %v", err)
 	}
-	if err := client.AttachImageBytes(ctx, "live", []byte{0}, "image.png"); err != nil {
+	if err := client.AttachImageBytes(ctx, "live", []byte{0}); err != nil {
 		t.Fatalf("AttachImageBytes: %v", err)
 	}
 	if err := client.Interrupt(ctx, "live"); err != nil {

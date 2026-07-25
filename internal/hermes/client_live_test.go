@@ -46,9 +46,11 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	if _, err := proc.Client.ModelOptions(ctx, created.SessionID); err != nil {
 		t.Fatalf("model.options: %v", err)
 	}
+	// No filename hint, exactly as the prompt path uploads: the live gateway has
+	// to accept the attachment on the PNG signature alone.
 	if err := proc.Client.AttachImageBytes(ctx, created.SessionID, []byte(
 		"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
-	), "acp-probe.png"); err != nil {
+	)); err != nil {
 		t.Fatalf("image.attach_bytes: %v", err)
 	}
 	if os.Getenv("ACP_GO_HERMES_RUN_LIVE_TOKENS") != "" {

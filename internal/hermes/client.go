@@ -19,7 +19,6 @@ const (
 	jsonrpcVersion = "2.0"
 	methodEvent    = "event"
 	fieldSessionID = "session_id"
-	fieldFilename  = "filename"
 
 	// readLimitBytes caps a single inbound gateway frame. It must comfortably
 	// exceed the advertised rawEvent maxBytes (64 KiB) so an oversize native
@@ -541,9 +540,15 @@ func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text st
 	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, nil)
 }
 
-// AttachImageBytes uploads one embedded image to the live session. Hermes
+// AttachImageBytes uploads one validated image to the live session. Hermes
 // queues it for the immediately following prompt.submit call.
-func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, data []byte, filename string) error {
+//
+// The optional filename parameter is omitted. Hermes reads it only as an
+// extension hint and falls back to the image's own magic bytes without one,
+// which covers every media type the prompt allowlist admits; neither input form
+// derives a filename, so an empty string would declare a hint that does not
+// exist.
+func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, data []byte) error {
 	var result struct {
 		Attached bool `json:"attached"`
 	}
@@ -551,7 +556,6 @@ func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, dat
 	err := c.Call(ctx, "image.attach_bytes", map[string]any{
 		fieldSessionID:   liveSessionID,
 		"content_base64": base64.StdEncoding.EncodeToString(data),
-		fieldFilename:    filename,
 	}, &result)
 	if err != nil {
 		return err

@@ -28,7 +28,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	if err := a.rejectUnsupportedHome(); err != nil {
+	if err := a.rejectInvalidConfiguration(); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 
@@ -178,7 +178,7 @@ func (a *Agent) loadOrResumeSession(
 		return nil, err
 	}
 
-	if err := a.rejectUnsupportedHome(); err != nil {
+	if err := a.rejectInvalidConfiguration(); err != nil {
 		return nil, err
 	}
 
@@ -721,7 +721,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 }
 
 func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (_ acp.UnstableForkSessionResponse, returnErr error) {
-	if err := a.rejectUnsupportedHome(); err != nil {
+	if err := a.rejectInvalidConfiguration(); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
@@ -1095,10 +1095,17 @@ func (a *Agent) homeRoot() string {
 	return filepath.Join(scratchParent(a.options.ScratchDir), valACPGoHermes)
 }
 
-// rejectUnsupportedHome fails session establishment with the uniform
-// unsupported-option error when a Home value is configured. Hermes has no
-// native config or auth root the adapter may target.
-func (a *Agent) rejectUnsupportedHome() error {
+// rejectInvalidConfiguration fails session establishment on agent configuration
+// no session may run under: an option that failed validation at construction, or
+// a configured Home value, for which Hermes has no native config or auth root
+// the adapter may target. The handshake reports the option failures too, but an
+// embedded host can open a session and prompt without ever calling initialize,
+// so options that never validated must not reach a gateway process.
+func (a *Agent) rejectInvalidConfiguration() error {
+	if err := a.optionsError(); err != nil {
+		return err
+	}
+
 	if a.options.Home != "" {
 		return unsupportedField(optionFieldHome)
 	}

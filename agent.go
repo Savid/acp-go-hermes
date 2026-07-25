@@ -228,9 +228,19 @@ func (a *Agent) endSessionConstruction() {
 	a.constructions.Done()
 }
 
+// optionsError reports a construction-time option failure as the uniform
+// invalid-params error, or nil when every option validated.
+func (a *Agent) optionsError() error {
+	if a.optionsErr == nil {
+		return nil
+	}
+
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
+}
+
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
-	if a.optionsErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	if err := a.optionsError(); err != nil {
+		return acp.InitializeResponse{}, err
 	}
 
 	title := a.options.AgentTitle

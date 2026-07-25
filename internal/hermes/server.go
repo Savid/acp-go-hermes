@@ -1291,13 +1291,12 @@ func textFromHermesParts(parts []map[string]any) string {
 	return builder.String()
 }
 
-type gatewayImageAttachment struct {
-	data     []byte
-	filename string
-}
-
-func imageAttachmentsFromHermesParts(parts []map[string]any) ([]gatewayImageAttachment, error) {
-	attachments := make([]gatewayImageAttachment, 0)
+// imageAttachmentsFromHermesParts collects the decoded bytes of every file part
+// in prompt order. A file part carries nothing else the gateway upload takes:
+// the media type has already been validated against the bytes, and the upload
+// derives its own extension from them.
+func imageAttachmentsFromHermesParts(parts []map[string]any) ([][]byte, error) {
+	attachments := make([][]byte, 0)
 
 	for _, part := range parts {
 		partType, _ := part["type"].(string)
@@ -1310,8 +1309,7 @@ func imageAttachmentsFromHermesParts(parts []map[string]any) ([]gatewayImageAtta
 			return nil, fmt.Errorf("hermes image part requires decoded image data")
 		}
 
-		filename, _ := part[fieldFilename].(string)
-		attachments = append(attachments, gatewayImageAttachment{data: data, filename: filename})
+		attachments = append(attachments, data)
 	}
 
 	return attachments, nil
@@ -1349,14 +1347,14 @@ func (s *hermesServer) submitGatewayTextForLive(
 	stored string,
 	live string,
 	text string,
-	attachments []gatewayImageAttachment,
+	attachments [][]byte,
 ) (NativeMessage, error) {
 	s.beginGatewayTurn()
 	defer s.endGatewayTurn()
 
 	gw := s.gatewayClient()
 	for _, attachment := range attachments {
-		if err := gw.AttachImageBytes(ctx, live, attachment.data, attachment.filename); err != nil {
+		if err := gw.AttachImageBytes(ctx, live, attachment); err != nil {
 			return NativeMessage{}, err
 		}
 	}

@@ -113,7 +113,7 @@ materialized.
   `_meta["acp-go.dev/mediaEnvelope"]`.
 - Two inbound image transports: embedded base64, and — for a co-located host
   that sets `WithInputHandoffRoot` — digest-verified local files read under that
-  read-only root, resolved symlink-safely and never named in the native request.
+  read-only root, contained by the kernel and never named in the native request.
 - Input-only image transport: Hermes image artifacts are not projected as
   typed ACP image output.
 - Command, file, and generic permission prompts, plus MCP elicitation bridging.

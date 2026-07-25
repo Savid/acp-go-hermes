@@ -440,7 +440,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 		return err
 	}
 
-	if err := methodPresent("image.attach_bytes", p.Client.AttachImageBytes(ctx, "__acp_go_hermes_missing_probe__", []byte{0}, "probe.png")); err != nil {
+	if err := methodPresent("image.attach_bytes", p.Client.AttachImageBytes(ctx, "__acp_go_hermes_missing_probe__", []byte{0})); err != nil {
 		return err
 	}
 

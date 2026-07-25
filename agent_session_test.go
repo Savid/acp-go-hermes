@@ -1689,3 +1689,33 @@ func TestAgentRejectsHomeOption(t *testing.T) {
 	_, forkErr := agent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest("session-1", cwd)))
 	requireUnsupportedField(t, forkErr, optionFieldHome, "fork session")
 }
+
+// TestAgentRejectsUnvalidatedOptionsWithoutInitialize proves the handshake is not
+// the only door: an embedded host that opens a session directly is still refused
+// when an option failed validation at construction, on every
+// session-establishing path.
+func TestAgentRejectsUnvalidatedOptionsWithoutInitialize(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	agent := NewAgent(
+		WithExecutablePath(filepath.Join(t.TempDir(), "absent-hermes")),
+		WithImageLimits(ImageLimits{MaxOutputBytesPerImage: -1}),
+	)
+
+	_, newErr := agent.NewSession(ctx, NewSessionRequest(cwd))
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("session-1", cwd))
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd))
+	_, forkErr := agent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest("session-1", cwd)))
+
+	for name, err := range map[string]error{
+		"new session":    newErr,
+		"load session":   loadErr,
+		"resume session": resumeErr,
+		"fork session":   forkErr,
+	} {
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) || !strings.Contains(fmt.Sprint(reqErr.Data), "image limits must be non-negative") {
+			t.Fatalf("%s error = %#v", name, err)
+		}
+	}
+}

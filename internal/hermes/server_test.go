@@ -1020,11 +1020,14 @@ func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermes
 	t.Helper()
 
 	before := len(fake.callMethods())
+	// Exactly the part shape the prompt mapper builds: a type, the validated
+	// media type, and the decoded bytes. Nothing on either input form carries a
+	// filename.
 	imageMessage, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{
 		{"type": "text", "text": "first"},
-		{"type": "file", "data": []byte{0, 1}, "filename": "first.png"},
+		{"type": "file", "mime": "image/png", "data": []byte{0, 1}},
 		{"type": "text", "text": "second"},
-		{"type": "file", "data": []byte{2, 3}, "filename": "second.webp"},
+		{"type": "file", "mime": "image/webp", "data": []byte{2, 3}},
 	}})
 	if err != nil || imageMessage.Info.SessionID != "stored-1" {
 		t.Fatalf("image SendMessage = %#v err=%v", imageMessage, err)
@@ -1037,9 +1040,15 @@ func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermes
 		calls[1].Method != "image.attach_bytes" || calls[2].Method != "prompt.submit" {
 		t.Fatalf("attach-then-submit calls = %#v", calls)
 	}
-	if calls[0].Params["content_base64"] != "AAE=" || calls[0].Params["filename"] != "first.png" ||
-		calls[1].Params["content_base64"] != "AgM=" || calls[1].Params["filename"] != "second.webp" {
+	if calls[0].Params["content_base64"] != "AAE=" || calls[1].Params["content_base64"] != "AgM=" {
 		t.Fatalf("attachment params = %#v", calls[:2])
+	}
+	for _, call := range calls[:2] {
+		// An empty hint is not an absent one: Hermes sniffs the extension from
+		// the bytes, so the upload must not claim a name the adapter never had.
+		if _, present := call.Params["filename"]; present {
+			t.Fatalf("attachment declared a filename hint: %#v", call.Params)
+		}
 	}
 	if calls[2].Params["text"] != "first\n\nsecond" {
 		t.Fatalf("flattened prompt text = %#v", calls[2].Params)
