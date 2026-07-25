@@ -52,6 +52,10 @@ The adapter reads exactly one host-supplied location on disk, and only when the
 host opts in with `WithInputHandoffRoot`. Every other inbound payload arrives in
 the ACP frame; no prompt URI is ever fetched, local or remote.
 
+A block whose declared media type or declared size fails its gate is refused
+before the root is opened at all, so a refusal on the declaration reveals nothing
+about whether the file it named exists.
+
 Inside that root the adapter is read-only and bounded. Containment is enforced
 by the kernel: the root is opened once per prompt and every file is opened
 relative to that descriptor, so a name leading out of the root is refused as

@@ -101,21 +101,24 @@ count is rejected `too_large` reporting the count against 64. The bound is on
 the work rather than on the byte policy, so it holds even where
 `MaxInputBytesPerPrompt` is disabled, and it sits far above any conforming turn.
 
-Containment is the kernel's: the configured root is opened once per prompt and
-every file is opened relative to that descriptor, so a symlink beneath the root
-cannot name a location outside it and there is no window between deciding a path
-is inside the root and reading it. A path outside the root, one that cannot be
-opened from the root, and one that is not a regular file are `path_not_allowed`;
-a path inside the root that does not exist is `missing_file` — the expected
-outcome when a host cleans up early. A handoff root that cannot be opened at all
-is `path_not_allowed`, because that is a deployment defect rather than an
-early cleanup.
+The declaration is judged in full before the filesystem is consulted at all: the
+declared media type against the allowlist first, then the declared `sizeBytes`
+against the per-image bound. A block that fails either is `invalid_media_type` or
+`too_large` without the file it names being opened, measured, or hashed, and its
+refusal says nothing about whether that file is there.
 
-The declared media type is judged before any byte is read. The declared
-`sizeBytes` is then checked against the per-image bound before anything is
-opened, so an oversize block is `too_large` against the bound without the file
-being measured, and the read is capped at that declaration plus one byte. The
-bytes read must match the declared size and hash to the declared digest, failing
+Containment comes next, and it is the kernel's: the configured root is opened
+once per prompt and every file is opened relative to that descriptor, so a
+symlink beneath the root cannot name a location outside it and there is no window
+between deciding a path is inside the root and reading it. A path outside the
+root, one that cannot be opened from the root, and one that is not a regular file
+are `path_not_allowed`; a path inside the root that does not exist is
+`missing_file` — the expected outcome when a host cleans up early. A handoff root
+that cannot be opened at all is `path_not_allowed`, because that is a deployment
+defect rather than an early cleanup.
+
+The read is capped at the declared size plus one byte. The bytes read must match
+the declared size and hash to the declared digest, failing
 `handoff_digest_mismatch` rather than falling back to anything: a file that grew,
 shrank, or was swapped after the block was written fails verification, and no
 unverified byte leaves the read. Verified bytes run the same gate chain embedded

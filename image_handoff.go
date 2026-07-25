@@ -404,10 +404,10 @@ func (b *imagePromptBudget) closeHandoffRoot() {
 }
 
 // handoffBytes runs the handoff pre-gate for one prompt image block: the block
-// count bound, envelope and URI strictness, containment, the declared media
-// type, the declared size against the per-image gate, a bounded root-relative
-// read, then digest verification. Every path that returns bytes has verified
-// them against the envelope the caller sent.
+// count bound, envelope and URI strictness, the declared media type, the
+// declared size against the per-image gate, containment, a bounded
+// root-relative read, then digest verification. Every path that returns bytes
+// has verified them against the envelope the caller sent.
 func (b *imagePromptBudget) handoffBytes(ctx context.Context, image *acp.ContentBlockImage) ([]byte, *handoffError) {
 	if b.handoffRoot == "" {
 		return nil, handoffInvalid(handoffRootUnsetMessage)
@@ -432,19 +432,10 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, image *acp.Content
 		return nil, failure
 	}
 
-	rel, failure := handoffRelativePath(b.handoffRoot, path)
-	if failure != nil {
-		return nil, failure
-	}
-
-	root, failure := b.handoffRootHandle()
-	if failure != nil {
-		return nil, failure
-	}
-
-	// The declared type is judged before a byte is read, as it is in the
-	// embedded form, so a block this adapter was never going to accept costs it
-	// no read and no hash.
+	// The declaration is judged in full before the filesystem is consulted at
+	// all, as the declared type is in the embedded form. A block this adapter was
+	// never going to accept costs it no open, no read and no hash, and its
+	// refusal cannot report whether the path it named exists.
 	if !isAllowlistedImageMime(image.MimeType) {
 		return nil, &handoffError{value: imageErrInvalidMediaType}
 	}
@@ -458,6 +449,16 @@ func (b *imagePromptBudget) handoffBytes(ctx context.Context, image *acp.Content
 			sizeBytes: envelope.sizeBytes,
 			maxBytes:  b.perImage,
 		}
+	}
+
+	rel, failure := handoffRelativePath(b.handoffRoot, path)
+	if failure != nil {
+		return nil, failure
+	}
+
+	root, failure := b.handoffRootHandle()
+	if failure != nil {
+		return nil, failure
 	}
 
 	data, failure := readHandoffFile(ctx, root, rel, envelope.sizeBytes)
