@@ -108,7 +108,7 @@ func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
 		Data: base64.StdEncoding.EncodeToString(png), MimeType: mimePNG,
 	}}
 
-	_, imageErr := promptToHermesParts([]acp.ContentBlock{block}, limits, "")
+	_, imageErr := promptToHermesParts(t.Context(), []acp.ContentBlock{block}, limits, "")
 	requireImageInputError(t, imageErr, map[string]any{
 		keyField:       acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
@@ -117,7 +117,7 @@ func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
 		keyMaxBytes:    envelope[keyMaxBytes],
 	})
 
-	_, promptErr := promptToHermesParts([]acp.ContentBlock{block, block, block, block}, ImageLimits{
+	_, promptErr := promptToHermesParts(t.Context(), []acp.ContentBlock{block, block, block, block}, ImageLimits{
 		MaxInputBytesPerPrompt: limits.MaxInputBytesPerPrompt,
 	}, "")
 	requireImageInputError(t, promptErr, map[string]any{

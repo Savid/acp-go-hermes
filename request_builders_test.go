@@ -121,7 +121,7 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"uri":"file:///tmp/a","text":"body"}`), &resource); err != nil {
 		t.Fatal(err)
 	}
-	part, err := embeddedResourceHermesPart(resource, &imagePromptBudget{})
+	part, err := embeddedResourceHermesPart(resource, newImagePromptBudget(ImageLimits{}, ""))
 	if err != nil || part["text"] == "" {
 		t.Fatalf("embeddedResourceHermesPart = %#v err=%v", part, err)
 	}
@@ -129,23 +129,23 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(`{"uri":"file:///tmp/fallback"}`), &uriResource); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if uriPart, uriErr := embeddedResourceHermesPart(uriResource, &imagePromptBudget{}); uriErr != nil || uriPart[valText] != "file:///tmp/fallback" {
+	if uriPart, uriErr := embeddedResourceHermesPart(uriResource, newImagePromptBudget(ImageLimits{}, "")); uriErr != nil || uriPart[valText] != "file:///tmp/fallback" {
 		t.Fatalf("URI resource fallback = %#v err=%v", uriPart, uriErr)
 	}
 	var emptyTextResource acp.EmbeddedResourceResource
 	if decodeErr := json.Unmarshal([]byte(`{"uri":"","text":""}`), &emptyTextResource); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if _, promptErr := promptToHermesParts([]acp.ContentBlock{acp.ResourceBlock(emptyTextResource)}, ImageLimits{}, ""); promptErr == nil {
+	if _, promptErr := promptToHermesParts(t.Context(), []acp.ContentBlock{acp.ResourceBlock(emptyTextResource)}, ImageLimits{}, ""); promptErr == nil {
 		t.Fatal("prompt mapping accepted an empty embedded resource")
 	}
 	imageURI := "file:///tmp/image.png"
-	imagePart, err := imageHermesPart(&acp.ContentBlockImage{Data: fixtureBase64(t, "valid.png"), MimeType: "image/png", Uri: &imageURI}, &imagePromptBudget{})
-	if err != nil || imagePart[keyFilename] != "image.png" {
-		t.Fatalf("image filename mapping = %#v err=%v", imagePart, err)
+	imagePart, err := imageHermesPart(t.Context(), &acp.ContentBlockImage{Data: fixtureBase64(t, "valid.png"), MimeType: "image/png", Uri: &imageURI}, newImagePromptBudget(ImageLimits{}, ""))
+	if err != nil {
+		t.Fatalf("image mapping err=%v", err)
 	}
-	if filenameFromURI("%") != "" {
-		t.Fatal("malformed image URI produced a filename")
+	if _, ok := imagePart[keyFilename]; ok {
+		t.Fatalf("image part derived a native filename from its uri: %#v", imagePart)
 	}
 	if update := usageUpdateFromTokens(nativehermes.Tokens{}, 0); update != nil {
 		t.Fatalf("empty usage update = %#v", update)

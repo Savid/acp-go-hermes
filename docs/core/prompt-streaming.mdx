@@ -21,7 +21,7 @@ An image carries one canonical MIME string — `image/png`, `image/jpeg`,
 `image/gif`, or `image/webp` — and its bytes in one of two transports: embedded
 base64 `data`, or the [local handoff form](#local-handoff-image-input). Embedded
 data is authoritative when a URI is also present; that URI is never fetched and
-contributes only an optional filename hint.
+never reaches the native request.
 
 An embedded `resource` block carrying a blob is bounded like an image whatever
 it declares: its base64 must decode, its decoded bytes answer to the per-image
@@ -89,21 +89,38 @@ keeps a multi-image prompt's ACP frame small. Set
 ```
 
 The envelope carries exactly `version`, `digest` (64 lowercase hex characters),
-and `sizeBytes`; any other field, an unsupported version, a non-`file` URI, a
-URI naming a remote host, a relative path, or an unset handoff root is
-`invalid_handoff`. A block with empty `data` and neither a handoff envelope nor
+and `sizeBytes`; a missing field, an unknown field, a non-object envelope, an
+unsupported version, a non-`file` URI, a URI naming a remote host, a relative
+path, or an unset handoff root is `invalid_handoff`, each with its own message
+naming the defect. A block with empty `data` and neither a handoff envelope nor
 a `file://` URI is still `missing_data`, and non-empty `data` always wins over a
 URI.
 
-Resolution is bounded and symlink-safe: containment is checked on the cleaned
-path, symlinks are resolved, and containment is re-checked on the resolved path.
-A path outside the root, one that escapes through a symlink, and one that is not
-a regular file are `path_not_allowed`; a path inside the root that is absent or
-unopenable is `missing_file` — the expected outcome when a host cleans up early.
-The adapter then reads the file under the per-image byte bound and requires the
-bytes to hash to the declared digest, failing `handoff_digest_mismatch` rather
-than falling back to anything. Verified bytes run the same gate chain embedded
-bytes do and count toward the same aggregate total.
+At most 64 handoff-form blocks are read per prompt; the block that crosses that
+count is rejected `too_large` reporting the count against 64. The bound is on
+the work rather than on the byte policy, so it holds even where
+`MaxInputBytesPerPrompt` is disabled, and it sits far above any conforming turn.
+
+Containment is the kernel's: the configured root is opened once per prompt and
+every file is opened relative to that descriptor, so a symlink beneath the root
+cannot name a location outside it and there is no window between deciding a path
+is inside the root and reading it. A path outside the root, one that cannot be
+opened from the root, and one that is not a regular file are `path_not_allowed`;
+a path inside the root that does not exist is `missing_file` — the expected
+outcome when a host cleans up early. A handoff root that cannot be opened at all
+is `path_not_allowed`, because that is a deployment defect rather than an
+early cleanup.
+
+The declared media type is judged before any byte is read. The declared
+`sizeBytes` is then checked against the per-image bound before anything is
+opened, so an oversize block is `too_large` against the bound without the file
+being measured, and the read is capped at that declaration plus one byte. The
+bytes read must match the declared size and hash to the declared digest, failing
+`handoff_digest_mismatch` rather than falling back to anything: a file that grew,
+shrank, or was swapped after the block was written fails verification, and no
+unverified byte leaves the read. Verified bytes run the same gate chain embedded
+bytes do and count toward the same aggregate total, which text and blob resources
+are charged against as well.
 
 Files under the root stay host-owned: the adapter only reads there, and it never
 writes, moves, or removes anything. The path itself never reaches Hermes — the

@@ -45,15 +45,19 @@ the reserved capability key `_meta["acp-go.dev/mediaEnvelope"]`:
 
 | Field | Meaning |
 |---|---|
-| `maxBytes` | Decoded bytes accepted per image. Reports `ImageLimits.MaxInputBytesPerImage`, the value the per-image gate enforces. |
+| `maxBytes` | Decoded bytes accepted per image. Reports the bound the per-image gate enforces, which is `ImageLimits.MaxInputBytesPerImage` clamped to 7,864,155 bytes. |
 | `maxPromptBytes` | Decoded bytes accepted across one prompt. Reports `ImageLimits.MaxInputBytesPerPrompt`. |
 | `maxDimension` | Pixels accepted per dimension. Always `0`: Hermes enforces no pixel bound, and `0` means unbounded rather than zero. |
 | `imageFormats` | The inbound raster allowlist, in adapter order. |
 | `documentFormats` | MIME types mapped to a native document representation. Always an empty array: Hermes has none. |
 
 The byte values track `WithImageLimits`, so the advertisement and the rejection a
-host would receive always report the same number. A field set to `0` through
-`WithImageLimits` disables that policy limit and is advertised as `0`. Hermes'
+host would receive always report the same number. `MaxInputBytesPerImage` set to
+`0`, or above 7,864,155, is clamped to 7,864,155 — the largest decoded image one
+JSON-RPC frame can carry — and the clamp is what is advertised, because that is
+the number a rejection reports. `MaxInputBytesPerPrompt` set to `0` disables the
+aggregate and is advertised as `0`; the per-prompt cap of 64 handoff-form blocks
+bounds the read work instead. Hermes'
 25 MiB native `image.attach_bytes` cap is looser than the policy defaults, so no
 native ceiling tightens these values and no `native_envelope_exceeded` verdict
 exists on this adapter. The envelope describes adapter bounds only; whether a

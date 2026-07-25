@@ -2,21 +2,27 @@ package hermesacp
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
 
-// Image prompt validation vocabulary. Every pre-turn image rejection is
-// -32602 invalid params carrying {"field":"prompt.image","error":<value>,
+// Image prompt validation vocabulary. Every pre-turn media rejection is
+// -32602 invalid params carrying {"field":<request member>,"error":<value>,
 // "index":<image ordinal>} plus sizeBytes/maxBytes when a byte limit is at
-// fault.
+// fault. Routing is chosen by MIME and the field is chosen by the inbound block
+// type, so a resource blob names the resource channel even when its declared
+// raster type sent it through the image gates.
 const (
-	acpFieldPromptImage = "prompt.image"
+	acpFieldPromptImage    = "prompt.image"
+	acpFieldPromptResource = "prompt.resource"
 
 	imageErrMissingData          = "missing_data"
 	imageErrInvalidBase64        = "invalid_base64"
@@ -47,53 +53,85 @@ const (
 // inside the pinned ACP SDK's 10 MiB inbound frame once the enclosing JSON-RPC
 // envelope is accounted for. Decode retention is bounded here rather than by
 // the configurable per-image policy limit so structural inspection always walks
-// the whole decodable payload; the policy limit governs only the too_large
-// verdict, which reads the full decoded size. The process has already received
-// at most one 10 MiB frame, so retaining the whole image is memory-safe.
+// the whole decodable payload. It is a retention bound and never a gate: the
+// enforced per-image bound is derived from it and can never exceed it, so bytes
+// offered past it always fail a byte verdict instead of being truncated and
+// forwarded. The process has already received at most one 10 MiB frame, so
+// retaining a whole image is memory-safe.
 const maxDecodableImageBytes int64 = 7_864_155
+
+// effectiveInputImageLimit resolves the configured per-image input policy limit
+// into the bound the adapter actually enforces: a disabled (zero) or
+// above-retention limit clamps to the retention bound, because a decoded image
+// still has to fit one JSON-RPC frame and a handoff read still has to be
+// bounded before it allocates a file's declared size. Advertisement and gate
+// both read this, so the number a host is told is the number it is judged by.
+func effectiveInputImageLimit(configured int64) int64 {
+	if configured <= 0 || configured > maxDecodableImageBytes {
+		return maxDecodableImageBytes
+	}
+
+	return configured
+}
+
+// effectiveInputPromptLimit resolves the configured per-prompt aggregate input
+// limit into the bound the gate enforces. A disabled (zero) aggregate stays
+// disabled: the handoff-form block count bounds the read work instead, so
+// restating "disabled" as a byte number would reject the multi-image turn the
+// handoff form exists to carry.
+func effectiveInputPromptLimit(configured int64) int64 {
+	return configured
+}
 
 // errImageStructure signals that a sniffed raster's header yields no valid
 // dimensions or cannot complete the structural walk needed to read them.
 var errImageStructure = errors.New("image structure invalid")
 
-func imageInputError(errValue string, index int) error {
-	return acp.NewInvalidParams(map[string]any{
-		keyField:       acpFieldPromptImage,
+// promptMediaError reports a gated-media verdict against the request member the
+// block arrived on.
+func promptMediaError(field string, errValue string, index int, sizeBytes, maxBytes int64) error {
+	data := map[string]any{
+		keyField:       field,
 		jsonFieldError: errValue,
 		keyIndex:       index,
-	})
-}
+	}
 
-// imageHandoffError carries the same input error shape plus a truthful human
-// message: a handoff rejection names a host deployment fact, so the cause is
-// worth stating rather than leaving the host to guess which check failed.
-func imageHandoffError(errValue string, index int, message string) error {
-	return acp.NewInvalidParams(map[string]any{
-		keyField:         acpFieldPromptImage,
-		jsonFieldError:   errValue,
-		keyIndex:         index,
-		jsonFieldMessage: message,
-	})
-}
+	if sizeBytes > 0 {
+		data[keySizeBytes] = sizeBytes
+	}
 
-func imageInputSizeError(index int, sizeBytes, maxBytes int64) error {
-	return acp.NewInvalidParams(map[string]any{
-		keyField:       acpFieldPromptImage,
-		jsonFieldError: imageErrTooLarge,
-		keyIndex:       index,
-		keySizeBytes:   sizeBytes,
-		keyMaxBytes:    maxBytes,
-	})
+	if maxBytes > 0 {
+		data[keyMaxBytes] = maxBytes
+	}
+
+	return acp.NewInvalidParams(data)
 }
 
 // imagePromptBudget validates every image in one prompt in request order,
-// assigning stable image indexes and enforcing the configured decoded-byte
-// limits. Validation stops on the first failing image.
+// assigning stable image indexes and enforcing the decoded-byte bounds the
+// adapter advertises. Validation stops on the first failing image.
 type imagePromptBudget struct {
-	limits      ImageLimits
+	perImage    int64
+	perPrompt   int64
 	handoffRoot string
 	nextIndex   int
 	totalBytes  int64
+	// handoffBlocks counts the handoff-form blocks this prompt has asked the
+	// adapter to read, which is bounded independently of the byte aggregate a
+	// host may disable.
+	handoffBlocks int
+	// root is the opened read root, held for the life of one prompt mapping so
+	// every handoff open in that prompt is relative to one kernel-checked
+	// descriptor.
+	root *os.Root
+}
+
+func newImagePromptBudget(limits ImageLimits, handoffRoot string) *imagePromptBudget {
+	return &imagePromptBudget{
+		perImage:    effectiveInputImageLimit(limits.MaxInputBytesPerImage),
+		perPrompt:   effectiveInputPromptLimit(limits.MaxInputBytesPerPrompt),
+		handoffRoot: handoffRoot,
+	}
 }
 
 func (b *imagePromptBudget) claimIndex() int {
@@ -108,89 +146,72 @@ func (b *imagePromptBudget) claimIndex() int {
 // The driven gateway publishes no exhaustive selected-model modality data, so
 // validated images always forward and the native provider remains
 // authoritative.
-func (b *imagePromptBudget) validateEmbedded(data, mimeType string) ([]byte, error) {
+func (b *imagePromptBudget) validateEmbedded(field, data, mimeType string) ([]byte, error) {
 	index := b.claimIndex()
 
 	if data == "" {
-		return nil, imageInputError(imageErrMissingData, index)
+		return nil, promptMediaError(field, imageErrMissingData, index, 0, 0)
 	}
 
 	if !isAllowlistedImageMime(mimeType) {
-		return nil, imageInputError(imageErrInvalidMediaType, index)
+		return nil, promptMediaError(field, imageErrInvalidMediaType, index, 0, 0)
 	}
 
 	decoded, size, err := decodeImageBase64(data, maxDecodableImageBytes)
 	if err != nil {
-		return nil, imageInputError(imageErrInvalidBase64, index)
+		return nil, promptMediaError(field, imageErrInvalidBase64, index, 0, 0)
 	}
 
-	return b.admitImage(index, decoded, size, b.limits.MaxInputBytesPerImage, mimeType)
+	return b.admitImage(field, index, decoded, size, mimeType)
 }
 
-// validateHandoff resolves, reads, and verifies a handoff block's file before
-// the embedded gate chain runs on those bytes. The pre-gate sits ahead of every
-// embedded gate: only the two gates that are meaningless without base64
-// (missing_data, invalid_base64) drop out.
-func (b *imagePromptBudget) validateHandoff(image *acp.ContentBlockImage) ([]byte, error) {
+// validateHandoff reads and verifies a handoff block's file before the embedded
+// gate chain runs on those bytes. The pre-gate sits ahead of every embedded
+// gate: only the two gates that are meaningless without base64 (missing_data,
+// invalid_base64) drop out.
+func (b *imagePromptBudget) validateHandoff(ctx context.Context, image *acp.ContentBlockImage) ([]byte, error) {
 	index := b.claimIndex()
 
-	request, err := parseHandoffBlock(image, b.handoffRoot, index)
-	if err != nil {
-		return nil, err
+	data, failure := b.handoffBytes(ctx, image)
+	if failure != nil {
+		return nil, imageHandoffError(failure, index)
 	}
 
-	resolved, info, err := resolveHandoffPath(b.handoffRoot, request.path, index)
-	if err != nil {
-		return nil, err
-	}
-
-	bound := b.handoffByteBound()
-
-	data, size, err := readHandoffFile(resolved, info, bound, index)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := verifyHandoffBytes(request, data, size, bound, index); err != nil {
-		return nil, err
-	}
-
-	if !isAllowlistedImageMime(image.MimeType) {
-		return nil, imageInputError(imageErrInvalidMediaType, index)
-	}
-
-	return b.admitImage(index, data, size, bound, image.MimeType)
+	return b.admitImage(acpFieldPromptImage, index, data, int64(len(data)), image.MimeType)
 }
 
 // admitImage runs the gates shared by both transport forms — sniff, structure,
 // animation, declared-vs-sniffed, per-image bytes, per-prompt bytes — over the
 // bytes one image contributed. size is the image's full decoded size even when
-// data holds only the bounded prefix, so a byte verdict never understates what
-// arrived while structural inspection still reads the header.
-func (b *imagePromptBudget) admitImage(index int, data []byte, size, perImageLimit int64, mimeType string) ([]byte, error) {
+// data holds only the retained prefix, so a byte verdict never understates what
+// arrived while structural inspection still reads the header. The per-image
+// bound can never exceed the retention bound, so a payload whose prefix is all
+// that survived decoding always fails the byte gate rather than reaching the
+// harness truncated.
+func (b *imagePromptBudget) admitImage(field string, index int, data []byte, size int64, mimeType string) ([]byte, error) {
 	sniffed := sniffImageMime(data)
 	if sniffed == "" {
-		return nil, imageInputError(imageErrMediaTypeMismatch, index)
+		return nil, promptMediaError(field, imageErrMediaTypeMismatch, index, 0, 0)
 	}
 
 	animated, structureErr := inspectImageStructure(sniffed, data)
 	if structureErr != nil {
-		return nil, imageInputError(imageErrInvalidDimensions, index)
+		return nil, promptMediaError(field, imageErrInvalidDimensions, index, 0, 0)
 	}
 
 	if animated {
-		return nil, imageInputError(imageErrAnimatedNotSupported, index)
+		return nil, promptMediaError(field, imageErrAnimatedNotSupported, index, 0, 0)
 	}
 
 	if sniffed != mimeType {
-		return nil, imageInputError(imageErrMediaTypeMismatch, index)
+		return nil, promptMediaError(field, imageErrMediaTypeMismatch, index, 0, 0)
 	}
 
-	if perImageLimit > 0 && size > perImageLimit {
-		return nil, imageInputSizeError(index, size, perImageLimit)
+	if size > b.perImage {
+		return nil, promptMediaError(field, imageErrTooLarge, index, size, b.perImage)
 	}
 
-	if err := b.accountPromptBytes(index, size); err != nil {
+	if err := b.accountPromptBytes(field, index, size); err != nil {
 		return nil, err
 	}
 
@@ -206,37 +227,33 @@ func (b *imagePromptBudget) accountBlobResource(blob string) error {
 
 	_, size, err := decodeImageBase64(blob, maxDecodableImageBytes)
 	if err != nil {
-		return imageInputError(imageErrInvalidBase64, index)
+		return promptMediaError(acpFieldPromptResource, imageErrInvalidBase64, index, 0, 0)
 	}
 
-	if limit := b.limits.MaxInputBytesPerImage; limit > 0 && size > limit {
-		return imageInputSizeError(index, size, limit)
+	if size > b.perImage {
+		return promptMediaError(acpFieldPromptResource, imageErrTooLarge, index, size, b.perImage)
 	}
 
-	return b.accountPromptBytes(index, size)
+	return b.accountPromptBytes(acpFieldPromptResource, index, size)
 }
 
-func (b *imagePromptBudget) accountPromptBytes(index int, size int64) error {
+// chargeText adds a text resource's bytes to the same per-prompt accumulator the
+// media forms use. Bytes are bytes: declaring them as text rather than as a blob
+// must not buy a prompt more of them than the aggregate allows. It reports at
+// the position the next media block would take without consuming it, because a
+// text resource carries no media the index is meant to identify.
+func (b *imagePromptBudget) chargeText(size int64) error {
+	return b.accountPromptBytes(acpFieldPromptResource, b.nextIndex, size)
+}
+
+func (b *imagePromptBudget) accountPromptBytes(field string, index int, size int64) error {
 	b.totalBytes += size
 
-	if limit := b.limits.MaxInputBytesPerPrompt; limit > 0 && b.totalBytes > limit {
-		return imageInputSizeError(index, b.totalBytes, limit)
+	if b.perPrompt > 0 && b.totalBytes > b.perPrompt {
+		return promptMediaError(field, imageErrTooLarge, index, b.totalBytes, b.perPrompt)
 	}
 
 	return nil
-}
-
-// handoffByteBound is the largest handoff file this adapter reads and verifies.
-// It is the configured per-image policy limit when one is set, so handoff-form
-// input is bounded by the per-image gate rather than by the inbound frame. With
-// that limit disabled the decode-retention bound applies instead, so a file too
-// large to verify is rejected rather than forwarded unverified.
-func (b *imagePromptBudget) handoffByteBound() int64 {
-	if limit := b.limits.MaxInputBytesPerImage; limit > 0 {
-		return limit
-	}
-
-	return maxDecodableImageBytes
 }
 
 // normalizeMediaType reduces a declared MIME to its bare lowercase type for
@@ -285,13 +302,17 @@ func decodeImageBase64(data string, limit int64) ([]byte, int64, error) {
 	return decoded.data, decoded.size, nil
 }
 
+// inputImageMIMEAllowlist is the ordered inbound raster allowlist: exactly the
+// four canonical static raster MIME strings, in advertisement order. The gate
+// and the advertisement read this one list, so neither can drift from the other.
+func inputImageMIMEAllowlist() []string {
+	return []string{mimePNG, mimeJPEG, mimeGIF, mimeWebP}
+}
+
+// isAllowlistedImageMime matches the declared MIME verbatim, so a non-canonical
+// raster spelling reaches the image gates and is rejected there.
 func isAllowlistedImageMime(mimeType string) bool {
-	switch mimeType {
-	case mimePNG, mimeJPEG, mimeGIF, mimeWebP:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(inputImageMIMEAllowlist(), mimeType)
 }
 
 var pngSignature = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'}

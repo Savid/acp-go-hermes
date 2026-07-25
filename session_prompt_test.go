@@ -2109,7 +2109,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 
 func TestPromptImageParts(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
-	imageData, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
+	imageData, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Type: "image", Data: base64.StdEncoding.EncodeToString(png), MimeType: "image/png",
 	}}}, ImageLimits{}, "")
 	if err != nil {
@@ -2125,24 +2125,26 @@ func TestPromptImageParts(t *testing.T) {
 	}
 
 	remoteURI := "https://example.com/pic.png"
-	imageWithURI, err := promptToHermesParts([]acp.ContentBlock{{Image: &acp.ContentBlockImage{
+	imageWithURI, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
 		Type: "image", Data: base64.StdEncoding.EncodeToString(png), MimeType: "image/png", Uri: &remoteURI,
 	}}}, ImageLimits{}, "")
 	if err != nil || len(imageWithURI) != 1 {
 		t.Fatalf("image data plus URI = %#v err=%v", imageWithURI, err)
 	}
 	decodedWithURI, imageOK := imageWithURI[0][keyData].([]byte)
-	if !imageOK || imageWithURI[0][keyFilename] != "pic.png" ||
-		!bytes.Equal(decodedWithURI, png) {
+	if !imageOK || !bytes.Equal(decodedWithURI, png) {
 		t.Fatalf("image data plus URI = %#v err=%v", imageWithURI, err)
 	}
-	if filename := filenameFromURI("https://example.com/"); filename != "" {
-		t.Fatalf("root URI filename = %q", filename)
+
+	// The URI is provenance the native request never learns, so the two forms
+	// of the same bytes stay indistinguishable below the adapter.
+	if !reflect.DeepEqual(imageData, imageWithURI) {
+		t.Fatalf("a block uri changed the native part: %#v versus %#v", imageData, imageWithURI)
 	}
 }
 
 func TestPromptHelpersAndAnswerMapping(t *testing.T) {
-	parts, err := promptToHermesParts([]acp.ContentBlock{
+	parts, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 		acp.TextBlock("hello"),
 		{ResourceLink: &acp.ContentBlockResourceLink{Name: "a", Type: "resource_link", Uri: "file:///tmp/a"}},
 		{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
@@ -2169,7 +2171,7 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 		parts[4]["type"] != "file" || !imageOK || !bytes.Equal(embeddedImage, fixtureBytes(t, "valid.png")) {
 		t.Fatalf("parts = %#v", parts)
 	}
-	_, emptyErr := promptToHermesParts(nil, ImageLimits{}, "")
+	_, emptyErr := promptToHermesParts(t.Context(), nil, ImageLimits{}, "")
 	if emptyErr == nil {
 		t.Fatal("empty prompt accepted")
 	}
@@ -2180,7 +2182,7 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	if !reflect.DeepEqual(emptyReqErr.Data, map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt}) {
 		t.Fatalf("empty prompt data = %#v, want unsupported/prompt", emptyReqErr.Data)
 	}
-	if _, err := promptToHermesParts([]acp.ContentBlock{{
+	if _, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{
 		Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"},
 	}}, ImageLimits{}, ""); err == nil {
 		t.Fatal("audio prompt accepted")
@@ -3932,11 +3934,11 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 
 		blob := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'%'}, oversize))
 
-		_, err := promptToHermesParts([]acp.ContentBlock{
+		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 			blobResourceBlock(blob, "application/pdf", "file:///tmp/report.pdf"),
 		}, limits, "")
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptImage,
+			keyField:       acpFieldPromptResource,
 			jsonFieldError: imageErrTooLarge,
 			keyIndex:       0,
 			keySizeBytes:   int64(oversize),
@@ -3945,11 +3947,11 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 	})
 
 	t.Run("corrupt base64 in a blob is rejected", func(t *testing.T) {
-		_, err := promptToHermesParts([]acp.ContentBlock{
+		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 			blobResourceBlock("not-base64", "application/pdf", "file:///tmp/report.pdf"),
 		}, limits, "")
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptImage,
+			keyField:       acpFieldPromptResource,
 			jsonFieldError: imageErrInvalidBase64,
 			keyIndex:       0,
 		})
@@ -3960,7 +3962,7 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 		png := fixtureBytes(t, "valid.png")
 		total := int64(len(document) + len(png))
 
-		_, err := promptToHermesParts([]acp.ContentBlock{
+		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 			blobResourceBlock(base64.StdEncoding.EncodeToString(document), "application/pdf", "file:///tmp/report.pdf"),
 			{Image: &acp.ContentBlockImage{Type: "image", Data: base64.StdEncoding.EncodeToString(png), MimeType: mimePNG}},
 		}, ImageLimits{MaxInputBytesPerPrompt: total - 1}, "")
@@ -3974,7 +3976,7 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 	})
 
 	t.Run("a conforming blob still degrades to its uri", func(t *testing.T) {
-		parts, err := promptToHermesParts([]acp.ContentBlock{
+		parts, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 			blobResourceBlock(base64.StdEncoding.EncodeToString([]byte("plain")), "application/pdf", "file:///tmp/report.pdf"),
 		}, limits, "")
 		if err != nil {
@@ -3994,11 +3996,11 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 
 	for _, mimeType := range []string{"IMAGE/PNG", "Image/Png", " image/png ", "image/png; charset=binary", "IMAGE/PNG;charset=binary"} {
 		t.Run(mimeType, func(t *testing.T) {
-			parts, err := promptToHermesParts([]acp.ContentBlock{
+			parts, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 				blobResourceBlock(png, mimeType, "file:///tmp/pixels.png"),
 			}, applyOptions(nil).ImageLimits, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				keyField:       acpFieldPromptResource,
 				jsonFieldError: imageErrInvalidMediaType,
 				keyIndex:       0,
 			})
@@ -4008,13 +4010,16 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 		})
 	}
 
-	parts, err := promptToHermesParts([]acp.ContentBlock{
+	parts, err := promptToHermesParts(t.Context(), []acp.ContentBlock{
 		blobResourceBlock(png, mimePNG, "file:///tmp/pixels.png"),
 	}, applyOptions(nil).ImageLimits, "")
 	if err != nil {
 		t.Fatalf("canonical raster blob: %v", err)
 	}
-	if parts[0][keyType] != valFile || parts[0][keyFilename] != "pixels.png" {
+	if parts[0][keyType] != valFile {
 		t.Fatalf("canonical raster blob part = %#v", parts[0])
+	}
+	if _, ok := parts[0][keyFilename]; ok {
+		t.Fatalf("blob resource derived a native filename from its uri: %#v", parts[0])
 	}
 }

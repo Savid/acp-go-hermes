@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -48,7 +46,6 @@ const (
 	keyType      = "type"
 	keyTitle     = "title"
 	keyMime      = "mime"
-	keyFilename  = "filename"
 	keyQuestion  = "question"
 	keyRequest   = "request"
 	keyMessageID = "messageId"
@@ -262,7 +259,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 	defer release()
 
-	parts, err := promptToHermesParts(params.Prompt, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
+	parts, err := promptToHermesParts(ctx, params.Prompt, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -480,11 +477,17 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 }
 
-func promptToHermesParts(blocks []acp.ContentBlock, limits ImageLimits, handoffRoot string) ([]map[string]any, error) {
-	budget := &imagePromptBudget{limits: limits, handoffRoot: handoffRoot}
+func promptToHermesParts(ctx context.Context, blocks []acp.ContentBlock, limits ImageLimits, handoffRoot string) ([]map[string]any, error) {
+	budget := newImagePromptBudget(limits, handoffRoot)
+
+	defer budget.closeHandoffRoot()
 
 	parts := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		switch {
 		case block.Text != nil:
 			parts = append(parts, map[string]any{keyType: valText, valText: block.Text.Text})
@@ -498,7 +501,7 @@ func promptToHermesParts(blocks []acp.ContentBlock, limits ImageLimits, handoffR
 
 			parts = append(parts, part)
 		case block.Image != nil:
-			part, err := imageHermesPart(block.Image, budget)
+			part, err := imageHermesPart(ctx, block.Image, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -519,36 +522,30 @@ func promptToHermesParts(blocks []acp.ContentBlock, limits ImageLimits, handoffR
 // imageHermesPart validates one image block and shapes its bytes as a native
 // attachment part. Embedded data wins whenever it is present; only a block with
 // empty data and handoff intent takes the local-handoff form.
-func imageHermesPart(image *acp.ContentBlockImage, budget *imagePromptBudget) (map[string]any, error) {
+func imageHermesPart(ctx context.Context, image *acp.ContentBlockImage, budget *imagePromptBudget) (map[string]any, error) {
 	if imageBlockIsHandoff(image) {
-		return handoffImageHermesPart(image, budget)
+		return handoffImageHermesPart(ctx, image, budget)
 	}
 
-	return embeddedImageHermesPart(image.Data, image.MimeType, image.Uri, budget)
+	return embeddedImageHermesPart(acpFieldPromptImage, image.Data, image.MimeType, budget)
 }
 
 // embeddedImageHermesPart validates base64 bytes carried in the block and shapes
-// them as a native attachment part. A URI is provenance only, never fetched, and
-// contributes at most a filename hint.
-func embeddedImageHermesPart(data, mimeType string, uri *string, budget *imagePromptBudget) (map[string]any, error) {
-	decoded, err := budget.validateEmbedded(data, mimeType)
+// them as a native attachment part. A block URI is provenance only: it is never
+// fetched and nothing derived from it enters the native request, because the
+// handoff form cannot derive anything from its own URI and the two forms build
+// the same request over the same bytes.
+func embeddedImageHermesPart(field, data, mimeType string, budget *imagePromptBudget) (map[string]any, error) {
+	decoded, err := budget.validateEmbedded(field, data, mimeType)
 	if err != nil {
 		return nil, err
 	}
 
-	part := map[string]any{
+	return map[string]any{
 		keyType: valFile,
 		keyMime: mimeType,
 		keyData: decoded,
-	}
-
-	if uri != nil && *uri != "" {
-		if filename := filenameFromURI(*uri); filename != "" {
-			part[keyFilename] = filename
-		}
-	}
-
-	return part, nil
+	}, nil
 }
 
 // handoffImageHermesPart validates a handoff block and shapes the bytes read
@@ -556,8 +553,8 @@ func embeddedImageHermesPart(data, mimeType string, uri *string, budget *imagePr
 // read location rather than provenance, so nothing derived from it enters the
 // native request: the part a handoff block builds is byte-identical to the part
 // the same bytes build embedded.
-func handoffImageHermesPart(image *acp.ContentBlockImage, budget *imagePromptBudget) (map[string]any, error) {
-	decoded, err := budget.validateHandoff(image)
+func handoffImageHermesPart(ctx context.Context, image *acp.ContentBlockImage, budget *imagePromptBudget) (map[string]any, error) {
+	decoded, err := budget.validateHandoff(ctx, image)
 	if err != nil {
 		return nil, err
 	}
@@ -569,20 +566,6 @@ func handoffImageHermesPart(image *acp.ContentBlockImage, budget *imagePromptBud
 	}, nil
 }
 
-func filenameFromURI(uri string) string {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return ""
-	}
-
-	name := filepath.Base(parsed.Path)
-	if name == "." || name == "/" {
-		return ""
-	}
-
-	return name
-}
-
 // embeddedResourceHermesPart maps an embedded resource to a native part. An
 // image-MIME blob resource carries pixels, so it runs the identical image
 // validation pipeline and occupies the next image index instead of degrading
@@ -590,13 +573,17 @@ func filenameFromURI(uri string) string {
 // validity and the decoded-byte budget bind before it degrades to its URI.
 func embeddedResourceHermesPart(resource acp.EmbeddedResourceResource, budget *imagePromptBudget) (map[string]any, error) {
 	if resource.TextResourceContents != nil {
+		if err := budget.chargeText(int64(len(resource.TextResourceContents.Text))); err != nil {
+			return nil, err
+		}
+
 		text := resource.TextResourceContents.Text
 		if text == "" {
 			text = resource.TextResourceContents.Uri
 		}
 
 		if text == "" {
-			return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.resource", jsonFieldError: "embedded resource is empty"})
+			return nil, acp.NewInvalidParams(map[string]any{keyField: acpFieldPromptResource, jsonFieldError: "embedded resource is empty"})
 		}
 
 		return map[string]any{keyType: valText, valText: text}, nil
@@ -609,9 +596,7 @@ func embeddedResourceHermesPart(resource acp.EmbeddedResourceResource, budget *i
 		}
 
 		if strings.HasPrefix(normalizeMediaType(mimeType), "image/") {
-			uri := resource.BlobResourceContents.Uri
-
-			return embeddedImageHermesPart(resource.BlobResourceContents.Blob, mimeType, &uri, budget)
+			return embeddedImageHermesPart(acpFieldPromptResource, resource.BlobResourceContents.Blob, mimeType, budget)
 		}
 
 		if err := budget.accountBlobResource(resource.BlobResourceContents.Blob); err != nil {

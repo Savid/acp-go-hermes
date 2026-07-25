@@ -20,19 +20,24 @@ const (
 // pixel ceiling to pin.
 const mediaEnvelopeMaxDimension = 0
 
+// mediaEnvelopeDocumentFormats is empty because Hermes maps no MIME to a native
+// document representation. It is a non-nil slice so the advertisement carries an
+// empty JSON array.
+var mediaEnvelopeDocumentFormats = []string{}
+
 // mediaEnvelopeMeta reports the inbound media bounds a host can rely on before
-// it sends. Every byte value is read from the same ImageLimits fields the input
-// gates enforce, so WithImageLimits moves the advertisement and the gate
-// together. Hermes maps no MIME to a native document representation, so
-// documentFormats is empty, and its native image.attach_bytes ceiling is looser
-// than the policy defaults, so no native envelope tightens these values.
+// it sends. Every value is computed by the same function the gate calls, never
+// read from a raw ImageLimits field, so a configured limit the adapter clamps is
+// advertised at the number a rejection would report rather than at the number
+// the host asked for. Hermes' native image.attach_bytes ceiling is looser than
+// the policy defaults, so no native envelope tightens these values.
 func mediaEnvelopeMeta(limits ImageLimits) map[string]any {
 	return map[string]any{
-		keyMaxBytes:                       limits.MaxInputBytesPerImage,
-		mediaEnvelopeFieldMaxPromptBytes:  limits.MaxInputBytesPerPrompt,
+		keyMaxBytes:                       effectiveInputImageLimit(limits.MaxInputBytesPerImage),
+		mediaEnvelopeFieldMaxPromptBytes:  effectiveInputPromptLimit(limits.MaxInputBytesPerPrompt),
 		mediaEnvelopeFieldMaxDimension:    mediaEnvelopeMaxDimension,
-		mediaEnvelopeFieldImageFormats:    []string{mimePNG, mimeJPEG, mimeGIF, mimeWebP},
-		mediaEnvelopeFieldDocumentFormats: []string{},
+		mediaEnvelopeFieldImageFormats:    inputImageMIMEAllowlist(),
+		mediaEnvelopeFieldDocumentFormats: mediaEnvelopeDocumentFormats,
 	}
 }
 
