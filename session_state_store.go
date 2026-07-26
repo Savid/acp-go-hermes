@@ -851,8 +851,25 @@ func isSQLiteDatabase(path string) (bool, error) {
 	return n == len(header) && string(header) == "SQLite format 3\x00", nil
 }
 
+// sqliteBusyTimeout bounds how long a state-db statement waits for a lock some
+// other connection holds. Hermes creates state.db in rollback-journal mode
+// whenever its SQLite build is exposed to the WAL-reset bug, and in that mode a
+// commit locks readers out entirely; SQLite defaults to no busy timeout, so a
+// snapshot taken while the live Hermes process is mid-write fails instantly
+// with SQLITE_BUSY. The wait is a bound rather than a hang, and it stays far
+// inside sessionStoreWriteTimeout so a contended snapshot still lands within
+// the turn's store-write budget.
+const sqliteBusyTimeout = 10 * time.Second
+
+// sqliteStateDSN renders a state-db path as a driver DSN carrying the busy
+// timeout. The path keeps its plain, non-URI form, so it still resolves exactly
+// as it did before the timeout was attached.
+func sqliteStateDSN(path string) string {
+	return fmt.Sprintf("%s?_pragma=busy_timeout(%d)", path, sqliteBusyTimeout.Milliseconds())
+}
+
 func vacuumSQLiteInto(source string, target string) error {
-	db, err := stateSQLOpen("sqlite", source)
+	db, err := stateSQLOpen("sqlite", sqliteStateDSN(source))
 	if err != nil {
 		return err
 	}
@@ -891,7 +908,7 @@ func copyFile(source string, target string, mode os.FileMode) error {
 }
 
 func scrubSQLiteCredentialTables(path string) error {
-	db, err := stateSQLOpen("sqlite", path)
+	db, err := stateSQLOpen("sqlite", sqliteStateDSN(path))
 	if err != nil {
 		return err
 	}

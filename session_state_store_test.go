@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
@@ -1000,6 +1001,88 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSQLiteArchiveWaitsForConcurrentWriter pins the snapshot behaviour that
+// matters in production: the live Hermes process is still writing state.db when
+// a turn's terminal snapshot runs, and a rollback-journal commit locks the
+// snapshot's read out. The archive must wait for that lock instead of failing
+// the turn with SQLITE_BUSY.
+func TestSQLiteArchiveWaitsForConcurrentWriter(t *testing.T) {
+	restoreStateStoreSeams(t)
+
+	scratchDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLiteStore(t, dbPath)
+
+	writer, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+
+	if _, err := writer.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("BEGIN EXCLUSIVE: %v", err)
+	}
+
+	released := make(chan struct{})
+
+	timer := time.AfterFunc(200*time.Millisecond, func() {
+		if _, rollbackErr := writer.Exec("ROLLBACK"); rollbackErr != nil {
+			t.Errorf("ROLLBACK: %v", rollbackErr)
+		}
+
+		close(released)
+	})
+	defer timer.Stop()
+
+	data, ok, archiveErr := sqliteArchiveContent(scratchDir, dbPath)
+	if archiveErr != nil || !ok || len(data) == 0 {
+		t.Fatalf("sqliteArchiveContent under a held write lock: ok=%v len=%d err=%v", ok, len(data), archiveErr)
+	}
+
+	<-released
+}
+
+// TestSQLiteScrubWaitsForConcurrentWriter holds the scrub to the same rule as
+// the archive read it follows: a lock another connection holds is waited on,
+// never reported as a failed snapshot.
+func TestSQLiteScrubWaitsForConcurrentWriter(t *testing.T) {
+	restoreStateStoreSeams(t)
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLiteStore(t, dbPath)
+
+	writer, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+
+	if _, err := writer.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("BEGIN EXCLUSIVE: %v", err)
+	}
+
+	released := make(chan struct{})
+
+	timer := time.AfterFunc(200*time.Millisecond, func() {
+		if _, rollbackErr := writer.Exec("ROLLBACK"); rollbackErr != nil {
+			t.Errorf("ROLLBACK: %v", rollbackErr)
+		}
+
+		close(released)
+	})
+	defer timer.Stop()
+
+	if scrubErr := scrubSQLiteCredentialTables(dbPath); scrubErr != nil {
+		t.Fatalf("scrubSQLiteCredentialTables under a held write lock: %v", scrubErr)
+	}
+
+	<-released
 }
 
 func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
