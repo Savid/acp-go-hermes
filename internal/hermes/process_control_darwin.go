@@ -13,11 +13,29 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// processContainment holds the boundary Darwin's best-effort backend
+// establishes around one native root. The captured direct child and the
+// memoized cleanup outcome belong to that backend alone.
+type processContainment struct {
+	processGroupID    int
+	process           *os.Process
+	terminateFn       func() error
+	killFn            func() error
+	proof             <-chan bool
+	closeFn           func() error
+	descendantCountFn func() (int, bool)
+	direct            *directChildWait
+	completeFn        func(time.Duration) error
+	cleanupOnce       sync.Once
+	cleanupErr        error
+}
 
 const (
 	darwinLaunchBootstrapEnv  = "ACP_GO_HERMES_INTERNAL_DARWIN_LAUNCH"

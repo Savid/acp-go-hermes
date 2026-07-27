@@ -71,6 +71,13 @@ spend model tokens. Use `make test-integration-cover` for compiled
 override the model used by live tests. Live tests always launch Hermes with an
 isolated temp `HERMES_HOME` and never touch the user's real Hermes home.
 
+`make test-integration-attended` sets `ACP_GO_HERMES_RUN_ATTENDED=1` and runs the
+provider-auth flows a human must approve at the provider.
+`make test-integration-keystore` sets `ACP_GO_HERMES_RUN_KEYSTORE=1` and runs the
+credential-residence matrix against the container fixture in
+`integration/keystore`; it fails rather than skips when no container runtime is
+available. Neither target joins `make audit`.
+
 ## Coding Rules
 
 - Follow standard Go idioms: `ctx` first, no `ctx` in structs, and `%w` for
