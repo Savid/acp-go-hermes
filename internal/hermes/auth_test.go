@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -107,18 +108,32 @@ func TestAuthProvidersReportsANonUniformStatusObject(t *testing.T) {
 	}
 }
 
-func TestAuthAPIKeyProvidersRequiresAnEnvironmentVariable(t *testing.T) {
+// nativeEnvCatalog is a verbatim excerpt of hermes 0.19.0's GET /api/env: a flat
+// object keyed by environment-variable name, one descriptor per variable. It
+// carries every class the fold has to separate — a secret variable, one of its
+// aliases, a base-URL override, a region and a service-account path tagged to
+// providers that take no pasted key, and an untagged tool token — and its
+// OPENAI_API_KEY row is the set form, whose redaction previews the operator's
+// own key.
+const nativeEnvCatalog = `{
+	"OPENAI_API_KEY":{"is_set":true,"redacted_value":"sk-p...mnop","description":"OpenAI API (api.openai.com, API key)","url":null,"category":"provider","is_password":true,"tools":[],"advanced":false,"channel_managed":false,"provider":"openai-api","provider_label":"OpenAI API","custom":false},
+	"OPENAI_BASE_URL":{"is_set":false,"redacted_value":null,"description":"OpenAI API base URL override","url":null,"category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"openai-api","provider_label":"OpenAI API","custom":false},
+	"ANTHROPIC_API_KEY":{"is_set":false,"redacted_value":null,"description":"anthropic API key","url":null,"category":"provider","is_password":true,"tools":[],"advanced":true,"channel_managed":false,"provider":"anthropic","provider_label":"Anthropic","custom":false},
+	"ANTHROPIC_TOKEN":{"is_set":false,"redacted_value":null,"description":"anthropic API key","url":null,"category":"provider","is_password":true,"tools":[],"advanced":true,"channel_managed":false,"provider":"anthropic","provider_label":"Anthropic","custom":false},
+	"AWS_REGION":{"is_set":false,"redacted_value":null,"description":"AWS region for Bedrock API calls","url":"https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html","category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"bedrock","provider_label":"AWS Bedrock","custom":false},
+	"VERTEX_CREDENTIALS_PATH":{"is_set":false,"redacted_value":null,"description":"Path to a Google Cloud service account JSON for Vertex AI","url":"https://cloud.google.com/iam/docs/keys-create-delete","category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"vertex","provider_label":"Google Vertex AI","custom":false},
+	"GITHUB_TOKEN":{"is_set":false,"redacted_value":null,"description":"GitHub token for Skills Hub","url":"https://github.com/settings/tokens","category":"tool","is_password":true,"tools":[],"advanced":false,"channel_managed":false,"provider":"","provider_label":"","custom":false}
+}`
+
+func TestAuthAPIKeyProvidersFoldsTheNativeEnvironmentMap(t *testing.T) {
 	t.Parallel()
 
 	server := newAuthTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/env" {
-			t.Errorf("unexpected path %s", r.URL.Path)
+		if r.URL.Path != "/api/env" || r.Method != http.MethodGet {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 
-		_, _ = w.Write([]byte(`{"providers":[
-			{"id":"openai","name":"OpenAI","key_env":"OPENAI_API_KEY"},
-			{"id":"nokey","name":"No Key"}
-		]}`))
+		_, _ = w.Write([]byte(nativeEnvCatalog))
 	})
 
 	providers, err := server.AuthAPIKeyProviders(context.Background())
@@ -126,7 +141,41 @@ func TestAuthAPIKeyProvidersRequiresAnEnvironmentVariable(t *testing.T) {
 		t.Fatalf("AuthAPIKeyProviders: %v", err)
 	}
 
-	if len(providers) != 1 || providers[0].ID != "openai" {
+	want := []AuthAPIKeyProvider{
+		{ID: "anthropic", Name: "Anthropic"},
+		{ID: "openai-api", Name: "OpenAI API"},
+	}
+	if !reflect.DeepEqual(providers, want) {
+		t.Fatalf("providers = %#v, want %#v", providers, want)
+	}
+
+	encoded, err := json.Marshal(providers)
+	if err != nil {
+		t.Fatalf("marshal providers: %v", err)
+	}
+
+	for _, dropped := range []string{"sk-p", "redacted", "is_set", "description", "tools", "custom"} {
+		if strings.Contains(string(encoded), dropped) {
+			t.Fatalf("the environment catalog forwarded %q: %s", dropped, encoded)
+		}
+	}
+}
+
+func TestAuthAPIKeyProvidersToleratesAnAddedNativeField(t *testing.T) {
+	t.Parallel()
+
+	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(
+			`{"XAI_API_KEY":{"is_password":true,"provider":"xai","provider_label":"xAI","added_upstream":{"nested":1}}}`,
+		))
+	})
+
+	providers, err := server.AuthAPIKeyProviders(context.Background())
+	if err != nil {
+		t.Fatalf("an added upstream field broke enumeration: %v", err)
+	}
+
+	if len(providers) != 1 || providers[0].ID != "xai" || providers[0].Name != "xAI" {
 		t.Fatalf("providers = %#v", providers)
 	}
 }

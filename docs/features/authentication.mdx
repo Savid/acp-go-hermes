@@ -81,11 +81,21 @@ operator key contributes one `api` method with the id `api_key`. A provider
 whose native flow is `external` is omitted entirely: that entry reads another
 harness's existing credential instead of brokering one and refuses to start.
 
+`GET /api/env` is keyed by environment-variable name, not by provider, so the
+operator-key half of the catalog is a fold: the variables tagged to one provider
+collapse to that provider's single `api_key` method. A variable carrying no
+provider tag is a tool token, a channel secret, or the operator's own custom
+key; a tagged variable that is not a secret field is a base URL, a region, or a
+service-account path. Neither is a key an operator can be prompted for, so
+neither contributes a method, and a provider configured only that way is absent
+from the catalog rather than offered a prompt it cannot answer.
+
 The provider label is the native name, NFC-normalised, bounded to 256 bytes and
 restricted to Unicode categories L, N, P, S, and Zs. An entry whose label
 violates its bound is omitted and the leg still succeeds. Native status objects
-are read through a fixed allowlist, so token previews, origin labels, and
-operator-facing removal commands never cross.
+and environment descriptors are read through fixed allowlists, so token
+previews, configured-key redactions, origin labels, and operator-facing removal
+commands never cross.
 
 `generation` names that exact result. `authorize` must carry it as
 `methodsGeneration`, and a superseded token is rejected rather than authorizing

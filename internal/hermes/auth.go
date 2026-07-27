@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -56,11 +57,21 @@ type AuthProvider struct {
 	Disconnectable bool
 }
 
-// AuthAPIKeyProvider is one entry of the native environment catalog: a provider
-// that accepts an operator-supplied key.
+// AuthAPIKeyProvider is one provider of the native environment catalog that
+// accepts an operator-supplied key.
 type AuthAPIKeyProvider struct {
 	ID   string
 	Name string
+}
+
+// authEnvEntry is the allowlist applied to one member of the native environment
+// map, which is keyed by environment-variable name rather than by provider. The
+// member also reports whether the variable is set on disk and a redaction of the
+// configured value; neither is named here, so neither survives the decode.
+type authEnvEntry struct {
+	Provider      string `json:"provider"`
+	ProviderLabel string `json:"provider_label"`
+	IsPassword    bool   `json:"is_password"`
 }
 
 // AuthStart is a decoded native flow start. The device-code and pkce shapes
@@ -137,27 +148,44 @@ func (s *hermesServer) AuthProviders(ctx context.Context) ([]AuthProvider, error
 	return providers, nil
 }
 
+// AuthAPIKeyProviders folds the native environment map into one entry per
+// provider. A variable carrying no provider tag is not a provider credential at
+// all — it is a tool token, a channel secret, or an operator's own custom key —
+// and a tagged variable that is not a password field is a base URL, a region, or
+// a service-account path, none of which is a key an operator can be prompted
+// for. Both are dropped, so a provider surfaces only when it owns at least one
+// secret-valued variable.
 func (s *hermesServer) AuthAPIKeyProviders(ctx context.Context) ([]AuthAPIKeyProvider, error) {
-	var payload struct {
-		Providers []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			KeyEnv string `json:"key_env"`
-		} `json:"providers"`
-	}
+	var payload map[string]authEnvEntry
 
 	if err := s.authRequest(ctx, http.MethodGet, authEnvPath, nil, &payload); err != nil {
 		return nil, err
 	}
 
-	providers := make([]AuthAPIKeyProvider, 0, len(payload.Providers))
+	// Several variables share one provider, so the fold walks the map in
+	// variable-name order to keep the result stable across calls.
+	names := make([]string, 0, len(payload))
+	for name := range payload {
+		names = append(names, name)
+	}
 
-	for _, entry := range payload.Providers {
-		if entry.KeyEnv == "" {
+	sort.Strings(names)
+
+	providers := make([]AuthAPIKeyProvider, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+
+	for _, name := range names {
+		entry := payload[name]
+		if entry.Provider == "" || !entry.IsPassword {
 			continue
 		}
 
-		providers = append(providers, AuthAPIKeyProvider{ID: entry.ID, Name: entry.Name})
+		if _, duplicate := seen[entry.Provider]; duplicate {
+			continue
+		}
+
+		seen[entry.Provider] = struct{}{}
+		providers = append(providers, AuthAPIKeyProvider{ID: entry.Provider, Name: entry.ProviderLabel})
 	}
 
 	return providers, nil
