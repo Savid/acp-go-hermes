@@ -42,7 +42,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -100,7 +100,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	return acp.NewSessionResponse{
 		SessionId:     id,
-		Meta:          sessionResponseMeta(session.snapshot()),
+		Meta:          lifecycleResponseMeta(session.snapshot()),
 		ConfigOptions: session.configOptions(ctx),
 	}, nil
 }
@@ -145,7 +145,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 
 	return acp.LoadSessionResponse{
-		Meta:          sessionResponseMeta(session.snapshot()),
+		Meta:          lifecycleResponseMeta(session.snapshot()),
 		ConfigOptions: session.configOptions(ctx),
 	}, nil
 }
@@ -161,7 +161,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 
 	return acp.ResumeSessionResponse{
-		Meta:          sessionResponseMeta(session.snapshot()),
+		Meta:          lifecycleResponseMeta(session.snapshot()),
 		ConfigOptions: session.configOptions(ctx),
 	}, nil
 }
@@ -206,7 +206,7 @@ func (a *Agent) loadOrResumeSession(
 		return nil, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(metaMap)
+	meta, err := a.sessionMetaFromLifecycle(metaMap)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +219,8 @@ func (a *Agent) loadOrResumeSession(
 		if applyErr := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta); applyErr != nil {
 			return nil, applyErr
 		}
+
+		a.reinjectActiveSession(existing, meta)
 
 		return existing, nil
 	}
@@ -323,11 +325,13 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	cwd := s.cwd
 	mcpServers := cloneMCPServers(s.mcpServers)
 	wantIDMap := s.idmap
+	// A resumed runtime gets a fresh native root, so an injected credential is
+	// reapplied rather than assumed resident.
 	meta := sessionMeta{
 		Model:       joinModelValue(s.providerID, s.modelID),
 		Env:         cloneStringMap(s.env),
 		RawMessages: s.rawMessages,
-	}
+	}.withProviderAuth(s.providerAuth)
 	s.mu.Unlock()
 
 	if poisonErr != nil {
@@ -735,7 +739,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	meta, err := sessionMetaFromLifecycle(params.Meta)
+	meta, err := a.sessionMetaFromLifecycle(params.Meta)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -844,7 +848,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	return acp.UnstableForkSessionResponse{
 		SessionId:     id,
-		Meta:          sessionResponseMeta(session.snapshot()),
+		Meta:          lifecycleResponseMeta(session.snapshot()),
 		ConfigOptions: unstableConfigOptions(session.configOptions(ctx)),
 	}, nil
 }
@@ -924,6 +928,8 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 	if err != nil {
 		return nil, err
 	}
+
+	a.injectProviderAuth(existing.Root, meta)
 
 	a.observe.RecordHermesProcessStart(ctx)
 	processRoot := a.processes.register()
@@ -1108,6 +1114,10 @@ func (a *Agent) rejectInvalidConfiguration() error {
 
 	if a.options.Home != "" {
 		return unsupportedField(optionFieldHome)
+	}
+
+	if a.options.ProviderAuthDirectHome != "" {
+		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
 	return nil

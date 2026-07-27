@@ -45,6 +45,7 @@ type Agent struct {
 	optionsErr      error
 	processes       *providerProcessTracker
 	containmentMode RuntimeContainmentMode
+	providerAuth    *providerAuth
 
 	mu                 sync.Mutex
 	closed             bool
@@ -72,7 +73,7 @@ func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
-		validateInputHandoffRoot(options.InputHandoffRoot))
+		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -114,6 +115,7 @@ func NewAgent(opts ...Option) *Agent {
 		containmentMode: mode,
 	}
 	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
+	agent.providerAuth = newProviderAuth(agent)
 
 	return agent
 }
@@ -270,9 +272,13 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"defaultEnabled": false,
 		},
 		"sessionStore": map[string]any{
-			"format": SessionStoreFormat,
-			"key":    []string{jsonFieldSessionID, "subpath"},
+			"format":     SessionStoreFormat,
+			jsonFieldKey: []string{jsonFieldSessionID, "subpath"},
 		},
+	}
+
+	if a.providerAuth != nil {
+		hermesMeta[providerAuthCapabilityKey] = a.providerAuth.capability()
 	}
 
 	capabilityMeta := capabilityMediaMeta(a.options)
@@ -339,6 +345,10 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 
 		return a.forkSession(ctx, req)
 	default:
+		if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
+			return result, err
+		}
+
 		return nil, acp.NewMethodNotFound(method)
 	}
 }

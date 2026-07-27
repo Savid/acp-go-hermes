@@ -44,6 +44,8 @@ type session struct {
 	mode                  string
 	env                   map[string]string
 	rawMessages           rawMessageConfig
+	providerAuth          map[string]ProviderAuthBinding
+	providerAuthInjection string
 
 	client nativehermes.Server
 
@@ -135,6 +137,7 @@ type sessionSnapshot struct {
 	env                   map[string]string
 	rawMessages           rawMessageConfig
 	client                nativehermes.Server
+	providerAuthInjection string
 }
 
 func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativehermes.Session, client nativehermes.Server, meta sessionMeta, idmap idmapRecord) *session {
@@ -188,6 +191,8 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		mode:                  firstNonEmpty(native.Agent, "default"),
 		env:                   cloneStringMap(meta.Env),
 		rawMessages:           meta.RawMessages,
+		providerAuth:          meta.ProviderAuth,
+		providerAuthInjection: meta.injection(),
 		client:                client,
 		seenParts:             map[string]string{},
 		pending:               map[string]nativehermes.PermissionRequest{},
@@ -738,6 +743,7 @@ func (s *session) snapshot() sessionSnapshot {
 		env:                   cloneStringMap(s.env),
 		rawMessages:           s.rawMessages,
 		client:                s.client,
+		providerAuthInjection: s.providerAuthInjection,
 	}
 }
 
@@ -826,6 +832,13 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 	epoch := s.turnEpoch
 	active := s.cancel != nil && epoch > 0
 	s.mu.Unlock()
+
+	// Pending provider-auth flows are cancelled after pending elicitation is
+	// resolved and before the native interrupt, so a flow is never abandoned to
+	// a process already being torn down.
+	if s.agent != nil && s.agent.providerAuth != nil {
+		s.agent.providerAuth.closeSession(ctx, s.id)
+	}
 
 	if active {
 		return s.fenceTurnLocked(ctx, epoch, true)

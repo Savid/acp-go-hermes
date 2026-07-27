@@ -93,12 +93,20 @@ model, environment, session storage, concurrency limits, and OpenTelemetry
 providers. Hermes has no native config or auth root, so `WithHome` is
 unsupported: a non-empty `Home` is rejected as an unsupported option when a
 session is established. Use `WithScratchDir` to control where ephemeral state is
-materialized.
+materialized. `WithProviderAuthRoot` names the durable directory that holds the
+values-free provider-auth ledger; without it no provider-auth method is
+advertised, and `WithProviderAuthDirectHome` is declared for configuration
+symmetry and rejected fail-closed at session start.
 
 ## What It Provides
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
   delete, and fork.
+- Provider logins brokered through eight session-scoped `_hermes/auth/*`
+  extension methods over the `hermes serve` REST auth API, with a durable
+  values-free ledger, a reserved credential-pool slot per connection, and
+  injection of non-rotating material through
+  `_meta.hermes.options.providerAuth`.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
   freshly generated `HERMES_HOME`. Linux and Windows use authoritative OS
   containment. Darwin is disabled unless its explicitly risky best-effort

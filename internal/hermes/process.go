@@ -107,12 +107,13 @@ func (b *synchronizedBuffer) String() string {
 }
 
 type Process struct {
-	Cmd       *exec.Cmd
-	Client    *Client
-	Home      string
-	Port      int
-	Token     string
-	StatusURL string
+	Cmd        *exec.Cmd
+	Client     *Client
+	Home       string
+	Port       int
+	Token      string
+	StatusURL  string
+	APIBaseURL string
 
 	cancel context.CancelFunc
 	tree   *processContainment
@@ -196,9 +197,15 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		env = append(env, key+"="+value)
 	}
 
+	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
+	// TTY hermes block-buffers stdout and emits nothing while working normally.
+	// BROWSER neutralises the login browser launch, which hermes performs even
+	// when told not to: --no-browser is accepted and then ignored.
 	env = append(env,
 		"HERMES_HOME="+home,
 		"HERMES_DASHBOARD_SESSION_TOKEN="+token,
+		"PYTHONUNBUFFERED=1",
+		"BROWSER="+neutralizedBrowserCommand(),
 	)
 
 	cmd.Env = env
@@ -231,13 +238,14 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, nil)
 
 	process := &Process{
-		Cmd:       cmd,
-		Home:      home,
-		Port:      port,
-		Token:     token,
-		StatusURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
-		cancel:    cancel,
-		tree:      tree,
+		Cmd:        cmd,
+		Home:       home,
+		Port:       port,
+		Token:      token,
+		StatusURL:  "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
+		APIBaseURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
+		cancel:     cancel,
+		tree:       tree,
 	}
 	process.beginWait()
 

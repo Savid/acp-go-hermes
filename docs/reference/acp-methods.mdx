@@ -20,6 +20,29 @@ description: The ACP methods the adapter implements and the one native extension
 | `session/delete` | Tombstone the store, then best-effort native delete. |
 | `session/set_config_option` | Apply a config option such as `model`. |
 
+## Provider-auth extension methods
+
+These eight session-scoped legs broker a provider login through the
+`hermes serve` REST auth API. They are advertised — and answer — only while
+`-provider-auth-root` names a usable durable directory; otherwise every one
+returns method-not-found.
+
+| Method | Params | Result |
+|---|---|---|
+| `_hermes/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_hermes/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url?, message, userCode?, callbackInput?, flowId, flowExpiresAt, pollIntervalMs?}` |
+| `_hermes/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_hermes/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, expiresAt?, reason?}` |
+| `_hermes/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_hermes/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_hermes/auth/credential` | `{sessionId, providerId, flowId}` | `{connectionId, revision, bindingGeneration, credential}` |
+| `_hermes/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+Every request object is closed: an unknown, duplicate, or missing field is
+rejected with `-32602` naming the field path. Every leg failure is
+`hermes_auth_failed` (`-32000`) with a closed `cause`, and no native message
+text ever crosses. See [Authentication](/docs/features/authentication).
+
 ## Extensions and unsupported methods
 
 `session/set_mode` returns method-not-found. The only native extension method is

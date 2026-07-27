@@ -1,10 +1,12 @@
 ---
 title: Authentication
-description: Why the adapter advertises no ACP auth methods and keeps Hermes credentials native.
+description: Agent auth stays native, while provider logins are brokered through eight session-scoped extension legs.
 ---
 
-Hermes and provider authentication stay native to Hermes. The adapter does not
-own or manage your real Hermes login state.
+Hermes owns agent-level authentication. The adapter does not manage your real
+Hermes login state, and it never authenticates a host through ACP. Separately,
+it can broker a **provider** login — signing a worker in to a model provider —
+through eight session-scoped extension methods.
 
 ## No ACP auth methods
 
@@ -18,6 +20,11 @@ Every per-session `hermes serve` process runs with an isolated `HERMES_HOME` and
 a random `HERMES_DASHBOARD_SESSION_TOKEN` for the loopback dashboard gateway. The
 token hash is written to the lease file only for stale-process identity checks.
 
+The launch environment also sets `PYTHONUNBUFFERED=1`, without which Hermes
+block-buffers stdout off a TTY and emits nothing while working normally, and
+neutralises the browser launch, which Hermes performs during a login regardless
+of its `--no-browser` flag.
+
 ## Credentials never reach the store
 
 Auth material is never persisted to the ACP session store. Credential-bearing
@@ -25,3 +32,128 @@ native files and SQLite credential tables are excluded or scrubbed from store
 snapshots. Keep provider keys in the environment (`WithEnv`) and reference them
 from seeded config by env-var indirection — see
 [Models and config](/docs/features/models-config).
+
+The provider-auth ledger is not session state either: it lives under the
+configured provider-auth root, outside every session root, and `session/delete`
+never removes it.
+
+## Provider auth
+
+`WithProviderAuthRoot` (CLI `-provider-auth-root`) names an absolute, durable,
+host-owned directory that houses the adapter's values-free provider-auth ledger.
+It is created `0700`, entries are written `0600`, and every write is atomic and
+fsynced. Without a usable root the adapter advertises no provider-auth method at
+all and every leg returns method-not-found.
+
+`WithProviderAuthDirectHome` (CLI `-provider-auth-direct-home`) is declared for
+configuration symmetry and rejected fail-closed at session start: removal here
+drops the one reserved pool slot a connection owns, which consents to nothing
+beyond that slot, so there is no canonical operator home for an exact-home gate
+to authorize.
+
+While the root is usable, `initialize` advertises:
+
+```json
+{
+  "providerAuth": {
+    "methods": [
+      "_hermes/auth/methods",
+      "_hermes/auth/authorize",
+      "_hermes/auth/callback",
+      "_hermes/auth/status",
+      "_hermes/auth/cancel",
+      "_hermes/auth/inventory",
+      "_hermes/auth/credential",
+      "_hermes/auth/disconnect"
+    ],
+    "injectionKey": "_meta.hermes.options.providerAuth"
+  }
+}
+```
+
+### The catalog
+
+`_hermes/auth/methods` enumerates `GET /api/providers/oauth` and `GET /api/env`
+and publishes what it finds — there is no completeness claim and no free entry
+of an unlisted provider. An OAuth provider contributes one `oauth` method whose
+id is its native flow (`device_code` or `pkce`); a provider that accepts an
+operator key contributes one `api` method with the id `api_key`. A provider
+whose native flow is `external` is omitted entirely: that entry reads another
+harness's existing credential instead of brokering one and refuses to start.
+
+The provider label is the native name, NFC-normalised, bounded to 256 bytes and
+restricted to Unicode categories L, N, P, S, and Zs. An entry whose label
+violates its bound is omitted and the leg still succeeds. Native status objects
+are read through a fixed allowlist, so token previews, origin labels, and
+operator-facing removal commands never cross.
+
+`generation` names that exact result. `authorize` must carry it as
+`methodsGeneration`, and a superseded token is rejected rather than authorizing
+whatever the id now denotes. No method publishes prompts: the native start takes
+no operator input on either flow, so `authorize.inputs` is always empty.
+
+### Flows
+
+`authorize` starts at most one flow per `(sessionId, providerId)`:
+
+- A `device_code` provider returns `interaction: "wait"` with the verification
+  URL, the user code, and the native poll interval as a hint.
+- The `pkce` provider returns `interaction: "callback"` with the authorization
+  URL and `callbackInput: "code"`; that start shape carries no user code and no
+  poll interval at all.
+- An operator-key method returns `interaction: "secret"` with no URL and the
+  method's native label as its `message`.
+
+`flowExpiresAt` is always present and is the minimum of the native expiry and a
+15-minute wrapper deadline. `status` drives a native poll no faster than
+`max(nativePollInterval, 5s)`, serving its cached state in between, and adds
+five seconds to its own interval when the provider asks it to slow down.
+`cancel` disarms the completer, terminalizes the record, and invokes Hermes'
+native flow cancel — it never claims provider-side cancellation, because an
+issued device code stays valid at the provider until it expires there.
+
+Repeating an `authorizeRequestId` returns the recorded presentation verbatim
+with no native call. A different one supersedes the previous flow, after which
+the old `flowId` addresses nothing.
+
+### The reserved slot
+
+When a flow completes, the adapter immediately migrates the entry Hermes just
+wrote into a reserved credential-pool slot labelled for that connection: it
+copies the token material, removes the original by index, and appends the
+labelled slot. Ambient, environment-supplied, and `gh`-derived pool entries
+carry no reserved label, so they are unrepresentable on this surface rather than
+merely unreported — `inventory` cannot see them, `credential` cannot harvest
+them, and `disconnect` cannot remove them.
+
+`inventory` answers residence from the ledger **and** a probe of the named slot,
+and reports the closed `proofSource` the two select. `credential` harvests that
+one slot, once, from a flow in `authenticated` or `saved`, and returns the
+`hermesOauth` variant. `disconnect` bumps the binding generation first, then
+removes only the exactly-fenced slot and verifies absence.
+
+### Access-token expiry is derived
+
+The pool entry carries no expiry. The `pkce` flow's own `0600` credential file
+supplies an absolute value directly; the `device_code` flow records only a
+relative lifetime with no issued-at anchor, and the access token's own claim is
+never decoded, so the adapter anchors at the moment of the read. The value is
+therefore derived rather than native, and it always errs early.
+
+### Injection
+
+Hermes accepts injection of non-rotating material through
+`_meta.hermes.options.providerAuth`, mapping a provider id to a binding whose
+credential is the `hermesOauth` variant. The value is written into the reserved
+slot of the session's native home before Hermes first reads it, and the
+lifecycle response reports the values-free outcome:
+
+```json
+{"_meta": {"hermes": {"providerAuth": {"injection": "applied"}}}}
+```
+
+`applied` means a demonstrably empty slot was written once, `noop` that a live
+entry of the same lineage already matched, and `conflict` that a live entry
+differs or the connection is unknown — in which case nothing was installed and
+nothing was used. The field is absent when the option key was not supplied at
+all. All three outcomes return a successful lifecycle response.

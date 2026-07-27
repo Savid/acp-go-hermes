@@ -117,8 +117,20 @@ type Options struct {
 	// prompt form rejected. It is not a materialization option: the adapter
 	// never writes, moves, or removes anything under it.
 	InputHandoffRoot string
-	DefaultModel     string
-	Env              map[string]string
+	// ProviderAuthRoot is the absolute, host-owned, durable directory that
+	// houses the values-free provider-auth ledger. It is not ephemeral
+	// materialization: the ledger deliberately outlives every session and every
+	// native generation, which is the one class of state a scratch parent must
+	// not hold. Without it no provider-auth method is advertised at all.
+	ProviderAuthRoot string
+	// ProviderAuthDirectHome is unsupported: Hermes removes a credential by
+	// dropping the one reserved pool slot a connection owns, which consents to
+	// nothing beyond that slot, so there is no canonical operator home for an
+	// exact-home gate to authorize. A non-empty value is rejected when a session
+	// is established.
+	ProviderAuthDirectHome string
+	DefaultModel           string
+	Env                    map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -229,6 +241,32 @@ func WithScratchDir(dir string) Option {
 func WithInputHandoffRoot(dir string) Option {
 	return func(options *Options) {
 		options.InputHandoffRoot = dir
+	}
+}
+
+// WithProviderAuthRoot sets the durable directory that houses the values-free
+// provider-auth ledger. The path must be absolute; a relative path is rejected
+// at agent construction. The directory is created 0700 when missing and ledger
+// entries are written 0600. Omitting the option, or supplying a root that is
+// not a writable directory, leaves every provider-auth method unadvertised and
+// answering method-not-found: a leg that cannot record what it did is never
+// offered. The root carries no config or auth-resolution semantics and is never
+// a scratch parent.
+func WithProviderAuthRoot(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthRoot = path
+	}
+}
+
+// WithProviderAuthDirectHome is unsupported. Hermes removes a credential by
+// dropping the one reserved pool slot a connection owns — a scoped act that
+// consents to nothing beyond that slot — so no provider-auth leg here reads or
+// clears an operator's canonical native home and there is nothing for an
+// exact-home consent gate to authorize. Establishing a session with a non-empty
+// value is rejected as an unsupported option.
+func WithProviderAuthDirectHome(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthDirectHome = path
 	}
 }
 

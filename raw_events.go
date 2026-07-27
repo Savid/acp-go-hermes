@@ -23,6 +23,7 @@ const (
 	jsonFieldError        = "error"
 	jsonFieldMessage      = "message"
 	jsonFieldMethod       = "method"
+	jsonFieldKey          = "key"
 	jsonFieldSessionID    = "sessionId"
 	jsonFieldCwd          = "cwd"
 	validationRequired    = "required"

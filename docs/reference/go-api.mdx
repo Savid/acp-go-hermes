@@ -38,6 +38,8 @@ still reach.
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithImageLimits` | Decoded-byte limits for image prompt input; all four fields default to 6 MiB when omitted. |
+| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger; unset or unusable leaves every provider-auth leg unadvertised. |
+| `WithProviderAuthDirectHome` | Declared for configuration symmetry and rejected fail-closed at session start: Hermes removes only the reserved slot a connection owns, so no leg acts on a canonical native home. |
 | `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
@@ -45,6 +47,35 @@ still reach.
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
+
+## Provider-auth types
+
+The brokered credential crosses in exactly these shapes, which are also the
+shapes the wire carries:
+
+```go
+type ProviderCredential struct {
+    Type        ProviderCredentialType
+    OAuth       *ProviderOAuthCredential
+    API         *ProviderAPICredential
+    HermesOAuth *ProviderHermesOAuthCredential
+}
+
+type ProviderAuthBinding struct {
+    ConnectionID      string
+    Revision          int64
+    BindingGeneration int64
+    Credential        ProviderCredential
+}
+```
+
+The union is closed and flat: `type` selects exactly one variant and exactly one
+pointer is non-nil. Decoding is strict — unknown fields, duplicate fields, empty
+required strings, and unaccepted variants are rejected rather than partially
+decoded. Hermes emits and accepts the `hermesOauth` variant only, and carries
+non-rotating material only. Every timestamp is Unix epoch milliseconds. Values of
+these types are secret material and never reach a log, an error, or the session
+store — see [Authentication](/docs/features/authentication).
 
 `WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
 before the adapter interrupts it, completes its selected native containment

@@ -18,6 +18,11 @@ const (
 	// unsupported-option error. Hermes has no native config or auth root the
 	// adapter may target.
 	optionFieldHome = "home"
+
+	// optionFieldProviderAuthDirectHome names the unsupported exact-home consent
+	// gate. Hermes removes only the reserved pool slot a connection owns, so no
+	// leg here acts on an operator's canonical native home.
+	optionFieldProviderAuthDirectHome = "providerAuthDirectHome"
 )
 
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {

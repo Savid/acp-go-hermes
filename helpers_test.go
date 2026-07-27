@@ -10,6 +10,13 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// sessionMetaFromLifecycle decodes lifecycle meta through an agent with no
+// provider-auth root, which is the configuration every test that does not set
+// one runs under.
+func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
+	return NewAgent().sessionMetaFromLifecycle(meta)
+}
+
 type fakeHermesClient struct {
 	mu sync.Mutex
 
@@ -59,6 +66,81 @@ type fakeHermesClient struct {
 	reloadCalls          int
 	reloadFunc           func(context.Context, string) error
 	closeFunc            func(context.Context) error
+
+	authProviders     []nativehermes.AuthProvider
+	authKeyProviders  []nativehermes.AuthAPIKeyProvider
+	authProvidersErr  error
+	authKeyErr        error
+	authStart         nativehermes.AuthStart
+	authStartErr      error
+	authStartFunc     func(context.Context, string) (nativehermes.AuthStart, error)
+	authSubmitErr     error
+	authSubmits       []string
+	authPoll          nativehermes.AuthPoll
+	authPollErr       error
+	authPollFunc      func(context.Context, string, string) (nativehermes.AuthPoll, error)
+	authCancelled     []string
+	authCancelFlowErr error
+}
+
+func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthProvider, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.authProviders, c.authProvidersErr
+}
+
+func (c *fakeHermesClient) AuthAPIKeyProviders(context.Context) ([]nativehermes.AuthAPIKeyProvider, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.authKeyProviders, c.authKeyErr
+}
+
+func (c *fakeHermesClient) AuthStart(ctx context.Context, providerID string) (nativehermes.AuthStart, error) {
+	c.mu.Lock()
+	fn := c.authStartFunc
+	start := c.authStart
+	err := c.authStartErr
+	c.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, providerID)
+	}
+
+	return start, err
+}
+
+func (c *fakeHermesClient) AuthSubmit(_ context.Context, _ string, _ string, input string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.authSubmits = append(c.authSubmits, input)
+
+	return c.authSubmitErr
+}
+
+func (c *fakeHermesClient) AuthPollFlow(ctx context.Context, providerID string, nativeSessionID string) (nativehermes.AuthPoll, error) {
+	c.mu.Lock()
+	fn := c.authPollFunc
+	poll := c.authPoll
+	err := c.authPollErr
+	c.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, providerID, nativeSessionID)
+	}
+
+	return poll, err
+}
+
+func (c *fakeHermesClient) AuthCancelFlow(_ context.Context, nativeSessionID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.authCancelled = append(c.authCancelled, nativeSessionID)
+
+	return c.authCancelFlowErr
 }
 
 type fakePermissionReply struct {

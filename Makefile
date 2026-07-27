@@ -5,7 +5,7 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 
 REMOVED_PUBLIC_TERMS = hermes\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\x4e\x45\x53|SSE\x20MCP|mcpCapabilities\x2eacp|ExportSessio\x6e|ImportSessio\x6e|DeleteSessio\x6e|ParseConfi\x67|HermesSessio\x6e
 
-.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test-cross-compile test-integration-cover test-integration-live test-integration-smoke test/cover tidy vuln
+.PHONY: audit build clean coverage-check docs-audit fmt fmt-check help lint modernize-check test test-cross-compile test-integration-attended test-integration-cover test-integration-keystore test-integration-live test-integration-smoke test/cover tidy vuln
 
 ## build: compile all packages
 build:
@@ -56,6 +56,14 @@ test-integration-smoke:
 test-integration-live:
 	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes
 
+## test-integration-attended: run provider-auth flows a human must approve in real time
+test-integration-attended:
+	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
+
+## test-integration-keystore: run credential-residence tests against the container fixture
+test-integration-keystore:
+	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./integration/...
+
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
 	rm -rf .tmp/integration-cover coverage-integration.out
@@ -68,7 +76,7 @@ test-integration-cover:
 ## docs-audit: check public docs, examples, required files, CLI flags, and removed terms
 docs-audit:
 	@missing=0; for file in README.md doc.go docs.json example_test.go AGENTS.md docs/overview.mdx docs/core/sessions.mdx docs/core/prompt-streaming.mdx docs/features/authentication.mdx docs/features/elicitation.mdx docs/features/mcp.mdx docs/features/models-config.mdx docs/features/permissions.mdx docs/features/raw-events.mdx docs/features/session-store.mdx docs/get-started/examples.mdx docs/get-started/install.mdx docs/get-started/quickstart.mdx docs/get-started/run-modes.mdx docs/operations/observability.mdx docs/operations/security.mdx docs/operations/troubleshooting.mdx docs/reference/acp-methods.mdx docs/reference/cli.mdx docs/reference/go-api.mdx docs/reference/meta.mdx docs/reference/updates.mdx examples/minimal-client/main.go examples/resume-from-file/main.go examples/interactive-chat/main.go; do if [ ! -f "$$file" ]; then echo "missing required docs file: $$file"; missing=1; fi; done; exit $$missing
-	@for flag in -path -home -model -debug -version; do rg -q -- "$$flag" docs/reference/cli.mdx cmd/acp-go-hermes/main.go || { echo "missing CLI flag in docs/code: $$flag"; exit 1; }; done
+	@for flag in -path -home -scratch-dir -provider-auth-root -provider-auth-direct-home -model -debug -version; do rg -q -- "$$flag" docs/reference/cli.mdx cmd/acp-go-hermes/main.go || { echo "missing CLI flag in docs/code: $$flag"; exit 1; }; done
 	@pattern=$$(printf '%b' '$(REMOVED_PUBLIC_TERMS)'); ! rg -n -- "$$pattern" README.md doc.go docs.json docs examples cmd/acp-go-hermes/*.go AGENTS.md
 	@! rg -n -- 'options\.(mode|permission)\b|options"?\s*:.*\b(mode|permission)\b' docs README.md doc.go || { echo "removed _meta.hermes.options.mode/permission field reappeared in docs"; exit 1; }
 

@@ -130,6 +130,12 @@ type Server interface {
 	Events() <-chan TurnEvent
 	EventErrors() <-chan error
 	XDGDirs() XDGDirs
+	AuthProviders(context.Context) ([]AuthProvider, error)
+	AuthAPIKeyProviders(context.Context) ([]AuthAPIKeyProvider, error)
+	AuthStart(context.Context, string) (AuthStart, error)
+	AuthSubmit(context.Context, string, string, string) error
+	AuthPollFlow(context.Context, string, string) (AuthPoll, error)
+	AuthCancelFlow(context.Context, string) error
 }
 
 type StartOptions struct {

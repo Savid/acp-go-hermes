@@ -46,19 +46,19 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if env, err := stringMapFromMeta(map[string]string{"A": "1"}); err != nil || env["A"] != "1" {
 		t.Fatalf("stringMapFromMeta map[string]string = %#v err=%v", env, err)
 	}
-	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: "bad"}); err == nil {
+	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: "bad"}, false); err == nil {
 		t.Fatal("bad hermes meta accepted")
 	}
-	if err := validateLifecycleMeta(map[string]any{"github.com/savid/acp-go-hermes": map[string]any{}}); err != nil {
+	if err := validateLifecycleMeta(map[string]any{"github.com/savid/acp-go-hermes": map[string]any{}}, false); err != nil {
 		t.Fatalf("foreign module-path meta must be ignored, got %v", err)
 	}
-	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: "bad"}}); err == nil {
+	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: "bad"}}, false); err == nil {
 		t.Fatal("bad options meta accepted")
 	}
-	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{rawEventKey: "bad"}}); err == nil {
+	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{rawEventKey: "bad"}}, false); err == nil {
 		t.Fatal("bad raw event object accepted")
 	}
-	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{rawEventKey: map[string]any{"unknown": true}}}); err == nil {
+	if err := validateLifecycleMeta(map[string]any{hermesMetaKey: map[string]any{rawEventKey: map[string]any{"unknown": true}}}, false); err == nil {
 		t.Fatal("unknown raw event key accepted")
 	}
 	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{rawEventKey: map[string]any{rawEventEnabledKey: "bad"}}}); err == nil {

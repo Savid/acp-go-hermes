@@ -28,6 +28,25 @@ Every outbound Hermes clarification preserves native metadata and adds
 key. The adapter rejects a pre-existing reserved key. Permission requests keep
 their structural session/tool-call correlation and do not use this envelope.
 
+## Provider auth
+
+`_meta.hermes.options.providerAuth` maps a provider id to a
+`ProviderAuthBinding` whose credential the adapter installs into the session's
+native home before Hermes first reads it. The key is accepted only while a
+usable provider-auth root is configured; otherwise it is rejected as an
+unsupported field.
+
+Every lifecycle response to a request that carried the key reports the
+values-free outcome:
+
+```json
+{"_meta": {"hermes": {"providerAuth": {"injection": "applied"}}}}
+```
+
+`injection` is `applied`, `noop`, or `conflict`, and the member is absent
+entirely when the option key was not supplied. See
+[Authentication](/docs/features/authentication).
+
 ## Media envelope
 
 Initialize always advertises the inbound media bounds the adapter enforces under

@@ -37,6 +37,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	hermesPath := flags.String("path", "", "path to hermes CLI")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	hermesHome := flags.String("home", "", "unsupported: Hermes has no native config or auth root; a non-empty value is rejected when a session is established (use -scratch-dir)")
+	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
+	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "unsupported: Hermes removes only the reserved slot a connection owns, so no leg acts on a canonical native home; a non-empty value is rejected when a session is established")
 	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "opt into Darwin process-group containment with residual escape and PGID-reuse risks")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
@@ -96,13 +98,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger = telemetry.logger
 
-	opts := make([]hermesacp.Option, 0, 6+len(telemetry.options))
+	opts := make([]hermesacp.Option, 0, 8+len(telemetry.options))
 
 	opts = append(opts,
 		hermesacp.WithAgentVersion(version),
 		hermesacp.WithExecutablePath(*hermesPath),
 		hermesacp.WithScratchDir(*scratchDir),
 		hermesacp.WithHome(*hermesHome),
+		hermesacp.WithProviderAuthRoot(*providerAuthRoot),
+		hermesacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
 	)
