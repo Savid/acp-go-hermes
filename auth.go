@@ -401,9 +401,10 @@ func authRequiredString(fields map[string]json.RawMessage, name string) (string,
 	return value, nil
 }
 
-// authConnectionIDMaxBytes bounds the caller-minted connection id. The contract
-// fixes no bound of its own, so the accepted shape is the opaque ASCII token a
-// consumer mints — a short prefix and a UUID is 40 bytes — with room to spare.
+// authConnectionIDMaxBytes bounds the caller-minted connection id, matching the
+// bound the contract fixes for the whole family. The accepted shape is the
+// opaque ASCII token a consumer mints — a short prefix and a UUID is 40 bytes —
+// with room to spare.
 const authConnectionIDMaxBytes = 128
 
 // authRequiredConnectionID decodes and validates the connection id a leg
