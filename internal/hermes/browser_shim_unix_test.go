@@ -16,31 +16,30 @@ import (
 	"time"
 )
 
-const (
-	browserProbeURL      = "https://example.invalid/"
-	browserProbeLauncher = "open"
-)
+const browserProbeURL = "https://example.invalid/"
 
 // TestLoginNeverExecsABrowserLauncher proves the launch never reaches a browser
-// launcher on PATH. The harness it starts execs `open` and `xdg-open` by bare
+// launcher on PATH. The harness it starts execs every launcher name by bare
 // name, and a probe directory ahead of the inherited PATH records every such
 // exec in a marker file.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "launched")
 	probe := browserProbeDirOnPath(t, marker)
 
-	resolved, lookErr := exec.LookPath(browserProbeLauncher)
-	if lookErr != nil || resolved != filepath.Join(probe, browserProbeLauncher) {
-		t.Fatalf("LookPath(%s) = %q err=%v, want the probe launcher", browserProbeLauncher, resolved, lookErr)
-	}
+	for _, name := range browserLauncherNames {
+		resolved, lookErr := exec.LookPath(name)
+		if lookErr != nil || resolved != filepath.Join(probe, name) {
+			t.Fatalf("LookPath(%s) = %q err=%v, want the probe launcher", name, resolved, lookErr)
+		}
 
-	if runErr := exec.Command(browserProbeLauncher, browserProbeURL).Run(); runErr != nil {
-		t.Fatalf("probe launcher: %v", runErr)
-	}
+		if runErr := exec.Command(name, browserProbeURL).Run(); runErr != nil {
+			t.Fatalf("probe launcher %s: %v", name, runErr)
+		}
 
-	control, controlErr := os.ReadFile(marker)
-	if controlErr != nil || !strings.Contains(string(control), browserProbeURL) {
-		t.Fatalf("probe launcher recorded %q err=%v, want the opened URL", control, controlErr)
+		control, controlErr := os.ReadFile(marker)
+		if controlErr != nil || !strings.Contains(string(control), name+" "+browserProbeURL) {
+			t.Fatalf("probe launcher %s recorded %q err=%v, want the opened URL", name, control, controlErr)
+		}
 	}
 
 	if removeErr := os.Remove(marker); removeErr != nil {
@@ -82,7 +81,7 @@ func browserProbeDirOnPath(t *testing.T, marker string) string {
 	probe := t.TempDir()
 	body := fmt.Appendf(nil, "#!/bin/sh\necho \"$0 $*\" >> %q\nexit 0\n", marker)
 
-	for _, name := range []string{browserProbeLauncher, "xdg-open"} {
+	for _, name := range browserLauncherNames {
 		if err := os.WriteFile(filepath.Join(probe, name), body, 0o700); err != nil {
 			t.Fatalf("write probe launcher %s: %v", name, err)
 		}
@@ -100,16 +99,20 @@ func browserLaunchingHermesExecutable(t *testing.T) string {
 
 	serve := fakeHermesExecutable(t, fakeProcessModeOK)
 	path := filepath.Join(t.TempDir(), "hermes")
+
+	launches := ""
+	for _, name := range browserLauncherNames {
+		launches += fmt.Sprintf("%s %q\n", name, browserProbeURL)
+	}
+
 	body := fmt.Appendf(nil, `#!/bin/sh
 for arg in "$@"; do
 	if [ "$arg" = "--version" ]; then
 		exec %q "$@"
 	fi
 done
-open %q
-xdg-open %q
-exec %q "$@"
-`, serve, browserProbeURL, browserProbeURL, serve)
+%sexec %q "$@"
+`, serve, launches, serve)
 
 	if err := os.WriteFile(path, body, 0o700); err != nil {
 		t.Fatalf("write browser-launching harness: %v", err)

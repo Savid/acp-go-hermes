@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -24,9 +25,11 @@ const (
 
 	keystoreCanaryToken = "canary-not-a-real-credential"
 
-	keystoreEnvFile   = "/run/acp-go-hermes-keystore/env"
-	keystoreRoundTrip = "/usr/local/bin/roundtrip.sh"
-	keystoreProbePath = "/usr/local/bin/residence.test"
+	keystoreEnvFile         = "/run/acp-go-hermes-keystore/env"
+	keystoreRoundTrip       = "/usr/local/bin/roundtrip.sh"
+	keystoreProbePath       = "/usr/local/bin/residence.test"
+	keystoreBrowserShimPath = "/usr/local/bin/browser-shim.test"
+	keystoreBrowserShimCase = "^TestLoginNeverExecsABrowserLauncher$"
 )
 
 func requireRunKeystore(t *testing.T) {
@@ -85,7 +88,7 @@ func TestKeystoreLinuxCredentialResidence(t *testing.T) {
 		}
 	})
 
-	probe := buildResidenceProbe(t)
+	probe := buildLinuxHermesProbe(t)
 
 	if err := container.CopyFileToContainer(ctx, probe, keystoreProbePath, 0o755); err != nil {
 		t.Fatalf("copy residence probe: %v", err)
@@ -150,10 +153,96 @@ func TestKeystoreLinuxArtifactCarriesNoSecretServiceClient(t *testing.T) {
 	}
 }
 
-// buildResidenceProbe compiles the package that owns the store read path for the
-// fixture's platform. The matrix cannot run on the host: only the container has
-// a Secret Service to answer it.
-func buildResidenceProbe(t *testing.T) string {
+// TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs the launch path on Linux
+// against a real Linux PATH. Hermes is python: its webbrowser module reads
+// BROWSER but still execs xdg-open by bare name, and hermes accepts
+// --no-browser and then ignores it, so the launcher half of the shim is what
+// keeps a login off the operator's desktop there. A Darwin box can compile that
+// half but never execute it, and a claim that has only ever been compiled is
+// the failure this shim exists to answer.
+func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
+	requireKeystoreRuntime(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	container, startErr := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:      keystoreBaseImage(t),
+			Entrypoint: []string{"/bin/sh", "-c", "exec sleep infinity"},
+			WaitingFor: wait.ForExec([]string{"/bin/true"}).WithStartupTimeout(3 * time.Minute),
+		},
+		Started: true,
+	})
+	if startErr != nil {
+		t.Fatalf("start the launcher fixture: %v", startErr)
+	}
+
+	t.Cleanup(func() {
+		if err := container.Terminate(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("terminate the launcher fixture: %v", err)
+		}
+	})
+
+	probe := buildLinuxHermesProbe(t)
+
+	if copyErr := container.CopyFileToContainer(ctx, probe, keystoreBrowserShimPath, 0o755); copyErr != nil {
+		t.Fatalf("copy the launcher probe: %v", copyErr)
+	}
+
+	code, output, execErr := container.Exec(
+		ctx,
+		[]string{keystoreBrowserShimPath, "-test.run", keystoreBrowserShimCase, "-test.v"},
+		tcexec.Multiplexed(),
+	)
+	if execErr != nil {
+		t.Fatalf("run the launcher probe: %v", execErr)
+	}
+
+	logs, readErr := io.ReadAll(output)
+	if readErr != nil {
+		t.Fatalf("read the launcher probe output: %v", readErr)
+	}
+
+	t.Log(string(logs))
+
+	if code != 0 {
+		t.Fatalf("the launcher probe exited %d", code)
+	}
+
+	if !strings.Contains(string(logs), "PASS") {
+		t.Fatalf("the launcher probe reported no pass: %s", logs)
+	}
+}
+
+// keystoreBaseImage returns the digest-pinned image the fixture is built on.
+// Reading it out of the Dockerfile keeps this tier on one pin: a second copy of
+// the digest drifts the moment either is bumped alone.
+func keystoreBaseImage(t *testing.T) string {
+	t.Helper()
+
+	dockerfile, err := os.ReadFile(filepath.Join("keystore", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read the fixture Dockerfile: %v", err)
+	}
+
+	for line := range strings.SplitSeq(string(dockerfile), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.EqualFold(fields[0], "FROM") {
+			return fields[1]
+		}
+	}
+
+	t.Fatal("the fixture Dockerfile names no base image")
+
+	return ""
+}
+
+// buildLinuxHermesProbe compiles the package that owns the store read path and
+// the launch path for the fixture's platform. Neither Linux claim can be
+// observed from the host: only the container has a Secret Service to answer one
+// and a Linux PATH to resolve the other.
+func buildLinuxHermesProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "residence.test")
