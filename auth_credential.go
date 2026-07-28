@@ -325,7 +325,7 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 	}
 
 	if !ok || record.ConnectionID != connectionID || record.BindingGeneration != bindingGeneration {
-		return nil, authFailed(authCausePolicy, providerID, "", "")
+		return nil, authFailed(authCauseBindingConflict, providerID, "", "")
 	}
 
 	record.BindingGeneration++

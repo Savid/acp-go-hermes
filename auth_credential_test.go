@@ -329,7 +329,7 @@ func TestDisconnectRemovesOnlyTheFencedReservedSlot(t *testing.T) {
 
 	// The same request now fences against the bumped generation.
 	_, err = callLeg(t, agent, AuthDisconnectMethod, params)
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
 }
 
 func TestDisconnectRejectsEveryAddressingAndFencingFailure(t *testing.T) {
@@ -374,7 +374,7 @@ func TestDisconnectRejectsEveryAddressingAndFencingFailure(t *testing.T) {
 	wrongConnection["connectionId"] = "other"
 
 	_, err := callLeg(t, agent, AuthDisconnectMethod, wrongConnection)
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
 
 	unknownProvider := map[string]any{}
 	for key, value := range base {
@@ -384,7 +384,23 @@ func TestDisconnectRejectsEveryAddressingAndFencingFailure(t *testing.T) {
 	unknownProvider["providerId"] = "unrecorded"
 
 	_, err = callLeg(t, agent, AuthDisconnectMethod, unknownProvider)
-	requireAuthCause(t, err, authCausePolicy)
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	staleGeneration := map[string]any{}
+	for key, value := range base {
+		staleGeneration[key] = value
+	}
+
+	staleGeneration["bindingGeneration"] = 99
+
+	_, err = callLeg(t, agent, AuthDisconnectMethod, staleGeneration)
+	requireAuthCause(t, err, authCauseBindingConflict)
+
+	// Every refusal landed before the bump and before the reserved-slot removal.
+	live, ok, readErr := agent.providerAuth.ledger.read(testProviderID)
+	if readErr != nil || !ok || live.BindingGeneration != 1 || live.State == authLedgerRemoved {
+		t.Fatalf("a refused fence mutated the ledger: %#v/%v/%v", live, ok, readErr)
+	}
 }
 
 func TestDisconnectFailurePaths(t *testing.T) {

@@ -68,6 +68,7 @@ const (
 	authCauseFlowState          = "flow_state"
 	authCauseFlowCancelled      = "flow_cancelled"
 	authCausePolicy             = "policy"
+	authCauseBindingConflict    = "binding_conflict"
 )
 
 // Native credential-store entry points. Every reserved-slot read and write on

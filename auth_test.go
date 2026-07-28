@@ -339,6 +339,16 @@ func TestAuthFailedErrorCarriesTheClosedShapeOnly(t *testing.T) {
 			t.Fatalf("%s is not retryable", cause)
 		}
 	}
+
+	for _, cause := range []string{
+		authCauseNativeVeto, authCauseProviderRefused, authCauseHarvestFailed,
+		authCauseUnsupportedVariant, authCauseFlowExpired, authCauseFlowState,
+		authCauseFlowCancelled, authCausePolicy, authCauseBindingConflict,
+	} {
+		if authCauseRetryable(cause) {
+			t.Fatalf("%s reported retryable", cause)
+		}
+	}
 }
 
 func TestAuthFlowTransitionIsTotalOverTheCauseEnum(t *testing.T) {
@@ -362,6 +372,7 @@ func TestAuthFlowTransitionIsTotalOverTheCauseEnum(t *testing.T) {
 		{authCauseHarvestFailed, false, authStateFailed, authReasonHarvestFailed},
 		{authCauseFlowExpired, false, authStateExpired, authReasonDeadline},
 		{authCausePolicy, false, "", ""},
+		{authCauseBindingConflict, false, "", ""},
 		{authCauseFlowState, false, "", ""},
 		{authCauseFlowCancelled, false, "", ""},
 	}
