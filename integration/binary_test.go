@@ -27,10 +27,7 @@ func TestHermesACPAgentBinaryClosedInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := agentCommand(ctx,
-		"-path", integrationHermesPath(t),
-		"-scratch-dir", t.TempDir(),
-	)
+	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), t.TempDir())...)
 	cmd.Stdin = strings.NewReader("")
 
 	var stdout bytes.Buffer

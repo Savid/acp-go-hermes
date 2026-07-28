@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -17,7 +18,7 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	home := t.TempDir()
-	proc, err := Start(ctx, ProcessOptions{
+	opts := ProcessOptions{
 		Home:    home,
 		Cwd:     t.TempDir(),
 		Timeout: 120 * time.Second,
@@ -26,7 +27,11 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		},
 		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
 		RetainDiscoveryRoot:       func(string, error) {},
-	})
+	}
+	if runtime.GOOS == "darwin" {
+		opts.DarwinBestEffortContainment = true
+	}
+	proc, err := Start(ctx, opts)
 	if err != nil {
 		t.Fatalf("start hermes serve: %v", err)
 	}

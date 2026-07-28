@@ -295,20 +295,6 @@ func TestKeystoreProviderAuthResidence(t *testing.T) {
 	}
 }
 
-// keystoreHostAgent starts the wrapper the host thirds drive. Darwin's
-// containment boundary is opt-in, and a session refuses to start without the
-// operator's acceptance.
-func keystoreHostAgent(t *testing.T, ctx context.Context, scratch string, extraArgs ...string) *liveAgent {
-	t.Helper()
-
-	args := append([]string(nil), extraArgs...)
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-darwin-best-effort-containment")
-	}
-
-	return startLiveAgent(t, ctx, scratch, args...)
-}
-
 // keystoreAssertOwnStore drives one secret method to completion and asserts the
 // credential is resident in the adapter's own reserved pool slot under
 // HERMES_HOME, with canary material only.
@@ -319,7 +305,7 @@ func keystoreAssertOwnStore(t *testing.T, scratch string) {
 	defer cancel()
 
 	authRoot := t.TempDir()
-	agent := keystoreHostAgent(t, ctx, scratch, "-provider-auth-root", authRoot)
+	agent := startLiveAgent(t, ctx, scratch, "-provider-auth-root", authRoot)
 
 	defer agent.close()
 
@@ -385,7 +371,7 @@ func keystoreDarwinResidence(t *testing.T) {
 	defer cancel()
 
 	authRoot := t.TempDir()
-	agent := keystoreHostAgent(t, ctx, t.TempDir(), "-provider-auth-root", authRoot)
+	agent := startLiveAgent(t, ctx, t.TempDir(), "-provider-auth-root", authRoot)
 
 	defer agent.close()
 

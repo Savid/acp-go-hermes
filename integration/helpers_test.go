@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	hermesacp "github.com/savid/acp-go-hermes"
 )
 
 const liveTokenHermesConfig = `model:
@@ -34,14 +36,35 @@ type liveAgent struct {
 	wait   func() error
 }
 
-func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
-	t.Helper()
+// integrationAgentArgs builds the launch args every wrapper subprocess in this
+// tier shares. Darwin's containment boundary is opt-in, and a session refuses to
+// start without the operator's acceptance; every other platform rejects the flag.
+func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) []string {
 	args := []string{
-		"-path", integrationHermesPath(t),
+		"-path", hermesPath,
 		"-scratch-dir", home,
 	}
-	args = append(args, extraArgs...)
-	cmd := agentCommand(ctx, args...)
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-darwin-best-effort-containment")
+	}
+
+	return append(args, extraArgs...)
+}
+
+// integrationContainmentOption accepts the same Darwin containment boundary for
+// an in-process Agent. On every other platform the option is rejected, so the
+// tier configures nothing there.
+func integrationContainmentOption() hermesacp.Option {
+	if runtime.GOOS == "darwin" {
+		return hermesacp.WithDarwinBestEffortContainment()
+	}
+
+	return func(*hermesacp.Options) {}
+}
+
+func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
+	t.Helper()
+	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

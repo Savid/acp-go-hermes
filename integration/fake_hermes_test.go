@@ -205,10 +205,7 @@ func TestFakeHermesExecutable(t *testing.T) {
 
 func startAgentWithHermesPath(t *testing.T, ctx context.Context, hermesPath string, home string) *liveAgent {
 	t.Helper()
-	cmd := agentCommand(ctx,
-		"-path", hermesPath,
-		"-scratch-dir", home,
-	)
+	cmd := agentCommand(ctx, integrationAgentArgs(hermesPath, home)...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
