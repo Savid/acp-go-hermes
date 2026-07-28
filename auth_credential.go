@@ -14,8 +14,8 @@ import (
 // ProviderCredentialType selects one variant of the closed credential union.
 type ProviderCredentialType string
 
-// ProviderCredentialHermesOAuth is the only variant hermes brokers: its login
-// hands back non-rotating material this adapter can reinstall unchanged.
+// ProviderCredentialHermesOAuth is the only variant this adapter brokers: the
+// native token material for one reserved slot, reinstalled unchanged.
 const ProviderCredentialHermesOAuth ProviderCredentialType = "hermesOauth"
 
 // Native auth kinds the hermesOauth variant carries.
@@ -34,7 +34,7 @@ const (
 )
 
 // ProviderHermesOAuthCredential is the variant this adapter brokers. It carries
-// non-rotating material only.
+// a refresh token only for a provider whose refresh token stays valid after use.
 type ProviderHermesOAuthCredential struct {
 	AuthType        string `json:"authType"`
 	AccessToken     string `json:"accessToken"`
@@ -235,6 +235,10 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
 	}
 
+	if !authCacheable(flow.providerID, material.RefreshToken) {
+		return nil, authFailed(authCausePolicy, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	expiry, _, err := authReadFlowExpiry(home, flow.providerID, flow.method.Flow)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
@@ -365,10 +369,11 @@ const (
 )
 
 // inject installs the host's bound credentials into the reserved slots of a
-// native home before the harness first reads it. Only non-rotating material is
-// brokered here, so nothing this writes can be invalidated by a refresh the
-// adapter never sees. Every binding is evaluated: one stale binding must not
-// deny the host the other providers it configured.
+// native home before the harness first reads it. A binding whose refresh token
+// would be invalidated by the provider on its next refresh is refused, so
+// nothing this writes can be killed by a refresh the adapter never sees. Every
+// binding is evaluated: one refused or stale binding must not deny the host the
+// other providers it configured.
 func (p *providerAuth) inject(home string, bindings map[string]ProviderAuthBinding) string {
 	outcome := authInjectionNoop
 
@@ -388,6 +393,10 @@ func (p *providerAuth) inject(home string, bindings map[string]ProviderAuthBindi
 
 func (p *providerAuth) injectOne(home string, providerID string, binding ProviderAuthBinding) string {
 	if binding.Credential.Type != ProviderCredentialHermesOAuth || binding.Credential.HermesOAuth == nil {
+		return authInjectionConflict
+	}
+
+	if !authCacheable(providerID, binding.Credential.HermesOAuth.RefreshToken) {
 		return authInjectionConflict
 	}
 

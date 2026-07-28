@@ -15,7 +15,9 @@ import (
 
 // Session-scoped provider-auth extension methods. Hermes brokers a login
 // through its own REST auth API and hands the completed credential back out, so
-// it carries the credential leg and accepts injection of non-rotating material.
+// it carries the credential leg and accepts injection. Only non-rotating
+// providers cross those two legs; material for the rest is refused and stays in
+// the session's own native home.
 const (
 	AuthMethodsMethod   = "_hermes/auth/methods"
 	AuthAuthorizeMethod = "_hermes/auth/authorize"

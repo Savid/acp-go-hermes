@@ -70,8 +70,9 @@ type ProviderAuthBinding struct {
 The union is closed and flat: `type` selects the variant carrying the rest of the
 fields. Decoding is strict — unknown fields, duplicate fields, empty required
 strings, and any other variant are rejected rather than partially decoded. Hermes
-emits and accepts the `hermesOauth` variant only, and carries non-rotating
-material only. Every timestamp is Unix epoch milliseconds. Values of these types
+emits and accepts the `hermesOauth` variant only, for non-rotating providers
+only — the adapter refuses to harvest or inject a refresh token the provider
+invalidates when it is used. Every timestamp is Unix epoch milliseconds. Values of these types
 are secret material and never reach a log, an error, or the session store — see
 [Authentication](/docs/features/authentication).
 

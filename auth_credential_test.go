@@ -110,6 +110,8 @@ func completedFlow(t *testing.T, agent *Agent, client *fakeHermesClient) string 
 }
 
 func TestCredentialHarvestsOnlyTheReservedSlotAndOnlyOnce(t *testing.T) {
+	allowRefreshHarvest(t, testProviderID)
+
 	agent, client := newAuthAgent(t)
 	flowID := completedFlow(t, agent, client)
 
@@ -524,6 +526,25 @@ func TestInjectionOutcomesAreTheFourFixedCases(t *testing.T) {
 	}
 }
 
+func TestInjectionRefusesARotatingCredential(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+
+	binding := testBinding()
+	binding.Credential.HermesOAuth.RefreshToken = "native-refresh"
+
+	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
+	if outcome != authInjectionConflict {
+		t.Fatalf("a refresh token for an unrecorded provider produced %q", outcome)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || present {
+		t.Fatalf("a refused binding reached the native home: %v, %v", present, err)
+	}
+}
+
 func TestInjectionEvaluatesEveryBinding(t *testing.T) {
 	t.Parallel()
 
@@ -685,7 +706,30 @@ func TestDecodeCredentialVariantRejectsAnUnencodableField(t *testing.T) {
 	}
 }
 
+func TestCredentialRefusesARotatingProviderWithoutConsumingTheFlow(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	flowID := completedFlow(t, agent, client)
+
+	params := map[string]any{"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": flowID}
+
+	_, err := callLeg(t, agent, AuthCredentialMethod, params)
+	requireAuthCause(t, err, authCausePolicy)
+
+	allowRefreshHarvest(t, testProviderID)
+
+	result, err := callLeg(t, agent, AuthCredentialMethod, params)
+	if err != nil {
+		t.Fatalf("the refusal consumed the flow or its one harvest: %v", err)
+	}
+
+	if mustType[authCredentialResult](t, result).Credential.HermesOAuth.RefreshToken != "native-refresh" {
+		t.Fatalf("harvest = %#v", result)
+	}
+}
+
 func TestCredentialFailsClosedOnAnUnreadableSecondResidence(t *testing.T) {
+	allowRefreshHarvest(t, testProviderID)
+
 	agent, client := newAuthAgent(t)
 	flowID := completedFlow(t, agent, client)
 

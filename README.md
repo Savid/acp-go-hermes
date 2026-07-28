@@ -105,8 +105,9 @@ symmetry and rejected fail-closed at session start.
 - Provider logins brokered through eight session-scoped `_hermes/auth/*`
   extension methods over the `hermes serve` REST auth API, with a durable
   values-free ledger, a reserved credential-pool slot per connection, and
-  injection of non-rotating material through
-  `_meta.hermes.options.providerAuth`.
+  injection through `_meta.hermes.options.providerAuth` for non-rotating
+  providers only — the adapter refuses to harvest or inject a refresh token the
+  provider invalidates when it is used.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
   freshly generated `HERMES_HOME`. Linux and Windows use authoritative OS
   containment. Darwin is disabled unless its explicitly risky best-effort

@@ -139,7 +139,10 @@ them, and `disconnect` cannot remove them.
 `inventory` answers residence from the ledger **and** a probe of the named slot,
 and reports the closed `proofSource` the two select. `credential` harvests that
 one slot, once, from a flow in `authenticated` or `saved`, and returns the
-`hermesOauth` variant. `disconnect` bumps the binding generation first, then
+`hermesOauth` variant. A slot holding a refresh token the provider invalidates
+when it is used is refused with `cause: "policy"` instead, which consumes
+neither the flow nor its one harvest, so that login stays usable for the life of
+the session that made it. `disconnect` bumps the binding generation first, then
 removes only the exactly-fenced slot and verifies absence.
 
 ### Access-token expiry is derived
@@ -152,7 +155,7 @@ therefore derived rather than native, and it always errs early.
 
 ### Injection
 
-Hermes accepts injection of non-rotating material through
+Hermes accepts injection for non-rotating providers only through
 `_meta.hermes.options.providerAuth`, mapping a provider id to a binding whose
 credential is the `hermesOauth` variant. The value is written into the reserved
 slot of the session's native home before Hermes first reads it, and the
@@ -164,6 +167,7 @@ lifecycle response reports the values-free outcome:
 
 `applied` means a demonstrably empty slot was written once, `noop` that a live
 entry of the same lineage already matched, and `conflict` that a live entry
-differs or the connection is unknown — in which case nothing was installed and
-nothing was used. The field is absent when the option key was not supplied at
-all. All three outcomes return a successful lifecycle response.
+differs, the connection is unknown, or the credential is rotating — in which
+case nothing was installed and nothing was used. The field is absent when the
+option key was not supplied at all. All three outcomes return a successful
+lifecycle response.
