@@ -48,13 +48,25 @@ func authAcquireGate[K comparable](ctx context.Context, mu *sync.Mutex, gates ma
 		}
 	}
 
+	held := func() {
+		<-gate.ch
+
+		leave()
+	}
+
+	// An uncontended gate is taken even by a request that is already ending, so
+	// a leg only ever fails on a queue it actually joined. Selecting straight
+	// away would make that a coin toss between the two ready cases, and a leg
+	// refused by a gate nobody held would report a wait it never made.
 	select {
 	case gate.ch <- struct{}{}:
-		return func() {
-			<-gate.ch
+		return held, true
+	default:
+	}
 
-			leave()
-		}, true
+	select {
+	case gate.ch <- struct{}{}:
+		return held, true
 	case <-ctx.Done():
 		leave()
 
@@ -90,6 +102,35 @@ func (p *providerAuth) lockSlot(ctx context.Context, home string) (func(), bool)
 // flow.
 func (p *providerAuth) lockFlowSlot(ctx context.Context, flow *authFlow, home string) (func(), error) {
 	release, ok := p.lockSlot(ctx, home)
+	if !ok {
+		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	return release, nil
+}
+
+// lockLedger serializes every read-modify-write of one provider's durable
+// ledger entry: authorize's revision bump, disconnect's generation bump, a
+// completion's lineage check and confirmation, and injection's record of what
+// it installed. Each of those decides what to write from what it just read, and
+// an interleaved write in between is read back and overwritten — a disconnect's
+// generation bump lost to an authorize's revision bump leaves the removal
+// standing in the native store under a record naming a generation the owner
+// retired.
+//
+// The key is the provider id rather than the native home the credential-slot
+// gate uses, because that is the identity of the record these legs rewrite: the
+// ledger is agent-wide, one file per provider under the host's own root with no
+// per-home segment, so two sessions rewriting one provider's record would hold
+// two different home gates and serialize nothing. It is always taken inside the
+// slot gate, never around it.
+func (p *providerAuth) lockLedger(ctx context.Context, providerID string) (func(), bool) {
+	return authAcquireGate(ctx, &p.mu, p.ledgers, providerID)
+}
+
+// lockFlowLedger takes the ledger gate for a leg that answers for a flow.
+func (p *providerAuth) lockFlowLedger(ctx context.Context, flow *authFlow) (func(), error) {
+	release, ok := p.lockLedger(ctx, flow.providerID)
 	if !ok {
 		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
 	}
@@ -175,6 +216,18 @@ func (p *providerAuth) sessionClosed(sessionID acp.SessionId) bool {
 	_, closed := p.closedSessions[sessionID]
 
 	return closed
+}
+
+// reopenSession drops the mark when the id becomes live again. The mark exists
+// to stop a flow publishing into a session close already swept, and a
+// reinstated id has a new session behind it with no such flow: keeping the mark
+// would refuse its legs forever. The agent mutex is held by the caller, and
+// nothing here reaches back for it.
+func (p *providerAuth) reopenSession(sessionID acp.SessionId) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	delete(p.closedSessions, sessionID)
 }
 
 // claimFlow admits the one leg that may drive a pending flow's native mutation

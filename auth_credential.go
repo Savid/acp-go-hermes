@@ -324,6 +324,13 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 
 	defer release()
 
+	releaseLedger, recorded := p.lockLedger(ctx, providerID)
+	if !recorded {
+		return nil, authFailed(authCauseTimeout, providerID, "", "")
+	}
+
+	defer releaseLedger()
+
 	record, ok, err := p.ledger.read(providerID)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
@@ -390,7 +397,7 @@ func (p *providerAuth) inject(ctx context.Context, home string, bindings map[str
 	outcome := authInjectionNoop
 
 	for _, providerID := range sortedBindingKeys(bindings) {
-		switch p.injectOne(home, providerID, bindings[providerID]) {
+		switch p.injectOne(ctx, home, providerID, bindings[providerID]) {
 		case authInjectionConflict:
 			outcome = authInjectionConflict
 		case authInjectionApplied:
@@ -403,7 +410,7 @@ func (p *providerAuth) inject(ctx context.Context, home string, bindings map[str
 	return outcome
 }
 
-func (p *providerAuth) injectOne(home string, providerID string, binding ProviderAuthBinding) string {
+func (p *providerAuth) injectOne(ctx context.Context, home string, providerID string, binding ProviderAuthBinding) string {
 	if binding.Credential.Type != ProviderCredentialHermesOAuth || binding.Credential.HermesOAuth == nil {
 		return authInjectionConflict
 	}
@@ -411,6 +418,13 @@ func (p *providerAuth) injectOne(home string, providerID string, binding Provide
 	if !authCacheable(providerID, binding.Credential.HermesOAuth.RefreshToken) {
 		return authInjectionConflict
 	}
+
+	release, acquired := p.lockLedger(ctx, providerID)
+	if !acquired {
+		return authInjectionConflict
+	}
+
+	defer release()
 
 	record, hasRecord, err := p.ledger.read(providerID)
 	if err != nil {

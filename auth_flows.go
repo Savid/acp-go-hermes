@@ -214,26 +214,10 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	}
 
 	now := authNow()
-	record := authLedgerRecord{
-		ProviderID:         request.providerID,
-		ConnectionID:       request.connectionID,
-		Revision:           1,
-		BindingGeneration:  1,
-		FlowID:             flowID,
-		AuthorizeRequestID: request.authorizeRequestID,
-		State:              authLedgerIntent,
-		CreatedAt:          now.UnixMilli(),
-		UpdatedAt:          now.UnixMilli(),
-	}
 
-	if prior, ok, readErr := p.ledger.read(request.providerID); readErr == nil && ok {
-		record.Revision = prior.Revision + 1
-		record.BindingGeneration = prior.BindingGeneration
-		record.CreatedAt = prior.CreatedAt
-	}
-
-	if writeErr := p.ledger.write(record); writeErr != nil {
-		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
+	record, err := p.recordAuthorizeIntent(ctx, request, flowID, now)
+	if err != nil {
+		return nil, err
 	}
 
 	flow := &authFlow{
@@ -288,6 +272,45 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	p.armCompleter(flow)
 
 	return mint.presentation, nil
+}
+
+// recordAuthorizeIntent performs the one read-modify-write authorize makes on
+// the provider's ledger entry: the record it reads decides the revision this
+// flow claims and carries the binding generation forward. The gate is held
+// across the read and the write and released before the mint, so a disconnect
+// cannot have its generation bump read back and overwritten here, and no native
+// start runs while another session's authorize waits for the same entry.
+func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request authorizeRequest, flowID string, now time.Time) (authLedgerRecord, error) {
+	release, acquired := p.lockLedger(ctx, request.providerID)
+	if !acquired {
+		return authLedgerRecord{}, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer release()
+
+	record := authLedgerRecord{
+		ProviderID:         request.providerID,
+		ConnectionID:       request.connectionID,
+		Revision:           1,
+		BindingGeneration:  1,
+		FlowID:             flowID,
+		AuthorizeRequestID: request.authorizeRequestID,
+		State:              authLedgerIntent,
+		CreatedAt:          now.UnixMilli(),
+		UpdatedAt:          now.UnixMilli(),
+	}
+
+	if prior, ok, readErr := p.ledger.read(request.providerID); readErr == nil && ok {
+		record.Revision = prior.Revision + 1
+		record.BindingGeneration = prior.BindingGeneration
+		record.CreatedAt = prior.CreatedAt
+	}
+
+	if writeErr := p.ledger.write(record); writeErr != nil {
+		return authLedgerRecord{}, authFailed(authCauseProcess, request.providerID, request.method, "")
+	}
+
+	return record, nil
 }
 
 // commitMint settles what the native start produced onto the flow record.
@@ -704,6 +727,13 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 
 	defer release()
 
+	releaseLedger, err := p.lockFlowLedger(ctx, flow)
+	if err != nil {
+		return nil, err
+	}
+
+	defer releaseLedger()
+
 	// The recorded lineage is compared before the write and not only after it.
 	// A leg that writes first and compares second leaves the key resident under
 	// a ledger entry a disconnect moved past — live at the provider, skipped by
@@ -794,6 +824,13 @@ func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow 
 
 	defer release()
 
+	releaseLedger, err := p.lockFlowLedger(ctx, flow)
+	if err != nil {
+		return err
+	}
+
+	defer releaseLedger()
+
 	// The lineage is read before the migration for the same reason the secret
 	// apply reads it before its write: a disconnect that already proved the
 	// slot absent must not have a labelled slot appear behind it.
@@ -832,16 +869,12 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 
 // confirmCause writes the confirmation and answers the cause that stopped it
 // rather than performing a transition: whether the flow is still the caller's
-// to close is the caller's question. The provider owns one entry, so a leg
-// whose native work outlived its flow would otherwise rename its own lineage
-// over whatever replaced it — the write is refused where the recorded lineage
-// has already moved past this flow's, which is exactly the case where it would
-// name a binding the host no longer holds.
+// to close is the caller's question. It compares no lineage of its own. The
+// provider owns one entry and its gate is held from the check that admitted
+// this mutation through this write, so nothing can have moved the entry in
+// between — a comparison here would be asking a second time what the caller
+// already established it may write.
 func (p *providerAuth) confirmCause(flow *authFlow) string {
-	if cause := p.lineageCause(flow); cause != "" {
-		return cause
-	}
-
 	if err := p.ledger.write(authConfirmation(flow)); err != nil {
 		return authCauseProcess
 	}

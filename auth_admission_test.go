@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
@@ -846,4 +847,277 @@ func TestACompletionRefusesToRefillASlotItsDisconnectRemoved(t *testing.T) {
 	if present {
 		t.Fatal("a completion refused after its write left the credential resident under a removed ledger entry")
 	}
+}
+
+// TestAuthorizeDoesNotClobberADisconnectsGenerationBump runs an authorize's one
+// ledger read-modify-write against a disconnect's. The revision an authorize
+// claims is derived from the record it read, so a disconnect that bumps the
+// binding generation between that read and the write back has its bump read
+// back and overwritten — the removal stands in the native store and the record
+// names a generation the owner already retired. The two legs run in different
+// sessions, which is where the credential-slot gate cannot help: the ledger
+// entry is agent-wide, one file per provider under the host's own root, so two
+// sessions rewriting it hold two different home gates.
+func TestAuthorizeDoesNotClobberADisconnectsGenerationBump(t *testing.T) {
+	restoreLedgerHooks(t)
+
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	if _, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r-first")); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	peerClient := newFakeHermesClient()
+	peerClient.xdg = nativehermes.XDGDirs{Root: t.TempDir()}
+
+	peer := newSession(agent, "peer-session", "/cwd", nil, nil, nativehermes.Session{ID: "peer"}, peerClient, sessionMeta{}, idmapRecord{})
+	if err := agent.storeStartedSession(peer); err != nil {
+		t.Fatalf("storeStartedSession: %v", err)
+	}
+
+	recording := make(chan struct{})
+	disconnected := make(chan struct{})
+
+	var renames atomic.Int32
+
+	originalRename := ledgerRename
+	ledgerRename = func(from string, to string) error {
+		if renames.Add(1) == 1 {
+			close(recording)
+
+			select {
+			case <-disconnected:
+			case <-time.After(admissionRendezvous):
+			}
+		}
+
+		return originalRename(from, to)
+	}
+
+	settled := make(chan error, 1)
+
+	go func() {
+		_, authorizeErr := authLeg(agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r-second"))
+		settled <- authorizeErr
+	}()
+
+	<-recording
+
+	if _, err := callLeg(t, agent, AuthDisconnectMethod, map[string]any{
+		"sessionId": "peer-session", "providerId": "openai",
+		"connectionId": testConnectionID, "bindingGeneration": 1,
+	}); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+
+	close(disconnected)
+
+	if err := <-settled; err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	record, ok, err := agent.providerAuth.ledger.read("openai")
+	if err != nil || !ok {
+		t.Fatalf("ledger read: %v present=%v", err, ok)
+	}
+
+	if record.BindingGeneration < 2 {
+		t.Fatalf("ledger record = %#v, want the disconnect's generation bump to have survived", record)
+	}
+}
+
+// TestAReopenedSessionAnswersItsAuthLegsAgain pins the one thing the closed-set
+// must not outlive: the id. session/close leaves the durable snapshot in place,
+// so a later session/load hydrates the same id and it is live again — and a
+// tombstone that survived the reopen would refuse every provider-auth leg on
+// that id for the rest of the agent's life.
+func TestAReopenedSessionAnswersItsAuthLegsAgain(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+
+	agent := NewAgent(WithScratchDir(root), WithSessionStore(NewInMemorySessionStore()), WithProviderAuthRoot(t.TempDir()))
+
+	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	if err != nil {
+		t.Fatalf("CreateXDGDirs: %v", err)
+	}
+
+	client := newFakeHermesClient()
+	client.xdg = xdg
+
+	session := testSession(agent, client)
+	session.cwd = root
+
+	if err := agent.storeStartedSession(session); err != nil {
+		t.Fatalf("storeStartedSession: %v", err)
+	}
+
+	if err := session.snapshotToStore(ctx); err != nil {
+		t.Fatalf("snapshotToStore: %v", err)
+	}
+
+	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	loaded := newFakeHermesClient()
+	loaded.getSession = testNativeSession("native-1")
+	loaded.providers = testProviders()
+
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		loaded.xdg = options.ExistingXDG
+
+		return loaded, nil
+	}
+
+	agent.setAgentClient(newRecordingAgentClient())
+
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(session.id, root)); err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+
+	if _, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(session.id)}); err != nil {
+		t.Fatalf("a reopened session was refused its provider-auth legs: %v", err)
+	}
+}
+
+// parkLedgerWrite starts an authorize and blocks it inside the one ledger write
+// it makes, so the provider's ledger entry is held and no other gate is. The
+// returned function releases it.
+func parkLedgerWrite(t *testing.T, agent *Agent, providerID string, method string, requestID string) func() {
+	t.Helper()
+
+	generation := agent.providerAuth.generation
+
+	recording := make(chan struct{})
+	release := make(chan struct{})
+	settled := make(chan error, 1)
+
+	var renames atomic.Int32
+
+	original := ledgerRename
+	ledgerRename = func(from string, to string) error {
+		if renames.Add(1) == 1 {
+			close(recording)
+			<-release
+		}
+
+		return original(from, to)
+	}
+
+	go func() {
+		_, err := authLeg(agent, AuthAuthorizeMethod, authorizeParams(generation, providerID, method, requestID))
+		settled <- err
+	}()
+
+	<-recording
+
+	return func() {
+		close(release)
+
+		if err := <-settled; err != nil {
+			t.Errorf("the authorize that held the ledger entry: %v", err)
+		}
+
+		ledgerRename = original
+	}
+}
+
+// peerAuthSession registers a second session with its own native home, which is
+// how a leg reaches a provider's ledger entry without holding the first
+// session's credential-slot gate.
+func peerAuthSession(t *testing.T, agent *Agent) *fakeHermesClient {
+	t.Helper()
+
+	client := newFakeHermesClient()
+	client.xdg = nativehermes.XDGDirs{Root: t.TempDir()}
+
+	peer := newSession(agent, "peer-session", "/cwd", nil, nil, nativehermes.Session{ID: "peer"}, client, sessionMeta{}, idmapRecord{})
+	if err := agent.storeStartedSession(peer); err != nil {
+		t.Fatalf("storeStartedSession: %v", err)
+	}
+
+	return client
+}
+
+// TestLedgerGatedLegsFailClosedWhenTheRequestEndedFirst pins the answer every
+// leg gives when the record it must rewrite is held and its own caller is
+// already gone. The entry is agent-wide, so these legs reach it from a session
+// whose credential-slot gate is free — the queue they join is the provider's,
+// not the home's.
+func TestLedgerGatedLegsFailClosedWhenTheRequestEndedFirst(t *testing.T) {
+	restoreLedgerHooks(t)
+
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	first, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r-first"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	peerClient := peerAuthSession(t, agent)
+
+	releaseParked := parkLedgerWrite(t, agent, "openai", authAPIKeyMethodID, "r-second")
+
+	broker := agent.providerAuth
+	ended := endedRequest(t)
+
+	_, err = broker.callback(ended, authRawParams(t, map[string]any{
+		"sessionId": string(testSessionID), "providerId": "openai",
+		"method": authAPIKeyMethodID, "flowId": mustType[authAuthorizeResult](t, first).FlowID,
+		"input": "sk-operator-key",
+	}))
+	requireAuthCause(t, err, authCauseTimeout)
+
+	_, err = broker.disconnect(ended, authRawParams(t, map[string]any{
+		"sessionId": "peer-session", "providerId": "openai",
+		"connectionId": testConnectionID, "bindingGeneration": 1,
+	}))
+	requireAuthCause(t, err, authCauseTimeout)
+
+	binding := ProviderAuthBinding{
+		ConnectionID: testConnectionID, Revision: 1, BindingGeneration: 1,
+		Credential: ProviderCredential{Type: ProviderCredentialHermesOAuth, HermesOAuth: &ProviderHermesOAuthCredential{
+			AuthType: ProviderAuthTypeAPIKey, AccessToken: "sk-injected",
+		}},
+	}
+
+	if outcome := broker.inject(ended, peerClient.xdg.Root, map[string]ProviderAuthBinding{"openai": binding}); outcome != authInjectionConflict {
+		t.Fatalf("injection into a record it never reached = %q", outcome)
+	}
+
+	peerAuthorize := authorizeParams(generation, "openai", authAPIKeyMethodID, "r-peer")
+	peerAuthorize["sessionId"] = "peer-session"
+
+	_, err = broker.authorize(ended, authRawParams(t, peerAuthorize))
+	requireAuthCause(t, err, authCauseTimeout)
+
+	releaseParked()
+}
+
+// TestACompletionFailsClosedWhenItsRequestEndedAtTheLedger is the same answer
+// for the oauth completion arm, which reaches the entry after it already holds
+// the credential-slot gate.
+func TestACompletionFailsClosedWhenItsRequestEndedAtTheLedger(t *testing.T) {
+	restoreLedgerHooks(t)
+
+	agent, client := newAuthAgent(t)
+	device := startDeviceFlow(t, agent, client)
+
+	session, err := agent.providerAuth.authSession(string(testSessionID))
+	if err != nil {
+		t.Fatalf("authSession: %v", err)
+	}
+
+	releaseParked := parkLedgerWrite(t, agent, testProviderID, nativehermes.AuthFlowDeviceCode, "request-2")
+
+	requireAuthCause(t,
+		agent.providerAuth.completeFlow(endedRequest(t), session, agent.providerAuth.byID[device.FlowID]),
+		authCauseTimeout)
+
+	releaseParked()
 }

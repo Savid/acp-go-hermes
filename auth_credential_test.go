@@ -601,7 +601,7 @@ func TestInjectionAcceptsOnlyTheHermesVariant(t *testing.T) {
 	empty := testBinding()
 	empty.Credential = ProviderCredential{Type: ProviderCredentialHermesOAuth}
 
-	if agent.providerAuth.injectOne(client.xdg.Root, testProviderID, empty) != authInjectionConflict {
+	if agent.providerAuth.injectOne(context.Background(), client.xdg.Root, testProviderID, empty) != authInjectionConflict {
 		t.Fatal("a type without its variant pointer was accepted")
 	}
 }

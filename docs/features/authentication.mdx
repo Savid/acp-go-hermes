@@ -170,9 +170,15 @@ Hermes rewrites its whole credential document on every mutation, so the adapter
 serializes every write to one session's store: a `disconnect` and any completion
 of that store run one after the other, a completion re-reads the recorded
 lineage before it writes and refuses outright once a `disconnect` moved past it,
-and two providers' callbacks in one session keep each other's slot. A leg whose
-caller goes away while it waits its turn is answered `cause: "timeout"` and
-writes nothing.
+and two providers' callbacks in one session keep each other's slot.
+
+The durable ledger entry is one file per provider under the host's own root and
+is shared by every session, so each provider's entry is serialized in its own
+right: an `authorize`'s revision bump, a `disconnect`'s generation bump, a
+completion's confirmation, and an injection's record never interleave, whichever
+sessions they arrive on. A leg whose caller goes away while it waits its turn is
+answered `cause: "timeout"` and writes nothing; a leg that finds the queue empty
+never waits at all.
 
 ### Access-token expiry is derived
 

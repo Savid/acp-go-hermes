@@ -435,6 +435,15 @@ func (a *Agent) storeStartedSession(session *session) error {
 
 	a.sessions[session.id] = session
 	delete(a.deleted, session.id)
+
+	// This is the one place an id becomes live, so it is where both tombstones
+	// are cleared. session/close leaves the durable snapshot in place, so the
+	// same id can be hydrated again, and a provider-auth closed mark that
+	// outlived the reopen would refuse every leg on it for the agent's life.
+	if a.providerAuth != nil {
+		a.providerAuth.reopenSession(session.id)
+	}
+
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil

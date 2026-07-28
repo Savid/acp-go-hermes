@@ -665,10 +665,13 @@ func TestSecretApplyOutlivingACancelAnswersForTheClosedFlow(t *testing.T) {
 }
 
 // TestALateConfirmationLeavesTheSuccessorsLineageAlone pins the provider's one
-// ledger entry against a leg that outlived its own flow. A fresh authorize
-// supersedes the old record and mints the next revision; the superseded flow's
-// confirmation would otherwise rename its own lineage over it, leaving the host
-// holding one lineage and the ledger naming another.
+// ledger entry against a fresh authorize that arrives while an apply is still
+// inside its native write. The two are serialized on that entry, so the
+// successor's intent and the apply's confirmation cannot interleave: whichever
+// runs second reads what the first left, and the entry names the newest flow
+// rather than whichever leg finished last. The successor arrives on its own
+// goroutine because that is where every leg arrives — a leg that re-entered the
+// broker on the caller's goroutine would be waiting for a record it holds.
 func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
 	agent, client := newAuthAgent(t)
 	generation := seedCatalog(t, agent, client)
@@ -680,27 +683,37 @@ func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
 
 	flowID := mustType[authAuthorizeResult](t, result).FlowID
 
-	var successor string
+	arrived := make(chan struct{})
+	settled := make(chan any, 1)
 
 	original := authWriteSlot
 	authWriteSlot = func(home string, providerID string, label string, material nativehermes.AuthMaterial) error {
-		second, authorizeErr := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r2"))
-		if authorizeErr != nil {
-			t.Errorf("successor authorize: %v", authorizeErr)
-		} else {
-			successor = mustType[authAuthorizeResult](t, second).FlowID
-		}
+		go func() {
+			close(arrived)
+
+			second, authorizeErr := authLeg(agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r2"))
+			if authorizeErr != nil {
+				settled <- authorizeErr
+
+				return
+			}
+
+			settled <- second
+		}()
+
+		<-arrived
 
 		return original(home, providerID, label, material)
 	}
 
 	t.Cleanup(func() { authWriteSlot = original })
 
-	_, err = callLeg(t, agent, AuthCallbackMethod, map[string]any{
+	_, applyErr := callLeg(t, agent, AuthCallbackMethod, map[string]any{
 		"sessionId": string(testSessionID), "providerId": "openai",
 		"method": authAPIKeyMethodID, "flowId": flowID, "input": "sk-operator-key",
 	})
-	requireAuthCause(t, err, authCauseFlowCancelled)
+
+	successor := mustType[authAuthorizeResult](t, <-settled).FlowID
 
 	record, present, err := agent.providerAuth.ledger.read("openai")
 	if err != nil || !present {
@@ -709,6 +722,28 @@ func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
 
 	if record.FlowID != successor || record.Revision != 2 {
 		t.Fatalf("ledger names %+v, want the successor at revision 2", record)
+	}
+
+	// The apply either landed before the successor claimed the entry or was
+	// refused by the lineage check that runs before its write. It never leaves
+	// a key resident under a lineage the entry no longer names.
+	resident, held, err := nativehermes.AuthReadSlot(client.xdg.Root, "openai", nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil {
+		t.Fatalf("reserved slot: %v", err)
+	}
+
+	if applyErr != nil {
+		requireAuthCause(t, applyErr, authCauseBindingConflict)
+
+		if held {
+			t.Fatalf("a refused apply left %q resident", resident.AccessToken)
+		}
+
+		return
+	}
+
+	if !held || resident.AccessToken != "sk-operator-key" {
+		t.Fatalf("the apply reported the key saved and the slot holds %#v", resident)
 	}
 }
 

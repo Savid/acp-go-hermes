@@ -133,9 +133,11 @@ type providerAuth struct {
 	// closedSessions is the tombstone publication checks against.
 	closedSessions map[acp.SessionId]struct{}
 	// admissions gates authorize per (session, provider); slots gates every
-	// mutation of one native home's credential store.
+	// mutation of one native home's credential store; ledgers gates every
+	// read-modify-write of one provider's durable ledger entry.
 	admissions map[authFlowKey]*authGate
 	slots      map[string]*authGate
+	ledgers    map[string]*authGate
 }
 
 type authFlowKey struct {
@@ -169,6 +171,7 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		closedSessions: make(map[acp.SessionId]struct{}),
 		admissions:     make(map[authFlowKey]*authGate),
 		slots:          make(map[string]*authGate),
+		ledgers:        make(map[string]*authGate),
 	}
 }
 
