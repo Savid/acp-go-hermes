@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"os"
@@ -17,6 +18,7 @@ func restoreAuthStoreHooks(t *testing.T) {
 	t.Helper()
 
 	reset := func() {
+		authSnapshotRandRead = rand.Read
 		authStoreReadFile = os.ReadFile
 		authStoreMkdirAll = os.MkdirAll
 		authStoreRename = os.Rename
@@ -124,11 +126,25 @@ func TestAuthMigrateSlotRemovesTheOriginalByIndex(t *testing.T) {
 
 	home := t.TempDir()
 
+	ambient := map[string]any{"auth_type": "oauth", "access_token": "ambient", "source": "gh", "request_count": 4}
+
+	writeAuthStore(t, home, map[string]any{
+		authPoolSection: map[string]any{"xai": []any{ambient}},
+		"other_section": map[string]any{"kept": true},
+	})
+
+	snapshot, err := AuthSnapshotPool(home, "xai")
+	if err != nil {
+		t.Fatalf("AuthSnapshotPool: %v", err)
+	}
+
+	// A completed flow writes the first pool position, so the entry it produced
+	// is not the newest one and position alone can never identify it.
 	writeAuthStore(t, home, map[string]any{
 		authPoolSection: map[string]any{
 			"xai": []any{
-				map[string]any{"auth_type": "oauth", "access_token": "ambient", "source": "gh", "request_count": 4},
 				map[string]any{"auth_type": "oauth", "access_token": "completed", "refresh_token": "r", "expires_at": nil, "secret_fingerprint": "abc"},
+				ambient,
 			},
 		},
 		"other_section": map[string]any{"kept": true},
@@ -136,7 +152,7 @@ func TestAuthMigrateSlotRemovesTheOriginalByIndex(t *testing.T) {
 
 	label := AuthSlotLabel("c1")
 
-	migrated, err := AuthMigrateSlot(home, "xai", label)
+	migrated, err := AuthMigrateSlot(home, "xai", label, snapshot)
 	if err != nil || !migrated {
 		t.Fatalf("AuthMigrateSlot = %v, %v", migrated, err)
 	}
@@ -166,15 +182,20 @@ func TestAuthMigrateSlotRemovesTheOriginalByIndex(t *testing.T) {
 		t.Fatal("a section the adapter does not own was dropped")
 	}
 
-	// Migrating again finds only labelled and ambient entries; the ambient one
-	// is never claimed once it is the newest unlabelled entry, so the second
-	// migration moves it and the first slot is replaced rather than duplicated.
-	if _, err := AuthMigrateSlot(home, "xai", label); err != nil {
-		t.Fatalf("second migrate: %v", err)
+	// The ambient entry is the newest unlabelled one now, and the snapshot held
+	// it before the flow started, so nothing is left for a second migration to
+	// claim: an entry this adapter did not produce never reaches a reserved slot.
+	if migrated, err := AuthMigrateSlot(home, "xai", label, snapshot); err != nil || migrated {
+		t.Fatalf("second migrate = %v, %v", migrated, err)
 	}
 
-	if entries := poolEntries(t, home, "xai"); len(entries) != 1 {
-		t.Fatalf("a second migration duplicated the reserved label: %#v", entries)
+	entries = poolEntries(t, home, "xai")
+	if len(entries) != 2 {
+		t.Fatalf("a second migration disturbed the pool: %#v", entries)
+	}
+
+	if ambientAfter, _ := entries[0].(map[string]any); ambientAfter["access_token"] != "ambient" {
+		t.Fatalf("the ambient entry was migrated into the reserved slot: %#v", entries)
 	}
 }
 
@@ -183,7 +204,12 @@ func TestAuthMigrateSlotFindsNothingToMigrate(t *testing.T) {
 
 	home := t.TempDir()
 
-	if migrated, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1")); err != nil || migrated {
+	snapshot, err := AuthSnapshotPool(home, "xai")
+	if err != nil {
+		t.Fatalf("AuthSnapshotPool: %v", err)
+	}
+
+	if migrated, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1"), snapshot); err != nil || migrated {
 		t.Fatalf("empty pool migrated = %v, %v", migrated, err)
 	}
 
@@ -191,8 +217,32 @@ func TestAuthMigrateSlotFindsNothingToMigrate(t *testing.T) {
 		authPoolSection: map[string]any{"xai": []any{map[string]any{"auth_type": "oauth", "access_token": ""}}},
 	})
 
-	if migrated, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1")); err != nil || migrated {
+	if migrated, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1"), snapshot); err != nil || migrated {
 		t.Fatalf("an empty token migrated = %v, %v", migrated, err)
+	}
+}
+
+func TestAuthSnapshotPoolFailsClosed(t *testing.T) {
+	restoreAuthStoreHooks(t)
+
+	home := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(home, authStoreFile), []byte(`{"credential_pool":7}`), 0o600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+
+	if _, err := AuthSnapshotPool(home, "xai"); err == nil {
+		t.Fatal("a malformed pool was snapshotted")
+	}
+
+	if err := os.Remove(filepath.Join(home, authStoreFile)); err != nil {
+		t.Fatalf("remove store: %v", err)
+	}
+
+	authSnapshotRandRead = func([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+	if _, err := AuthSnapshotPool(home, "xai"); err == nil {
+		t.Fatal("a snapshot was taken without a key")
 	}
 }
 
@@ -361,7 +411,7 @@ func TestAuthReadStoreFailurePaths(t *testing.T) {
 		t.Fatal("a malformed pool was removed from")
 	}
 
-	if _, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1")); err == nil {
+	if _, err := AuthMigrateSlot(home, "xai", AuthSlotLabel("c1"), AuthPoolSnapshot{}); err == nil {
 		t.Fatal("a malformed pool was migrated")
 	}
 

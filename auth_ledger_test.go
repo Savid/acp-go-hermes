@@ -59,11 +59,29 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 		name  string
 		apply func()
 	}{
-		{"mkdir", func() {
+		{"root mkdir", func() {
 			ledgerMkdirAll = func(string, os.FileMode) error { return errors.New("mkdir") }
 		}},
-		{"chmod", func() {
+		{"root chmod", func() {
 			ledgerChmod = func(string, os.FileMode) error { return errors.New("chmod") }
+		}},
+		{"leaf mkdir", func() {
+			ledgerMkdirAll = func(path string, mode os.FileMode) error {
+				if filepath.Base(path) == authLedgerLeafDir {
+					return errors.New("mkdir")
+				}
+
+				return os.MkdirAll(path, mode)
+			}
+		}},
+		{"leaf chmod", func() {
+			ledgerChmod = func(path string, mode os.FileMode) error {
+				if filepath.Base(path) == authLedgerLeafDir {
+					return errors.New("chmod")
+				}
+
+				return os.Chmod(path, mode)
+			}
 		}},
 		{"stat", func() {
 			ledgerStat = func(string) (os.FileInfo, error) { return nil, errors.New("stat") }
@@ -97,6 +115,32 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 				t.Fatal("unusable root accepted")
 			}
 		})
+	}
+}
+
+func TestAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
+	restoreLedgerHooks(t)
+
+	root := filepath.Join(t.TempDir(), "provider-auth")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatalf("relax root: %v", err)
+	}
+
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root}); err != nil {
+		t.Fatalf("newAuthLedger: %v", err)
+	}
+
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat root: %v", err)
+	}
+
+	if info.Mode().Perm() != authLedgerDirMode {
+		t.Fatalf("configured root mode = %v, want %v", info.Mode().Perm(), os.FileMode(authLedgerDirMode))
 	}
 }
 

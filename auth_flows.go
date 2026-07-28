@@ -80,6 +80,8 @@ type authFlow struct {
 	nativeSessionID    string
 	presentation       authAuthorizeResult
 
+	poolSnapshot nativehermes.AuthPoolSnapshot
+
 	createdAt           int64
 	state               string
 	reason              string
@@ -90,7 +92,24 @@ type authFlow struct {
 	nextProbeAt   time.Time
 	probeInterval time.Duration
 
+	// ready is closed once the mint has settled, with either a presentation or
+	// the failure that replaced it. A repeat of the idempotency key that arrives
+	// before then waits here rather than replaying a presentation nobody minted.
+	ready   chan struct{}
+	mintErr error
+
 	disarm chan struct{}
+}
+
+// authMint is what one native start produces: the wire presentation and the
+// mutable flow state it settles. They are committed together, so a concurrent
+// status never observes half a mint.
+type authMint struct {
+	presentation    authAuthorizeResult
+	nativeSessionID string
+	expiresAt       time.Time
+	probeInterval   time.Duration
+	snapshot        nativehermes.AuthPoolSnapshot
 }
 
 type authAuthorizeResult struct {
@@ -153,7 +172,11 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	key := authFlowKey{sessionID: session.id, providerID: request.providerID}
 
-	if replay, ok := p.replayAuthorize(key, request.authorizeRequestID); ok {
+	if replay, ok, replayErr := p.replayAuthorize(ctx, key, request.authorizeRequestID); ok {
+		if replayErr != nil {
+			return nil, replayErr
+		}
+
 		return replay, nil
 	}
 
@@ -170,8 +193,6 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
 	}
-
-	p.supersede(ctx, key, authReasonSuperseded)
 
 	now := authNow()
 	record := authLedgerRecord{
@@ -209,24 +230,78 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		state:              authStatePending,
 		expiresAt:          now.Add(authSafetyDeadline),
 		probeInterval:      authPollFloor,
+		ready:              make(chan struct{}),
 		disarm:             make(chan struct{}),
 	}
 
-	presentation, err := p.mintPresentation(ctx, session, flow)
-	if err != nil {
-		return nil, err
+	p.registerFlow(ctx, key, flow)
+
+	mint, cause := p.mintPresentation(ctx, session, flow)
+	p.commitMint(flow, mint)
+
+	if cause != "" {
+		failure := p.fail(ctx, flow, cause, false)
+		p.settle(flow, failure)
+
+		return nil, failure
 	}
 
-	flow.presentation = presentation
-
-	p.mu.Lock()
-	p.flows[key] = flow
-	p.byID[flowID] = flow
-	p.mu.Unlock()
-
+	p.settle(flow, nil)
 	p.armCompleter(flow)
 
-	return presentation, nil
+	return mint.presentation, nil
+}
+
+// registerFlow terminalizes the flow a new authorize replaces and publishes the
+// new record in one step, before the mint that fills it in has run: a repeat of
+// the idempotency key has something to find from the moment the flow exists,
+// and a mint failure addresses a real flow rather than nothing. The retained
+// record outlives every terminal transition, so the key answers for as long as
+// the session lives.
+func (p *providerAuth) registerFlow(ctx context.Context, key authFlowKey, flow *authFlow) {
+	p.mu.Lock()
+
+	superseded := p.flows[key]
+	if superseded != nil {
+		delete(p.byID, superseded.id)
+
+		superseded.state = authStateCancelled
+		superseded.reason = authReasonSuperseded
+
+		superseded.stopCompleter()
+	}
+
+	p.flows[key] = flow
+	p.byID[flow.id] = flow
+	p.retained[key] = flow
+
+	p.mu.Unlock()
+
+	if superseded != nil {
+		p.cancelNative(ctx, superseded)
+	}
+}
+
+// commitMint settles what the native start produced onto the flow record.
+func (p *providerAuth) commitMint(flow *authFlow, mint authMint) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	flow.presentation = mint.presentation
+	flow.nativeSessionID = mint.nativeSessionID
+	flow.expiresAt = mint.expiresAt
+	flow.probeInterval = mint.probeInterval
+	flow.poolSnapshot = mint.snapshot
+}
+
+// settle releases every repeat waiting on the mint, with the presentation it
+// produced or the failure that replaced it.
+func (p *providerAuth) settle(flow *authFlow, mintErr error) {
+	p.mu.Lock()
+	flow.mintErr = mintErr
+	p.mu.Unlock()
+
+	close(flow.ready)
 }
 
 type authorizeRequest struct {
@@ -280,17 +355,29 @@ func decodeAuthorizeRequest(fields map[string]json.RawMessage) (authorizeRequest
 
 // replayAuthorize answers a repeated idempotency key verbatim from memory: no
 // supersede, no completer disarm, no destruction of flow state, and no native
-// call.
-func (p *providerAuth) replayAuthorize(key authFlowKey, requestID string) (authAuthorizeResult, bool) {
+// call. It answers from the retained record rather than the pending one, so a
+// completed, failed, cancelled, or expired flow still replays; and it waits for
+// the mint the first call started rather than replaying a presentation nobody
+// has minted yet.
+func (p *providerAuth) replayAuthorize(ctx context.Context, key authFlowKey, requestID string) (authAuthorizeResult, bool, error) {
+	p.mu.Lock()
+	flow, ok := p.retained[key]
+	p.mu.Unlock()
+
+	if !ok || flow.authorizeRequestID != requestID {
+		return authAuthorizeResult{}, false, nil
+	}
+
+	select {
+	case <-flow.ready:
+	case <-ctx.Done():
+		return authAuthorizeResult{}, true, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	flow, ok := p.flows[key]
-	if !ok || flow.authorizeRequestID != requestID {
-		return authAuthorizeResult{}, false
-	}
-
-	return flow.presentation, true
+	return flow.presentation, true, flow.mintErr
 }
 
 // resolveMethod fences a method id against the generation that produced it.
@@ -313,83 +400,99 @@ func (p *providerAuth) resolveMethod(request authorizeRequest) (authCatalogMetho
 
 // mintPresentation performs the native start for an oauth method and builds the
 // wire presentation. An operator-key method has nothing to mint: its value is
-// submitted through callback and applied to the reserved slot there.
-func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authAuthorizeResult, error) {
-	result := authAuthorizeResult{
-		FlowID:        flow.id,
-		FlowExpiresAt: flow.expiresAt.UnixMilli(),
+// submitted through callback and applied to the reserved slot there. An empty
+// cause is the success answer; every other cause carries the transition its
+// caller performs.
+func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authMint, string) {
+	mint := authMint{
+		presentation: authAuthorizeResult{
+			FlowID:        flow.id,
+			FlowExpiresAt: flow.expiresAt.UnixMilli(),
+			// The label already passed its display bound when the catalog
+			// published it, and it is the only presentation text hermes gives a
+			// login method.
+			Message: flow.method.Label,
+		},
+		expiresAt:     flow.expiresAt,
+		probeInterval: flow.probeInterval,
 	}
 
-	// The label already passed its display bound when the catalog published it,
-	// and it is the only presentation text hermes gives a login method.
-	result.Message = flow.method.Label
-
 	if flow.method.Type == authMethodTypeAPI {
-		result.Interaction = authInteractionSecret
+		mint.presentation.Interaction = authInteractionSecret
 
-		return result, nil
+		return mint, ""
 	}
 
 	client := session.authNativeClient()
 	if client == nil {
-		return authAuthorizeResult{}, authFailed(authCauseTransport, flow.providerID, flow.method.ID, flow.id)
+		return mint, authCauseTransport
 	}
+
+	// The pool is fingerprinted before the native flow can append to it, so the
+	// entry this flow produces is the only one the reserved slot can claim.
+	snapshot, err := authSnapshotPool(client.XDGDirs().Root, flow.providerID)
+	if err != nil {
+		return mint, authCauseHarvestFailed
+	}
+
+	mint.snapshot = snapshot
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
 
 	start, err := client.AuthStart(callCtx, flow.providerID)
 	if err != nil {
-		return authAuthorizeResult{}, authFailed(authNativeCause(err), flow.providerID, flow.method.ID, flow.id)
+		return mint, authNativeCause(err)
 	}
 
+	mint.nativeSessionID = start.SessionID
+
 	if start.Flow != flow.method.Flow {
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return mint, authCauseNativeVeto
 	}
 
 	if authLoopbackHost(start.URL) {
-		return authAuthorizeResult{}, authFailed(authCauseUnsupportedVariant, flow.providerID, flow.method.ID, flow.id)
+		return mint, authCauseUnsupportedVariant
 	}
 
 	authorizeURL, ok := authDisplayURL(start.URL)
 	if !ok {
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return mint, authCauseNativeVeto
 	}
 
-	flow.nativeSessionID = start.SessionID
-	result.URL = authorizeURL
+	mint.presentation.URL = authorizeURL
 
 	if start.ExpiresIn > 0 {
-		if native := authNow().Add(start.ExpiresIn); native.Before(flow.expiresAt) {
-			flow.expiresAt = native
-			result.FlowExpiresAt = native.UnixMilli()
+		if native := authNow().Add(start.ExpiresIn); native.Before(mint.expiresAt) {
+			mint.expiresAt = native
+			mint.presentation.FlowExpiresAt = native.UnixMilli()
 		}
 	}
 
 	if start.Flow == nativehermes.AuthFlowPKCE {
-		result.Interaction = authInteractionCallback
-		result.CallbackInput = authCallbackInputCode
+		mint.presentation.Interaction = authInteractionCallback
+		mint.presentation.CallbackInput = authCallbackInputCode
 
-		return result, nil
+		return mint, ""
 	}
 
-	result.Interaction = authInteractionWait
+	mint.presentation.Interaction = authInteractionWait
 
 	if start.UserCode != "" {
 		code, ok := authDisplayUserCode(start.UserCode)
 		if !ok {
-			return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+			return mint, authCauseNativeVeto
 		}
 
-		result.UserCode = code
+		mint.presentation.UserCode = code
 	}
 
 	if start.PollInterval > 0 {
-		result.PollIntervalMs = start.PollInterval.Milliseconds()
-		flow.probeInterval = max(start.PollInterval, authPollFloor)
+		mint.presentation.PollIntervalMs = start.PollInterval.Milliseconds()
+		mint.probeInterval = max(start.PollInterval, authPollFloor)
 	}
 
-	return result, nil
+	return mint, ""
 }
 
 // armCompleter bounds the flow by its effective deadline. It is armed exactly
@@ -428,30 +531,6 @@ func (p *providerAuth) expire(flow *authFlow) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
-
-	p.cancelNative(ctx, flow)
-}
-
-// supersede terminalizes the flow a new authorize replaces and invokes the
-// native cancel route alongside the wrapper disarm.
-func (p *providerAuth) supersede(ctx context.Context, key authFlowKey, reason string) {
-	p.mu.Lock()
-
-	flow, ok := p.flows[key]
-	if !ok {
-		p.mu.Unlock()
-
-		return
-	}
-
-	delete(p.flows, key)
-	delete(p.byID, flow.id)
-
-	flow.state = authStateCancelled
-	flow.reason = reason
-
-	flow.stopCompleter()
-	p.mu.Unlock()
 
 	p.cancelNative(ctx, flow)
 }
@@ -536,7 +615,9 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, invalidAuthField(authFieldMethod)
 	}
 
-	if authTerminal(flow.state) {
+	state, callbackInput := p.flowGate(flow)
+
+	if authTerminal(state) {
 		return nil, authFailed(authCauseFlowState, providerID, method, flowID)
 	}
 
@@ -548,11 +629,20 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return p.applySecret(ctx, session, flow, input)
 	}
 
-	if flow.presentation.CallbackInput == "" {
+	if callbackInput == "" {
 		return nil, invalidAuthField(authFieldInput)
 	}
 
 	return p.submitCode(ctx, session, flow, input)
+}
+
+// flowGate reads the two record fields a callback is admitted on. Both are
+// settled by the mint, which a callback can race.
+func (p *providerAuth) flowGate(flow *authFlow) (string, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return flow.state, flow.presentation.CallbackInput
 }
 
 // applySecret writes an operator-supplied key into the reserved slot. No
@@ -625,7 +715,7 @@ func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow 
 		return p.fail(ctx, flow, authCauseTransport, true)
 	}
 
-	migrated, migrateErr := authMigrateSlot(home, flow.providerID, authSlotLabel(flow.connectionID))
+	migrated, migrateErr := authMigrateSlot(home, flow.providerID, authSlotLabel(flow.connectionID), flow.poolSnapshot)
 	if migrateErr != nil || !migrated {
 		return p.fail(ctx, flow, authCauseHarvestFailed, true)
 	}
@@ -835,19 +925,26 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*session, *auth
 // closeSession cancels every pending flow the session owns, terminalizing each
 // as cancelled/session_closed and invoking native cancel. It runs before the
 // native interrupt, so a flow is never abandoned to a process already being
-// torn down.
+// torn down. Closing the session is also what ends the reach of an idempotency
+// key: the retained records go with it.
 func (p *providerAuth) closeSession(ctx context.Context, sessionID acp.SessionId) {
 	p.mu.Lock()
 
 	pending := make([]*authFlow, 0, len(p.flows))
 
-	for key, flow := range p.flows {
+	for key, flow := range p.retained {
 		if key.sessionID != sessionID {
 			continue
 		}
 
-		delete(p.flows, key)
+		delete(p.retained, key)
 		delete(p.byID, flow.id)
+
+		if _, live := p.flows[key]; !live {
+			continue
+		}
+
+		delete(p.flows, key)
 
 		flow.state = authStateCancelled
 		flow.reason = authReasonSessionClosed

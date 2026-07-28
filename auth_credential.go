@@ -14,11 +14,9 @@ import (
 // ProviderCredentialType selects one variant of the closed credential union.
 type ProviderCredentialType string
 
-const (
-	ProviderCredentialOAuth       ProviderCredentialType = "oauth"
-	ProviderCredentialAPI         ProviderCredentialType = "api"
-	ProviderCredentialHermesOAuth ProviderCredentialType = "hermesOauth"
-)
+// ProviderCredentialHermesOAuth is the only variant hermes brokers: its login
+// hands back non-rotating material this adapter can reinstall unchanged.
+const ProviderCredentialHermesOAuth ProviderCredentialType = "hermesOauth"
 
 // Native auth kinds the hermesOauth variant carries.
 const (
@@ -29,39 +27,11 @@ const (
 // Wire member names of the credential union.
 const (
 	credentialFieldType            = "type"
-	credentialFieldMetadata        = "metadata"
-	credentialFieldRefresh         = "refresh"
-	credentialFieldAccess          = "access"
 	credentialFieldAccessExpiresAt = "accessExpiresAt"
-	credentialFieldAccountID       = "accountId"
-	credentialFieldEnterpriseURL   = "enterpriseUrl"
 	credentialFieldAuthType        = "authType"
 	credentialFieldAccessToken     = "accessToken"
 	credentialFieldRefreshToken    = "refreshToken"
 )
-
-// Metadata bounds, matched to the input bounds so native metadata is always
-// reinjectable.
-const (
-	providerMetadataMaxKeys       = 16
-	providerMetadataMaxValueBytes = 1024
-	providerMetadataMaxTotalBytes = 8192
-)
-
-// ProviderOAuthCredential is the rotating three-part variant.
-type ProviderOAuthCredential struct {
-	Refresh         string `json:"refresh"`
-	Access          string `json:"access"`
-	AccessExpiresAt int64  `json:"accessExpiresAt"`
-	AccountID       string `json:"accountId,omitempty"`
-	EnterpriseURL   string `json:"enterpriseUrl,omitempty"`
-}
-
-// ProviderAPICredential is the opaque-key variant.
-type ProviderAPICredential struct {
-	Key      string            `json:"key"`
-	Metadata map[string]string `json:"metadata,omitempty"`
-}
 
 // ProviderHermesOAuthCredential is the variant this adapter brokers. It carries
 // non-rotating material only.
@@ -72,12 +42,10 @@ type ProviderHermesOAuthCredential struct {
 	AccessExpiresAt int64  `json:"accessExpiresAt,omitempty"`
 }
 
-// ProviderCredential is the closed, flat credential union. Exactly one variant
-// pointer is non-nil in a valid value, and the type member selects it.
+// ProviderCredential is the closed, flat credential union. It marshals to one
+// object whose type member selects the variant carrying the rest of the fields.
 type ProviderCredential struct {
 	Type        ProviderCredentialType
-	OAuth       *ProviderOAuthCredential
-	API         *ProviderAPICredential
 	HermesOAuth *ProviderHermesOAuthCredential
 }
 
@@ -93,41 +61,18 @@ type ProviderAuthBinding struct {
 var errProviderCredentialInvalid = errors.New("provider credential is not a valid member of the closed union")
 
 func (credential ProviderCredential) MarshalJSON() ([]byte, error) {
-	switch credential.Type {
-	case ProviderCredentialOAuth:
-		if credential.OAuth == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderOAuthCredential
-		}{credential.Type, *credential.OAuth})
-	case ProviderCredentialAPI:
-		if credential.API == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderAPICredential
-		}{credential.Type, *credential.API})
-	case ProviderCredentialHermesOAuth:
-		if credential.HermesOAuth == nil {
-			return nil, errProviderCredentialInvalid
-		}
-
-		return json.Marshal(struct {
-			Type ProviderCredentialType `json:"type"`
-			ProviderHermesOAuthCredential
-		}{credential.Type, *credential.HermesOAuth})
-	default:
+	if credential.Type != ProviderCredentialHermesOAuth || credential.HermesOAuth == nil {
 		return nil, errProviderCredentialInvalid
 	}
+
+	return json.Marshal(struct {
+		Type ProviderCredentialType `json:"type"`
+		ProviderHermesOAuthCredential
+	}{credential.Type, *credential.HermesOAuth})
 }
 
 // UnmarshalJSON decodes strictly: an unknown field, a duplicate field, an empty
-// required string, and a variant this adapter does not accept are all rejected
+// required string, and a variant this adapter does not broker are all rejected
 // rather than partially decoded.
 func (credential *ProviderCredential) UnmarshalJSON(data []byte) error {
 	fields, err := strictCredentialFields(data)
@@ -145,48 +90,13 @@ func (credential *ProviderCredential) UnmarshalJSON(data []byte) error {
 		return errProviderCredentialInvalid
 	}
 
+	if ProviderCredentialType(kind) != ProviderCredentialHermesOAuth {
+		return errProviderCredentialInvalid
+	}
+
 	delete(fields, credentialFieldType)
 
-	switch ProviderCredentialType(kind) {
-	case ProviderCredentialOAuth:
-		return credential.decodeOAuth(fields)
-	case ProviderCredentialAPI:
-		return credential.decodeAPI(fields)
-	case ProviderCredentialHermesOAuth:
-		return credential.decodeHermesOAuth(fields)
-	default:
-		return errProviderCredentialInvalid
-	}
-}
-
-func (credential *ProviderCredential) decodeOAuth(fields map[string]json.RawMessage) error {
-	var variant ProviderOAuthCredential
-	if err := decodeCredentialVariant(fields, []string{credentialFieldRefresh, credentialFieldAccess, credentialFieldAccessExpiresAt, credentialFieldAccountID, credentialFieldEnterpriseURL}, &variant); err != nil {
-		return err
-	}
-
-	if variant.Refresh == "" || variant.Access == "" || variant.AccessExpiresAt <= 0 {
-		return errProviderCredentialInvalid
-	}
-
-	*credential = ProviderCredential{Type: ProviderCredentialOAuth, OAuth: &variant}
-
-	return nil
-}
-
-func (credential *ProviderCredential) decodeAPI(fields map[string]json.RawMessage) error {
-	var variant ProviderAPICredential
-	if err := decodeCredentialVariant(fields, []string{jsonFieldKey, credentialFieldMetadata}, &variant); err != nil {
-		return err
-	}
-
-	if variant.Key == "" || !validProviderMetadata(variant.Metadata) {
-		return errProviderCredentialInvalid
-	}
-
-	*credential = ProviderCredential{Type: ProviderCredentialAPI, API: &variant}
-
-	return nil
+	return credential.decodeHermesOAuth(fields)
 }
 
 func (credential *ProviderCredential) decodeHermesOAuth(fields map[string]json.RawMessage) error {
@@ -275,24 +185,6 @@ func strictCredentialFields(data []byte) (map[string]json.RawMessage, error) {
 	}
 
 	return fields, nil
-}
-
-func validProviderMetadata(metadata map[string]string) bool {
-	if len(metadata) > providerMetadataMaxKeys {
-		return false
-	}
-
-	total := 0
-
-	for key, value := range metadata {
-		if len(value) > providerMetadataMaxValueBytes {
-			return false
-		}
-
-		total += len(key) + len(value)
-	}
-
-	return total <= providerMetadataMaxTotalBytes
 }
 
 type authCredentialResult struct {
@@ -473,18 +365,21 @@ const (
 )
 
 // inject installs the host's bound credentials into the reserved slots of a
-// native home before the harness first reads it. Only the hermesOauth variant
-// is accepted, and only non-rotating material is brokered here, so nothing this
-// writes can be invalidated by a refresh the adapter never sees.
+// native home before the harness first reads it. Only non-rotating material is
+// brokered here, so nothing this writes can be invalidated by a refresh the
+// adapter never sees. Every binding is evaluated: one stale binding must not
+// deny the host the other providers it configured.
 func (p *providerAuth) inject(home string, bindings map[string]ProviderAuthBinding) string {
 	outcome := authInjectionNoop
 
 	for _, providerID := range sortedBindingKeys(bindings) {
 		switch p.injectOne(home, providerID, bindings[providerID]) {
 		case authInjectionConflict:
-			return authInjectionConflict
+			outcome = authInjectionConflict
 		case authInjectionApplied:
-			outcome = authInjectionApplied
+			if outcome != authInjectionConflict {
+				outcome = authInjectionApplied
+			}
 		}
 	}
 

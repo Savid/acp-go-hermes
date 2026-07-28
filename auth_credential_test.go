@@ -15,55 +15,25 @@ import (
 func TestProviderCredentialMarshalsFlat(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		name       string
-		credential ProviderCredential
-		want       string
-	}{
-		{
-			name: "oauth",
-			credential: ProviderCredential{Type: ProviderCredentialOAuth, OAuth: &ProviderOAuthCredential{
-				Refresh: "r", Access: "a", AccessExpiresAt: 1,
-			}},
-			want: `{"type":"oauth","refresh":"r","access":"a","accessExpiresAt":1}`,
-		},
-		{
-			name:       "api",
-			credential: ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: "k"}},
-			want:       `{"type":"api","key":"k"}`,
-		},
-		{
-			name: "hermesOauth",
-			credential: ProviderCredential{Type: ProviderCredentialHermesOAuth, HermesOAuth: &ProviderHermesOAuthCredential{
-				AuthType: ProviderAuthTypeOAuth, AccessToken: "t",
-			}},
-			want: `{"type":"hermesOauth","authType":"oauth","accessToken":"t"}`,
-		},
+	credential := ProviderCredential{Type: ProviderCredentialHermesOAuth, HermesOAuth: &ProviderHermesOAuthCredential{
+		AuthType: ProviderAuthTypeOAuth, AccessToken: "t",
+	}}
+
+	encoded, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
 
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	if string(encoded) != `{"type":"hermesOauth","authType":"oauth","accessToken":"t"}` {
+		t.Fatalf("marshal = %s", encoded)
+	}
 
-			encoded, err := json.Marshal(tt.credential)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-
-			if string(encoded) != tt.want {
-				t.Fatalf("marshal = %s, want %s", encoded, tt.want)
-			}
-
-			var round ProviderCredential
-			if err := json.Unmarshal(encoded, &round); err != nil {
-				t.Fatalf("round trip: %v", err)
-			}
-		})
+	var round ProviderCredential
+	if err := json.Unmarshal(encoded, &round); err != nil {
+		t.Fatalf("round trip: %v", err)
 	}
 
 	invalid := []ProviderCredential{
-		{Type: ProviderCredentialOAuth},
-		{Type: ProviderCredentialAPI},
 		{Type: ProviderCredentialHermesOAuth},
 		{Type: "wellknown"},
 	}
@@ -88,9 +58,8 @@ func TestProviderCredentialDecodesStrictly(t *testing.T) {
 		`{"type":"hermesOauth","accessToken":"","authType":"oauth"}`,
 		`{"type":"hermesOauth","accessToken":"t","authType":"bearer"}`,
 		`{"type":"hermesOauth","accessToken":1,"authType":"oauth"}`,
-		`{"type":"oauth","refresh":"","access":"a","accessExpiresAt":1}`,
-		`{"type":"oauth","refresh":"r","access":"a","accessExpiresAt":0}`,
-		`{"type":"api","key":""}`,
+		`{"type":"oauth","refresh":"r","access":"a","accessExpiresAt":1}`,
+		`{"type":"api","key":"k"}`,
 		`{"type":"hermesOauth","accessToken":"t","authType":"oauth"} 1`,
 		`{"type":"hermesOauth","accessToken":"t","authType":"oauth"`,
 	}
@@ -103,42 +72,12 @@ func TestProviderCredentialDecodesStrictly(t *testing.T) {
 	}
 
 	var accepted ProviderCredential
-	if err := json.Unmarshal([]byte(`{"type":"api","key":"k","metadata":{"instanceUrl":"https://gitlab.example"}}`), &accepted); err != nil {
-		t.Fatalf("valid api credential rejected: %v", err)
+	if err := json.Unmarshal([]byte(`{"type":"hermesOauth","authType":"api_key","accessToken":"t","refreshToken":"r","accessExpiresAt":9}`), &accepted); err != nil {
+		t.Fatalf("valid credential rejected: %v", err)
 	}
 
-	if accepted.API.Metadata["instanceUrl"] != "https://gitlab.example" {
-		t.Fatalf("metadata = %#v", accepted.API.Metadata)
-	}
-}
-
-func TestProviderMetadataBounds(t *testing.T) {
-	t.Parallel()
-
-	if !validProviderMetadata(nil) {
-		t.Fatal("absent metadata rejected")
-	}
-
-	tooManyKeys := map[string]string{}
-	for i := range providerMetadataMaxKeys + 1 {
-		tooManyKeys[string(rune('a'+i))] = "v"
-	}
-
-	if validProviderMetadata(tooManyKeys) {
-		t.Fatal("accepted more than sixteen keys")
-	}
-
-	if validProviderMetadata(map[string]string{"k": strings.Repeat("v", providerMetadataMaxValueBytes+1)}) {
-		t.Fatal("accepted an over-long value")
-	}
-
-	oversized := map[string]string{}
-	for i := range providerMetadataMaxKeys {
-		oversized[string(rune('a'+i))] = strings.Repeat("v", providerMetadataMaxValueBytes)
-	}
-
-	if validProviderMetadata(oversized) {
-		t.Fatal("accepted an over-long metadata object")
+	if accepted.HermesOAuth.RefreshToken != "r" || accepted.HermesOAuth.AccessExpiresAt != 9 {
+		t.Fatalf("decoded = %#v", accepted.HermesOAuth)
 	}
 }
 
@@ -146,6 +85,8 @@ func TestProviderMetadataBounds(t *testing.T) {
 // a real reserved slot and ledger confirmation to work from.
 func completedFlow(t *testing.T, agent *Agent, client *fakeHermesClient) string {
 	t.Helper()
+
+	seedAmbientPool(t, client.xdg.Root, testProviderID)
 
 	presentation := startDeviceFlow(t, agent, client)
 
@@ -583,13 +524,36 @@ func TestInjectionOutcomesAreTheFourFixedCases(t *testing.T) {
 	}
 }
 
+func TestInjectionEvaluatesEveryBinding(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+
+	stale := testBinding()
+	stale.Credential = ProviderCredential{Type: "api"}
+
+	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{
+		"aardvark":     stale,
+		testProviderID: testBinding(),
+	})
+
+	if outcome != authInjectionConflict {
+		t.Fatalf("outcome = %q, want the stale binding reported", outcome)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || !present {
+		t.Fatalf("one stale binding denied a later provider: %v, %v", present, err)
+	}
+}
+
 func TestInjectionAcceptsOnlyTheHermesVariant(t *testing.T) {
 	t.Parallel()
 
 	agent, client := newAuthAgent(t)
 
 	binding := testBinding()
-	binding.Credential = ProviderCredential{Type: ProviderCredentialAPI, API: &ProviderAPICredential{Key: "k"}}
+	binding.Credential = ProviderCredential{Type: "api"}
 
 	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
 	if outcome != authInjectionConflict {
@@ -713,25 +677,11 @@ func TestStrictCredentialFieldsWalksTheObjectOnce(t *testing.T) {
 func TestDecodeCredentialVariantRejectsAnUnencodableField(t *testing.T) {
 	t.Parallel()
 
-	var variant ProviderAPICredential
+	var variant ProviderHermesOAuthCredential
 
-	err := decodeCredentialVariant(map[string]json.RawMessage{"key": json.RawMessage("{")}, []string{"key"}, &variant)
+	err := decodeCredentialVariant(map[string]json.RawMessage{"accessToken": json.RawMessage("{")}, []string{"accessToken"}, &variant)
 	if err == nil {
 		t.Fatal("an unencodable field was accepted")
-	}
-}
-
-func TestDecodeVariantsRejectMalformedValues(t *testing.T) {
-	t.Parallel()
-
-	var credential ProviderCredential
-
-	if err := credential.decodeOAuth(map[string]json.RawMessage{"refresh": json.RawMessage(`7`)}); err == nil {
-		t.Fatal("a non-string refresh was accepted")
-	}
-
-	if err := credential.decodeAPI(map[string]json.RawMessage{"key": json.RawMessage(`7`)}); err == nil {
-		t.Fatal("a non-string key was accepted")
 	}
 }
 

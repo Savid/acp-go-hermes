@@ -75,6 +75,7 @@ var (
 	authReadSlot       = nativehermes.AuthReadSlot
 	authWriteSlot      = nativehermes.AuthWriteSlot
 	authMigrateSlot    = nativehermes.AuthMigrateSlot
+	authSnapshotPool   = nativehermes.AuthSnapshotPool
 	authRemoveSlot     = nativehermes.AuthRemoveSlot
 	authReadFlowExpiry = nativehermes.AuthReadFlowExpiry
 	authSlotLabel      = nativehermes.AuthSlotLabel
@@ -107,6 +108,9 @@ type providerAuth struct {
 	catalog    map[string][]authCatalogMethod
 	flows      map[authFlowKey]*authFlow
 	byID       map[string]*authFlow
+	// retained holds the newest flow per key whatever its state, so a repeated
+	// idempotency key is answerable for as long as the session lives.
+	retained map[authFlowKey]*authFlow
 }
 
 type authFlowKey struct {
@@ -131,10 +135,11 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:  agent,
-		ledger: ledger,
-		flows:  make(map[authFlowKey]*authFlow),
-		byID:   make(map[string]*authFlow),
+		agent:    agent,
+		ledger:   ledger,
+		flows:    make(map[authFlowKey]*authFlow),
+		byID:     make(map[string]*authFlow),
+		retained: make(map[authFlowKey]*authFlow),
 	}
 }
 

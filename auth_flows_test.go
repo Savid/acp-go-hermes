@@ -236,6 +236,195 @@ func TestAuthorizeReplayAnswersFromMemoryWithNoNativeCall(t *testing.T) {
 	}
 }
 
+func TestAuthorizeFailsClosedWhenTheProviderPoolCannotBeSnapshotted(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	original := authSnapshotPool
+	authSnapshotPool = func(string, string) (nativehermes.AuthPoolSnapshot, error) {
+		return nativehermes.AuthPoolSnapshot{}, errors.New("store")
+	}
+
+	t.Cleanup(func() { authSnapshotPool = original })
+
+	client.authStartFunc = func(context.Context, string) (nativehermes.AuthStart, error) {
+		t.Error("the native start ran without a snapshot of the pool it appends to")
+
+		return nativehermes.AuthStart{}, nil
+	}
+
+	_, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "request-1"))
+	requireAuthCause(t, err, authCauseHarvestFailed)
+}
+
+func TestAuthorizeReplayOutlivesTerminalization(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	first := startDeviceFlow(t, agent, client)
+
+	seedNativeCompletion(t, client.xdg.Root, testProviderID)
+	seedDeviceResidence(t, client.xdg.Root, testProviderID, 21600)
+
+	client.authPoll = nativehermes.AuthPoll{State: nativehermes.AuthPollComplete}
+
+	status, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": first.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	if state := mustType[authStatusResult](t, status).State; state != authStateAuthenticated {
+		t.Fatalf("state = %q, want a terminal flow to replay from", state)
+	}
+
+	generation := agent.providerAuth.generation
+	client.authStartFunc = func(context.Context, string) (nativehermes.AuthStart, error) {
+		t.Error("a replayed authorizeRequestId reached the native start route")
+
+		return nativehermes.AuthStart{}, nil
+	}
+
+	replay, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "request-1"))
+	if err != nil {
+		t.Fatalf("replay after terminalization: %v", err)
+	}
+
+	if mustType[authAuthorizeResult](t, replay) != first {
+		t.Fatalf("replay = %#v, want %#v", replay, first)
+	}
+
+	if len(client.authCancelled) != 0 {
+		t.Fatal("a replayed idempotency key superseded the flow it should have replayed")
+	}
+
+	record, _, err := agent.providerAuth.ledger.read(testProviderID)
+	if err != nil || record.Revision != 1 || record.FlowID != first.FlowID {
+		t.Fatalf("a replay disturbed the ledger: %#v, %v", record, err)
+	}
+}
+
+func TestAuthorizeReplayWaitsForTheMintToPublish(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	minting := make(chan struct{})
+	release := make(chan struct{})
+	client.authStartFunc = func(context.Context, string) (nativehermes.AuthStart, error) {
+		close(minting)
+		<-release
+
+		return nativehermes.AuthStart{
+			SessionID: "native-flow",
+			Flow:      nativehermes.AuthFlowDeviceCode,
+			URL:       testDeviceURL,
+			UserCode:  "ABCD-EFGH",
+		}, nil
+	}
+
+	params := authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "request-1")
+
+	minted := make(chan authAuthorizeResult, 1)
+	go func() {
+		result, err := callLeg(t, agent, AuthAuthorizeMethod, params)
+		if err != nil {
+			t.Errorf("authorize: %v", err)
+			close(minted)
+
+			return
+		}
+
+		minted <- mustType[authAuthorizeResult](t, result)
+	}()
+
+	<-minting
+
+	replayed := make(chan authAuthorizeResult, 1)
+	go func() {
+		result, err := callLeg(t, agent, AuthAuthorizeMethod, params)
+		if err != nil {
+			t.Errorf("replay during the mint: %v", err)
+			close(replayed)
+
+			return
+		}
+
+		replayed <- mustType[authAuthorizeResult](t, result)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	select {
+	case answered := <-replayed:
+		t.Fatalf("a repeat answered before the mint published: %#v", answered)
+	default:
+	}
+
+	// A caller that gives up while the mint is still running is answered rather
+	// than left holding the wait.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	key := authFlowKey{sessionID: testSessionID, providerID: testProviderID}
+	if _, ok, err := agent.providerAuth.replayAuthorize(cancelled, key, "request-1"); !ok || err == nil {
+		t.Fatalf("an abandoned repeat = %v, %v", ok, err)
+	}
+
+	close(release)
+
+	presentation := <-minted
+	if presentation != <-replayed {
+		t.Fatal("a repeat arriving during the mint replayed a different presentation")
+	}
+
+	if presentation.Interaction != authInteractionWait || presentation.FlowID == "" {
+		t.Fatalf("presentation = %#v", presentation)
+	}
+}
+
+func TestAuthorizeReplayRepeatsTheMintFailure(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	starts := 0
+	client.authStartFunc = func(context.Context, string) (nativehermes.AuthStart, error) {
+		starts++
+
+		return nativehermes.AuthStart{}, errors.New("gateway")
+	}
+
+	params := authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "request-1")
+
+	_, err := callLeg(t, agent, AuthAuthorizeMethod, params)
+	requireAuthCause(t, err, authCauseTransport)
+
+	flowID := authErrorField(t, err, authFieldFlowID)
+
+	status, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": flowID,
+	})
+	if err != nil {
+		t.Fatalf("status on a failed mint: %v", err)
+	}
+
+	terminal := mustType[authStatusResult](t, status)
+	if terminal.State != authStateFailed || terminal.Reason != authReasonTransport {
+		t.Fatalf("failed mint left %#v", terminal)
+	}
+
+	_, replayErr := callLeg(t, agent, AuthAuthorizeMethod, params)
+	requireAuthCause(t, replayErr, authCauseTransport)
+
+	if starts != 1 {
+		t.Fatalf("native start invocations = %d, want the failure replayed", starts)
+	}
+}
+
 func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	t.Parallel()
 
@@ -398,6 +587,8 @@ func TestCallbackSubmitsAPKCECodeAndMigratesTheReservedSlot(t *testing.T) {
 
 	agent, client := newAuthAgent(t)
 	generation := seedCatalog(t, agent, client)
+
+	seedAmbientPool(t, client.xdg.Root, "anthropic")
 
 	client.authStart = nativehermes.AuthStart{SessionID: "native-pkce", Flow: nativehermes.AuthFlowPKCE, URL: testPKCEURL}
 	client.authPoll = nativehermes.AuthPoll{State: nativehermes.AuthPollComplete}
@@ -694,6 +885,9 @@ func TestStatusHonoursANativeSlowDown(t *testing.T) {
 
 func TestStatusCompletesADeviceFlowAndAnchorsTheExpiry(t *testing.T) {
 	agent, client := newAuthAgent(t)
+
+	seedAmbientPool(t, client.xdg.Root, testProviderID)
+
 	presentation := startDeviceFlow(t, agent, client)
 
 	anchor := time.Unix(1_700_000_000, 0)
@@ -974,6 +1168,75 @@ func TestCloseSessionCancelsPendingFlows(t *testing.T) {
 	agent.providerAuth.closeSession(context.Background(), testSessionID)
 }
 
+func TestCompletionNeverMigratesAnAmbientPoolEntry(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+
+	writeStoreFixture(t, client.xdg.Root, map[string]any{
+		"credential_pool": map[string]any{
+			testProviderID: []any{map[string]any{"auth_type": "oauth", testFieldAccessToken: "ambient", "source": "gh"}},
+		},
+	})
+
+	presentation := startDeviceFlow(t, agent, client)
+
+	client.authPoll = nativehermes.AuthPoll{State: nativehermes.AuthPollComplete}
+
+	status, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": presentation.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	terminal := mustType[authStatusResult](t, status)
+	if terminal.State != authStateFailed || terminal.Reason != authReasonHarvestFailed {
+		t.Fatalf("a flow that produced nothing settled as %#v", terminal)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || present {
+		t.Fatalf("an entry resident before the flow was handed a reserved slot: %v, %v", present, err)
+	}
+}
+
+func TestCloseSessionEndsTheReachOfARetainedFlow(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	presentation := startDeviceFlow(t, agent, client)
+
+	seedNativeCompletion(t, client.xdg.Root, testProviderID)
+	seedDeviceResidence(t, client.xdg.Root, testProviderID, 21600)
+
+	client.authPoll = nativehermes.AuthPoll{State: nativehermes.AuthPollComplete}
+
+	if _, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": presentation.FlowID,
+	}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	session, err := agent.providerAuth.authSession(string(testSessionID))
+	if err != nil {
+		t.Fatalf("authSession: %v", err)
+	}
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	broker := agent.providerAuth
+	if len(broker.retained) != 0 || len(broker.byID) != 0 || len(broker.flows) != 0 {
+		t.Fatalf("a closed session left records behind: %d retained, %d addressable, %d pending", len(broker.retained), len(broker.byID), len(broker.flows))
+	}
+
+	if len(client.authCancelled) != 0 {
+		t.Fatalf("a terminal flow was cancelled natively at close: %v", client.authCancelled)
+	}
+}
+
 func TestCancelNativeIsSkippedWithoutANativeFlow(t *testing.T) {
 	t.Parallel()
 
@@ -1016,22 +1279,41 @@ func TestNewAuthTokenIsOpaqueAndUnpadded(t *testing.T) {
 	}
 }
 
+// seedAmbientPool writes the gh-derived entry a fresh Hermes home already
+// carries. It is resident before any flow starts and must never be migrated.
+func seedAmbientPool(t *testing.T, home string, providerID string) {
+	t.Helper()
+
+	seedPoolEntry(t, home, providerID, map[string]any{
+		"auth_type": "oauth", testFieldAccessToken: "ambient", "source": "gh", "label": "",
+	})
+}
+
 // seedNativeCompletion writes the unlabelled pool entry a completed native flow
-// leaves behind, plus an ambient entry that must never be migrated.
+// leaves behind. A completed flow takes the first position, so the entry it
+// produced is not the newest one.
 func seedNativeCompletion(t *testing.T, home string, providerID string) {
 	t.Helper()
 
-	store := map[string]any{
-		"credential_pool": map[string]any{
-			providerID: []any{
-				map[string]any{"auth_type": "oauth", testFieldAccessToken: "ambient", "source": "gh", "label": ""},
-				map[string]any{
-					"auth_type": "oauth", testFieldAccessToken: "native-access", "refresh_token": "native-refresh",
-					"expires_at": nil, "source": "device_code", "request_count": 0, "secret_fingerprint": "abc",
-				},
-			},
-		},
+	seedPoolEntry(t, home, providerID, map[string]any{
+		"auth_type": "oauth", testFieldAccessToken: "native-access", "refresh_token": "native-refresh",
+		"expires_at": nil, "source": "device_code", "request_count": 0, "secret_fingerprint": "abc",
+	})
+}
+
+func seedPoolEntry(t *testing.T, home string, providerID string, entry map[string]any) {
+	t.Helper()
+
+	store := readStoreFixture(t, home)
+
+	pool, _ := store["credential_pool"].(map[string]any)
+	if pool == nil {
+		pool = map[string]any{}
 	}
+
+	entries, _ := pool[providerID].([]any)
+	pool[providerID] = append([]any{entry}, entries...)
+	store["credential_pool"] = pool
 
 	writeStoreFixture(t, home, store)
 }

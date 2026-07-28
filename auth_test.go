@@ -88,6 +88,27 @@ func requireAuthCause(t *testing.T, err error, cause string) {
 	}
 }
 
+func authErrorField(t *testing.T, err error, name string) string {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error is not a request error: %v", err)
+	}
+
+	data, ok := requestErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("request error data is not an object: %#v", requestErr.Data)
+	}
+
+	value, _ := data[name].(string)
+	if value == "" {
+		t.Fatalf("error data carries no %s: %#v", name, data)
+	}
+
+	return value
+}
+
 func requireInvalidField(t *testing.T, err error, field string) {
 	t.Helper()
 
@@ -591,6 +612,57 @@ func TestAuthParamFieldsRejectsATruncatedObject(t *testing.T) {
 	}
 
 	requireInvalidField(t, err, authFieldParams)
+}
+
+// Every Hermes session gets a throwaway home, so session/new is the injection
+// path: the binding is written into the generation root the server is about to
+// be started against, before it reads it.
+func TestNewSessionInjectsIntoTheGenerationRoot(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(WithScratchDir(t.TempDir()), WithProviderAuthRoot(t.TempDir()))
+
+	var root string
+
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		client := newFakeHermesClient()
+		client.xdg = options.ExistingXDG
+		client.createSession = nativehermes.Session{ID: "native-1"}
+		root = options.ExistingXDG.Root
+
+		return client, nil
+	}
+
+	response, err := agent.NewSession(context.Background(), acp.NewSessionRequest{
+		Cwd: t.TempDir(),
+		Meta: map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+			metaProviderAuthKey: map[string]any{testProviderID: map[string]any{
+				"connectionId":      testConnectionID,
+				"revision":          1,
+				"bindingGeneration": 1,
+				testFieldCredential: map[string]any{
+					"type":        string(ProviderCredentialHermesOAuth),
+					"authType":    ProviderAuthTypeOAuth,
+					"accessToken": "token",
+				},
+			}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	meta, _ := response.Meta[hermesMetaKey].(map[string]any)
+
+	injection, _ := meta[metaProviderAuthKey].(map[string]any)
+	if injection[providerAuthInjectionName] != authInjectionApplied {
+		t.Fatalf("injection = %#v", meta)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || !present {
+		t.Fatalf("reserved slot in the generation root = %v, %v", present, err)
+	}
 }
 
 func TestInjectProviderAuthRecordsTheOutcome(t *testing.T) {

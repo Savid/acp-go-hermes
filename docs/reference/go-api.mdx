@@ -56,8 +56,6 @@ shapes the wire carries:
 ```go
 type ProviderCredential struct {
     Type        ProviderCredentialType
-    OAuth       *ProviderOAuthCredential
-    API         *ProviderAPICredential
     HermesOAuth *ProviderHermesOAuthCredential
 }
 
@@ -69,13 +67,13 @@ type ProviderAuthBinding struct {
 }
 ```
 
-The union is closed and flat: `type` selects exactly one variant and exactly one
-pointer is non-nil. Decoding is strict — unknown fields, duplicate fields, empty
-required strings, and unaccepted variants are rejected rather than partially
-decoded. Hermes emits and accepts the `hermesOauth` variant only, and carries
-non-rotating material only. Every timestamp is Unix epoch milliseconds. Values of
-these types are secret material and never reach a log, an error, or the session
-store — see [Authentication](/docs/features/authentication).
+The union is closed and flat: `type` selects the variant carrying the rest of the
+fields. Decoding is strict — unknown fields, duplicate fields, empty required
+strings, and any other variant are rejected rather than partially decoded. Hermes
+emits and accepts the `hermesOauth` variant only, and carries non-rotating
+material only. Every timestamp is Unix epoch milliseconds. Values of these types
+are secret material and never reach a log, an error, or the session store — see
+[Authentication](/docs/features/authentication).
 
 `WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
 before the adapter interrupts it, completes its selected native containment

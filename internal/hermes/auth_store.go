@@ -1,6 +1,9 @@
 package hermes
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +32,8 @@ const (
 	authFieldExpiresAt    = "expires_at"
 	authFieldExpiresIn    = "expires_in"
 	authFieldTokens       = "tokens"
+
+	authSnapshotKeyBytes = 32
 )
 
 // authStoreHandle is the file surface an atomic store write drives.
@@ -41,6 +46,8 @@ type authStoreHandle interface {
 }
 
 var (
+	authSnapshotRandRead = rand.Read
+
 	authStoreReadFile = os.ReadFile
 	authStoreMkdirAll = os.MkdirAll
 	authStoreRename   = os.Rename
@@ -102,11 +109,58 @@ func AuthWriteSlot(home string, providerID string, label string, material AuthMa
 	return authWriteStore(home, document)
 }
 
+// AuthPoolSnapshot fingerprints the entries a provider's pool already held when
+// a flow started, so the entry that flow appends can be told apart from one that
+// was resident before it. The fingerprint is an HMAC under a key minted per
+// snapshot and held only in memory: a bare digest of an entry is an equality
+// correlator over credential material.
+type AuthPoolSnapshot struct {
+	key     []byte
+	entries map[string]struct{}
+}
+
+// AuthSnapshotPool records the provider's pool as it stands before a flow mints.
+func AuthSnapshotPool(home string, providerID string) (AuthPoolSnapshot, error) {
+	document, err := authReadStore(home)
+	if err != nil {
+		return AuthPoolSnapshot{}, err
+	}
+
+	key := make([]byte, authSnapshotKeyBytes)
+	if _, err := authSnapshotRandRead(key); err != nil {
+		return AuthPoolSnapshot{}, fmt.Errorf("mint hermes credential pool snapshot key: %w", err)
+	}
+
+	snapshot := AuthPoolSnapshot{key: key, entries: map[string]struct{}{}}
+	for _, entry := range document.pool[providerID] {
+		snapshot.entries[snapshot.fingerprint(entry)] = struct{}{}
+	}
+
+	return snapshot, nil
+}
+
+func (s AuthPoolSnapshot) fingerprint(entry authPoolEntry) string {
+	// The entry and its members are already-decoded raw JSON and Go marshals map
+	// keys in sorted order, so the encoding is canonical and cannot fail.
+	encoded, _ := json.Marshal(entry)
+
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write(encoded)
+
+	return string(mac.Sum(nil))
+}
+
+func (s AuthPoolSnapshot) holds(entry authPoolEntry) bool {
+	_, ok := s.entries[s.fingerprint(entry)]
+
+	return ok
+}
+
 // AuthMigrateSlot moves the entry a completed native flow just wrote into the
 // reserved slot: it copies the token material, removes the original by index,
 // and appends the labelled slot. The order is load-bearing — an idempotent
 // re-add under the same label leaves two live copies of one credential.
-func AuthMigrateSlot(home string, providerID string, label string) (bool, error) {
+func AuthMigrateSlot(home string, providerID string, label string, snapshot AuthPoolSnapshot) (bool, error) {
 	document, err := authReadStore(home)
 	if err != nil {
 		return false, err
@@ -114,7 +168,7 @@ func AuthMigrateSlot(home string, providerID string, label string) (bool, error)
 
 	entries := document.pool[providerID]
 
-	index := authFindUnlabelled(entries)
+	index := authFindUnlabelled(entries, snapshot)
 	if index < 0 {
 		return false, nil
 	}
@@ -239,15 +293,22 @@ func authFindSlot(entries []authPoolEntry, label string) int {
 	return -1
 }
 
-// authFindUnlabelled selects the newest entry no adapter label claims. A
-// completed native flow appends its entry, so the last unlabelled one is the
-// entry this flow produced; ambient, environment, and operator entries keep
-// their position and are never selected once a labelled slot exists for them.
-func authFindUnlabelled(entries []authPoolEntry) int {
+// authFindUnlabelled selects the newest entry no adapter label claims and no
+// pre-flow snapshot held. A completed native flow appends its entry, so that is
+// the entry this flow produced; an ambient, environment, or operator entry was
+// already there when the flow started and is never migrated into a reserved
+// slot, whatever its position.
+func authFindUnlabelled(entries []authPoolEntry, snapshot AuthPoolSnapshot) int {
 	for index := len(entries) - 1; index >= 0; index-- {
-		if !AuthSlotLabelPrefix(authStringField(entries[index], authFieldLabel)) {
-			return index
+		if AuthSlotLabelPrefix(authStringField(entries[index], authFieldLabel)) {
+			continue
 		}
+
+		if snapshot.holds(entries[index]) {
+			continue
+		}
+
+		return index
 	}
 
 	return -1
