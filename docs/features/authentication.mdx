@@ -21,9 +21,19 @@ a random `HERMES_DASHBOARD_SESSION_TOKEN` for the loopback dashboard gateway. Th
 token hash is written to the lease file only for stale-process identity checks.
 
 The launch environment also sets `PYTHONUNBUFFERED=1`, without which Hermes
-block-buffers stdout off a TTY and emits nothing while working normally, and
-neutralises the browser launch, which Hermes performs during a login regardless
-of its `--no-browser` flag.
+block-buffers stdout off a TTY and emits nothing while working normally.
+
+It also contains the browser launch, which Hermes performs during a login
+regardless of its `--no-browser` flag. A private `0700` scratch directory of
+no-op launchers — `open`, `xdg-open`, `x-www-browser`, `www-browser`,
+`sensible-browser` — is placed ahead of every other `PATH` entry, and `BROWSER`
+points at one of them. Both halves are needed: Python's `webbrowser` reads
+`BROWSER`, but it also execs `xdg-open` by name, which `BROWSER` alone does not
+cover. The directory is removed with the process that owns it. On Windows no
+such shim can contain the launch, so sessions run normally and the provider
+login leg is what refuses: `_hermes/auth/authorize` returns the closed
+`auth_failed` shape with cause `policy` rather than opening a browser on your
+desktop. Operator-key methods, which open nothing, keep working there.
 
 ## Credentials never reach the store
 

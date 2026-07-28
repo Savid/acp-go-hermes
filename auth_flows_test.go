@@ -425,6 +425,29 @@ func TestAuthorizeReplayRepeatsTheMintFailure(t *testing.T) {
 	}
 }
 
+// TestAuthorizeRefusesAnUncontainedBrowserLaunch covers the leg's answer where
+// the session's process cannot shadow the launchers a login would exec: the
+// closed refusal, not a browser tab and not a native call the owner authorized.
+func TestAuthorizeRefusesAnUncontainedBrowserLaunch(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	client.authStartFunc = func(context.Context, string) (nativehermes.AuthStart, error) {
+		return nativehermes.AuthStart{}, nativehermes.ErrBrowserLaunchUncontained
+	}
+
+	params := authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "request-1")
+
+	_, err := callLeg(t, agent, AuthAuthorizeMethod, params)
+	requireAuthCause(t, err, authCausePolicy)
+
+	if authErrorRetryable(t, err) {
+		t.Fatal("a refusal the adapter made itself was reported as retryable")
+	}
+}
+
 func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	t.Parallel()
 

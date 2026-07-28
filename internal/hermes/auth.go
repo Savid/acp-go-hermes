@@ -191,7 +191,14 @@ func (s *hermesServer) AuthAPIKeyProviders(ctx context.Context) ([]AuthAPIKeyPro
 	return providers, nil
 }
 
+// AuthStart begins a native login. It refuses before the native call when the
+// session's process is not shadowing the browser launchers, because the native
+// start is what makes hermes open a tab.
 func (s *hermesServer) AuthStart(ctx context.Context, providerID string) (AuthStart, error) {
+	if !s.process.BrowserLaunchContained() {
+		return AuthStart{}, ErrBrowserLaunchUncontained
+	}
+
 	var payload struct {
 		SessionID       string  `json:"session_id"`
 		Flow            string  `json:"flow"`

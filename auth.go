@@ -292,6 +292,13 @@ func authFlowTransition(cause string, materialInFlight bool) (string, string) {
 // text. Hermes reports a provider refusal with a body that can carry an entire
 // upstream response.
 func authNativeCause(err error) string {
+	// An uncontained browser launch is this adapter's own refusal, not a native
+	// answer: nothing was asked of hermes, so repeating the leg on this platform
+	// changes nothing and the owner's authorization is untouched.
+	if errors.Is(err, nativehermes.ErrBrowserLaunchUncontained) {
+		return authCausePolicy
+	}
+
 	if nativehermes.AuthRefused(err) {
 		return authCauseProviderRefused
 	}

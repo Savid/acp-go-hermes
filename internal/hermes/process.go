@@ -51,6 +51,7 @@ var (
 	waitProcessCommand          = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	processTreeClose            = func(tree *processContainment) error { return tree.close() }
 	startHermesContainedProcess = startContainedProcess
+	newProcessBrowserShim       = newBrowserShim
 	executableProbeMu           sync.Mutex
 	executableProbed            = map[string]struct{}{}
 	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
@@ -117,6 +118,7 @@ type Process struct {
 
 	cancel context.CancelFunc
 	tree   *processContainment
+	shim   *browserShim
 
 	waitOnce sync.Once
 	waitDone chan struct{}
@@ -131,6 +133,14 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 	}
 
 	return p.tree.descendantCount()
+}
+
+// BrowserLaunchContained reports whether this process runs with the launcher
+// shim installed. A login leg must not start a native flow without it: hermes
+// opens a browser for the login, and only the shim keeps that launch off the
+// operator's desktop.
+func (p *Process) BrowserLaunchContained() bool {
+	return p != nil && p.shim != nil
 }
 
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
@@ -199,16 +209,26 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
 	// TTY hermes block-buffers stdout and emits nothing while working normally.
-	// BROWSER neutralises the login browser launch, which hermes performs even
-	// when told not to: --no-browser is accepted and then ignored.
 	env = append(env,
 		"HERMES_HOME="+home,
 		"HERMES_DASHBOARD_SESSION_TOKEN="+token,
 		"PYTHONUNBUFFERED=1",
-		"BROWSER="+neutralizedBrowserCommand(),
 	)
 
-	cmd.Env = env
+	// A login runs inside this process, and hermes opens a browser for it even
+	// when told not to: --no-browser is accepted and then ignored. The shim
+	// shadows every launcher it could exec and points BROWSER at one of those
+	// no-ops, because python's webbrowser reads BROWSER but still execs
+	// xdg-open on its own. Where no shim can exist the session still starts and
+	// the login leg refuses instead; a prompt turn opens nothing.
+	shim, err := newProcessBrowserShim(opts.ScratchParent)
+	if err != nil {
+		cancel()
+
+		return nil, err
+	}
+
+	cmd.Env = shim.environ(env)
 	if opts.LogWriter != nil {
 		cmd.Stdout = opts.LogWriter
 		cmd.Stderr = opts.LogWriter
@@ -232,7 +252,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, startErr)
 		cancel()
 
-		return nil, startErr
+		return nil, errors.Join(startErr, shim.remove())
 	}
 
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, nil)
@@ -246,6 +266,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		APIBaseURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
 		cancel:     cancel,
 		tree:       tree,
+		shim:       shim,
 	}
 	process.beginWait()
 
@@ -497,7 +518,7 @@ func (p *Process) Close(ctx context.Context) error {
 	}()
 
 	if p.Cmd == nil || p.Cmd.Process == nil {
-		return nil
+		return p.shim.remove()
 	}
 
 	afterFn := after
@@ -513,7 +534,7 @@ func (p *Process) Close(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return p.completeProcessContainment()
+		return errors.Join(p.completeProcessContainment(), p.shim.remove())
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-afterFn(5 * time.Second):
@@ -531,7 +552,7 @@ func (p *Process) Close(ctx context.Context) error {
 	case <-afterFn(time.Second):
 	}
 
-	return errors.Join(err, p.completeProcessContainment())
+	return errors.Join(err, p.completeProcessContainment(), p.shim.remove())
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.

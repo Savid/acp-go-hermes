@@ -14,14 +14,18 @@ import (
 
 // newAuthTestServer wires a hermesServer at a stub REST broker so every auth
 // route is driven exactly as it is against the real one, including the session
-// token header.
+// token header. Its process carries a shim, which is what a login leg requires.
 func newAuthTestServer(t *testing.T, handler http.HandlerFunc) *hermesServer {
 	t.Helper()
 
 	stub := httptest.NewServer(handler)
 	t.Cleanup(stub.Close)
 
-	return &hermesServer{process: &Process{APIBaseURL: stub.URL + "/api", Token: "session-token"}}
+	return &hermesServer{process: &Process{
+		APIBaseURL: stub.URL + "/api",
+		Token:      "session-token",
+		shim:       &browserShim{dir: t.TempDir()},
+	}}
 }
 
 func TestAuthProvidersReadsIdentityFieldsOnly(t *testing.T) {
@@ -416,14 +420,6 @@ func TestAuthSlotLabelIsAdapterOwned(t *testing.T) {
 
 	if AuthSlotLabelPrefix("") || AuthSlotLabelPrefix("operator-entry") {
 		t.Fatal("an unlabelled entry was claimed by the adapter")
-	}
-}
-
-func TestNeutralizedBrowserCommandIsNamed(t *testing.T) {
-	t.Parallel()
-
-	if neutralizedBrowserCommand() == "" {
-		t.Fatal("no browser neutraliser is named")
 	}
 }
 

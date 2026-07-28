@@ -109,6 +109,27 @@ func authErrorField(t *testing.T, err error, name string) string {
 	return value
 }
 
+func authErrorRetryable(t *testing.T, err error) bool {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error is not a request error: %v", err)
+	}
+
+	data, ok := requestErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("request error data is not an object: %#v", requestErr.Data)
+	}
+
+	retryable, ok := data["retryable"].(bool)
+	if !ok {
+		t.Fatalf("error data carries no retryable flag: %#v", data)
+	}
+
+	return retryable
+}
+
 func requireInvalidField(t *testing.T, err error, field string) {
 	t.Helper()
 
@@ -359,6 +380,10 @@ func TestAuthNativeCauseNeverForwardsNativeText(t *testing.T) {
 	refusal := &nativehermes.AuthStatusError{StatusCode: 400}
 	if authNativeCause(refusal) != authCauseProviderRefused {
 		t.Fatal("a native 4xx is not a provider refusal")
+	}
+
+	if authNativeCause(nativehermes.ErrBrowserLaunchUncontained) != authCausePolicy {
+		t.Fatal("an uncontained browser launch was classified as a native answer")
 	}
 
 	if authNativeCause(&nativehermes.AuthStatusError{StatusCode: 503}) != authCauseTransport {
