@@ -790,3 +790,22 @@ func TestDarwinStartContainmentFailureBranches(t *testing.T) {
 		require.ErrorContains(t, err, "exec native Hermes command")
 	})
 }
+
+// TestDarwinDirectKillEndsTheProcessItIsGiven covers the default direct-child
+// kill. Every other assertion in this file replaces it, and the handles they
+// build carry invented pids, so the real one has to be exercised against a
+// child the test started itself — signalling a fabricated pid would reach a
+// process this repo does not own. It is the last resort that removes a native
+// child the process-group boundary failed to take, which is the one path where
+// a leaked Hermes process is all that is left.
+func TestDarwinDirectKillEndsTheProcessItIsGiven(t *testing.T) {
+	child := exec.Command("/bin/sleep", "30")
+	require.NoError(t, child.Start())
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+
+	require.NoError(t, darwinDirectProcessKill(child.Process))
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, child.Wait(), &exitErr)
+	require.False(t, exitErr.Success())
+}

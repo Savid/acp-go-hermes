@@ -180,6 +180,14 @@ sessions they arrive on. A leg whose caller goes away while it waits its turn is
 answered `cause: "timeout"` and writes nothing; a leg that finds the queue empty
 never waits at all.
 
+`session/close` cancels every pending flow the session owns, reporting each as
+`cancelled` with reason `session_closed`, and ends the reach of that session's
+`authorizeRequestId`s. The durable snapshot outlives it, so `session/load`
+hydrates the same id and its provider-auth legs answer again. A login that was
+already in flight when the close ran belongs to the lifetime that ended: it is
+refused with the unknown-session rejection rather than published into the new
+one, however long it waited and whichever id it names.
+
 ### Access-token expiry is derived
 
 The pool entry carries no expiry. The `pkce` flow's own `0600` credential file

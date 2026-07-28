@@ -204,7 +204,7 @@ func (s *session) snapshotToStoreLocked(
 		return err
 	}
 
-	if requirement != nil && s.closedForSnapshot() {
+	if requirement != nil && s.lifetimeEnded() {
 		return errors.New("session closed before Hermes terminal snapshot commit")
 	}
 
@@ -540,7 +540,12 @@ func (s *session) snapshotBlockedReasonForTerminalCommit(allowOwningTurn bool) s
 	}
 }
 
-func (s *session) closedForSnapshot() bool {
+// lifetimeEnded reports whether this session object's own teardown has begun.
+// It is set before close reaches either the store or the provider-auth broker
+// and is never cleared, so it identifies the lifetime rather than the id: a
+// later session/load hydrates the same id behind a different object, and this
+// one keeps answering true for the legs still holding it.
+func (s *session) lifetimeEnded() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

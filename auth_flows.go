@@ -242,7 +242,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	// exists, and a mint failure addresses a real flow rather than nothing. The
 	// retained record outlives every terminal transition, so the key answers
 	// for as long as the session lives.
-	if publishErr := p.publishFlow(ctx, key, flow); publishErr != nil {
+	if publishErr := p.publishFlow(ctx, session, key, flow); publishErr != nil {
 		return nil, publishErr
 	}
 
@@ -884,8 +884,13 @@ func (p *providerAuth) confirmCause(flow *authFlow) string {
 
 // lineageCause reports the cause that stops a mutation this flow no longer owns
 // — the provider's recorded lineage has moved past it, or it could not be read
-// at all. Both callers hold the credential-slot gate across the check and the
-// mutation it admits, so what it reports cannot go stale under them.
+// at all. Both callers hold the credential-slot gate and the provider's ledger
+// gate across the check, the mutation it admits, and the confirmation that
+// follows, so what it reports cannot go stale under them. That unbroken hold is
+// the whole reason the confirmation compares nothing of its own: shorten it and
+// the check moves back into confirmCause, or a successor rewrites the entry
+// between the two and the credential is left resident under a lineage no
+// surface names.
 func (p *providerAuth) lineageCause(flow *authFlow) string {
 	prior, present, err := p.ledger.read(flow.providerID)
 	if err != nil {

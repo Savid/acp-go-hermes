@@ -984,6 +984,117 @@ func TestAReopenedSessionAnswersItsAuthLegsAgain(t *testing.T) {
 	}
 }
 
+// TestAnAuthorizeParkedAcrossAReopenIsRefusedTheClosedLifetime pins the leg the
+// reopened id must still refuse: one that resolved its session before close and
+// was still queued behind a gate when the same id came back. Clearing the mark
+// is what lets the new lifetime answer, and an id-only publication check reads
+// that as permission for the old one too. The session this leg holds is the one
+// close tore down — its gateway is shut and the sweep that would have cancelled
+// its flow has already run — so publishing now leaves a pending flow, an armed
+// completer, and a replayable idempotency key in a lifetime nothing sweeps,
+// every one of them addressable through the live id.
+func TestAnAuthorizeParkedAcrossAReopenIsRefusedTheClosedLifetime(t *testing.T) {
+	restoreLedgerHooks(t)
+
+	ctx := context.Background()
+	root := t.TempDir()
+
+	agent := NewAgent(WithScratchDir(root), WithSessionStore(NewInMemorySessionStore()), WithProviderAuthRoot(t.TempDir()))
+
+	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	if err != nil {
+		t.Fatalf("CreateXDGDirs: %v", err)
+	}
+
+	client := newFakeHermesClient()
+	client.xdg = xdg
+	client.authKeyProviders = []nativehermes.AuthAPIKeyProvider{{ID: "openai", Name: "OpenAI"}}
+
+	session := testSession(agent, client)
+	session.cwd = root
+
+	if storeErr := agent.storeStartedSession(session); storeErr != nil {
+		t.Fatalf("storeStartedSession: %v", storeErr)
+	}
+
+	if snapshotErr := session.snapshotToStore(ctx); snapshotErr != nil {
+		t.Fatalf("snapshotToStore: %v", snapshotErr)
+	}
+
+	catalog, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(session.id)})
+	if err != nil {
+		t.Fatalf("methods: %v", err)
+	}
+
+	// The operator-key method is the one whose mint needs no gateway, so what
+	// this pins is publication itself rather than a native call failing behind
+	// a torn-down process.
+	params := authorizeParams(mustType[authMethodsResult](t, catalog).Generation, "openai", authAPIKeyMethodID, "r-parked")
+	params[authFieldSessionID] = string(session.id)
+
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	settled := make(chan error, 1)
+
+	var renames atomic.Int32
+
+	originalRename := ledgerRename
+	ledgerRename = func(from string, to string) error {
+		if renames.Add(1) == 1 {
+			close(parked)
+			<-release
+		}
+
+		return originalRename(from, to)
+	}
+
+	go func() {
+		_, authorizeErr := authLeg(agent, AuthAuthorizeMethod, params)
+		settled <- authorizeErr
+	}()
+
+	<-parked
+
+	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	loaded := newFakeHermesClient()
+	loaded.getSession = testNativeSession("native-1")
+	loaded.providers = testProviders()
+
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		loaded.xdg = options.ExistingXDG
+
+		return loaded, nil
+	}
+
+	agent.setAgentClient(newRecordingAgentClient())
+
+	if _, err := agent.LoadSession(ctx, LoadSessionRequest(session.id, root)); err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+
+	close(release)
+
+	authorizeErr := <-settled
+	if authorizeErr == nil {
+		t.Fatal("an authorize parked across the close published into the lifetime the sweep had already run for")
+	}
+
+	requireUnknownSession(t, authorizeErr)
+
+	broker := agent.providerAuth
+
+	broker.mu.Lock()
+	live, addressable, replayable := len(broker.flows), len(broker.byID), len(broker.retained)
+	broker.mu.Unlock()
+
+	if live != 0 || addressable != 0 || replayable != 0 {
+		t.Fatalf("the closed lifetime left flows=%d byID=%d retained=%d behind", live, addressable, replayable)
+	}
+}
+
 // parkLedgerWrite starts an authorize and blocks it inside the one ledger write
 // it makes, so the provider's ledger entry is held and no other gate is. The
 // returned function releases it.

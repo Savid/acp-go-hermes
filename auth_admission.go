@@ -147,10 +147,24 @@ func (p *providerAuth) lockFlowLedger(ctx context.Context, flow *authFlow) (func
 // wait for the legs already in flight — blocks the whole teardown for the
 // length of an unbounded native call, and refusing publication holds the same
 // invariant without that: no flow escapes close's cleanup set.
-func (p *providerAuth) publishFlow(ctx context.Context, key authFlowKey, flow *authFlow) error {
+//
+// It refuses on the lifetime and not merely on the id, because the two stop
+// agreeing the moment an id is reinstated. The mark is what orders this check
+// against the sweep — both take this lock — but it is cleared when session/load
+// hydrates the id again, and the leg being admitted here may have resolved its
+// session before any of that and waited out the whole close behind a gate. Such
+// a leg still holds the object close tore down, so the session's own flag is
+// what names which lifetime it belongs to: close and delete both set it before
+// reaching this broker, and nothing ever clears it.
+//
+// This is the only place the broker mutex and a session mutex are held at once,
+// and the order is broker first. Nothing held under a session mutex reaches
+// back for this one or for the agent's, so the order cannot close a cycle.
+func (p *providerAuth) publishFlow(ctx context.Context, session *session, key authFlowKey, flow *authFlow) error {
 	p.mu.Lock()
 
-	if _, closed := p.closedSessions[key.sessionID]; closed {
+	_, closed := p.closedSessions[key.sessionID]
+	if closed || session.lifetimeEnded() {
 		p.mu.Unlock()
 
 		return unknownSessionError()
