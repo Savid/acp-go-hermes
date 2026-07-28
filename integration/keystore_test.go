@@ -64,6 +64,20 @@ func TestKeystoreLinuxCredentialResidence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	container := startKeystoreFixture(ctx, t)
+
+	if err := container.CopyFileToContainer(ctx, buildResidenceProbe(t), keystoreProbePath, 0o755); err != nil {
+		t.Fatalf("copy residence probe: %v", err)
+	}
+
+	runResidenceMatrix(ctx, t, container, false)
+	runResidenceMatrix(ctx, t, container, true)
+}
+
+// startKeystoreFixture builds and starts the Secret Service fixture.
+func startKeystoreFixture(ctx context.Context, t *testing.T) testcontainers.Container {
+	t.Helper()
+
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			FromDockerfile: testcontainers.FromDockerfile{
@@ -88,40 +102,46 @@ func TestKeystoreLinuxCredentialResidence(t *testing.T) {
 		}
 	})
 
-	probe := buildLinuxHermesProbe(t)
+	return container
+}
 
-	if err := container.CopyFileToContainer(ctx, probe, keystoreProbePath, 0o755); err != nil {
-		t.Fatalf("copy residence probe: %v", err)
+// runResidenceMatrix runs the residence matrix in one Linux configuration. The
+// two differ only in whether the fixture's session bus is exported, so the
+// probe binary and the container are the same for both.
+func runResidenceMatrix(ctx context.Context, t *testing.T, container testcontainers.Container, bus bool) {
+	t.Helper()
+
+	name, prelude := "keystore-absent", ""
+	if bus {
+		name, prelude = "keystore-present", ". "+keystoreEnvFile+"; export DBUS_SESSION_BUS_ADDRESS; "
 	}
 
-	matrix := keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'"
+	command := prelude + "export " + envRunIntegration + "=1 " + envRunKeystore + "=1; exec " +
+		keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'"
 
-	for name, command := range map[string]string{
-		"keystore-present": ". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; exec " + matrix,
-		"keystore-absent":  "unset DBUS_SESSION_BUS_ADDRESS; exec " + matrix,
-	} {
-		t.Run(name, func(t *testing.T) {
-			code, output, err := container.Exec(ctx, []string{"/bin/sh", "-c", command})
-			if err != nil {
-				t.Fatalf("run residence matrix: %v", err)
-			}
+	t.Run(name, func(t *testing.T) {
+		code, output, err := container.Exec(ctx, []string{"/bin/sh", "-c", command}, tcexec.Multiplexed())
+		if err != nil {
+			t.Fatalf("run residence matrix: %v", err)
+		}
 
-			logs, readErr := io.ReadAll(output)
-			if readErr != nil {
-				t.Fatalf("read residence output: %v", readErr)
-			}
+		logs, readErr := io.ReadAll(output)
+		if readErr != nil {
+			t.Fatalf("read residence output: %v", readErr)
+		}
 
-			t.Log(string(logs))
+		t.Log(string(logs))
 
-			if code != 0 {
-				t.Fatalf("residence matrix exited %d", code)
-			}
+		if code != 0 {
+			t.Fatalf("residence matrix exited %d", code)
+		}
 
-			if strings.Contains(string(logs), "SKIP") {
-				t.Fatalf("the residence matrix skipped inside the fixture: %s", logs)
-			}
-		})
-	}
+		// An exit status alone goes green on a skip, which is the silent success
+		// this tier exists to prevent.
+		if !strings.Contains(string(logs), "--- PASS: TestKeystoreResidenceMatrix") {
+			t.Fatalf("the residence matrix did not report a pass inside the fixture: %s", logs)
+		}
+	})
 }
 
 // TestKeystoreLinuxArtifactCarriesNoSecretServiceClient pins the mechanism
@@ -184,7 +204,7 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 		}
 	})
 
-	probe := buildLinuxHermesProbe(t)
+	probe := buildResidenceProbe(t)
 
 	if copyErr := container.CopyFileToContainer(ctx, probe, keystoreBrowserShimPath, 0o755); copyErr != nil {
 		t.Fatalf("copy the launcher probe: %v", copyErr)
@@ -238,18 +258,20 @@ func keystoreBaseImage(t *testing.T) string {
 	return ""
 }
 
-// buildLinuxHermesProbe compiles the package that owns the store read path and
+// buildResidenceProbe compiles the package that owns the store read path and
 // the launch path for the fixture's platform. Neither Linux claim can be
 // observed from the host: only the container has a Secret Service to answer one
 // and a Linux PATH to resolve the other.
-func buildLinuxHermesProbe(t *testing.T) string {
+func buildResidenceProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "residence.test")
 
 	command := exec.CommandContext(t.Context(), "go", "test", "-c", "-tags=integration", "-o", out, "./internal/hermes")
 	command.Dir = repoRoot()
-	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
+	// GOWORK=off is not optional: a go.work in scope otherwise builds the probe
+	// from another module's requirements.
+	command.Env = append(os.Environ(), "GOWORK=off", "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build residence probe: %v: %s", err, output)

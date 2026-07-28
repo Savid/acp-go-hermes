@@ -1,9 +1,13 @@
-# The base image is pinned by digest: an unpinned base drifts this fixture's own
-# dependency on a schedule nobody controls. Re-verify with the harness pin.
-FROM debian:bookworm-slim@sha256:1209d8fd77def86ceb6663deef7956481cc6c14a25e1e64daec12c0ceffcc19d
+# Secret Service fixture for the credential-residence tier. The base is pinned by
+# digest: an unpinned base drifts the test's own dependency on a schedule nobody
+# controls.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update \
- && apt-get install --no-install-recommends -y dbus gnome-keyring libsecret-tools \
+ && apt-get install --no-install-recommends --assume-yes \
+      dbus \
+      gnome-keyring \
+      libsecret-tools \
  && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
