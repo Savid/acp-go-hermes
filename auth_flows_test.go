@@ -1499,7 +1499,166 @@ func TestSubmitCodeFailsClosedWithoutAGateway(t *testing.T) {
 	requireAuthCause(t, err, authCauseTransport)
 }
 
+// TestCompleteFlowFailurePaths drives each failure on its own flow: the first
+// one terminalizes the record it runs against, and a second call into that
+// closed record answers for the record rather than for this leg.
 func TestCompleteFlowFailurePaths(t *testing.T) {
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, session *session)
+		cause   string
+	}{
+		{
+			name: "the flow expiry cannot be read",
+			arrange: func(t *testing.T, _ *session) {
+				t.Helper()
+
+				original := authReadFlowExpiry
+				authReadFlowExpiry = func(string, string, string) (nativehermes.AuthMaterial, bool, error) {
+					return nativehermes.AuthMaterial{}, false, errors.New("residence")
+				}
+
+				t.Cleanup(func() { authReadFlowExpiry = original })
+			},
+			cause: authCauseHarvestFailed,
+		},
+		{
+			name: "the session lost its gateway",
+			arrange: func(t *testing.T, session *session) {
+				t.Helper()
+
+				session.mu.Lock()
+				session.client = nil
+				session.mu.Unlock()
+			},
+			cause: authCauseTransport,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			agent, client := newAuthAgent(t)
+			presentation := startDeviceFlow(t, agent, client)
+
+			flow := agent.providerAuth.byID[presentation.FlowID]
+
+			session, err := agent.providerAuth.authSession(string(testSessionID))
+			if err != nil {
+				t.Fatalf("authSession: %v", err)
+			}
+
+			seedNativeCompletion(t, client.xdg.Root, testProviderID)
+			testCase.arrange(t, session)
+
+			requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), testCase.cause)
+		})
+	}
+}
+
+// TestTerminalizeKeepsTheFirstTerminalTransition pins the record itself: a flow
+// has one terminal transition, and a later one is dropped rather than
+// overwriting the owner's.
+func TestTerminalizeKeepsTheFirstTerminalTransition(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	presentation := startDeviceFlow(t, agent, client)
+
+	flow := agent.providerAuth.byID[presentation.FlowID]
+
+	agent.providerAuth.terminalize(flow, authStateCancelled, authReasonOwnerCancel, 0)
+	agent.providerAuth.terminalize(flow, authStateAuthenticated, "", 4242)
+
+	status, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": presentation.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	terminal := mustType[authStatusResult](t, status)
+	if terminal.State != authStateCancelled || terminal.Reason != authReasonOwnerCancel || terminal.ExpiresAt != 0 {
+		t.Fatalf("status = %#v, want cancelled/owner_cancel", terminal)
+	}
+}
+
+// TestCallbackAnswersForAFlowCancelledUnderIt pins the leg against the record.
+// The owner cancels while the native exchange is still running, so whatever it
+// answers arrives into a record already closed: the leg migrates nothing into
+// the reserved slot, writes no confirmation, and reports the closed flow rather
+// than a provider refusal nobody made or a completion the owner abandoned.
+func TestCallbackAnswersForAFlowCancelledUnderIt(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		poll nativehermes.AuthPoll
+	}{
+		{name: "native answer completes", poll: nativehermes.AuthPoll{State: nativehermes.AuthPollComplete}},
+		{name: "native answer denies", poll: nativehermes.AuthPoll{State: nativehermes.AuthPollDenied}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			agent, client := newAuthAgent(t)
+			generation := seedCatalog(t, agent, client)
+
+			seedAmbientPool(t, client.xdg.Root, "anthropic")
+
+			client.authStart = nativehermes.AuthStart{SessionID: "native-pkce", Flow: nativehermes.AuthFlowPKCE, URL: testPKCEURL}
+
+			result, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "anthropic", nativehermes.AuthFlowPKCE, "r"))
+			if err != nil {
+				t.Fatalf("authorize: %v", err)
+			}
+
+			flowID := mustType[authAuthorizeResult](t, result).FlowID
+			params := map[string]any{"sessionId": string(testSessionID), "providerId": "anthropic", "flowId": flowID}
+
+			seedNativeCompletion(t, client.xdg.Root, "anthropic")
+			seedPKCEResidence(t, client.xdg.Root, 1750000000000)
+
+			// The owner cancels while the native poll this leg drives is still in
+			// flight.
+			client.authPollFunc = func(context.Context, string, string) (nativehermes.AuthPoll, error) {
+				if _, cancelErr := callLeg(t, agent, AuthCancelMethod, params); cancelErr != nil {
+					t.Errorf("cancel: %v", cancelErr)
+				}
+
+				return testCase.poll, nil
+			}
+
+			_, callbackErr := callLeg(t, agent, AuthCallbackMethod, map[string]any{
+				"sessionId": string(testSessionID), "providerId": "anthropic",
+				"method": nativehermes.AuthFlowPKCE, "flowId": flowID, "input": "code#state",
+			})
+			requireAuthCause(t, callbackErr, authCauseFlowCancelled)
+
+			record, ok, readErr := agent.providerAuth.ledger.read("anthropic")
+			if readErr != nil || !ok || record.State != authLedgerIntent {
+				t.Fatalf("ledger = %#v/%v/%v, want intent", record, ok, readErr)
+			}
+
+			status, statusErr := callLeg(t, agent, AuthStatusMethod, params)
+			if statusErr != nil {
+				t.Fatalf("status: %v", statusErr)
+			}
+
+			terminal := mustType[authStatusResult](t, status)
+			if terminal.State != authStateCancelled || terminal.Reason != authReasonOwnerCancel {
+				t.Fatalf("status = %#v, want cancelled/owner_cancel", terminal)
+			}
+		})
+	}
+}
+
+// TestCompletionAnswersForAFlowThatExpiredUnderIt pins the same rule on the
+// other way a record closes under a leg: the deadline the completer enforces.
+func TestCompletionAnswersForAFlowThatExpiredUnderIt(t *testing.T) {
+	t.Parallel()
+
 	agent, client := newAuthAgent(t)
 	presentation := startDeviceFlow(t, agent, client)
 
@@ -1510,22 +1669,15 @@ func TestCompleteFlowFailurePaths(t *testing.T) {
 		t.Fatalf("authSession: %v", err)
 	}
 
-	originalExpiry := authReadFlowExpiry
-	authReadFlowExpiry = func(string, string, string) (nativehermes.AuthMaterial, bool, error) {
-		return nativehermes.AuthMaterial{}, false, errors.New("residence")
-	}
-
-	t.Cleanup(func() { authReadFlowExpiry = originalExpiry })
-
 	seedNativeCompletion(t, client.xdg.Root, testProviderID)
+	agent.providerAuth.expire(flow)
 
-	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), authCauseHarvestFailed)
+	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), authCauseFlowState)
 
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-
-	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), authCauseTransport)
+	record, ok, readErr := agent.providerAuth.ledger.read(testProviderID)
+	if readErr != nil || !ok || record.State != authLedgerIntent {
+		t.Fatalf("ledger = %#v/%v/%v, want intent", record, ok, readErr)
+	}
 }
 
 func TestCompleteFlowFailsClosedWhenTheConfirmationCannotBeWritten(t *testing.T) {

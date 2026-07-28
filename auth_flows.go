@@ -684,12 +684,12 @@ func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *a
 	defer cancel()
 
 	if err := client.AuthSubmit(callCtx, flow.providerID, flow.nativeSessionID, input); err != nil {
-		return nil, p.fail(ctx, flow, authNativeCause(err), true)
+		return nil, p.failSettled(ctx, flow, authNativeCause(err), true)
 	}
 
 	poll, err := client.AuthPollFlow(callCtx, flow.providerID, flow.nativeSessionID)
 	if err != nil {
-		return nil, p.fail(ctx, flow, authNativeCause(err), true)
+		return nil, p.failSettled(ctx, flow, authNativeCause(err), true)
 	}
 
 	switch poll.State {
@@ -698,7 +698,7 @@ func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *a
 			return nil, err
 		}
 	case nativehermes.AuthPollDenied:
-		return nil, p.fail(ctx, flow, authCauseProviderRefused, true)
+		return nil, p.failSettled(ctx, flow, authCauseProviderRefused, true)
 	}
 
 	return authFlowIDResult{FlowID: flow.id}, nil
@@ -710,6 +710,10 @@ func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *a
 // appending under a label that already exists leaves two live copies of one
 // credential — and it is what makes every unlabelled entry unharvestable.
 func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow *authFlow) error {
+	if cause, abandoned := p.abandonedCause(flow); abandoned {
+		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	home := session.authHome()
 	if home == "" {
 		return p.fail(ctx, flow, authCauseTransport, true)
@@ -756,6 +760,36 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 	return nil
 }
 
+// abandonedCause reports the cause a leg answers with when the flow reached a
+// terminal state while the native call this leg started was still in flight.
+// Such a leg owns no transition and confirms nothing: the record it addressed
+// is already closed, and the outcome it carries is no longer the flow's.
+func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case !authTerminal(flow.state):
+		return "", false
+	case flow.state == authStateCancelled:
+		return authCauseFlowCancelled, true
+	default:
+		return authCauseFlowState, true
+	}
+}
+
+// failSettled answers a native outcome that could have arrived after the flow
+// closed. The transition it would otherwise perform belongs to whoever closed
+// the flow first, and a cause naming the provider over a login the owner
+// abandoned reports a refusal nobody made.
+func (p *providerAuth) failSettled(ctx context.Context, flow *authFlow, cause string, materialInFlight bool) error {
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	return p.fail(ctx, flow, cause, materialInFlight)
+}
+
 // fail returns the leg's closed error and performs the transition its cause
 // pairs with. A cause with no transition consumes nothing.
 func (p *providerAuth) fail(ctx context.Context, flow *authFlow, cause string, materialInFlight bool) error {
@@ -767,9 +801,17 @@ func (p *providerAuth) fail(ctx context.Context, flow *authFlow, cause string, m
 	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }
 
+// terminalize records the flow's one terminal transition and frees the pending
+// slot. A flow that already reached one keeps it: a native answer still in
+// flight when the owner cancelled arrives into a record the owner already
+// closed, and what it carries is no longer the flow's outcome.
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string, credentialExpiresAt int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if authTerminal(flow.state) {
+		return
+	}
 
 	flow.state = state
 	flow.reason = reason
