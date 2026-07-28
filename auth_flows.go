@@ -328,7 +328,7 @@ func decodeAuthorizeRequest(fields map[string]json.RawMessage) (authorizeRequest
 		return request, err
 	}
 
-	if request.connectionID, err = authRequiredString(fields, authFieldConnectionID); err != nil {
+	if request.connectionID, err = authRequiredConnectionID(fields); err != nil {
 		return request, err
 	}
 

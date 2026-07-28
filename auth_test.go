@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -733,4 +734,82 @@ func TestLifecycleMetaRejectsAnInvalidBinding(t *testing.T) {
 	}
 
 	requireInvalidField(t, err, providerAuthOptionPath)
+}
+
+// adversarialConnectionIDs are the caller-minted values that must never reach
+// the reserved slot's native label. The prefix-bearing, separator-bearing, and
+// control-character cases are what the label would otherwise carry verbatim
+// into the native credential store; the two replacement-rune spellings are one
+// Go string reached from two different wire encodings, which is an alias over
+// one connection's slot.
+func adversarialConnectionIDs() map[string]string {
+	return map[string]string{
+		"empty":              "",
+		"carries the prefix": "acp-go-hermes:connection-1",
+		"path separators":    "../../../etc/passwd",
+		"windows separators": `..\..\connection`,
+		"newline":            "connection\n1",
+		"nul":                "connection\x00 1",
+		"bidi override":      "connection\u202e1",
+		"space":              "connection 1",
+		"replacement rune":   "connection-�",
+		"non ascii":          "connection-é",
+		"unbounded":          strings.Repeat("c", authConnectionIDMaxBytes+1),
+	}
+}
+
+func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
+	t.Parallel()
+
+	agent, _ := newAuthAgent(t)
+
+	for name, connectionID := range adversarialConnectionIDs() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := callLeg(t, agent, AuthAuthorizeMethod, map[string]any{
+				"sessionId": string(testSessionID), "providerId": testProviderID,
+				"connectionId": connectionID, "methodsGeneration": "generation",
+				"method": "device_code", "authorizeRequestId": "request-1",
+			})
+			requireInvalidField(t, err, authFieldConnectionID)
+
+			_, err = callLeg(t, agent, AuthDisconnectMethod, map[string]any{
+				"sessionId": string(testSessionID), "providerId": testProviderID,
+				"connectionId": connectionID, "bindingGeneration": 1,
+			})
+			requireInvalidField(t, err, authFieldConnectionID)
+
+			_, err = agent.sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{
+				metaOptionsKey: map[string]any{metaProviderAuthKey: map[string]any{
+					testProviderID: map[string]any{
+						"connectionId": connectionID, "revision": 1, "bindingGeneration": 1,
+						testFieldCredential: map[string]any{
+							"type":     string(ProviderCredentialHermesOAuth),
+							"authType": ProviderAuthTypeOAuth, "accessToken": "token",
+						},
+					},
+				}},
+			}})
+			requireInvalidField(t, err, providerAuthOptionPath)
+		})
+	}
+}
+
+func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
+	t.Parallel()
+
+	accepted := []string{
+		"pac_2f1c9b4e-8d3a-4c17-9f21-0b6e5a7c8d90",
+		"pac_conformance",
+		testConnectionID,
+		"C0",
+		strings.Repeat("c", authConnectionIDMaxBytes),
+	}
+
+	for _, connectionID := range accepted {
+		if !authValidConnectionID(connectionID) {
+			t.Fatalf("connection id %q was refused", connectionID)
+		}
+	}
 }

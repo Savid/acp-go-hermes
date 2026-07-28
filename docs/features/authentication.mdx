@@ -177,7 +177,16 @@ lifecycle response reports the values-free outcome:
 
 `applied` means a demonstrably empty slot was written once, `noop` that a live
 entry of the same lineage already matched, and `conflict` that a live entry
-differs, the connection is unknown, or the credential is rotating — in which
-case nothing was installed and nothing was used. The field is absent when the
-option key was not supplied at all. All three outcomes return a successful
-lifecycle response.
+differs, the connection is unknown, the binding is superseded, or the credential
+is rotating — in which case nothing was installed and nothing was used. The
+field is absent when the option key was not supplied at all. All three outcomes
+return a successful lifecycle response.
+
+A binding is superseded when its `revision` or its `bindingGeneration` is below
+the value this adapter's own durable ledger already recorded for that same
+`connectionId`: a later `authorize` raised the revision, or a `disconnect`
+bumped the generation, and installing the older binding would reinstate material
+the owner replaced. Both counters are therefore monotone per connection, and a
+replayed or reordered lifecycle request is `conflict` rather than an
+installation. A fresh connection id starts its own counters at one and is
+unaffected. The binding's `connectionId` is bounded exactly as the legs' is.

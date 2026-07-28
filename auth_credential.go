@@ -304,7 +304,7 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 		return nil, err
 	}
 
-	connectionID, err := authRequiredString(fields, authFieldConnectionID)
+	connectionID, err := authRequiredConnectionID(fields)
 	if err != nil {
 		return nil, err
 	}
@@ -406,6 +406,17 @@ func (p *providerAuth) injectOne(home string, providerID string, binding Provide
 	}
 
 	if hasRecord && record.State != authLedgerRemoved && record.ConnectionID != binding.ConnectionID {
+		return authInjectionConflict
+	}
+
+	// Both counters are monotone per connection. A binding below either one is a
+	// generation this adapter has already superseded — an earlier authorize
+	// raised the revision, or a disconnect bumped the generation — so installing
+	// it would reinstate material the owner replaced and move the ledger back to
+	// naming it. The comparison is scoped to this connection because a fresh one
+	// legitimately starts its own counters at one.
+	if hasRecord && record.ConnectionID == binding.ConnectionID &&
+		(binding.Revision < record.Revision || binding.BindingGeneration < record.BindingGeneration) {
 		return authInjectionConflict
 	}
 

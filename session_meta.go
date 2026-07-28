@@ -126,7 +126,7 @@ func providerAuthBindingsFromMeta(value any) (map[string]ProviderAuthBinding, er
 	}
 
 	for providerID, binding := range bindings {
-		if providerID == "" || binding.ConnectionID == "" || binding.Revision <= 0 || binding.BindingGeneration <= 0 {
+		if providerID == "" || !authValidConnectionID(binding.ConnectionID) || binding.Revision <= 0 || binding.BindingGeneration <= 0 {
 			return nil, unsupportedField(providerAuthOptionPath)
 		}
 	}

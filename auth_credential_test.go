@@ -680,6 +680,81 @@ func TestInjectionSurvivesADisconnectedLineage(t *testing.T) {
 	}
 }
 
+func TestInjectionRefusesACounterRegression(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	broker := agent.providerAuth
+	home := client.xdg.Root
+
+	if err := broker.ledger.write(authLedgerRecord{
+		ProviderID: testProviderID, ConnectionID: testConnectionID,
+		Revision: 5, BindingGeneration: 3, State: authLedgerConfirmed,
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	replayed := testBinding()
+	replayed.Revision = 4
+	replayed.BindingGeneration = 3
+
+	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: replayed}); outcome != authInjectionConflict {
+		t.Fatalf("a replayed revision produced %q", outcome)
+	}
+
+	superseded := testBinding()
+	superseded.Revision = 5
+	superseded.BindingGeneration = 2
+
+	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: superseded}); outcome != authInjectionConflict {
+		t.Fatalf("a replayed binding generation produced %q", outcome)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(home, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || present {
+		t.Fatalf("superseded material reached the native home: %v, %v", present, err)
+	}
+
+	live, ok, readErr := broker.ledger.read(testProviderID)
+	if readErr != nil || !ok || live.Revision != 5 || live.BindingGeneration != 3 {
+		t.Fatalf("a replayed binding moved the ledger backwards: %#v/%v/%v", live, ok, readErr)
+	}
+
+	current := testBinding()
+	current.Revision = 5
+	current.BindingGeneration = 3
+
+	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: current}); outcome != authInjectionApplied {
+		t.Fatalf("the ledger's own counters into an empty native home produced %q", outcome)
+	}
+}
+
+// A disconnect leaves this connection's own record removed under a bumped
+// binding generation, which is the state a replayed pre-disconnect binding
+// lands in.
+func TestInjectionRefusesABindingItsDisconnectSuperseded(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+	broker := agent.providerAuth
+
+	if err := broker.ledger.write(authLedgerRecord{
+		ProviderID: testProviderID, ConnectionID: testConnectionID,
+		Revision: 1, BindingGeneration: 2, State: authLedgerRemoved,
+	}); err != nil {
+		t.Fatalf("seed removed record: %v", err)
+	}
+
+	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+		t.Fatalf("a pre-disconnect binding produced %q", outcome)
+	}
+
+	present, err := nativehermes.AuthSlotPresent(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
+	if err != nil || present {
+		t.Fatalf("a disconnected credential was reinstated: %v, %v", present, err)
+	}
+}
+
 func TestSortedBindingKeysIsDeterministic(t *testing.T) {
 	t.Parallel()
 

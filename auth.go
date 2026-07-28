@@ -401,6 +401,54 @@ func authRequiredString(fields map[string]json.RawMessage, name string) (string,
 	return value, nil
 }
 
+// authConnectionIDMaxBytes bounds the caller-minted connection id. The contract
+// fixes no bound of its own, so the accepted shape is the opaque ASCII token a
+// consumer mints — a short prefix and a UUID is 40 bytes — with room to spare.
+const authConnectionIDMaxBytes = 128
+
+// authRequiredConnectionID decodes and validates the connection id a leg
+// addresses. It is checked here, where the value enters, rather than at each
+// addressing site: the id becomes the reserved slot's native label verbatim, so
+// one entry check covers every leg that then reads, writes, migrates, or probes
+// that slot.
+func authRequiredConnectionID(fields map[string]json.RawMessage) (string, error) {
+	value, err := authRequiredString(fields, authFieldConnectionID)
+	if err != nil {
+		return "", err
+	}
+
+	if !authValidConnectionID(value) {
+		return "", invalidAuthField(authFieldConnectionID)
+	}
+
+	return value, nil
+}
+
+// authValidConnectionID reports whether id is an opaque bounded ASCII token.
+// Restricting it to that alphabet is what keeps the derived label free of the
+// adapter's own prefix, of separators and control characters, and of two wire
+// spellings that decode to one Go string and would alias one connection's slot.
+func authValidConnectionID(id string) bool {
+	if id == "" || len(id) > authConnectionIDMaxBytes {
+		return false
+	}
+
+	for index := range len(id) {
+		if !authConnectionIDByte(id[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func authConnectionIDByte(char byte) bool {
+	return (char >= 'A' && char <= 'Z') ||
+		(char >= 'a' && char <= 'z') ||
+		(char >= '0' && char <= '9') ||
+		char == '-' || char == '_'
+}
+
 // authString decodes a string field that may be empty but must be present.
 func authString(fields map[string]json.RawMessage, name string) (string, error) {
 	raw, ok := fields[name]

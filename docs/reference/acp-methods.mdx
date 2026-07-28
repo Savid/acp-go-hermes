@@ -39,7 +39,11 @@ returns method-not-found.
 | `_hermes/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
 
 Every request object is closed: an unknown, duplicate, or missing field is
-rejected with `-32602` naming the field path. Every leg failure is
+rejected with `-32602` naming the field path. `connectionId` is minted by the
+host and becomes this adapter's reserved credential-slot label verbatim, so it
+is bounded where it enters: at most 128 bytes drawn from `A-Z`, `a-z`, `0-9`,
+`-`, and `_`. A value outside that shape is `-32602` on `connectionId`, on
+`authorize` and `disconnect` alike. Every leg failure is
 `hermes_auth_failed` (`-32000`) with a closed `cause`, and no native message
 text ever crosses. See [Authentication](/docs/features/authentication).
 
