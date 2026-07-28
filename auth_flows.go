@@ -237,7 +237,6 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	p.registerFlow(ctx, key, flow)
 
 	mint, cause := p.mintPresentation(ctx, session, flow)
-	p.commitMint(flow, mint)
 
 	if cause != "" {
 		failure := p.fail(ctx, flow, cause, false)
@@ -399,11 +398,24 @@ func (p *providerAuth) resolveMethod(request authorizeRequest) (authCatalogMetho
 }
 
 // mintPresentation performs the native start for an oauth method and builds the
-// wire presentation. An operator-key method has nothing to mint: its value is
-// submitted through callback and applied to the reserved slot there. An empty
+// wire presentation, then settles whatever it produced onto the flow record
+// before its caller sees the cause. Committing on every path is what makes the
+// caller's fence reach a login the mint began: the fence cancels by the session
+// id on the record, and a refusal that returned before the commit would leave
+// the login running at the provider with nothing left to stop it. An empty
 // cause is the success answer; every other cause carries the transition its
 // caller performs.
 func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authMint, string) {
+	mint, cause := p.buildMint(ctx, session, flow)
+	p.commitMint(flow, mint)
+
+	return mint, cause
+}
+
+// buildMint produces the presentation an authorize answers with. An
+// operator-key method has nothing to mint: its value is submitted through
+// callback and applied to the reserved slot there.
+func (p *providerAuth) buildMint(ctx context.Context, session *session, flow *authFlow) (authMint, string) {
 	mint := authMint{
 		presentation: authAuthorizeResult{
 			FlowID:        flow.id,
@@ -445,9 +457,20 @@ func (p *providerAuth) mintPresentation(ctx context.Context, session *session, f
 		return mint, authNativeCause(err)
 	}
 
+	// The started login is stoppable only through this id, and every judgement
+	// about what was started is made below, by a function that receives the
+	// mint already carrying it. A veto cannot be written that returns without
+	// it, so a refused login is never one nothing can cancel.
 	mint.nativeSessionID = start.SessionID
 
-	if start.Flow != flow.method.Flow {
+	return applyNativeStart(mint, start, flow.method)
+}
+
+// applyNativeStart judges what the native start produced and folds it into the
+// mint. It refuses a flow variant the catalog did not publish, an authorization
+// URL only this host could reach, and any display value that fails its bound.
+func applyNativeStart(mint authMint, start nativehermes.AuthStart, method authCatalogMethod) (authMint, string) {
+	if start.Flow != method.Flow {
 		return mint, authCauseNativeVeto
 	}
 
@@ -663,8 +686,18 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 		return nil, p.fail(ctx, flow, authCauseHarvestFailed, true)
 	}
 
-	if err := p.confirm(ctx, flow); err != nil {
-		return nil, err
+	// The write landed, so the key is resident whatever became of the flow
+	// while it ran. Its provenance is recorded first — a credential nothing
+	// names can be neither removed nor reported — and only then does the leg
+	// find out whether the outcome is still its to report.
+	confirmCause := p.confirmCause(flow)
+
+	if cause, abandoned := p.abandonedCause(flow); abandoned {
+		return nil, authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	if confirmCause != "" {
+		return nil, p.fail(ctx, flow, confirmCause, true)
 	}
 
 	p.terminalize(flow, authStateSaved, "", 0)
@@ -741,6 +774,21 @@ func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow 
 // confirm records the post-mutation confirmation, which is what separates a
 // residence answer of confirmed_present from not_confirmed.
 func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
+	if cause := p.confirmCause(flow); cause != "" {
+		return p.fail(ctx, flow, cause, true)
+	}
+
+	return nil
+}
+
+// confirmCause writes the confirmation and answers the cause that stopped it
+// rather than performing a transition: whether the flow is still the caller's
+// to close is the caller's question. The provider owns one entry, so a leg
+// whose native work outlived its flow would otherwise rename its own lineage
+// over whatever replaced it — the write is refused where the recorded lineage
+// has already moved past this flow's, which is exactly the case where it would
+// name a binding the host no longer holds.
+func (p *providerAuth) confirmCause(flow *authFlow) string {
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
 		ConnectionID:       flow.connectionID,
@@ -753,11 +801,32 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 		UpdatedAt:          authNow().UnixMilli(),
 	}
 
-	if err := p.ledger.write(record); err != nil {
-		return p.fail(ctx, flow, authCauseProcess, true)
+	prior, present, err := p.ledger.read(flow.providerID)
+	if err != nil {
+		return authCauseProcess
 	}
 
-	return nil
+	if present && authLedgerAdvancedPast(prior, record) {
+		return authCauseBindingConflict
+	}
+
+	if err := p.ledger.write(record); err != nil {
+		return authCauseProcess
+	}
+
+	return ""
+}
+
+// authLedgerAdvancedPast reports whether the recorded lineage already belongs
+// to something later than the record offered. A removal moves the binding
+// generation and every fresh authorize moves the revision, so either one ahead
+// means a successor owns the provider's entry.
+func authLedgerAdvancedPast(prior authLedgerRecord, record authLedgerRecord) bool {
+	if prior.BindingGeneration != record.BindingGeneration {
+		return prior.BindingGeneration > record.BindingGeneration
+	}
+
+	return prior.Revision > record.Revision
 }
 
 // abandonedCause reports the cause a leg answers with when the flow reached a

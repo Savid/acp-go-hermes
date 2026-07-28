@@ -485,6 +485,11 @@ func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	}
 }
 
+// TestAuthorizeNativeFailurePaths walks every refusal the native start can
+// draw. Each one is asserted to cancel what it refused: hermes started a login
+// at the provider before the wrapper judged it, and a veto that leaves that
+// login running has nothing left to stop it — the safety deadline is armed only
+// on the success path.
 func TestAuthorizeNativeFailurePaths(t *testing.T) {
 	t.Parallel()
 
@@ -496,28 +501,37 @@ func TestAuthorizeNativeFailurePaths(t *testing.T) {
 	_, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "r1"))
 	requireAuthCause(t, err, authCauseProviderRefused)
 
-	client.authStartErr = nil
-	client.authStart = nativehermes.AuthStart{SessionID: "s", Flow: nativehermes.AuthFlowPKCE, URL: testPKCEURL}
-
-	_, err = callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "r2"))
-	requireAuthCause(t, err, authCauseNativeVeto)
-
-	client.authStart = nativehermes.AuthStart{SessionID: "s", Flow: nativehermes.AuthFlowDeviceCode, URL: "https://127.0.0.1/device"}
-
-	_, err = callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "r3"))
-	requireAuthCause(t, err, authCauseUnsupportedVariant)
-
-	client.authStart = nativehermes.AuthStart{SessionID: "s", Flow: nativehermes.AuthFlowDeviceCode, URL: "http://accounts.x.ai/device"}
-
-	_, err = callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "r4"))
-	requireAuthCause(t, err, authCauseNativeVeto)
-
-	client.authStart = nativehermes.AuthStart{
-		SessionID: "s", Flow: nativehermes.AuthFlowDeviceCode, URL: testDeviceURL, UserCode: "</script>ABCD",
+	if len(client.authCancelled) != 0 {
+		t.Fatalf("a start that never began was cancelled: %v", client.authCancelled)
 	}
 
-	_, err = callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, "r5"))
-	requireAuthCause(t, err, authCauseNativeVeto)
+	client.authStartErr = nil
+
+	cases := []struct {
+		requestID string
+		start     nativehermes.AuthStart
+		cause     string
+	}{
+		{"r2", nativehermes.AuthStart{SessionID: "s2", Flow: nativehermes.AuthFlowPKCE, URL: testPKCEURL}, authCauseNativeVeto},
+		{"r3", nativehermes.AuthStart{SessionID: "s3", Flow: nativehermes.AuthFlowDeviceCode, URL: "https://127.0.0.1/device"}, authCauseUnsupportedVariant},
+		{"r4", nativehermes.AuthStart{SessionID: "s4", Flow: nativehermes.AuthFlowDeviceCode, URL: "http://accounts.x.ai/device"}, authCauseNativeVeto},
+		{"r5", nativehermes.AuthStart{SessionID: "s5", Flow: nativehermes.AuthFlowDeviceCode, URL: testDeviceURL, UserCode: "</script>ABCD"}, authCauseNativeVeto},
+	}
+
+	for index, testCase := range cases {
+		client.authStart = testCase.start
+
+		_, err = callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, testProviderID, nativehermes.AuthFlowDeviceCode, testCase.requestID))
+		requireAuthCause(t, err, testCase.cause)
+
+		if len(client.authCancelled) != index+1 {
+			t.Fatalf("%s: native cancels = %v, want the refused login stopped", testCase.requestID, client.authCancelled)
+		}
+
+		if client.authCancelled[index] != testCase.start.SessionID {
+			t.Fatalf("%s: cancelled %q, want %q", testCase.requestID, client.authCancelled[index], testCase.start.SessionID)
+		}
+	}
 }
 
 func TestAuthorizeFailsClosedWhenTheGatewayIsGone(t *testing.T) {
@@ -602,6 +616,146 @@ func TestCallbackAppliesASecretAndReachesSaved(t *testing.T) {
 
 	if material.AccessToken != "sk-operator-key" || material.AuthType != nativehermes.AuthTypeAPIKey {
 		t.Fatalf("reserved slot material = %#v", material)
+	}
+}
+
+// TestSecretApplyOutlivingACancelAnswersForTheClosedFlow pins the answer a
+// secret apply gives when the owner closed the flow while the slot write was in
+// flight. The write landed, so the key is resident and its provenance is still
+// recorded — but reporting a login the owner abandoned as saved tells the host
+// a connection it cancelled came up.
+func TestSecretApplyOutlivingACancelAnswersForTheClosedFlow(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	result, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	flowID := mustType[authAuthorizeResult](t, result).FlowID
+
+	original := authWriteSlot
+	authWriteSlot = func(home string, providerID string, label string, material nativehermes.AuthMaterial) error {
+		if _, cancelErr := callLeg(t, agent, AuthCancelMethod, map[string]any{
+			"sessionId": string(testSessionID), "providerId": "openai", "flowId": flowID,
+		}); cancelErr != nil {
+			t.Errorf("cancel: %v", cancelErr)
+		}
+
+		return original(home, providerID, label, material)
+	}
+
+	t.Cleanup(func() { authWriteSlot = original })
+
+	_, err = callLeg(t, agent, AuthCallbackMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": "openai",
+		"method": authAPIKeyMethodID, "flowId": flowID, "input": "sk-operator-key",
+	})
+	requireAuthCause(t, err, authCauseFlowCancelled)
+
+	record, present, err := agent.providerAuth.ledger.read("openai")
+	if err != nil || !present {
+		t.Fatalf("ledger read: %v present=%v", err, present)
+	}
+
+	if record.State != authLedgerConfirmed {
+		t.Fatalf("ledger state = %q, want the resident key recorded", record.State)
+	}
+}
+
+// TestALateConfirmationLeavesTheSuccessorsLineageAlone pins the provider's one
+// ledger entry against a leg that outlived its own flow. A fresh authorize
+// supersedes the old record and mints the next revision; the superseded flow's
+// confirmation would otherwise rename its own lineage over it, leaving the host
+// holding one lineage and the ledger naming another.
+func TestALateConfirmationLeavesTheSuccessorsLineageAlone(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	result, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	flowID := mustType[authAuthorizeResult](t, result).FlowID
+
+	var successor string
+
+	original := authWriteSlot
+	authWriteSlot = func(home string, providerID string, label string, material nativehermes.AuthMaterial) error {
+		second, authorizeErr := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r2"))
+		if authorizeErr != nil {
+			t.Errorf("successor authorize: %v", authorizeErr)
+		} else {
+			successor = mustType[authAuthorizeResult](t, second).FlowID
+		}
+
+		return original(home, providerID, label, material)
+	}
+
+	t.Cleanup(func() { authWriteSlot = original })
+
+	_, err = callLeg(t, agent, AuthCallbackMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": "openai",
+		"method": authAPIKeyMethodID, "flowId": flowID, "input": "sk-operator-key",
+	})
+	requireAuthCause(t, err, authCauseFlowCancelled)
+
+	record, present, err := agent.providerAuth.ledger.read("openai")
+	if err != nil || !present {
+		t.Fatalf("ledger read: %v present=%v", err, present)
+	}
+
+	if record.FlowID != successor || record.Revision != 2 {
+		t.Fatalf("ledger names %+v, want the successor at revision 2", record)
+	}
+}
+
+// TestSecretApplyFailsClosedWhenTheLedgerCannotBeRead pins the confirmation
+// against a ledger it could not compare. Writing over an entry nobody read is
+// how a late leg renames its lineage over a successor's.
+func TestSecretApplyFailsClosedWhenTheLedgerCannotBeRead(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	generation := seedCatalog(t, agent, client)
+
+	result, err := callLeg(t, agent, AuthAuthorizeMethod, authorizeParams(generation, "openai", authAPIKeyMethodID, "r"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	restoreLedgerHooks(t)
+
+	ledgerReadFile = func(string) ([]byte, error) { return nil, errors.New("read") }
+
+	_, err = callLeg(t, agent, AuthCallbackMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": "openai",
+		"method": authAPIKeyMethodID, "flowId": mustType[authAuthorizeResult](t, result).FlowID,
+		"input": "sk-operator-key",
+	})
+	requireAuthCause(t, err, authCauseProcess)
+}
+
+func TestAuthLedgerAdvancedPast(t *testing.T) {
+	t.Parallel()
+
+	record := authLedgerRecord{Revision: 2, BindingGeneration: 3}
+
+	cases := map[string]struct {
+		prior authLedgerRecord
+		want  bool
+	}{
+		"same":             {authLedgerRecord{Revision: 2, BindingGeneration: 3}, false},
+		"older generation": {authLedgerRecord{Revision: 9, BindingGeneration: 2}, false},
+		"newer generation": {authLedgerRecord{Revision: 1, BindingGeneration: 4}, true},
+		"older revision":   {authLedgerRecord{Revision: 1, BindingGeneration: 3}, false},
+		"newer revision":   {authLedgerRecord{Revision: 3, BindingGeneration: 3}, true},
+	}
+
+	for name, testCase := range cases {
+		if got := authLedgerAdvancedPast(testCase.prior, record); got != testCase.want {
+			t.Fatalf("%s: advancedPast = %v, want %v", name, got, testCase.want)
+		}
 	}
 }
 
