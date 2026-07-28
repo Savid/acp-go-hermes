@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +19,21 @@ import (
 
 const envRunAttended = "ACP_GO_HERMES_RUN_ATTENDED"
 
+// requireRunAttended gates the attended tier and resolves the harness it will
+// launch. Once the gate is set a missing CLI is a hard failure rather than the
+// shared resolver's skip: the operator has committed a quarter hour of their
+// attention to watching for a login URL, and a sub-second skip scrolling past in
+// -v output is indistinguishable from a login that completed.
 func requireRunAttended(t *testing.T) {
 	t.Helper()
 	requireRunIntegration(t)
 
 	if os.Getenv(envRunAttended) != "1" {
 		t.Skipf("set %s=1 to run the attended provider-auth tier", envRunAttended)
+	}
+
+	if _, err := exec.LookPath(envOrDefault(envHermesPath, "hermes")); err != nil {
+		t.Fatalf("%s=1 requires the hermes CLI: %v", envRunAttended, err)
 	}
 }
 

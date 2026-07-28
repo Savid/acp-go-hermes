@@ -57,8 +57,18 @@ test-integration-live:
 	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes
 
 ## test-integration-attended: run provider-auth flows a human must approve in real time
+# go test exits 0 when -run selects nothing, so the exit status alone reports a
+# successful login for a tier that ran none. The run is piped through tee rather
+# than redirected so the relayed login URL still reaches the watching operator
+# live, and the guard requires a top-level pass line, which no empty selection
+# and no skip can produce.
 test-integration-attended:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
+	@log=$$(mktemp); rc=$$(mktemp); \
+	{ ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); ran=$$(grep -c '^--- PASS: TestAttended' "$$log"); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$ran" -gt 0 ] || { echo 'no attended provider-auth login ran: -run TestAttended selected nothing'; exit 1; }
 
 ## test-integration-keystore: run credential-residence tests against the container fixture
 test-integration-keystore:

@@ -29,7 +29,8 @@ const (
 	keystoreRoundTrip       = "/usr/local/bin/roundtrip.sh"
 	keystoreProbePath       = "/usr/local/bin/residence.test"
 	keystoreBrowserShimPath = "/usr/local/bin/browser-shim.test"
-	keystoreBrowserShimCase = "^TestLoginNeverExecsABrowserLauncher$"
+	keystoreBrowserShimTest = "TestLoginNeverExecsABrowserLauncher"
+	keystoreBrowserShimCase = "^" + keystoreBrowserShimTest + "$"
 )
 
 func requireRunKeystore(t *testing.T) {
@@ -230,8 +231,15 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 		t.Fatalf("the launcher probe exited %d", code)
 	}
 
-	if !strings.Contains(string(logs), "PASS") {
-		t.Fatalf("the launcher probe reported no pass: %s", logs)
+	// A probe binary whose selector matches nothing prints a bare PASS and exits
+	// 0, so both the status and that word report success for a run in which the
+	// launcher path never executed. Only the per-test line names the case.
+	if strings.Contains(string(logs), "no tests to run") {
+		t.Fatalf("the launcher probe selected no test: %s", logs)
+	}
+
+	if !strings.Contains(string(logs), "--- PASS: "+keystoreBrowserShimTest) {
+		t.Fatalf("the launcher probe did not run %s: %s", keystoreBrowserShimTest, logs)
 	}
 }
 
