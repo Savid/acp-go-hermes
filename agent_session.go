@@ -220,7 +220,7 @@ func (a *Agent) loadOrResumeSession(
 			return nil, applyErr
 		}
 
-		a.reinjectActiveSession(existing, meta)
+		a.reinjectActiveSession(ctx, existing, meta)
 
 		return existing, nil
 	}
@@ -929,7 +929,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		return nil, err
 	}
 
-	a.injectProviderAuth(existing.Root, meta)
+	a.injectProviderAuth(ctx, existing.Root, meta)
 
 	a.observe.RecordHermesProcessStart(ctx)
 	processRoot := a.processes.register()

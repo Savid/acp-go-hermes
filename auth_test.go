@@ -526,11 +526,11 @@ func TestInjectProviderAuthIsSkippedWhenNothingWasSupplied(t *testing.T) {
 
 	agent, client := newAuthAgent(t)
 
-	agent.injectProviderAuth(client.xdg.Root, sessionMeta{})
+	agent.injectProviderAuth(context.Background(), client.xdg.Root, sessionMeta{})
 
 	bare := NewAgent()
 	outcome := new(string)
-	bare.injectProviderAuth(client.xdg.Root, sessionMeta{injectionOutcome: outcome})
+	bare.injectProviderAuth(context.Background(), client.xdg.Root, sessionMeta{injectionOutcome: outcome})
 
 	if *outcome != "" {
 		t.Fatalf("an agent without the surface recorded %q", *outcome)
@@ -553,7 +553,7 @@ func TestReinjectActiveSessionRecordsTheTriState(t *testing.T) {
 		injectionOutcome:     new(string),
 	}
 
-	agent.reinjectActiveSession(session, meta)
+	agent.reinjectActiveSession(context.Background(), session, meta)
 
 	if meta.injection() != authInjectionApplied {
 		t.Fatalf("first injection = %q", meta.injection())
@@ -573,13 +573,13 @@ func TestReinjectActiveSessionRecordsTheTriState(t *testing.T) {
 	session.mu.Unlock()
 
 	second := sessionMeta{ProviderAuth: meta.ProviderAuth, ProviderAuthSupplied: true, injectionOutcome: new(string)}
-	agent.reinjectActiveSession(session, second)
+	agent.reinjectActiveSession(context.Background(), session, second)
 
 	if second.injection() != authInjectionConflict {
 		t.Fatalf("injection without a live home = %q", second.injection())
 	}
 
-	NewAgent().reinjectActiveSession(session, second)
+	NewAgent().reinjectActiveSession(context.Background(), session, second)
 }
 
 func TestLifecycleResponseMetaOmitsAnInjectionThatNeverRan(t *testing.T) {
@@ -708,7 +708,7 @@ func TestInjectProviderAuthRecordsTheOutcome(t *testing.T) {
 	agent, client := newAuthAgent(t)
 
 	meta := sessionMeta{}.withProviderAuth(map[string]ProviderAuthBinding{testProviderID: testBinding()})
-	agent.injectProviderAuth(client.xdg.Root, meta)
+	agent.injectProviderAuth(context.Background(), client.xdg.Root, meta)
 
 	if meta.injection() != authInjectionApplied {
 		t.Fatalf("injection outcome = %q", meta.injection())

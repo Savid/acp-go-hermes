@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -515,29 +516,29 @@ func TestInjectionOutcomesAreTheFourFixedCases(t *testing.T) {
 
 	bindings := map[string]ProviderAuthBinding{testProviderID: testBinding()}
 
-	if outcome := broker.inject(home, bindings); outcome != authInjectionApplied {
+	if outcome := broker.inject(context.Background(), home, bindings); outcome != authInjectionApplied {
 		t.Fatalf("empty entry outcome = %q", outcome)
 	}
 
-	if outcome := broker.inject(home, bindings); outcome != authInjectionNoop {
+	if outcome := broker.inject(context.Background(), home, bindings); outcome != authInjectionNoop {
 		t.Fatalf("equal live entry outcome = %q", outcome)
 	}
 
 	differing := testBinding()
 	differing.Credential.HermesOAuth = &ProviderHermesOAuthCredential{AuthType: ProviderAuthTypeOAuth, AccessToken: "other"}
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: differing}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{testProviderID: differing}); outcome != authInjectionConflict {
 		t.Fatalf("differing live entry outcome = %q", outcome)
 	}
 
 	foreign := testBinding()
 	foreign.ConnectionID = "unknown-connection"
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: foreign}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{testProviderID: foreign}); outcome != authInjectionConflict {
 		t.Fatalf("unknown connection outcome = %q", outcome)
 	}
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{}); outcome != authInjectionNoop {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{}); outcome != authInjectionNoop {
 		t.Fatalf("empty binding map outcome = %q", outcome)
 	}
 }
@@ -550,7 +551,7 @@ func TestInjectionRefusesARotatingCredential(t *testing.T) {
 	binding := testBinding()
 	binding.Credential.HermesOAuth.RefreshToken = "native-refresh"
 
-	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
+	outcome := agent.providerAuth.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
 	if outcome != authInjectionConflict {
 		t.Fatalf("a refresh token for an unrecorded provider produced %q", outcome)
 	}
@@ -569,7 +570,7 @@ func TestInjectionEvaluatesEveryBinding(t *testing.T) {
 	stale := testBinding()
 	stale.Credential = ProviderCredential{Type: "api"}
 
-	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{
+	outcome := agent.providerAuth.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{
 		"aardvark":     stale,
 		testProviderID: testBinding(),
 	})
@@ -592,7 +593,7 @@ func TestInjectionAcceptsOnlyTheHermesVariant(t *testing.T) {
 	binding := testBinding()
 	binding.Credential = ProviderCredential{Type: "api"}
 
-	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
+	outcome := agent.providerAuth.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: binding})
 	if outcome != authInjectionConflict {
 		t.Fatalf("a foreign variant produced %q", outcome)
 	}
@@ -611,14 +612,14 @@ func TestInjectionConflictsWhenTheLineageDiffers(t *testing.T) {
 	agent, client := newAuthAgent(t)
 	broker := agent.providerAuth
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionApplied {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionApplied {
 		t.Fatalf("first injection = %q", outcome)
 	}
 
 	advanced := testBinding()
 	advanced.Revision = 2
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: advanced}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: advanced}); outcome != authInjectionConflict {
 		t.Fatalf("a revision mismatch produced %q", outcome)
 	}
 
@@ -626,7 +627,7 @@ func TestInjectionConflictsWhenTheLineageDiffers(t *testing.T) {
 
 	ledgerReadFile = func(string) ([]byte, error) { return nil, errors.New("read") }
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
 		t.Fatalf("an unreadable ledger produced %q", outcome)
 	}
 }
@@ -641,7 +642,7 @@ func TestInjectionConflictsWhenTheStoreCannotBeReadOrWritten(t *testing.T) {
 		t.Fatalf("corrupt store: %v", err)
 	}
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
 		t.Fatalf("a corrupt store produced %q", outcome)
 	}
 
@@ -651,13 +652,13 @@ func TestInjectionConflictsWhenTheStoreCannotBeReadOrWritten(t *testing.T) {
 
 	ledgerRename = func(string, string) error { return errors.New("rename") }
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
 		t.Fatalf("an unwritable ledger produced %q", outcome)
 	}
 
 	restoreLedgerHooks(t)
 
-	if outcome := broker.inject(filepath.Join(client.xdg.Root, "auth.json", "nested"), map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), filepath.Join(client.xdg.Root, "auth.json", "nested"), map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
 		t.Fatalf("an unwritable home produced %q", outcome)
 	}
 }
@@ -675,7 +676,7 @@ func TestInjectionSurvivesADisconnectedLineage(t *testing.T) {
 		t.Fatalf("seed removed record: %v", err)
 	}
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionApplied {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionApplied {
 		t.Fatalf("injection after a disconnect = %q", outcome)
 	}
 }
@@ -698,7 +699,7 @@ func TestInjectionRefusesACounterRegression(t *testing.T) {
 	replayed.Revision = 4
 	replayed.BindingGeneration = 3
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: replayed}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{testProviderID: replayed}); outcome != authInjectionConflict {
 		t.Fatalf("a replayed revision produced %q", outcome)
 	}
 
@@ -706,7 +707,7 @@ func TestInjectionRefusesACounterRegression(t *testing.T) {
 	superseded.Revision = 5
 	superseded.BindingGeneration = 2
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: superseded}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{testProviderID: superseded}); outcome != authInjectionConflict {
 		t.Fatalf("a replayed binding generation produced %q", outcome)
 	}
 
@@ -724,7 +725,7 @@ func TestInjectionRefusesACounterRegression(t *testing.T) {
 	current.Revision = 5
 	current.BindingGeneration = 3
 
-	if outcome := broker.inject(home, map[string]ProviderAuthBinding{testProviderID: current}); outcome != authInjectionApplied {
+	if outcome := broker.inject(context.Background(), home, map[string]ProviderAuthBinding{testProviderID: current}); outcome != authInjectionApplied {
 		t.Fatalf("the ledger's own counters into an empty native home produced %q", outcome)
 	}
 }
@@ -745,7 +746,7 @@ func TestInjectionRefusesABindingItsDisconnectSuperseded(t *testing.T) {
 		t.Fatalf("seed removed record: %v", err)
 	}
 
-	if outcome := broker.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
+	if outcome := broker.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()}); outcome != authInjectionConflict {
 		t.Fatalf("a pre-disconnect binding produced %q", outcome)
 	}
 
@@ -870,7 +871,7 @@ func TestInjectionConflictsWhenTheSlotCannotBeWritten(t *testing.T) {
 
 	t.Cleanup(func() { authWriteSlot = original })
 
-	outcome := agent.providerAuth.inject(client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()})
+	outcome := agent.providerAuth.inject(context.Background(), client.xdg.Root, map[string]ProviderAuthBinding{testProviderID: testBinding()})
 	if outcome != authInjectionConflict {
 		t.Fatalf("an unwritable slot produced %q", outcome)
 	}

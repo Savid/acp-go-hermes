@@ -89,6 +89,10 @@ type authFlow struct {
 	credentialExpiresAt int64
 	harvested           bool
 
+	// claimed marks the flow as held by the one leg currently driving its
+	// native mutation.
+	claimed bool
+
 	nextProbeAt   time.Time
 	probeInterval time.Duration
 
@@ -172,12 +176,27 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	key := authFlowKey{sessionID: session.id, providerID: request.providerID}
 
+	// Everything from the replay check to the settled mint is held against
+	// another authorize for the same key, which is what makes the idempotency
+	// key mean anything: without it neither request has published a flow when
+	// the other looks for one.
+	release, admitted := p.admit(ctx, key)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer release()
+
 	if replay, ok, replayErr := p.replayAuthorize(ctx, key, request.authorizeRequestID); ok {
 		if replayErr != nil {
 			return nil, replayErr
 		}
 
 		return replay, nil
+	}
+
+	if p.requestRetired(key, request.authorizeRequestID) {
+		return nil, invalidAuthField(authFieldAuthorizeRequestID)
 	}
 
 	method, err := p.resolveMethod(request)
@@ -234,7 +253,14 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		disarm:             make(chan struct{}),
 	}
 
-	p.registerFlow(ctx, key, flow)
+	// The flow is published before the mint that fills it in has run: a repeat
+	// of the idempotency key has something to find from the moment the flow
+	// exists, and a mint failure addresses a real flow rather than nothing. The
+	// retained record outlives every terminal transition, so the key answers
+	// for as long as the session lives.
+	if publishErr := p.publishFlow(ctx, key, flow); publishErr != nil {
+		return nil, publishErr
+	}
 
 	mint, cause := p.mintPresentation(ctx, session, flow)
 
@@ -245,40 +271,23 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, failure
 	}
 
+	// The mint outlived a close that swept this flow: the login it started is
+	// stoppable only through the id the commit just recorded, and close read
+	// that id before the commit wrote it. Cancelling here is what leaves no
+	// login running for a session nobody can address.
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		p.cancelNativeFlow(ctx, session, flow)
+
+		failure := authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+		p.settle(flow, failure)
+
+		return nil, failure
+	}
+
 	p.settle(flow, nil)
 	p.armCompleter(flow)
 
 	return mint.presentation, nil
-}
-
-// registerFlow terminalizes the flow a new authorize replaces and publishes the
-// new record in one step, before the mint that fills it in has run: a repeat of
-// the idempotency key has something to find from the moment the flow exists,
-// and a mint failure addresses a real flow rather than nothing. The retained
-// record outlives every terminal transition, so the key answers for as long as
-// the session lives.
-func (p *providerAuth) registerFlow(ctx context.Context, key authFlowKey, flow *authFlow) {
-	p.mu.Lock()
-
-	superseded := p.flows[key]
-	if superseded != nil {
-		delete(p.byID, superseded.id)
-
-		superseded.state = authStateCancelled
-		superseded.reason = authReasonSuperseded
-
-		superseded.stopCompleter()
-	}
-
-	p.flows[key] = flow
-	p.byID[flow.id] = flow
-	p.retained[key] = flow
-
-	p.mu.Unlock()
-
-	if superseded != nil {
-		p.cancelNative(ctx, superseded)
-	}
 }
 
 // commitMint settles what the native start produced onto the flow record.
@@ -562,12 +571,23 @@ func (p *providerAuth) expire(flow *authFlow) {
 // provider-side cancellation: an issued device code stays valid at the provider
 // until it expires there.
 func (p *providerAuth) cancelNative(ctx context.Context, flow *authFlow) {
-	if flow.nativeSessionID == "" {
+	session, err := p.agent.session(flow.sessionID)
+	if err != nil {
 		return
 	}
 
-	session, err := p.agent.session(flow.sessionID)
-	if err != nil {
+	p.cancelNativeFlow(ctx, session, flow)
+}
+
+// cancelNativeFlow cancels through a session the caller already resolved. The
+// native flow id is read under the mutex because the mint commits it there, and
+// the leg that cancels is routinely the one racing that commit.
+func (p *providerAuth) cancelNativeFlow(ctx context.Context, session *session, flow *authFlow) {
+	p.mu.Lock()
+	nativeSessionID := flow.nativeSessionID
+	p.mu.Unlock()
+
+	if nativeSessionID == "" {
 		return
 	}
 
@@ -579,7 +599,7 @@ func (p *providerAuth) cancelNative(ctx context.Context, flow *authFlow) {
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
 
-	_ = client.AuthCancelFlow(callCtx, flow.nativeSessionID)
+	_ = client.AuthCancelFlow(callCtx, nativeSessionID)
 }
 
 func (f *authFlow) stopCompleter() {
@@ -638,11 +658,11 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, invalidAuthField(authFieldMethod)
 	}
 
-	state, callbackInput := p.flowGate(flow)
-
-	if authTerminal(state) {
-		return nil, authFailed(authCauseFlowState, providerID, method, flowID)
+	if claimErr := p.claimFlow(flow); claimErr != nil {
+		return nil, claimErr
 	}
+
+	defer p.releaseFlow(flow)
 
 	if input == "" || len(input) > authMaxSecretBytes {
 		return nil, invalidAuthField(authFieldInput)
@@ -652,20 +672,20 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return p.applySecret(ctx, session, flow, input)
 	}
 
-	if callbackInput == "" {
+	if p.callbackInput(flow) == "" {
 		return nil, invalidAuthField(authFieldInput)
 	}
 
 	return p.submitCode(ctx, session, flow, input)
 }
 
-// flowGate reads the two record fields a callback is admitted on. Both are
-// settled by the mint, which a callback can race.
-func (p *providerAuth) flowGate(flow *authFlow) (string, string) {
+// callbackInput reads the value the mint published as this flow's expected
+// paste-back, which a callback can race the mint for.
+func (p *providerAuth) callbackInput(flow *authFlow) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return flow.state, flow.presentation.CallbackInput
+	return flow.presentation.CallbackInput
 }
 
 // applySecret writes an operator-supplied key into the reserved slot. No
@@ -675,6 +695,21 @@ func (p *providerAuth) applySecret(ctx context.Context, session *session, flow *
 	home := session.authHome()
 	if home == "" {
 		return nil, p.fail(ctx, flow, authCauseTransport, true)
+	}
+
+	release, err := p.lockFlowSlot(ctx, flow, home)
+	if err != nil {
+		return nil, err
+	}
+
+	defer release()
+
+	// The recorded lineage is compared before the write and not only after it.
+	// A leg that writes first and compares second leaves the key resident under
+	// a ledger entry a disconnect moved past — live at the provider, skipped by
+	// inventory, and invisible on every host surface.
+	if cause := p.lineageCause(flow); cause != "" {
+		return nil, p.fail(ctx, flow, cause, false)
 	}
 
 	material := nativehermes.AuthMaterial{
@@ -752,6 +787,20 @@ func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow 
 		return p.fail(ctx, flow, authCauseTransport, true)
 	}
 
+	release, err := p.lockFlowSlot(ctx, flow, home)
+	if err != nil {
+		return err
+	}
+
+	defer release()
+
+	// The lineage is read before the migration for the same reason the secret
+	// apply reads it before its write: a disconnect that already proved the
+	// slot absent must not have a labelled slot appear behind it.
+	if cause := p.lineageCause(flow); cause != "" {
+		return p.fail(ctx, flow, cause, false)
+	}
+
 	migrated, migrateErr := authMigrateSlot(home, flow.providerID, authSlotLabel(flow.connectionID), flow.poolSnapshot)
 	if migrateErr != nil || !migrated {
 		return p.fail(ctx, flow, authCauseHarvestFailed, true)
@@ -789,7 +838,37 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 // has already moved past this flow's, which is exactly the case where it would
 // name a binding the host no longer holds.
 func (p *providerAuth) confirmCause(flow *authFlow) string {
-	record := authLedgerRecord{
+	if cause := p.lineageCause(flow); cause != "" {
+		return cause
+	}
+
+	if err := p.ledger.write(authConfirmation(flow)); err != nil {
+		return authCauseProcess
+	}
+
+	return ""
+}
+
+// lineageCause reports the cause that stops a mutation this flow no longer owns
+// — the provider's recorded lineage has moved past it, or it could not be read
+// at all. Both callers hold the credential-slot gate across the check and the
+// mutation it admits, so what it reports cannot go stale under them.
+func (p *providerAuth) lineageCause(flow *authFlow) string {
+	prior, present, err := p.ledger.read(flow.providerID)
+	if err != nil {
+		return authCauseProcess
+	}
+
+	if present && authLedgerAdvancedPast(prior, authConfirmation(flow)) {
+		return authCauseBindingConflict
+	}
+
+	return ""
+}
+
+// authConfirmation is the record a completed leg writes and compares against.
+func authConfirmation(flow *authFlow) authLedgerRecord {
+	return authLedgerRecord{
 		ProviderID:         flow.providerID,
 		ConnectionID:       flow.connectionID,
 		Revision:           flow.revision,
@@ -800,21 +879,6 @@ func (p *providerAuth) confirmCause(flow *authFlow) string {
 		CreatedAt:          flow.createdAt,
 		UpdatedAt:          authNow().UnixMilli(),
 	}
-
-	prior, present, err := p.ledger.read(flow.providerID)
-	if err != nil {
-		return authCauseProcess
-	}
-
-	if present && authLedgerAdvancedPast(prior, record) {
-		return authCauseBindingConflict
-	}
-
-	if err := p.ledger.write(record); err != nil {
-		return authCauseProcess
-	}
-
-	return ""
 }
 
 // authLedgerAdvancedPast reports whether the recorded lineage already belongs
@@ -932,10 +996,16 @@ func (p *providerAuth) status(ctx context.Context, params json.RawMessage) (any,
 // raised to the floor, and a native slow_down adds five seconds to it, which
 // the next status reports through the slower cadence it produces.
 func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFlow) {
+	if !p.tryClaimFlow(flow) {
+		return
+	}
+
+	defer p.releaseFlow(flow)
+
 	p.mu.Lock()
 
 	now := authNow()
-	if authTerminal(flow.state) || flow.nativeSessionID == "" || now.Before(flow.nextProbeAt) {
+	if flow.nativeSessionID == "" || now.Before(flow.nextProbeAt) {
 		p.mu.Unlock()
 
 		return
@@ -1037,11 +1107,26 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*session, *auth
 // as cancelled/session_closed and invoking native cancel. It runs before the
 // native interrupt, so a flow is never abandoned to a process already being
 // torn down. Closing the session is also what ends the reach of an idempotency
-// key: the retained records go with it.
+// key: the retained and retired records go with it.
+//
+// The id is marked closed in the same critical section that takes the cleanup
+// set, which is what makes the set complete: an authorize that has not yet
+// published cannot publish afterwards, so there is no flow left for close to
+// have missed. Waiting for the legs already in flight would be the other way to
+// get that, and it would block teardown for the length of an unbounded native
+// call.
 func (p *providerAuth) closeSession(ctx context.Context, sessionID acp.SessionId) {
 	p.mu.Lock()
 
+	p.closedSessions[sessionID] = struct{}{}
+
 	pending := make([]*authFlow, 0, len(p.flows))
+
+	for key := range p.retired {
+		if key.sessionID == sessionID {
+			delete(p.retired, key)
+		}
+	}
 
 	for key, flow := range p.retained {
 		if key.sessionID != sessionID {

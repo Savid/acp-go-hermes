@@ -102,6 +102,20 @@ func authMethodNames() []string {
 // providerAuth is the agent-scoped broker behind the provider-auth legs. It
 // owns the current method catalog, the per-session flow records, and the
 // durable values-free ledger.
+//
+// Every leg here runs concurrently with every other one. The ACP connection
+// dispatches each inbound request on its own goroutine and cancels that
+// request's context when the handler returns; only notifications are
+// serialized. So two legs addressing the same flow, the same session, or the
+// same native credential store are ordinary, and every read state → native
+// call → write state sequence on this surface is a check-then-set whose window
+// is the whole native call. Nothing in the field-level locking below closes
+// that window: each individual access is already guarded, so the outcome is a
+// lost update rather than a data race, and the race detector reports nothing.
+// The four admission primitives in auth_admission.go are what make those
+// sequences indivisible — session admission, the per-(session, provider)
+// authorize gate, the per-flow claim, and the credential-slot gate keyed on the
+// native home.
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
@@ -114,6 +128,14 @@ type providerAuth struct {
 	// retained holds the newest flow per key whatever its state, so a repeated
 	// idempotency key is answerable for as long as the session lives.
 	retained map[authFlowKey]*authFlow
+	// retired holds the idempotency keys a later authorize replaced, per key.
+	retired map[authFlowKey]map[string]struct{}
+	// closedSessions is the tombstone publication checks against.
+	closedSessions map[acp.SessionId]struct{}
+	// admissions gates authorize per (session, provider); slots gates every
+	// mutation of one native home's credential store.
+	admissions map[authFlowKey]*authGate
+	slots      map[string]*authGate
 }
 
 type authFlowKey struct {
@@ -138,11 +160,15 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	return &providerAuth{
-		agent:    agent,
-		ledger:   ledger,
-		flows:    make(map[authFlowKey]*authFlow),
-		byID:     make(map[string]*authFlow),
-		retained: make(map[authFlowKey]*authFlow),
+		agent:          agent,
+		ledger:         ledger,
+		flows:          make(map[authFlowKey]*authFlow),
+		byID:           make(map[string]*authFlow),
+		retained:       make(map[authFlowKey]*authFlow),
+		retired:        make(map[authFlowKey]map[string]struct{}),
+		closedSessions: make(map[acp.SessionId]struct{}),
+		admissions:     make(map[authFlowKey]*authGate),
+		slots:          make(map[string]*authGate),
 	}
 }
 
@@ -308,9 +334,20 @@ func authNativeCause(err error) string {
 }
 
 // authSession resolves the session a leg addresses. An unknown, unloaded, or
-// tombstoned session gets the uniform unknown-session rejection.
+// tombstoned session gets the uniform unknown-session rejection, and so does
+// one this broker has already swept: a leg that arrives after close is answered
+// cheaply here rather than deep inside a native call.
 func (p *providerAuth) authSession(id string) (*session, error) {
-	return p.agent.session(acp.SessionId(id))
+	session, err := p.agent.session(acp.SessionId(id))
+	if err != nil {
+		return nil, err
+	}
+
+	if p.sessionClosed(session.id) {
+		return nil, unknownSessionError()
+	}
+
+	return session, nil
 }
 
 // authNativeClient reports the session's live gateway, which is also the home
@@ -490,19 +527,19 @@ func (p *providerAuth) goSafe(name string, fn func()) {
 // injectProviderAuth applies the host's bound credentials to a native home
 // before the harness first reads it, and records the values-free tri-state on
 // the cell the lifecycle response reads.
-func (a *Agent) injectProviderAuth(home string, meta sessionMeta) {
+func (a *Agent) injectProviderAuth(ctx context.Context, home string, meta sessionMeta) {
 	if a.providerAuth == nil || meta.injectionOutcome == nil {
 		return
 	}
 
-	*meta.injectionOutcome = a.providerAuth.inject(home, meta.ProviderAuth)
+	*meta.injectionOutcome = a.providerAuth.inject(ctx, home, meta.ProviderAuth)
 }
 
 // reinjectActiveSession re-evaluates injection for a lifecycle request that
 // reuses a running session. The home is live rather than fresh, so a resident
 // entry is answered rather than replaced: the tri-state is still what tells the
 // host whether the credential it holds is the one in the slot.
-func (a *Agent) reinjectActiveSession(existing *session, meta sessionMeta) {
+func (a *Agent) reinjectActiveSession(ctx context.Context, existing *session, meta sessionMeta) {
 	if a.providerAuth == nil || meta.injectionOutcome == nil {
 		return
 	}
@@ -511,7 +548,7 @@ func (a *Agent) reinjectActiveSession(existing *session, meta sessionMeta) {
 	if home == "" {
 		*meta.injectionOutcome = authInjectionConflict
 	} else {
-		*meta.injectionOutcome = a.providerAuth.inject(home, meta.ProviderAuth)
+		*meta.injectionOutcome = a.providerAuth.inject(ctx, home, meta.ProviderAuth)
 	}
 
 	existing.mu.Lock()

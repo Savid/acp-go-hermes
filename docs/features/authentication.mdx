@@ -133,8 +133,19 @@ native flow cancel — it never claims provider-side cancellation, because an
 issued device code stays valid at the provider until it expires there.
 
 Repeating an `authorizeRequestId` returns the recorded presentation verbatim
-with no native call. A different one supersedes the previous flow, after which
-the old `flowId` addresses nothing.
+with no native call, and two identical requests that arrive together produce one
+login rather than two. A different one supersedes the previous flow, after which
+the old `flowId` addresses nothing and the key it carried is refused as an
+invalid `authorizeRequestId` — a delayed retry never destroys the flow that
+replaced it.
+
+Every leg runs on its own goroutine, so two of them routinely address one flow.
+One leg at a time drives a flow's native work: a second `callback` for the same
+flow is answered `flow_state`, and a `status` poll that finds the flow busy
+serves its cached state instead of driving a second completion. Closing the
+session ends the surface for that id — every later leg, including an `authorize`
+that was already in flight, gets the uniform unknown-session rejection, so no
+login is left running behind a session nobody can address.
 
 ### The reserved slot
 
@@ -154,6 +165,14 @@ when it is used is refused with `cause: "policy"` instead, which consumes
 neither the flow nor its one harvest, so that login stays usable for the life of
 the session that made it. `disconnect` bumps the binding generation first, then
 removes only the exactly-fenced slot and verifies absence.
+
+Hermes rewrites its whole credential document on every mutation, so the adapter
+serializes every write to one session's store: a `disconnect` and any completion
+of that store run one after the other, a completion re-reads the recorded
+lineage before it writes and refuses outright once a `disconnect` moved past it,
+and two providers' callbacks in one session keep each other's slot. A leg whose
+caller goes away while it waits its turn is answered `cause: "timeout"` and
+writes nothing.
 
 ### Access-token expiry is derived
 

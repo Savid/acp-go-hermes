@@ -397,15 +397,21 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 	defer a.mu.Unlock()
 
 	if _, ok := a.deleted[id]; ok {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
+		return nil, unknownSessionError()
 	}
 
 	session := a.sessions[id]
 	if session == nil {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
+		return nil, unknownSessionError()
 	}
 
 	return session, nil
+}
+
+// unknownSessionError is the uniform rejection every surface gives an id nobody
+// knows, so a caller cannot tell an unknown session from a deleted one.
+func unknownSessionError() error {
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
 }
 
 func (a *Agent) activeSession(id acp.SessionId) *session {

@@ -203,57 +203,44 @@ func (p *providerAuth) credential(_ context.Context, params json.RawMessage) (an
 		return nil, err
 	}
 
-	p.mu.Lock()
-	state := flow.state
-	harvested := flow.harvested
-	p.mu.Unlock()
-
-	if state != authStateAuthenticated && state != authStateSaved {
-		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
-	}
-
-	if harvested {
-		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	if claimErr := p.claimHarvest(flow); claimErr != nil {
+		return nil, claimErr
 	}
 
 	record, ok, err := p.ledger.read(flow.providerID)
 	if err != nil || !ok {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	if record.ConnectionID != flow.connectionID || record.Revision != flow.revision || record.BindingGeneration != flow.bindingGeneration {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	home := session.authHome()
 	if home == "" {
-		return nil, authFailed(authCauseTransport, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseTransport)
 	}
 
 	material, ok, err := authReadSlot(home, flow.providerID, authSlotLabel(flow.connectionID))
 	if err != nil || !ok {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	if !authCacheable(flow.providerID, material.RefreshToken) {
-		return nil, authFailed(authCausePolicy, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCausePolicy)
 	}
 
 	expiry, _, err := authReadFlowExpiry(home, flow.providerID, flow.method.Flow)
 	if err != nil {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
 
 	material.AccessExpiresAt = nativehermes.AuthAnchorExpiry(authNow(), expiry)
 
 	variant, err := hermesOAuthCredential(material)
 	if err != nil {
-		return nil, authFailed(authCauseHarvestFailed, flow.providerID, flow.method.ID, flow.id)
+		return nil, p.failHarvest(flow, authCauseHarvestFailed)
 	}
-
-	p.mu.Lock()
-	flow.harvested = true
-	p.mu.Unlock()
 
 	return authCredentialResult{
 		ConnectionID:      flow.connectionID,
@@ -288,7 +275,13 @@ func hermesOAuthCredential(material nativehermes.AuthMaterial) (ProviderCredenti
 // removes only the exactly-fenced reserved slot and verifies absence. It never
 // removes an ambient, environment, or differently fenced entry, and it promises
 // no provider-side revocation.
-func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (any, error) {
+//
+// The whole sequence — ledger read, generation compare, bump, removal, absence
+// proof, removed record — is held against every other mutation of this native
+// home. A completion admitted just before it would otherwise refill the slot
+// after the absence was proved, leaving a live credential behind a ledger entry
+// that says removed.
+func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID, authFieldProviderID, authFieldConnectionID, authFieldBindingGeneration)
 	if err != nil {
 		return nil, err
@@ -319,6 +312,18 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 		return nil, err
 	}
 
+	home := session.authHome()
+	if home == "" {
+		return nil, authFailed(authCauseTransport, providerID, "", "")
+	}
+
+	release, acquired := p.lockSlot(ctx, home)
+	if !acquired {
+		return nil, authFailed(authCauseTimeout, providerID, "", "")
+	}
+
+	defer release()
+
 	record, ok, err := p.ledger.read(providerID)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
@@ -334,11 +339,6 @@ func (p *providerAuth) disconnect(_ context.Context, params json.RawMessage) (an
 
 	if err := p.ledger.write(record); err != nil {
 		return nil, authFailed(authCauseProcess, providerID, "", "")
-	}
-
-	home := session.authHome()
-	if home == "" {
-		return nil, authFailed(authCauseTransport, providerID, "", "")
 	}
 
 	label := authSlotLabel(connectionID)
@@ -374,7 +374,19 @@ const (
 // nothing this writes can be killed by a refresh the adapter never sees. Every
 // binding is evaluated: one refused or stale binding must not deny the host the
 // other providers it configured.
-func (p *providerAuth) inject(home string, bindings map[string]ProviderAuthBinding) string {
+//
+// It holds the credential-slot gate for the same reason a completion does: a
+// lifecycle request that reinjects into a home a session is still serving is
+// one more whole-document writer, and an unserialized one drops whatever slot
+// the leg it overlapped had just written.
+func (p *providerAuth) inject(ctx context.Context, home string, bindings map[string]ProviderAuthBinding) string {
+	release, acquired := p.lockSlot(ctx, home)
+	if !acquired {
+		return authInjectionConflict
+	}
+
+	defer release()
+
 	outcome := authInjectionNoop
 
 	for _, providerID := range sortedBindingKeys(bindings) {
