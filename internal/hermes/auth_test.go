@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +42,7 @@ func TestAuthProvidersReadsIdentityFieldsOnly(t *testing.T) {
 
 		_, _ = w.Write([]byte(`{"providers":[
 			{"id":"xai-oauth","name":"xAI","flow":"device_code","disconnectable":true,
-			 "status":{"connected":true,"token_preview":"…abcd","source":"file",
+			 "status":{"logged_in":true,"token_preview":"…abcd","source":"file",
 			  "source_label":"/home/operator/.hermes/auth.json","last_refresh":null},
 			 "disconnect_command":"rm -f ~/.claude/.credentials.json",
 			 "disconnect_hint":"remove the file yourself"},
@@ -70,7 +70,8 @@ func TestAuthProvidersReadsIdentityFieldsOnly(t *testing.T) {
 		}
 	}
 
-	if providers[0].ID != "xai-oauth" || providers[0].Flow != AuthFlowDeviceCode || !providers[0].Disconnectable {
+	if providers[0].ID != "xai-oauth" || providers[0].Flow != AuthFlowDeviceCode ||
+		!providers[0].Disconnectable || !providers[0].LoggedIn {
 		t.Fatalf("provider = %#v", providers[0])
 	}
 }
@@ -97,8 +98,8 @@ func TestAuthProvidersReportsANonUniformStatusObject(t *testing.T) {
 
 	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"providers":[
-			{"id":"anthropic","name":"Anthropic API Key","flow":"pkce","status":{"connected":false}},
-			{"id":"nous","name":"Nous","flow":"device_code","status":{"connected":true,"token_preview":null,"last_refresh":"2026-01-01"}}
+			{"id":"anthropic","name":"Anthropic API Key","flow":"pkce","status":{"logged_in":false}},
+			{"id":"nous","name":"Nous","flow":"device_code","status":{"logged_in":true,"token_preview":null,"last_refresh":"2026-01-01"}}
 		]}`))
 	})
 
@@ -110,77 +111,8 @@ func TestAuthProvidersReportsANonUniformStatusObject(t *testing.T) {
 	if len(providers) != 2 {
 		t.Fatalf("providers = %#v", providers)
 	}
-}
-
-// nativeEnvCatalog is a verbatim excerpt of hermes 0.19.0's GET /api/env: a flat
-// object keyed by environment-variable name, one descriptor per variable. It
-// carries every class the fold has to separate — a secret variable, one of its
-// aliases, a base-URL override, a region and a service-account path tagged to
-// providers that take no pasted key, and an untagged tool token — and its
-// OPENAI_API_KEY row is the set form, whose redaction previews the operator's
-// own key.
-const nativeEnvCatalog = `{
-	"OPENAI_API_KEY":{"is_set":true,"redacted_value":"sk-p...mnop","description":"OpenAI API (api.openai.com, API key)","url":null,"category":"provider","is_password":true,"tools":[],"advanced":false,"channel_managed":false,"provider":"openai-api","provider_label":"OpenAI API","custom":false},
-	"OPENAI_BASE_URL":{"is_set":false,"redacted_value":null,"description":"OpenAI API base URL override","url":null,"category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"openai-api","provider_label":"OpenAI API","custom":false},
-	"ANTHROPIC_API_KEY":{"is_set":false,"redacted_value":null,"description":"anthropic API key","url":null,"category":"provider","is_password":true,"tools":[],"advanced":true,"channel_managed":false,"provider":"anthropic","provider_label":"Anthropic","custom":false},
-	"ANTHROPIC_TOKEN":{"is_set":false,"redacted_value":null,"description":"anthropic API key","url":null,"category":"provider","is_password":true,"tools":[],"advanced":true,"channel_managed":false,"provider":"anthropic","provider_label":"Anthropic","custom":false},
-	"AWS_REGION":{"is_set":false,"redacted_value":null,"description":"AWS region for Bedrock API calls","url":"https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html","category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"bedrock","provider_label":"AWS Bedrock","custom":false},
-	"VERTEX_CREDENTIALS_PATH":{"is_set":false,"redacted_value":null,"description":"Path to a Google Cloud service account JSON for Vertex AI","url":"https://cloud.google.com/iam/docs/keys-create-delete","category":"provider","is_password":false,"tools":[],"advanced":true,"channel_managed":false,"provider":"vertex","provider_label":"Google Vertex AI","custom":false},
-	"GITHUB_TOKEN":{"is_set":false,"redacted_value":null,"description":"GitHub token for Skills Hub","url":"https://github.com/settings/tokens","category":"tool","is_password":true,"tools":[],"advanced":false,"channel_managed":false,"provider":"","provider_label":"","custom":false}
-}`
-
-func TestAuthAPIKeyProvidersFoldsTheNativeEnvironmentMap(t *testing.T) {
-	t.Parallel()
-
-	server := newAuthTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/env" || r.Method != http.MethodGet {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-
-		_, _ = w.Write([]byte(nativeEnvCatalog))
-	})
-
-	providers, err := server.AuthAPIKeyProviders(context.Background())
-	if err != nil {
-		t.Fatalf("AuthAPIKeyProviders: %v", err)
-	}
-
-	want := []AuthAPIKeyProvider{
-		{ID: "anthropic", Name: "Anthropic"},
-		{ID: "openai-api", Name: "OpenAI API"},
-	}
-	if !reflect.DeepEqual(providers, want) {
-		t.Fatalf("providers = %#v, want %#v", providers, want)
-	}
-
-	encoded, err := json.Marshal(providers)
-	if err != nil {
-		t.Fatalf("marshal providers: %v", err)
-	}
-
-	for _, dropped := range []string{"sk-p", "redacted", "is_set", "description", "tools", "custom"} {
-		if strings.Contains(string(encoded), dropped) {
-			t.Fatalf("the environment catalog forwarded %q: %s", dropped, encoded)
-		}
-	}
-}
-
-func TestAuthAPIKeyProvidersToleratesAnAddedNativeField(t *testing.T) {
-	t.Parallel()
-
-	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(
-			`{"XAI_API_KEY":{"is_password":true,"provider":"xai","provider_label":"xAI","added_upstream":{"nested":1}}}`,
-		))
-	})
-
-	providers, err := server.AuthAPIKeyProviders(context.Background())
-	if err != nil {
-		t.Fatalf("an added upstream field broke enumeration: %v", err)
-	}
-
-	if len(providers) != 1 || providers[0].ID != "xai" || providers[0].Name != "xAI" {
-		t.Fatalf("providers = %#v", providers)
+	if providers[0].LoggedIn || !providers[1].LoggedIn {
+		t.Fatalf("logged-in status = %#v", providers)
 	}
 }
 
@@ -267,7 +199,7 @@ func TestAuthSubmitPollAndCancel(t *testing.T) {
 		seen = append(seen, r.Method+" "+r.URL.Path)
 
 		if r.URL.Path == "/api/providers/oauth/anthropic/poll/s1" {
-			_, _ = w.Write([]byte(`{"status":"complete"}`))
+			_, _ = w.Write([]byte(`{"status":"approved"}`))
 
 			return
 		}
@@ -284,7 +216,7 @@ func TestAuthSubmitPollAndCancel(t *testing.T) {
 		t.Fatalf("AuthPollFlow: %v", err)
 	}
 
-	if poll.State != AuthPollComplete {
+	if poll.State != AuthPollApproved {
 		t.Fatalf("poll = %#v", poll)
 	}
 
@@ -292,16 +224,58 @@ func TestAuthSubmitPollAndCancel(t *testing.T) {
 		t.Fatalf("AuthCancelFlow: %v", err)
 	}
 
+	if err := server.AuthDisconnect(context.Background(), "anthropic"); err != nil {
+		t.Fatalf("AuthDisconnect: %v", err)
+	}
+
 	want := []string{
 		"POST /api/providers/oauth/anthropic/submit",
 		"GET /api/providers/oauth/anthropic/poll/s1",
 		"DELETE /api/providers/oauth/sessions/s1",
+		"DELETE /api/providers/oauth/anthropic",
 	}
 
 	for index, request := range want {
 		if seen[index] != request {
 			t.Fatalf("request %d = %q, want %q", index, seen[index], request)
 		}
+	}
+}
+
+func TestAuthPollNormalizesTheNativeStateVocabulary(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		native string
+		state  string
+	}{
+		{native: "pending", state: AuthPollPending},
+		{native: "approved", state: AuthPollApproved},
+		{native: "denied", state: AuthPollDenied},
+		{native: "expired", state: AuthPollExpired},
+		{native: "error", state: AuthPollError},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.native, func(t *testing.T) {
+			t.Parallel()
+
+			server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"status":%q}`, testCase.native)
+			})
+
+			poll, err := server.AuthPollFlow(context.Background(), "xai-oauth", "s1")
+			if err != nil || poll.State != testCase.state {
+				t.Fatalf("AuthPollFlow = %#v, %v", poll, err)
+			}
+		})
+	}
+
+	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"complete"}`))
+	})
+	if _, err := server.AuthPollFlow(context.Background(), "xai-oauth", "s1"); err == nil {
+		t.Fatal("the removed native complete state was accepted")
 	}
 }
 
@@ -321,10 +295,6 @@ func TestAuthRequestFailurePaths(t *testing.T) {
 		t.Fatal("a malformed body decoded")
 	}
 
-	if _, err := malformed.AuthAPIKeyProviders(context.Background()); err == nil {
-		t.Fatal("a malformed env body decoded")
-	}
-
 	if _, err := malformed.AuthPollFlow(context.Background(), "p", "s"); err == nil {
 		t.Fatal("a malformed poll body decoded")
 	}
@@ -340,6 +310,10 @@ func TestAuthRequestFailurePaths(t *testing.T) {
 
 	if err := refusing.AuthCancelFlow(context.Background(), "s"); err == nil {
 		t.Fatal("a failing cancel was reported clean")
+	}
+
+	if err := refusing.AuthDisconnect(context.Background(), "p"); err == nil {
+		t.Fatal("a failing disconnect was reported clean")
 	}
 
 	if _, err := refusing.AuthStart(context.Background(), "p"); err == nil {
@@ -407,19 +381,6 @@ func TestSecondsToDurationIgnoresAbsentValues(t *testing.T) {
 
 	if secondsToDuration(1.5) != 1500*time.Millisecond {
 		t.Fatalf("secondsToDuration(1.5) = %v", secondsToDuration(1.5))
-	}
-}
-
-func TestAuthSlotLabelIsAdapterOwned(t *testing.T) {
-	t.Parallel()
-
-	label := AuthSlotLabel("connection-1")
-	if !AuthSlotLabelPrefix(label) {
-		t.Fatalf("label %q is not recognised as adapter-owned", label)
-	}
-
-	if AuthSlotLabelPrefix("") || AuthSlotLabelPrefix("operator-entry") {
-		t.Fatal("an unlabelled entry was claimed by the adapter")
 	}
 }
 

@@ -20,9 +20,9 @@ const (
 	authLedgerRemoved   = "removed"
 )
 
-// Closed proofSource enum. Presence alone is never enough: without durable
-// provenance binding the resident credential to this connection generation the
-// honest answer is not_confirmed however plainly the slot is occupied.
+// Closed proofSource enum. Native presence alone is never enough: without
+// durable provenance binding it to this connection generation the honest answer
+// is not_confirmed.
 const (
 	authProofConfirmedPresent = "confirmed_present"
 	authProofConfirmedAbsent  = "confirmed_absent"
@@ -61,6 +61,7 @@ var (
 	ledgerReadDir  = os.ReadDir
 	ledgerRemove   = os.Remove
 	ledgerMarshal  = json.Marshal
+	ledgerEvalPath = filepath.EvalSymlinks
 )
 
 // ledgerFile is the file surface an atomic ledger write drives.
@@ -76,26 +77,25 @@ var ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
 	return os.CreateTemp(dir, pattern)
 }
 
-// authLedger is the durable values-free record of which native slot each
-// connection generation owns. It outlives every session and every native
-// generation, so its path is deterministic by design: a bookkeeping record that
-// could not be found again after the crash that makes it matter answers
-// nothing.
+// authLedger is the durable values-free record of which connection lineage
+// owns a provider in one native credential residence.
 type authLedger struct {
 	dir string
 }
 
-// validateProviderAuthRoots rejects a relative provider-auth root and a
-// relative exact-home consent path. An empty value is valid for both: an unset
-// ledger root leaves the surface unadvertised, and the consent gate is
-// unsupported here in every form.
+// validateProviderAuthRoots requires the ledger and native residence as one
+// pair and rejects relative paths.
 func validateProviderAuthRoots(options Options) error {
+	if (options.ProviderAuthRoot == "") != (options.ProviderAuthHome == "") {
+		return errors.New("provider auth requires both root and home")
+	}
+
 	if options.ProviderAuthRoot != "" && !filepath.IsAbs(options.ProviderAuthRoot) {
 		return fmt.Errorf("provider auth root must be an absolute path")
 	}
 
-	if options.ProviderAuthDirectHome != "" && !filepath.IsAbs(options.ProviderAuthDirectHome) {
-		return fmt.Errorf("provider auth direct home must be an absolute path")
+	if options.ProviderAuthHome != "" && !filepath.IsAbs(options.ProviderAuthHome) {
+		return fmt.Errorf("provider auth home must be an absolute path")
 	}
 
 	return nil
@@ -105,19 +105,42 @@ func validateProviderAuthRoots(options Options) error {
 // root at all, which is what separates a surface nobody asked for from one that
 // was asked for and could not be prepared.
 func authLedgerRootConfigured(options Options) bool {
-	return options.ProviderAuthRoot != ""
+	return options.ProviderAuthRoot != "" && options.ProviderAuthHome != ""
+}
+
+func prepareProviderAuthHome(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("provider auth home must be an absolute path")
+	}
+
+	clean := filepath.Clean(path)
+	if err := ledgerMkdirAll(clean, authLedgerDirMode); err != nil {
+		return "", fmt.Errorf("create provider auth home: %w", err)
+	}
+
+	if err := ledgerChmod(clean, authLedgerDirMode); err != nil {
+		return "", fmt.Errorf("restrict provider auth home: %w", err)
+	}
+
+	resolved, err := ledgerEvalPath(clean)
+	if err != nil {
+		return "", fmt.Errorf("resolve provider auth home: %w", err)
+	}
+
+	return resolved, nil
 }
 
 // newAuthLedger resolves and validates the configured durable root. A root that
 // does not exist and cannot be created, is not a directory, or is not writable
 // leaves the provider-auth surface unadvertised, exactly as an unset one does.
-// The leaf carries no per-home segment: every Hermes session runs in a fresh
-// throwaway native root, so the host-owned ledger root is the only durable
-// scope there is to key on.
 func newAuthLedger(options Options) (*authLedger, error) {
 	root := options.ProviderAuthRoot
 	if !filepath.IsAbs(root) {
 		return nil, errors.New("provider auth root must be an absolute path")
+	}
+
+	if !filepath.IsAbs(options.ProviderAuthHome) {
+		return nil, errors.New("provider auth home must be an absolute path")
 	}
 
 	// The operator-configured root is restricted as well as the leaf: a
@@ -130,7 +153,7 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, fmt.Errorf("restrict provider auth root: %w", err)
 	}
 
-	dir := filepath.Join(root, authLedgerVendorDir, authLedgerLeafDir)
+	dir := filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey(options.ProviderAuthHome), authLedgerLeafDir)
 	if err := ledgerMkdirAll(dir, authLedgerDirMode); err != nil {
 		return nil, fmt.Errorf("create provider auth ledger root: %w", err)
 	}
@@ -156,6 +179,12 @@ func newAuthLedger(options Options) (*authLedger, error) {
 	name := probe.Name()
 
 	return &authLedger{dir: dir}, errors.Join(probe.Close(), ledgerRemove(name))
+}
+
+func authLedgerHomeKey(home string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(home)))
+
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func (l *authLedger) path(providerID string) string {
@@ -277,13 +306,9 @@ type authInventoryResult struct {
 	Entries []authInventoryEntry `json:"entries"`
 }
 
-// inventory reports residence from the ledger and a probe of the reserved slot
-// each record names. The ledger alone is never sufficient — an adapter's record
-// of its own intent cannot prove residence — and a probe alone proves only that
-// something is resident, not that it is the thing this connection installed.
-// Ambient, environment, and gh-derived pool entries carry no reserved label and
-// are therefore unrepresentable here rather than merely unreported.
-func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any, error) {
+// inventory combines confirmed lineage with the native catalog's values-free
+// logged-in status. Neither source is sufficient on its own.
+func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
 		return nil, err
@@ -299,26 +324,31 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 		return nil, err
 	}
 
-	records, err := p.ledger.list()
-	if err != nil {
-		return nil, authFailed(authCauseHarvestFailed, "", "", "")
+	client := session.authNativeClient()
+	if client == nil {
+		return nil, authFailed(authCauseTransport, "", "", "")
 	}
 
-	home := session.authHome()
-	if home == "" {
-		return nil, authFailed(authCauseTransport, "", "", "")
+	providers, err := client.AuthProviders(ctx)
+	if err != nil {
+		return nil, authFailed(authNativeCause(err), "", "", "")
+	}
+
+	loggedIn := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		loggedIn[provider.ID] = provider.LoggedIn
+	}
+
+	records, err := p.ledger.list()
+	if err != nil {
+		return nil, authFailed(authCauseProcess, "", "", "")
 	}
 
 	entries := make([]authInventoryEntry, 0, len(records))
 
 	for _, record := range records {
-		if record.State == authLedgerRemoved {
+		if record.State != authLedgerConfirmed {
 			continue
-		}
-
-		present, err := authSlotPresent(home, record.ProviderID, authSlotLabel(record.ConnectionID))
-		if err != nil {
-			return nil, authFailed(authCauseHarvestFailed, record.ProviderID, "", "")
 		}
 
 		entries = append(entries, authInventoryEntry{
@@ -326,7 +356,7 @@ func (p *providerAuth) inventory(_ context.Context, params json.RawMessage) (any
 			ConnectionID:      record.ConnectionID,
 			Revision:          record.Revision,
 			BindingGeneration: record.BindingGeneration,
-			ProofSource:       authProofSource(record.State, present),
+			ProofSource:       authProofSource(record.State, loggedIn[record.ProviderID]),
 		})
 	}
 

@@ -103,6 +103,28 @@ func TestBrowserShimEnvironAddsPathWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestUpsertProcessEnvMakesProtectedValuesAuthoritative(t *testing.T) {
+	t.Parallel()
+
+	env := []string{
+		"HERMES_AUTH_HOME=/attacker",
+		"A=1",
+		"HERMES_AUTH_HOME=/stale",
+	}
+	env = upsertProcessEnv(env, "HERMES_AUTH_HOME", "/durable")
+
+	var values []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "HERMES_AUTH_HOME=") {
+			values = append(values, entry)
+		}
+	}
+
+	if len(values) != 1 || values[0] != "HERMES_AUTH_HOME=/durable" {
+		t.Fatalf("protected environment = %#v", env)
+	}
+}
+
 func TestBrowserShimRemoveToleratesANilShim(t *testing.T) {
 	t.Parallel()
 

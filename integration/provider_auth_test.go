@@ -66,13 +66,6 @@ type authStatusWire struct {
 	Reason    string `json:"reason"`
 }
 
-type authCredentialWire struct {
-	ConnectionID      string         `json:"connectionId"`
-	Revision          int64          `json:"revision"`
-	BindingGeneration int64          `json:"bindingGeneration"`
-	Credential        map[string]any `json:"credential"`
-}
-
 type authInventoryWire struct {
 	Entries []struct {
 		ProviderID        string `json:"providerId"`
@@ -83,13 +76,22 @@ type authInventoryWire struct {
 	} `json:"entries"`
 }
 
-// providerAuthAgent starts the wrapper with a durable provider-auth root and
-// returns a live connection plus that root.
+// providerAuthAgent starts the wrapper with durable ledger and native auth
+// homes.
 func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnection, *liveAgent, string) {
 	t.Helper()
 
 	authRoot := t.TempDir()
-	agent := startLiveAgent(t, ctx, t.TempDir(), "-provider-auth-root", authRoot)
+	authHome := t.TempDir()
+	agent := startLiveAgent(
+		t,
+		ctx,
+		t.TempDir(),
+		"-provider-auth-root",
+		authRoot,
+		"-provider-auth-home",
+		authHome,
+	)
 
 	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
 
@@ -106,11 +108,11 @@ func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnec
 	}
 
 	names, _ := capability["methods"].([]any)
-	if len(names) != 8 {
-		t.Fatalf("advertised %d legs, want eight: %#v", len(names), names)
+	if len(names) != 7 {
+		t.Fatalf("advertised %d legs, want seven: %#v", len(names), names)
 	}
 
-	return conn, agent, authRoot
+	return conn, agent, authHome
 }
 
 func callAuthLeg(t *testing.T, ctx context.Context, conn *acp.ClientSideConnection, method string, params map[string]any, out any) error {
@@ -219,29 +221,27 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 		t.Fatalf("flow reached %q/%q rather than authenticated before its deadline", status.State, status.Reason)
 	}
 
-	var harvest authCredentialWire
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/credential", map[string]any{
-		"sessionId": string(sessionID), "providerId": providerID, "flowId": authorization.FlowID,
-	}, &harvest); err != nil {
-		t.Fatalf("_hermes/auth/credential: %v", err)
-	}
-
-	if harvest.Credential["type"] != "hermesOauth" || harvest.Credential["accessToken"] == "" {
-		t.Fatalf("harvest = %#v", harvest)
-	}
-
 	var inventory authInventoryWire
 	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/inventory", map[string]any{"sessionId": string(sessionID)}, &inventory); err != nil {
 		t.Fatalf("_hermes/auth/inventory: %v", err)
 	}
 
-	if len(inventory.Entries) == 0 || inventory.Entries[0].ProofSource != "confirmed_present" {
+	var bindingGeneration int64
+	for _, entry := range inventory.Entries {
+		if entry.ProviderID == providerID && entry.ConnectionID == "attended-connection" {
+			bindingGeneration = entry.BindingGeneration
+			if entry.ProofSource != "confirmed_present" {
+				t.Fatalf("inventory proof = %q, want confirmed_present", entry.ProofSource)
+			}
+		}
+	}
+	if bindingGeneration == 0 {
 		t.Fatalf("inventory = %#v", inventory)
 	}
 
 	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/disconnect", map[string]any{
 		"sessionId": string(sessionID), "providerId": providerID,
-		"connectionId": "attended-connection", "bindingGeneration": harvest.BindingGeneration,
+		"connectionId": "attended-connection", "bindingGeneration": bindingGeneration,
 	}, nil); err != nil {
 		t.Fatalf("_hermes/auth/disconnect: %v", err)
 	}

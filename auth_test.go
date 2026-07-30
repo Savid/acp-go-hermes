@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	testFieldCredential  = "credential"
-	testFieldAccessToken = "access_token"
-	testFieldMetadata    = "metadata"
-	testProviderID       = "xai-oauth"
-	testConnectionID     = "connection-1"
-	testSessionID        = acp.SessionId("wrapper-session")
+	testFieldCredential   = "credential"
+	testFieldAccessToken  = "access_token"
+	testFieldRefreshToken = "refresh_token"
+	testFieldMetadata     = "metadata"
+	testProviderID        = "xai-oauth"
+	testConnectionID      = "connection-1"
+	testSessionID         = acp.SessionId("wrapper-session")
 )
 
 // newAuthAgent builds an agent with a usable durable ledger root and one
@@ -31,7 +32,7 @@ func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	client := newFakeHermesClient()
 	client.xdg = nativehermes.XDGDirs{Root: home}
 
-	agent := NewAgent(WithProviderAuthRoot(t.TempDir()))
+	agent := NewAgent(WithProviderAuthRoot(t.TempDir()), WithProviderAuthHome(t.TempDir()))
 	if agent.providerAuth == nil {
 		t.Fatal("provider auth surface is unavailable with a usable root")
 	}
@@ -89,48 +90,6 @@ func requireAuthCause(t *testing.T, err error, cause string) {
 	}
 }
 
-func authErrorField(t *testing.T, err error, name string) string {
-	t.Helper()
-
-	var requestErr *acp.RequestError
-	if !errors.As(err, &requestErr) {
-		t.Fatalf("error is not a request error: %v", err)
-	}
-
-	data, ok := requestErr.Data.(map[string]any)
-	if !ok {
-		t.Fatalf("request error data is not an object: %#v", requestErr.Data)
-	}
-
-	value, _ := data[name].(string)
-	if value == "" {
-		t.Fatalf("error data carries no %s: %#v", name, data)
-	}
-
-	return value
-}
-
-func authErrorRetryable(t *testing.T, err error) bool {
-	t.Helper()
-
-	var requestErr *acp.RequestError
-	if !errors.As(err, &requestErr) {
-		t.Fatalf("error is not a request error: %v", err)
-	}
-
-	data, ok := requestErr.Data.(map[string]any)
-	if !ok {
-		t.Fatalf("request error data is not an object: %#v", requestErr.Data)
-	}
-
-	retryable, ok := data["retryable"].(bool)
-	if !ok {
-		t.Fatalf("error data carries no retryable flag: %#v", data)
-	}
-
-	return retryable
-}
-
 func requireInvalidField(t *testing.T, err error, field string) {
 	t.Helper()
 
@@ -156,7 +115,7 @@ func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 		t.Fatal("unset root advertised the provider auth surface")
 	}
 
-	if NewAgent(WithProviderAuthRoot("relative")).providerAuth != nil {
+	if NewAgent(WithProviderAuthRoot("relative"), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
 		t.Fatal("relative root advertised the provider auth surface")
 	}
 
@@ -165,12 +124,20 @@ func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	if NewAgent(WithProviderAuthRoot(file)).providerAuth != nil {
+	if NewAgent(WithProviderAuthRoot(file), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
 		t.Fatal("root that is not a directory advertised the provider auth surface")
+	}
+
+	if NewAgent(WithProviderAuthRoot(t.TempDir())).providerAuth != nil {
+		t.Fatal("ledger without native auth home advertised provider auth")
+	}
+
+	if NewAgent(WithProviderAuthHome(t.TempDir())).providerAuth != nil {
+		t.Fatal("native auth home without ledger advertised provider auth")
 	}
 }
 
-func TestAuthCapabilityListsEveryLegAndTheInjectionKey(t *testing.T) {
+func TestAuthCapabilityListsEveryLeg(t *testing.T) {
 	t.Parallel()
 
 	agent, _ := newAuthAgent(t)
@@ -188,12 +155,8 @@ func TestAuthCapabilityListsEveryLegAndTheInjectionKey(t *testing.T) {
 	}
 
 	names, _ := capability[providerAuthMethodsField].([]string)
-	if len(names) != 8 {
-		t.Fatalf("advertised %d legs, want 8: %#v", len(names), names)
-	}
-
-	if capability[providerAuthInjectionKey] != providerAuthOptionPath {
-		t.Fatalf("injectionKey = %v", capability[providerAuthInjectionKey])
+	if len(names) != 7 {
+		t.Fatalf("advertised %d legs, want 7: %#v", len(names), names)
 	}
 
 	unset, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
@@ -342,7 +305,7 @@ func TestAuthFailedErrorCarriesTheClosedShapeOnly(t *testing.T) {
 	}
 
 	for _, cause := range []string{
-		authCauseNativeVeto, authCauseProviderRefused, authCauseHarvestFailed,
+		authCauseNativeVeto, authCauseProviderRefused,
 		authCauseUnsupportedVariant, authCauseFlowExpired, authCauseFlowState,
 		authCauseFlowCancelled, authCausePolicy, authCauseBindingConflict,
 	} {
@@ -370,7 +333,6 @@ func TestAuthFlowTransitionIsTotalOverTheCauseEnum(t *testing.T) {
 		{authCauseProcess, true, authStateFailed, authReasonAcceptanceUnknown},
 		{authCauseTimeout, false, authStateFailed, authReasonTransport},
 		{authCauseTimeout, true, authStateFailed, authReasonAcceptanceUnknown},
-		{authCauseHarvestFailed, false, authStateFailed, authReasonHarvestFailed},
 		{authCauseFlowExpired, false, authStateExpired, authReasonDeadline},
 		{authCausePolicy, false, "", ""},
 		{authCauseBindingConflict, false, "", ""},
@@ -407,10 +369,10 @@ func TestAuthNativeCauseNeverForwardsNativeText(t *testing.T) {
 	}
 }
 
-func TestAuthSessionAndHomeResolution(t *testing.T) {
+func TestAuthSessionResolution(t *testing.T) {
 	t.Parallel()
 
-	agent, client := newAuthAgent(t)
+	agent, _ := newAuthAgent(t)
 
 	if _, err := agent.providerAuth.authSession("missing"); err == nil {
 		t.Fatal("unknown session accepted")
@@ -421,17 +383,9 @@ func TestAuthSessionAndHomeResolution(t *testing.T) {
 		t.Fatalf("authSession: %v", err)
 	}
 
-	if session.authHome() != client.xdg.Root {
-		t.Fatalf("authHome = %q", session.authHome())
-	}
-
 	session.mu.Lock()
 	session.client = nil
 	session.mu.Unlock()
-
-	if session.authHome() != "" {
-		t.Fatal("a session with no live gateway reported a home")
-	}
 }
 
 func TestAuthGoSafeContainsAPanic(t *testing.T) {
@@ -449,197 +403,6 @@ func TestAuthGoSafeContainsAPanic(t *testing.T) {
 	<-done
 }
 
-func TestProviderAuthOptionKeyIsRejectedWithoutTheSurface(t *testing.T) {
-	t.Parallel()
-
-	meta := map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
-		metaProviderAuthKey: map[string]any{},
-	}}}
-
-	if _, err := NewAgent().sessionMetaFromLifecycle(meta); err == nil {
-		t.Fatal("injection key accepted without the provider auth surface")
-	} else {
-		requireInvalidField(t, err, providerAuthOptionPath)
-	}
-
-	agent, _ := newAuthAgent(t)
-	if _, err := agent.sessionMetaFromLifecycle(meta); err != nil {
-		t.Fatalf("injection key rejected with the surface configured: %v", err)
-	}
-}
-
-func TestProviderAuthBindingsFromMetaDecodeStrictly(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-
-	valid := map[string]any{testProviderID: map[string]any{
-		"connectionId":      testConnectionID,
-		"revision":          1,
-		"bindingGeneration": 1,
-		testFieldCredential: map[string]any{
-			"type":        string(ProviderCredentialHermesOAuth),
-			"authType":    ProviderAuthTypeOAuth,
-			"accessToken": "token",
-		},
-	}}
-
-	meta, err := agent.sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{
-		metaOptionsKey: map[string]any{metaProviderAuthKey: valid},
-	}})
-	if err != nil {
-		t.Fatalf("valid binding rejected: %v", err)
-	}
-
-	if !meta.ProviderAuthSupplied || meta.injectionOutcome == nil {
-		t.Fatal("supplied binding did not allocate an injection cell")
-	}
-
-	if meta.ProviderAuth[testProviderID].ConnectionID != testConnectionID {
-		t.Fatalf("decoded binding = %#v", meta.ProviderAuth)
-	}
-
-	rejected := []any{
-		map[string]any{testProviderID: map[string]any{"connectionId": "", "revision": 1, "bindingGeneration": 1}},
-		map[string]any{testProviderID: map[string]any{"connectionId": "c", "revision": 0, "bindingGeneration": 1}},
-		map[string]any{testProviderID: map[string]any{"connectionId": "c", "revision": 1, "bindingGeneration": 0}},
-		"not-an-object",
-		map[string]any{testProviderID: map[string]any{
-			"connectionId": "c", "revision": 1, "bindingGeneration": 1,
-			testFieldCredential: map[string]any{"type": "oauth"},
-		}},
-	}
-
-	for index, value := range rejected {
-		if _, err := providerAuthBindingsFromMeta(value); err == nil {
-			t.Fatalf("case %d accepted an invalid binding", index)
-		}
-	}
-
-	if _, err := providerAuthBindingsFromMeta(func() {}); err == nil {
-		t.Fatal("unencodable binding accepted")
-	}
-}
-
-func TestInjectProviderAuthIsSkippedWhenNothingWasSupplied(t *testing.T) {
-	t.Parallel()
-
-	agent, client := newAuthAgent(t)
-
-	agent.injectProviderAuth(context.Background(), client.xdg.Root, sessionMeta{})
-
-	bare := NewAgent()
-	outcome := new(string)
-	bare.injectProviderAuth(context.Background(), client.xdg.Root, sessionMeta{injectionOutcome: outcome})
-
-	if *outcome != "" {
-		t.Fatalf("an agent without the surface recorded %q", *outcome)
-	}
-}
-
-func TestReinjectActiveSessionRecordsTheTriState(t *testing.T) {
-	t.Parallel()
-
-	agent, client := newAuthAgent(t)
-
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("authSession: %v", err)
-	}
-
-	meta := sessionMeta{
-		ProviderAuth:         map[string]ProviderAuthBinding{testProviderID: testBinding()},
-		ProviderAuthSupplied: true,
-		injectionOutcome:     new(string),
-	}
-
-	agent.reinjectActiveSession(context.Background(), session, meta)
-
-	if meta.injection() != authInjectionApplied {
-		t.Fatalf("first injection = %q", meta.injection())
-	}
-
-	if session.snapshot().providerAuthInjection != authInjectionApplied {
-		t.Fatal("session did not record the injection outcome")
-	}
-
-	present, err := nativehermes.AuthSlotPresent(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
-	if err != nil || !present {
-		t.Fatalf("reserved slot present = %v, %v", present, err)
-	}
-
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-
-	second := sessionMeta{ProviderAuth: meta.ProviderAuth, ProviderAuthSupplied: true, injectionOutcome: new(string)}
-	agent.reinjectActiveSession(context.Background(), session, second)
-
-	if second.injection() != authInjectionConflict {
-		t.Fatalf("injection without a live home = %q", second.injection())
-	}
-
-	NewAgent().reinjectActiveSession(context.Background(), session, second)
-}
-
-func TestLifecycleResponseMetaOmitsAnInjectionThatNeverRan(t *testing.T) {
-	t.Parallel()
-
-	plain := lifecycleResponseMeta(sessionSnapshot{})
-
-	hermesMeta, _ := plain[hermesMetaKey].(map[string]any)
-	if _, present := hermesMeta[metaProviderAuthKey]; present {
-		t.Fatalf("absent injection reported: %#v", hermesMeta)
-	}
-
-	carried := lifecycleResponseMeta(sessionSnapshot{providerAuthInjection: authInjectionNoop})
-
-	carriedMeta, _ := carried[hermesMetaKey].(map[string]any)
-
-	injection, _ := carriedMeta[metaProviderAuthKey].(map[string]any)
-	if injection[providerAuthInjectionName] != authInjectionNoop {
-		t.Fatalf("injection meta = %#v", carriedMeta)
-	}
-}
-
-func TestProviderAuthDirectHomeIsRejectedFailClosed(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent(WithProviderAuthDirectHome(filepath.Join(t.TempDir(), "home")))
-
-	_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/cwd"})
-	if err == nil {
-		t.Fatal("a configured exact-home consent path was accepted")
-	}
-
-	requireInvalidField(t, err, optionFieldProviderAuthDirectHome)
-
-	relative := NewAgent(WithProviderAuthDirectHome("relative"))
-	if _, err := relative.Initialize(context.Background(), acp.InitializeRequest{}); err == nil {
-		t.Fatal("a relative exact-home consent path was accepted at construction")
-	}
-
-	if err := validateProviderAuthRoots(Options{ProviderAuthRoot: "relative"}); err == nil {
-		t.Fatal("a relative provider auth root was accepted at construction")
-	}
-
-	if err := validateProviderAuthRoots(Options{}); err != nil {
-		t.Fatalf("empty roots rejected: %v", err)
-	}
-}
-
-func testBinding() ProviderAuthBinding {
-	return ProviderAuthBinding{
-		ConnectionID:      testConnectionID,
-		Revision:          1,
-		BindingGeneration: 1,
-		Credential: ProviderCredential{
-			Type:        ProviderCredentialHermesOAuth,
-			HermesOAuth: &ProviderHermesOAuthCredential{AuthType: ProviderAuthTypeOAuth, AccessToken: "token"},
-		},
-	}
-}
-
 func TestAuthParamFieldsRejectsATruncatedObject(t *testing.T) {
 	t.Parallel()
 
@@ -651,97 +414,9 @@ func TestAuthParamFieldsRejectsATruncatedObject(t *testing.T) {
 	requireInvalidField(t, err, authFieldParams)
 }
 
-// Every Hermes session gets a throwaway home, so session/new is the injection
-// path: the binding is written into the generation root the server is about to
-// be started against, before it reads it.
-func TestNewSessionInjectsIntoTheGenerationRoot(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent(WithScratchDir(t.TempDir()), WithProviderAuthRoot(t.TempDir()))
-
-	var root string
-
-	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
-		client := newFakeHermesClient()
-		client.xdg = options.ExistingXDG
-		client.createSession = nativehermes.Session{ID: "native-1"}
-		root = options.ExistingXDG.Root
-
-		return client, nil
-	}
-
-	response, err := agent.NewSession(context.Background(), acp.NewSessionRequest{
-		Cwd: t.TempDir(),
-		Meta: map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
-			metaProviderAuthKey: map[string]any{testProviderID: map[string]any{
-				"connectionId":      testConnectionID,
-				"revision":          1,
-				"bindingGeneration": 1,
-				testFieldCredential: map[string]any{
-					"type":        string(ProviderCredentialHermesOAuth),
-					"authType":    ProviderAuthTypeOAuth,
-					"accessToken": "token",
-				},
-			}},
-		}}},
-	})
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-
-	meta, _ := response.Meta[hermesMetaKey].(map[string]any)
-
-	injection, _ := meta[metaProviderAuthKey].(map[string]any)
-	if injection[providerAuthInjectionName] != authInjectionApplied {
-		t.Fatalf("injection = %#v", meta)
-	}
-
-	present, err := nativehermes.AuthSlotPresent(root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID))
-	if err != nil || !present {
-		t.Fatalf("reserved slot in the generation root = %v, %v", present, err)
-	}
-}
-
-func TestInjectProviderAuthRecordsTheOutcome(t *testing.T) {
-	t.Parallel()
-
-	agent, client := newAuthAgent(t)
-
-	meta := sessionMeta{}.withProviderAuth(map[string]ProviderAuthBinding{testProviderID: testBinding()})
-	agent.injectProviderAuth(context.Background(), client.xdg.Root, meta)
-
-	if meta.injection() != authInjectionApplied {
-		t.Fatalf("injection outcome = %q", meta.injection())
-	}
-
-	if empty := (sessionMeta{}).withProviderAuth(nil); empty.injectionOutcome != nil {
-		t.Fatal("absent bindings allocated an injection cell")
-	}
-}
-
-func TestLifecycleMetaRejectsAnInvalidBinding(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-
-	_, err := agent.sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{
-		metaOptionsKey: map[string]any{metaProviderAuthKey: map[string]any{
-			testProviderID: map[string]any{"connectionId": "", "revision": 1, "bindingGeneration": 1},
-		}},
-	}})
-	if err == nil {
-		t.Fatal("an invalid binding was accepted at session start")
-	}
-
-	requireInvalidField(t, err, providerAuthOptionPath)
-}
-
-// adversarialConnectionIDs are the caller-minted values that must never reach
-// the reserved slot's native label. The prefix-bearing, separator-bearing, and
-// control-character cases are what the label would otherwise carry verbatim
-// into the native credential store; the two replacement-rune spellings are one
-// Go string reached from two different wire encodings, which is an alias over
-// one connection's slot.
+// adversarialConnectionIDs are caller-minted values that must never enter
+// durable lineage. The two replacement-rune spellings are one Go string reached
+// from different wire encodings and would alias one connection.
 func adversarialConnectionIDs() map[string]string {
 	return map[string]string{
 		"empty":              "",
@@ -779,19 +454,6 @@ func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
 				"connectionId": connectionID, "bindingGeneration": 1,
 			})
 			requireInvalidField(t, err, authFieldConnectionID)
-
-			_, err = agent.sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{
-				metaOptionsKey: map[string]any{metaProviderAuthKey: map[string]any{
-					testProviderID: map[string]any{
-						"connectionId": connectionID, "revision": 1, "bindingGeneration": 1,
-						testFieldCredential: map[string]any{
-							"type":     string(ProviderCredentialHermesOAuth),
-							"authType": ProviderAuthTypeOAuth, "accessToken": "token",
-						},
-					},
-				}},
-			}})
-			requireInvalidField(t, err, providerAuthOptionPath)
 		})
 	}
 }

@@ -10,8 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
-	"strings"
 	"time"
 )
 
@@ -23,55 +21,30 @@ const (
 	AuthFlowExternal   = "external"
 )
 
-// Native credential kinds stored in a pool slot.
-const (
-	AuthTypeAPIKey = "api_key"
-	AuthTypeOAuth  = "oauth"
-)
-
-// Native poll states.
+// Native poll states reported by Hermes' dashboard OAuth API.
 const (
 	AuthPollPending  = "pending"
-	AuthPollComplete = "complete"
-	AuthPollSlowDown = "slow_down"
+	AuthPollApproved = "approved"
 	AuthPollDenied   = "denied"
+	AuthPollExpired  = "expired"
+	AuthPollError    = "error"
 )
 
 const (
 	authProvidersPath = "/providers/oauth"
 	authCodeField     = "code"
-	authEnvPath       = "/env"
 	authRequestLimit  = 1 << 20
 )
 
 var authHTTPClient = func() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 
-// AuthProvider is one entry of the native OAuth provider catalog. Only the
-// identity fields are read: every other member of the native entry, including
-// its per-provider status object, carries origin claims or token fragments this
-// adapter never forwards.
+// AuthProvider is the values-free subset of one native OAuth catalog entry.
 type AuthProvider struct {
 	ID             string
 	Name           string
 	Flow           string
 	Disconnectable bool
-}
-
-// AuthAPIKeyProvider is one provider of the native environment catalog that
-// accepts an operator-supplied key.
-type AuthAPIKeyProvider struct {
-	ID   string
-	Name string
-}
-
-// authEnvEntry is the allowlist applied to one member of the native environment
-// map, which is keyed by environment-variable name rather than by provider. The
-// member also reports whether the variable is set on disk and a redaction of the
-// configured value; neither is named here, so neither survives the decode.
-type authEnvEntry struct {
-	Provider      string `json:"provider"`
-	ProviderLabel string `json:"provider_label"`
-	IsPassword    bool   `json:"is_password"`
+	LoggedIn       bool
 }
 
 // AuthStart is a decoded native flow start. The device-code and pkce shapes
@@ -89,18 +62,6 @@ type AuthStart struct {
 // AuthPoll is a decoded native poll result.
 type AuthPoll struct {
 	State string
-}
-
-// AuthMaterial is the token material one credential-pool slot carries.
-// AccessExpiresAt is absolute epoch milliseconds where the native store records
-// one; ExpiresIn is the relative lifetime the device path records with no
-// issued-at anchor.
-type AuthMaterial struct {
-	AuthType        string
-	AccessToken     string
-	RefreshToken    string
-	AccessExpiresAt int64
-	ExpiresIn       time.Duration
 }
 
 // AuthStatusError reports a native HTTP refusal. The native body never travels
@@ -128,6 +89,9 @@ func (s *hermesServer) AuthProviders(ctx context.Context) ([]AuthProvider, error
 			Name           string `json:"name"`
 			Flow           string `json:"flow"`
 			Disconnectable bool   `json:"disconnectable"`
+			Status         struct {
+				LoggedIn bool `json:"logged_in"`
+			} `json:"status"`
 		} `json:"providers"`
 	}
 
@@ -142,50 +106,8 @@ func (s *hermesServer) AuthProviders(ctx context.Context) ([]AuthProvider, error
 			Name:           entry.Name,
 			Flow:           entry.Flow,
 			Disconnectable: entry.Disconnectable,
+			LoggedIn:       entry.Status.LoggedIn,
 		})
-	}
-
-	return providers, nil
-}
-
-// AuthAPIKeyProviders folds the native environment map into one entry per
-// provider. A variable carrying no provider tag is not a provider credential at
-// all — it is a tool token, a channel secret, or an operator's own custom key —
-// and a tagged variable that is not a password field is a base URL, a region, or
-// a service-account path, none of which is a key an operator can be prompted
-// for. Both are dropped, so a provider surfaces only when it owns at least one
-// secret-valued variable.
-func (s *hermesServer) AuthAPIKeyProviders(ctx context.Context) ([]AuthAPIKeyProvider, error) {
-	var payload map[string]authEnvEntry
-
-	if err := s.authRequest(ctx, http.MethodGet, authEnvPath, nil, &payload); err != nil {
-		return nil, err
-	}
-
-	// Several variables share one provider, so the fold walks the map in
-	// variable-name order to keep the result stable across calls.
-	names := make([]string, 0, len(payload))
-	for name := range payload {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	providers := make([]AuthAPIKeyProvider, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
-
-	for _, name := range names {
-		entry := payload[name]
-		if entry.Provider == "" || !entry.IsPassword {
-			continue
-		}
-
-		if _, duplicate := seen[entry.Provider]; duplicate {
-			continue
-		}
-
-		seen[entry.Provider] = struct{}{}
-		providers = append(providers, AuthAPIKeyProvider{ID: entry.Provider, Name: entry.ProviderLabel})
 	}
 
 	return providers, nil
@@ -255,11 +177,30 @@ func (s *hermesServer) AuthPollFlow(ctx context.Context, providerID string, nati
 		return AuthPoll{}, err
 	}
 
-	return AuthPoll{State: payload.Status}, nil
+	switch payload.Status {
+	case AuthPollPending:
+		return AuthPoll{State: AuthPollPending}, nil
+	case AuthPollApproved:
+		return AuthPoll{State: AuthPollApproved}, nil
+	case AuthPollDenied:
+		return AuthPoll{State: AuthPollDenied}, nil
+	case AuthPollExpired:
+		return AuthPoll{State: AuthPollExpired}, nil
+	case AuthPollError:
+		return AuthPoll{State: AuthPollError}, nil
+	default:
+		return AuthPoll{}, fmt.Errorf("hermes auth poll returned unsupported status %q", payload.Status)
+	}
 }
 
 func (s *hermesServer) AuthCancelFlow(ctx context.Context, nativeSessionID string) error {
 	path := authProvidersPath + "/sessions/" + url.PathEscape(nativeSessionID)
+
+	return s.authRequest(ctx, http.MethodDelete, path, nil, nil)
+}
+
+func (s *hermesServer) AuthDisconnect(ctx context.Context, providerID string) error {
+	path := authProvidersPath + "/" + url.PathEscape(providerID)
 
 	return s.authRequest(ctx, http.MethodDelete, path, nil, nil)
 }
@@ -336,17 +277,4 @@ func secondsToDuration(value float64) time.Duration {
 	}
 
 	return time.Duration(value * float64(time.Second))
-}
-
-// AuthSlotLabel is the label of the one reserved credential-pool slot this
-// adapter owns for a connection. Every other pool entry — ambient, environment
-// derived, or operator installed — is unrepresentable on the ACP surface and is
-// never read, migrated, or removed.
-func AuthSlotLabel(connectionID string) string {
-	return "acp-go-hermes:" + connectionID
-}
-
-// AuthSlotLabelPrefix reports whether a label belongs to this adapter at all.
-func AuthSlotLabelPrefix(label string) bool {
-	return strings.HasPrefix(label, "acp-go-hermes:")
 }

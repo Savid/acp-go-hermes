@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -22,8 +20,6 @@ import (
 
 const (
 	envRunKeystore = "ACP_GO_HERMES_RUN_KEYSTORE"
-
-	keystoreCanaryToken = "canary-not-a-real-credential"
 
 	keystoreEnvFile         = "/run/acp-go-hermes-keystore/env"
 	keystoreRoundTrip       = "/usr/local/bin/roundtrip.sh"
@@ -286,176 +282,4 @@ func buildResidenceProbe(t *testing.T) string {
 	}
 
 	return out
-}
-
-// TestKeystoreProviderAuthResidence asserts where a brokered credential is
-// resident on the host running the tier. The adapter's own store under
-// HERMES_HOME answers the harvest, and on Darwin — the one platform where hermes
-// carries a keychain reader for another harness's credential — nothing that
-// reader surfaces ever reaches this surface.
-func TestKeystoreProviderAuthResidence(t *testing.T) {
-	requireRunKeystore(t)
-
-	keystoreAssertOwnStore(t, t.TempDir())
-
-	if runtime.GOOS == "darwin" {
-		keystoreDarwinResidence(t)
-	}
-}
-
-// keystoreAssertOwnStore drives one secret method to completion and asserts the
-// credential is resident in the adapter's own reserved pool slot under
-// HERMES_HOME, with canary material only.
-func keystoreAssertOwnStore(t *testing.T, scratch string) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-
-	authRoot := t.TempDir()
-	agent := startLiveAgent(t, ctx, scratch, "-provider-auth-root", authRoot)
-
-	defer agent.close()
-
-	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
-	}
-
-	sessionID := newProviderAuthSession(t, ctx, conn)
-
-	var methods authMethodsWire
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/methods", map[string]any{"sessionId": string(sessionID)}, &methods); err != nil {
-		t.Fatalf("_hermes/auth/methods: %v", err)
-	}
-
-	providerID, method := secretMethod(t, methods)
-
-	var authorization authAuthorizeWire
-
-	err := callAuthLeg(t, ctx, conn, "_hermes/auth/authorize", map[string]any{
-		"sessionId":          string(sessionID),
-		"providerId":         providerID,
-		"connectionId":       "keystore-connection",
-		"methodsGeneration":  methods.Generation,
-		"method":             method.ID,
-		"authorizeRequestId": "keystore-request",
-	}, &authorization)
-	if err != nil {
-		t.Fatalf("_hermes/auth/authorize: %v", err)
-	}
-
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/callback", map[string]any{
-		"sessionId": string(sessionID), "providerId": providerID,
-		"method": method.ID, "flowId": authorization.FlowID, "input": keystoreCanaryToken,
-	}, nil); err != nil {
-		t.Fatalf("_hermes/auth/callback: %v", err)
-	}
-
-	var harvest authCredentialWire
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/credential", map[string]any{
-		"sessionId": string(sessionID), "providerId": providerID, "flowId": authorization.FlowID,
-	}, &harvest); err != nil {
-		t.Fatalf("_hermes/auth/credential: %v", err)
-	}
-
-	if harvest.Credential["accessToken"] != keystoreCanaryToken {
-		t.Fatalf("the adapter's own store did not answer the harvest: %#v", harvest.Credential)
-	}
-
-	if !keystoreCanaryOnDisk(t, scratch) {
-		t.Fatal("the canary is not resident in the adapter's own HERMES_HOME store")
-	}
-}
-
-// keystoreDarwinResidence asserts the Darwin third of the matrix: hermes reads
-// another harness's credential out of the login keychain regardless of
-// HERMES_HOME, and nothing it surfaces from there is ever forwarded on this
-// surface.
-func keystoreDarwinResidence(t *testing.T) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-
-	authRoot := t.TempDir()
-	agent := startLiveAgent(t, ctx, t.TempDir(), "-provider-auth-root", authRoot)
-
-	defer agent.close()
-
-	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
-	}
-
-	sessionID := newProviderAuthSession(t, ctx, conn)
-
-	var methods authMethodsWire
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/methods", map[string]any{"sessionId": string(sessionID)}, &methods); err != nil {
-		t.Fatalf("_hermes/auth/methods: %v", err)
-	}
-
-	encoded, err := json.Marshal(methods)
-	if err != nil {
-		t.Fatalf("marshal catalog: %v", err)
-	}
-
-	for _, leaked := range []string{"token_preview", "source_label", "disconnect_command", "disconnect_hint", "sk-ant-"} {
-		if strings.Contains(string(encoded), leaked) {
-			t.Fatalf("the catalog forwarded %q from the cross-harness keychain reader: %s", leaked, encoded)
-		}
-	}
-
-	var inventory authInventoryWire
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/inventory", map[string]any{"sessionId": string(sessionID)}, &inventory); err != nil {
-		t.Fatalf("_hermes/auth/inventory: %v", err)
-	}
-
-	if len(inventory.Entries) != 0 {
-		t.Fatalf("a credential this adapter never installed is represented in the inventory: %#v", inventory.Entries)
-	}
-}
-
-func secretMethod(t *testing.T, methods authMethodsWire) (string, authMethodWire) {
-	t.Helper()
-
-	for providerID, entries := range methods.Providers {
-		for _, entry := range entries {
-			if entry.Type == "api" {
-				return providerID, entry
-			}
-		}
-	}
-
-	t.Fatalf("no operator-key method to drive in %#v", methods.Providers)
-
-	return "", authMethodWire{}
-}
-
-func keystoreCanaryOnDisk(t *testing.T, scratch string) bool {
-	t.Helper()
-
-	found := false
-
-	err := filepath.WalkDir(scratch, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "auth.json" {
-			return nil //nolint:nilerr // an unreadable branch is not a residence answer.
-		}
-
-		contents, readErr := os.ReadFile(path) // #nosec G304 -- path comes from the test's own scratch tree.
-		if readErr != nil {
-			return nil
-		}
-
-		if strings.Contains(string(contents), keystoreCanaryToken) {
-			found = true
-		}
-
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk scratch: %v", err)
-	}
-
-	return found
 }

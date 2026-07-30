@@ -44,8 +44,6 @@ type session struct {
 	mode                  string
 	env                   map[string]string
 	rawMessages           rawMessageConfig
-	providerAuth          map[string]ProviderAuthBinding
-	providerAuthInjection string
 
 	client nativehermes.Server
 
@@ -137,7 +135,6 @@ type sessionSnapshot struct {
 	env                   map[string]string
 	rawMessages           rawMessageConfig
 	client                nativehermes.Server
-	providerAuthInjection string
 }
 
 func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativehermes.Session, client nativehermes.Server, meta sessionMeta, idmap idmapRecord) *session {
@@ -191,8 +188,6 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		mode:                  firstNonEmpty(native.Agent, "default"),
 		env:                   cloneStringMap(meta.Env),
 		rawMessages:           meta.RawMessages,
-		providerAuth:          meta.ProviderAuth,
-		providerAuthInjection: meta.injection(),
 		client:                client,
 		seenParts:             map[string]string{},
 		pending:               map[string]nativehermes.PermissionRequest{},
@@ -743,7 +738,6 @@ func (s *session) snapshot() sessionSnapshot {
 		env:                   cloneStringMap(s.env),
 		rawMessages:           s.rawMessages,
 		client:                s.client,
-		providerAuthInjection: s.providerAuthInjection,
 	}
 }
 

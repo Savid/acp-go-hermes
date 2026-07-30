@@ -220,8 +220,6 @@ func (a *Agent) loadOrResumeSession(
 			return nil, applyErr
 		}
 
-		a.reinjectActiveSession(ctx, existing, meta)
-
 		return existing, nil
 	}
 	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
@@ -325,13 +323,11 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	cwd := s.cwd
 	mcpServers := cloneMCPServers(s.mcpServers)
 	wantIDMap := s.idmap
-	// A resumed runtime gets a fresh native root, so an injected credential is
-	// reapplied rather than assumed resident.
 	meta := sessionMeta{
 		Model:       joinModelValue(s.providerID, s.modelID),
 		Env:         cloneStringMap(s.env),
 		RawMessages: s.rawMessages,
-	}.withProviderAuth(s.providerAuth)
+	}
 	s.mu.Unlock()
 
 	if poisonErr != nil {
@@ -913,6 +909,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 	for key, value := range meta.Env {
 		env[key] = value
 	}
+	delete(env, "HERMES_AUTH_HOME")
 
 	var servers []acp.McpServer
 	if len(mcpServers) > 0 {
@@ -929,23 +926,22 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		return nil, err
 	}
 
-	a.injectProviderAuth(ctx, existing.Root, meta)
-
 	a.observe.RecordHermesProcessStart(ctx)
 	processRoot := a.processes.register()
 
 	client, err := factory(ctx, nativehermes.StartOptions{
-		ACPSessionID:   nativehermes.ACPSessionIDString(id),
-		Root:           a.homeRoot(),
-		ScratchParent:  parent,
-		Cwd:            cwd,
-		ExecutablePath: a.options.ExecutablePath,
-		DefaultModel:   firstNonEmpty(meta.Model, a.options.DefaultModel),
-		Env:            a.observe.InjectTraceEnv(ctx, env),
-		Logger:         a.log,
-		ExistingXDG:    existing,
-		MCPServers:     servers,
-		SeedFiles:      cloneStringMap(a.options.SeedFiles),
+		ACPSessionID:     nativehermes.ACPSessionIDString(id),
+		Root:             a.homeRoot(),
+		ScratchParent:    parent,
+		Cwd:              cwd,
+		ExecutablePath:   a.options.ExecutablePath,
+		DefaultModel:     firstNonEmpty(meta.Model, a.options.DefaultModel),
+		ProviderAuthHome: a.options.ProviderAuthHome,
+		Env:              a.observe.InjectTraceEnv(ctx, env),
+		Logger:           a.log,
+		ExistingXDG:      existing,
+		MCPServers:       servers,
+		SeedFiles:        cloneStringMap(a.options.SeedFiles),
 		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {
@@ -1103,10 +1099,10 @@ func (a *Agent) homeRoot() string {
 
 // rejectInvalidConfiguration fails session establishment on agent configuration
 // no session may run under: an option that failed validation at construction, or
-// a configured Home value, for which Hermes has no native config or auth root
-// the adapter may target. The handshake reports the option failures too, but an
-// embedded host can open a session and prompt without ever calling initialize,
-// so options that never validated must not reach a gateway process.
+// a configured Home value, because each session runtime root is isolated. The
+// handshake reports the option failures too, but an embedded host can open a
+// session and prompt without ever calling initialize, so options that never
+// validated must not reach a gateway process.
 func (a *Agent) rejectInvalidConfiguration() error {
 	if err := a.optionsError(); err != nil {
 		return err
@@ -1114,10 +1110,6 @@ func (a *Agent) rejectInvalidConfiguration() error {
 
 	if a.options.Home != "" {
 		return unsupportedField(optionFieldHome)
-	}
-
-	if a.options.ProviderAuthDirectHome != "" {
-		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
 	return nil

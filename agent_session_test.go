@@ -1649,6 +1649,69 @@ func TestAgentClientFactoryDefaultsAndEnvMerge(t *testing.T) {
 	})
 }
 
+func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	authHome := filepath.Join(t.TempDir(), "native-auth")
+	agent := NewAgent(
+		WithScratchDir(t.TempDir()),
+		WithProviderAuthRoot(t.TempDir()),
+		WithProviderAuthHome(authHome),
+		WithEnv(map[string]string{"HERMES_AUTH_HOME": "/ignored-agent-value"}),
+	)
+
+	var captured []nativehermes.StartOptions
+	agent.options.clientFactory = func(_ context.Context, options nativehermes.StartOptions) (nativehermes.Server, error) {
+		captured = append(captured, options)
+		client := newFakeHermesClient()
+		client.xdg = options.ExistingXDG
+
+		return client, nil
+	}
+
+	first, err := agent.newHermesClient(
+		ctx,
+		"session-a",
+		t.TempDir(),
+		sessionMeta{Env: map[string]string{"HERMES_AUTH_HOME": "/ignored-session-value"}},
+		nativehermes.XDGDirs{},
+	)
+	if err != nil {
+		t.Fatalf("first client: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close(context.Background()) })
+
+	second, err := agent.newHermesClient(
+		ctx,
+		"session-b",
+		t.TempDir(),
+		sessionMeta{},
+		nativehermes.XDGDirs{},
+	)
+	if err != nil {
+		t.Fatalf("second client: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+
+	if len(captured) != 2 {
+		t.Fatalf("captured starts = %d", len(captured))
+	}
+
+	if captured[0].ExistingXDG.Root == captured[1].ExistingXDG.Root {
+		t.Fatalf("sessions share runtime home %q", captured[0].ExistingXDG.Root)
+	}
+
+	for _, options := range captured {
+		if options.ProviderAuthHome != agent.options.ProviderAuthHome {
+			t.Fatalf("provider auth home = %q, want %q", options.ProviderAuthHome, agent.options.ProviderAuthHome)
+		}
+		if _, present := options.Env["HERMES_AUTH_HOME"]; present {
+			t.Fatalf("user environment retained protected auth home: %#v", options.Env)
+		}
+	}
+}
+
 func testProviders() nativehermes.ProvidersResponse {
 	return nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
 		ID:   "openai",

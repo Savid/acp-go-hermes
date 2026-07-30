@@ -102,10 +102,9 @@ type Options struct {
 	AgentVersion string
 
 	ExecutablePath string
-	// Home is unsupported: Hermes has no native config or auth root that the
-	// adapter may target, so a non-empty Home is rejected as an unsupported
-	// option when a session is established. Use ScratchDir to control where
-	// ephemeral per-session state is materialized.
+	// Home is unsupported because each session runtime root is isolated. Use
+	// ScratchDir for ephemeral state and ProviderAuthHome for durable provider
+	// credentials.
 	Home string
 	// ScratchDir is the sole parent directory for all ephemeral on-disk
 	// materialization: isolated per-session Hermes homes, sqlite temp
@@ -121,16 +120,15 @@ type Options struct {
 	// houses the values-free provider-auth ledger. It is not ephemeral
 	// materialization: the ledger deliberately outlives every session and every
 	// native generation, which is the one class of state a scratch parent must
-	// not hold. Without it no provider-auth method is advertised at all.
+	// not hold. Provider auth is enabled only when ProviderAuthHome is also set.
 	ProviderAuthRoot string
-	// ProviderAuthDirectHome is unsupported: Hermes removes a credential by
-	// dropping the one reserved pool slot a connection owns, which consents to
-	// nothing beyond that slot, so there is no canonical operator home for an
-	// exact-home gate to authorize. A non-empty value is rejected when a session
-	// is established.
-	ProviderAuthDirectHome string
-	DefaultModel           string
-	Env                    map[string]string
+	// ProviderAuthHome is the absolute, durable native Hermes credential
+	// residence shared by every isolated session runtime. Hermes alone reads and
+	// writes credential material there; the adapter supplies it to native
+	// processes through HERMES_AUTH_HOME.
+	ProviderAuthHome string
+	DefaultModel     string
+	Env              map[string]string
 
 	Logger            *slog.Logger
 	TracerProvider    trace.TracerProvider
@@ -209,10 +207,9 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithHome is unsupported. Hermes has no native config or auth root that the
-// adapter may target, so establishing a session with a non-empty Home is
-// rejected as an unsupported option. Use WithScratchDir to control where
-// ephemeral per-session state is materialized.
+// WithHome is unsupported because each session runtime root is isolated. Use
+// WithScratchDir for ephemeral state and WithProviderAuthHome for durable
+// provider credentials.
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
@@ -250,23 +247,23 @@ func WithInputHandoffRoot(dir string) Option {
 // entries are written 0600. Omitting the option, or supplying a root that is
 // not a writable directory, leaves every provider-auth method unadvertised and
 // answering method-not-found: a leg that cannot record what it did is never
-// offered. The root carries no config or auth-resolution semantics and is never
-// a scratch parent.
+// offered. Provider auth is enabled only when WithProviderAuthHome is also set.
+// The root carries no config or auth-resolution semantics and is never a
+// scratch parent.
 func WithProviderAuthRoot(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthRoot = path
 	}
 }
 
-// WithProviderAuthDirectHome is unsupported. Hermes removes a credential by
-// dropping the one reserved pool slot a connection owns — a scoped act that
-// consents to nothing beyond that slot — so no provider-auth leg here reads or
-// clears an operator's canonical native home and there is nothing for an
-// exact-home consent gate to authorize. Establishing a session with a non-empty
-// value is rejected as an unsupported option.
-func WithProviderAuthDirectHome(path string) Option {
+// WithProviderAuthHome sets the durable native credential residence shared by
+// every isolated Hermes session runtime. The path must be absolute. Hermes owns
+// all credential reads and writes there; the adapter never parses or copies its
+// credential files. Provider auth is enabled only when WithProviderAuthRoot is
+// also set.
+func WithProviderAuthHome(path string) Option {
 	return func(options *Options) {
-		options.ProviderAuthDirectHome = path
+		options.ProviderAuthHome = path
 	}
 }
 

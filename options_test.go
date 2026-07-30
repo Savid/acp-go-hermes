@@ -21,6 +21,8 @@ func TestApplyOptions(t *testing.T) {
 		WithExecutablePath("hermes"),
 		WithHome("/tmp/home"),
 		WithScratchDir("/tmp/scratch"),
+		WithProviderAuthRoot("/tmp/provider-ledger"),
+		WithProviderAuthHome("/tmp/provider-home"),
 		WithDefaultModel("openai/gpt"),
 		WithEnv(map[string]string{"A": "1"}),
 		WithTracerProvider(tracenoop.NewTracerProvider()),
@@ -43,6 +45,9 @@ func TestApplyOptions(t *testing.T) {
 	}
 	if opts.Home != "/tmp/home" || opts.ScratchDir != "/tmp/scratch" {
 		t.Fatalf("home/scratch options = %q / %q", opts.Home, opts.ScratchDir)
+	}
+	if opts.ProviderAuthRoot != "/tmp/provider-ledger" || opts.ProviderAuthHome != "/tmp/provider-home" {
+		t.Fatalf("provider auth options = %q / %q", opts.ProviderAuthRoot, opts.ProviderAuthHome)
 	}
 	if opts.ImageLimits != (ImageLimits{
 		MaxInputBytesPerImage:     1,

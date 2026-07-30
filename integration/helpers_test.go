@@ -24,9 +24,9 @@ const liveTokenHermesConfig = `model:
 
 // liveAgent holds a launched acp-go-hermes subprocess and its stdio pipes.
 //
-// Home isolation is bespoke to Hermes: each launch passes a caller-provided
-// `-scratch-dir` temp root so the subprocess owns an isolated HERMES_HOME and
-// never touches the developer's real Hermes home.
+// Each launch passes a caller-provided `-scratch-dir` temp root so the
+// subprocess owns an isolated HERMES_HOME. Tests that need durable credentials
+// pass HERMES_AUTH_HOME separately.
 type liveAgent struct {
 	cmd    interface{ ProcessState() *os.ProcessState }
 	stdin  io.WriteCloser
@@ -87,8 +87,7 @@ func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ..
 }
 
 // startLiveTokenAgent caps only token-spending integration sessions through
-// Hermes' native isolated config. Production defaults and the caller's real
-// Hermes home remain untouched.
+// Hermes' native isolated config. Production defaults remain untouched.
 func startLiveTokenAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
 	t.Helper()
 

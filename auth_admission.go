@@ -9,13 +9,10 @@ import (
 
 // authGate is a mutex a leg waits on with its own context, plus the number of
 // legs holding or waiting for it. The count is what lets the broker drop the
-// gate when the last one leaves: the keys are native home paths and
-// (session, provider) pairs, both unbounded over the life of an agent that
-// outlives every session it serves, and a gate map that only ever grows is a
-// leak. Dropping the gate on the way out is also why nothing else may delete
-// one — a gate removed while a leg still holds it is replaced by a fresh gate
-// the next leg passes straight through, which is the serialization silently
-// not happening.
+// gate when the last one leaves. Provider and (session, provider) keys are
+// unbounded over the life of an agent, so a gate map that only grows is a leak.
+// Nothing else may delete a gate while a leg holds it because a replacement
+// gate would break serialization.
 type authGate struct {
 	ch      chan struct{}
 	waiters int
@@ -86,22 +83,14 @@ func (p *providerAuth) admit(ctx context.Context, key authFlowKey) (func(), bool
 	return authAcquireGate(ctx, &p.mu, p.admissions, key)
 }
 
-// lockSlot serializes every mutation of one session's native credential store.
-// The gate is keyed on the home rather than on the provider because hermes
-// rewrites auth.json whole: two providers' legs that read the same document and
-// rename their own complete replacement leave only the last one's slot, so
-// per-provider keying would still lose an unrelated provider's credential.
-// Keyed on the home, a completion's lineage check, native write, and
-// confirmation are one indivisible sequence against a disconnect's read,
-// generation bump, removal, absence proof, and removed record.
-func (p *providerAuth) lockSlot(ctx context.Context, home string) (func(), bool) {
-	return authAcquireGate(ctx, &p.mu, p.slots, home)
+// lockProvider serializes native completion and disconnect work for one
+// provider in the shared native auth residence.
+func (p *providerAuth) lockProvider(ctx context.Context, providerID string) (func(), bool) {
+	return authAcquireGate(ctx, &p.mu, p.providers, providerID)
 }
 
-// lockFlowSlot takes the credential-slot gate for a leg that answers for a
-// flow.
-func (p *providerAuth) lockFlowSlot(ctx context.Context, flow *authFlow, home string) (func(), error) {
-	release, ok := p.lockSlot(ctx, home)
+func (p *providerAuth) lockFlowProvider(ctx context.Context, flow *authFlow) (func(), error) {
+	release, ok := p.lockProvider(ctx, flow.providerID)
 	if !ok {
 		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
 	}
@@ -111,19 +100,16 @@ func (p *providerAuth) lockFlowSlot(ctx context.Context, flow *authFlow, home st
 
 // lockLedger serializes every read-modify-write of one provider's durable
 // ledger entry: authorize's revision bump, disconnect's generation bump, a
-// completion's lineage check and confirmation, and injection's record of what
-// it installed. Each of those decides what to write from what it just read, and
+// completion's lineage check and confirmation. Each decides what to write from
+// what it just read, and
 // an interleaved write in between is read back and overwritten — a disconnect's
 // generation bump lost to an authorize's revision bump leaves the removal
 // standing in the native store under a record naming a generation the owner
 // retired.
 //
-// The key is the provider id rather than the native home the credential-slot
-// gate uses, because that is the identity of the record these legs rewrite: the
-// ledger is agent-wide, one file per provider under the host's own root with no
-// per-home segment, so two sessions rewriting one provider's record would hold
-// two different home gates and serialize nothing. It is always taken inside the
-// slot gate, never around it.
+// The key is the provider id because the ledger is agent-wide, one file per
+// provider under the host's durable root. It is always taken inside the native
+// provider gate.
 func (p *providerAuth) lockLedger(ctx context.Context, providerID string) (func(), bool) {
 	return authAcquireGate(ctx, &p.mu, p.ledgers, providerID)
 }
@@ -257,9 +243,8 @@ func (p *providerAuth) claimFlow(flow *authFlow) error {
 // tryClaimFlow takes the terminal check and the claim in one critical section
 // and reports whether this leg got it. The two must be indivisible because a
 // native call sits between them: a second callback passes the same pending
-// check while the first is still inside its write, and both then apply a
-// different secret to the one reserved slot with no data race for the detector
-// to find, since every field access on the record is itself locked. A leg with
+// check while the first is still inside its native mutation, with no data race
+// for the detector to find because every field access is itself locked. A leg with
 // a cached answer — the status probe — skips a busy flow rather than queueing
 // behind it, because whoever holds the claim is already driving the same
 // completion.
@@ -284,38 +269,4 @@ func (p *providerAuth) releaseFlow(flow *authFlow) {
 	defer p.mu.Unlock()
 
 	flow.claimed = false
-}
-
-// claimHarvest admits the one harvest a completed flow allows and holds the
-// claim across the whole attempt. The state read and the claim are one critical
-// section because four record reads sit between them, and a check-then-set that
-// wide lets a second leg pass the check before the first has set it — handing
-// two callers the same live access and refresh material, again with nothing for
-// the race detector to find.
-func (p *providerAuth) claimHarvest(flow *authFlow) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if flow.state != authStateAuthenticated && flow.state != authStateSaved {
-		return authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
-	}
-
-	if flow.harvested {
-		return authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
-	}
-
-	flow.harvested = true
-
-	return nil
-}
-
-// failHarvest releases the claim and fails the leg. At-most-once governs the
-// credential a harvest hands back, and an attempt that handed back nothing has
-// nothing to be once about.
-func (p *providerAuth) failHarvest(flow *authFlow, cause string) error {
-	p.mu.Lock()
-	flow.harvested = false
-	p.mu.Unlock()
-
-	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }

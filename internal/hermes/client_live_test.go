@@ -17,11 +17,18 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	home := t.TempDir()
+
+	scratch := t.TempDir()
+	home, err := os.MkdirTemp(scratch, "acp-go-hermes-runtime-")
+	if err != nil {
+		t.Fatalf("create generation root: %v", err)
+	}
+
 	opts := ProcessOptions{
-		Home:    home,
-		Cwd:     t.TempDir(),
-		Timeout: 120 * time.Second,
+		Home:          home,
+		Cwd:           t.TempDir(),
+		ScratchParent: scratch,
+		Timeout:       120 * time.Second,
 		Env: map[string]string{
 			"NO_COLOR": "1",
 		},

@@ -381,7 +381,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	versionScript := filepath.Join(t.TempDir(), "version-hermes")
-	require.NoError(t, os.WriteFile(versionScript, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.18.2\\n'\n"), 0o700))
+	require.NoError(t, os.WriteFile(versionScript, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.19.0\\n'\n"), 0o700))
 	nativeReleases, scratchReleases := 0, 0
 	needed, err := ensureExecutableVersion(t.Context(), versionScript, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
@@ -447,7 +447,7 @@ func TestDarwinVersionDiscoveryRetainsIncompleteGenerationAndAdmissions(t *testi
 	restoreProcessSeams(t)
 
 	script := filepath.Join(t.TempDir(), "hermes-version")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.18.2\\n'\n"), 0o700))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.19.0\\n'\n"), 0o700))
 	parent := t.TempDir()
 	nativeReleases, scratchReleases := 0, 0
 	retainedRoot := ""

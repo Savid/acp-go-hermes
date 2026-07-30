@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 )
 
 const (
-	MinimumVersion = "0.18.2"
+	MinimumVersion = "0.19.0"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the compatibility sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
@@ -65,6 +66,7 @@ type ProcessOptions struct {
 	// system temp directory itself.
 	ScratchParent               string
 	Cwd                         string
+	ProviderAuthHome            string
 	Env                         map[string]string
 	Timeout                     time.Duration
 	Configure                   func(*exec.Cmd)
@@ -209,11 +211,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
 	// TTY hermes block-buffers stdout and emits nothing while working normally.
-	env = append(env,
-		"HERMES_HOME="+home,
-		"HERMES_DASHBOARD_SESSION_TOKEN="+token,
-		"PYTHONUNBUFFERED=1",
-	)
+	env = upsertProcessEnv(env, "HERMES_HOME", home)
+	env = upsertProcessEnv(env, "HERMES_DASHBOARD_SESSION_TOKEN", token)
+	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
+	if opts.ProviderAuthHome != "" {
+		env = upsertProcessEnv(env, "HERMES_AUTH_HOME", opts.ProviderAuthHome)
+	}
 
 	// A login runs inside this process, and hermes opens a browser for it even
 	// when told not to: --no-browser is accepted and then ignored. The shim
@@ -307,6 +310,20 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, nil)
 
 	return process, nil
+}
+
+func upsertProcessEnv(env []string, key string, value string) []string {
+	prefix := key + "="
+	filtered := env[:0]
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			continue
+		}
+
+		filtered = append(filtered, entry)
+	}
+
+	return append(filtered, prefix+value)
 }
 
 func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) (bool, error) {

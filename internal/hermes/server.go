@@ -131,11 +131,11 @@ type Server interface {
 	EventErrors() <-chan error
 	XDGDirs() XDGDirs
 	AuthProviders(context.Context) ([]AuthProvider, error)
-	AuthAPIKeyProviders(context.Context) ([]AuthAPIKeyProvider, error)
 	AuthStart(context.Context, string) (AuthStart, error)
 	AuthSubmit(context.Context, string, string, string) error
 	AuthPollFlow(context.Context, string, string) (AuthPoll, error)
 	AuthCancelFlow(context.Context, string) error
+	AuthDisconnect(context.Context, string) error
 }
 
 type StartOptions struct {
@@ -148,6 +148,7 @@ type StartOptions struct {
 	Cwd                         string
 	ExecutablePath              string
 	DefaultModel                string
+	ProviderAuthHome            string
 	Env                         map[string]string
 	HealthTimeout               time.Duration
 	Logger                      *slog.Logger
@@ -571,6 +572,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		Home:                        xdg.Root,
 		ScratchParent:               options.ScratchParent,
 		Cwd:                         options.Cwd,
+		ProviderAuthHome:            options.ProviderAuthHome,
 		Env:                         processEnv,
 		Timeout:                     options.HealthTimeout,
 		Configure:                   configureHermesProcess,

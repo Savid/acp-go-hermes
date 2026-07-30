@@ -67,20 +67,21 @@ type fakeHermesClient struct {
 	reloadFunc           func(context.Context, string) error
 	closeFunc            func(context.Context) error
 
-	authProviders     []nativehermes.AuthProvider
-	authKeyProviders  []nativehermes.AuthAPIKeyProvider
-	authProvidersErr  error
-	authKeyErr        error
-	authStart         nativehermes.AuthStart
-	authStartErr      error
-	authStartFunc     func(context.Context, string) (nativehermes.AuthStart, error)
-	authSubmitErr     error
-	authSubmits       []string
-	authPoll          nativehermes.AuthPoll
-	authPollErr       error
-	authPollFunc      func(context.Context, string, string) (nativehermes.AuthPoll, error)
-	authCancelled     []string
-	authCancelFlowErr error
+	authProviders      []nativehermes.AuthProvider
+	authProvidersErr   error
+	authStart          nativehermes.AuthStart
+	authStartErr       error
+	authStartFunc      func(context.Context, string) (nativehermes.AuthStart, error)
+	authSubmitErr      error
+	authSubmits        []string
+	authPoll           nativehermes.AuthPoll
+	authPollErr        error
+	authPollFunc       func(context.Context, string, string) (nativehermes.AuthPoll, error)
+	authCancelled      []string
+	authCancelFlowErr  error
+	authDisconnected   []string
+	authDisconnectErr  error
+	authDisconnectFunc func(context.Context, string) error
 }
 
 func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthProvider, error) {
@@ -88,13 +89,6 @@ func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthPr
 	defer c.mu.Unlock()
 
 	return c.authProviders, c.authProvidersErr
-}
-
-func (c *fakeHermesClient) AuthAPIKeyProviders(context.Context) ([]nativehermes.AuthAPIKeyProvider, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.authKeyProviders, c.authKeyErr
 }
 
 func (c *fakeHermesClient) AuthStart(ctx context.Context, providerID string) (nativehermes.AuthStart, error) {
@@ -141,6 +135,20 @@ func (c *fakeHermesClient) AuthCancelFlow(_ context.Context, nativeSessionID str
 	c.authCancelled = append(c.authCancelled, nativeSessionID)
 
 	return c.authCancelFlowErr
+}
+
+func (c *fakeHermesClient) AuthDisconnect(ctx context.Context, providerID string) error {
+	c.mu.Lock()
+	c.authDisconnected = append(c.authDisconnected, providerID)
+	fn := c.authDisconnectFunc
+	err := c.authDisconnectErr
+	c.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, providerID)
+	}
+
+	return err
 }
 
 type fakePermissionReply struct {

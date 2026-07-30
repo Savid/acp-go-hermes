@@ -8,7 +8,7 @@ import (
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-func TestMethodsEnumeratesBothNativeCatalogs(t *testing.T) {
+func TestMethodsEnumeratesOnlyNativeOAuthCatalog(t *testing.T) {
 	t.Parallel()
 
 	agent, client := newAuthAgent(t)
@@ -20,13 +20,6 @@ func TestMethodsEnumeratesBothNativeCatalogs(t *testing.T) {
 		{ID: "", Name: "nameless", Flow: nativehermes.AuthFlowDeviceCode},
 		{ID: "unlabelled", Name: "bad\u202Elabel", Flow: nativehermes.AuthFlowDeviceCode},
 	}
-	client.authKeyProviders = []nativehermes.AuthAPIKeyProvider{
-		{ID: "xai-oauth", Name: "xAI"},
-		{ID: "openai", Name: "OpenAI"},
-		{ID: "", Name: "nameless"},
-		{ID: "unusable", Name: ""},
-	}
-
 	result, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
 	if err != nil {
 		t.Fatalf("methods: %v", err)
@@ -45,16 +38,12 @@ func TestMethodsEnumeratesBothNativeCatalogs(t *testing.T) {
 		t.Fatal("an entry whose label violates its bound was published")
 	}
 
-	if _, present := catalog.Providers["unusable"]; present {
-		t.Fatal("an operator-key entry whose label violates its bound was published")
-	}
-
 	xai := catalog.Providers["xai-oauth"]
-	if len(xai) != 2 || xai[0].ID != nativehermes.AuthFlowDeviceCode || xai[1].ID != authAPIKeyMethodID {
+	if len(xai) != 1 || xai[0].ID != nativehermes.AuthFlowDeviceCode {
 		t.Fatalf("xai methods = %#v", xai)
 	}
 
-	if xai[0].Type != authMethodTypeOAuth || xai[1].Type != authMethodTypeAPI {
+	if xai[0].Type != authMethodTypeOAuth {
 		t.Fatalf("xai method types = %#v", xai)
 	}
 
@@ -87,12 +76,6 @@ func TestMethodsFailurePaths(t *testing.T) {
 	requireAuthCause(t, err, authCauseProviderRefused)
 
 	client.authProvidersErr = nil
-	client.authKeyErr = errors.New("transport")
-
-	_, err = callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
-	requireAuthCause(t, err, authCauseTransport)
-
-	client.authKeyErr = nil
 
 	session, err := agent.providerAuth.authSession(string(testSessionID))
 	if err != nil {
@@ -241,7 +224,6 @@ func TestBuildAuthCatalogSortsProvidersDeterministically(t *testing.T) {
 			{ID: "zeta", Name: "Zeta", Flow: nativehermes.AuthFlowDeviceCode},
 			{ID: "alpha", Name: "Alpha", Flow: nativehermes.AuthFlowDeviceCode},
 		},
-		nil,
 	)
 
 	if len(entries) != 2 {

@@ -17,13 +17,7 @@ import (
 // Method entry types on the wire.
 const (
 	authMethodTypeOAuth = "oauth"
-	authMethodTypeAPI   = "api"
 )
-
-// authAPIKeyMethodID is the id of the operator-key method. Hermes addresses a
-// login by provider and flow rather than by array position, so every method id
-// on this surface is a stable native token.
-const authAPIKeyMethodID = "api_key"
 
 // Display-field bounds. A value violating its bound is dropped, never
 // truncated.
@@ -34,8 +28,7 @@ const (
 	authMaxLabelBytes    = 256
 )
 
-// authMaxSecretBytes bounds the value an interaction:"secret" callback submits.
-const authMaxSecretBytes = 4096
+const authMaxCallbackBytes = 4096
 
 // authUserCodePattern is anchored: a substring match accepts a code with markup
 // wrapped around it.
@@ -47,9 +40,8 @@ type authCatalogMethod struct {
 	ID    string
 	Type  string
 	Label string
-	// Flow is the native flow discriminator for an oauth method and empty for
-	// the operator-key method. The start shapes differ per flow, so it is
-	// carried rather than re-derived.
+	// Flow is the native flow discriminator. The start shapes differ per flow,
+	// so it is carried rather than re-derived.
 	Flow string
 }
 
@@ -94,12 +86,7 @@ func (p *providerAuth) methods(ctx context.Context, params json.RawMessage) (any
 		return nil, authFailed(authNativeCause(err), "", "", "")
 	}
 
-	keyed, err := client.AuthAPIKeyProviders(ctx)
-	if err != nil {
-		return nil, authFailed(authNativeCause(err), "", "", "")
-	}
-
-	methods, entries := buildAuthCatalog(oauth, keyed)
+	methods, entries := buildAuthCatalog(oauth)
 
 	generation, err := newAuthToken()
 	if err != nil {
@@ -114,20 +101,15 @@ func (p *providerAuth) methods(ctx context.Context, params json.RawMessage) (any
 	return authMethodsResult{Providers: entries, Generation: generation}, nil
 }
 
-// buildAuthCatalog merges the native OAuth catalog with the providers that
-// accept an operator key. A provider whose native flow is external is omitted
-// entirely: that entry reads another harness's existing credential instead of
-// brokering one and refuses to start, so offering it as a login would advertise
-// a flow that can never complete.
-func buildAuthCatalog(
-	oauth []nativehermes.AuthProvider,
-	keyed []nativehermes.AuthAPIKeyProvider,
-) (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
-	methods := make(map[string][]authCatalogMethod, len(oauth)+len(keyed))
-	entries := make(map[string][]authMethodEntry, len(oauth)+len(keyed))
+// buildAuthCatalog publishes only native OAuth methods. External methods read
+// another harness's credential and API-key methods persist into the isolated
+// session home, so neither is a durable provider-auth method.
+func buildAuthCatalog(oauth []nativehermes.AuthProvider) (map[string][]authCatalogMethod, map[string][]authMethodEntry) {
+	methods := make(map[string][]authCatalogMethod, len(oauth))
+	entries := make(map[string][]authMethodEntry, len(oauth))
 
-	ids := make([]string, 0, len(oauth)+len(keyed))
-	byID := make(map[string][]authCatalogMethod, len(oauth)+len(keyed))
+	ids := make([]string, 0, len(oauth))
+	byID := make(map[string][]authCatalogMethod, len(oauth))
 
 	appendMethod := func(providerID string, method authCatalogMethod) {
 		if _, seen := byID[providerID]; !seen {
@@ -156,23 +138,6 @@ func buildAuthCatalog(
 			Type:  authMethodTypeOAuth,
 			Label: label,
 			Flow:  provider.Flow,
-		})
-	}
-
-	for _, provider := range keyed {
-		if provider.ID == "" {
-			continue
-		}
-
-		label, ok := authDisplayText(provider.Name, authMaxLabelBytes)
-		if !ok {
-			continue
-		}
-
-		appendMethod(provider.ID, authCatalogMethod{
-			ID:    authAPIKeyMethodID,
-			Type:  authMethodTypeAPI,
-			Label: label,
 		})
 	}
 

@@ -9,43 +9,10 @@ type sessionMeta struct {
 	Env          map[string]string
 	OutputSchema any
 	RawMessages  rawMessageConfig
-	// ProviderAuth carries the bindings the host asked the adapter to install
-	// into the session's native home before hermes first reads it. Supplied
-	// records whether the option key was present at all, which is what
-	// separates an injection that ran and matched from one that never ran.
-	ProviderAuth         map[string]ProviderAuthBinding
-	ProviderAuthSupplied bool
-	// injectionOutcome is the shared cell the native launch fills with the
-	// values-free tri-state. It is a pointer because this value travels by copy
-	// through the launch path.
-	injectionOutcome *string
-}
-
-// withProviderAuth attaches injection bindings and allocates the cell the
-// launch path fills. Bindings that do not exist are not an injection: the
-// lifecycle response then carries no outcome at all.
-func (meta sessionMeta) withProviderAuth(bindings map[string]ProviderAuthBinding) sessionMeta {
-	meta.ProviderAuth = bindings
-	if len(bindings) > 0 {
-		meta.ProviderAuthSupplied = true
-		meta.injectionOutcome = new(string)
-	}
-
-	return meta
-}
-
-// injection reports the recorded injection outcome, or the empty string when no
-// injection was requested.
-func (meta sessionMeta) injection() string {
-	if meta.injectionOutcome == nil {
-		return ""
-	}
-
-	return *meta.injectionOutcome
 }
 
 func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
-	if err := validateLifecycleMeta(meta, a.providerAuth != nil); err != nil {
+	if err := validateLifecycleMeta(meta); err != nil {
 		return sessionMeta{}, err
 	}
 
@@ -54,25 +21,16 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 		return sessionMeta{}, err
 	}
 
-	resolved := sessionMeta{
-		Model:                options.Model,
-		Env:                  options.Env,
-		RawMessages:          rawMessageConfigFromMeta(meta),
-		ProviderAuth:         options.ProviderAuth,
-		ProviderAuthSupplied: options.ProviderAuthSupplied,
-	}
-	if options.ProviderAuthSupplied {
-		resolved.injectionOutcome = new(string)
-	}
-
-	return resolved, nil
+	return sessionMeta{
+		Model:       options.Model,
+		Env:         options.Env,
+		RawMessages: rawMessageConfigFromMeta(meta),
+	}, nil
 }
 
 type hermesMetaOptions struct {
-	Model                string
-	Env                  map[string]string
-	ProviderAuth         map[string]ProviderAuthBinding
-	ProviderAuthSupplied bool
+	Model string
+	Env   map[string]string
 }
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
@@ -97,44 +55,10 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		options.Env = env
 	}
 
-	if raw, ok := optionsMap[metaProviderAuthKey]; ok {
-		bindings, err := providerAuthBindingsFromMeta(raw)
-		if err != nil {
-			return hermesMetaOptions{}, err
-		}
-
-		options.ProviderAuth = bindings
-		options.ProviderAuthSupplied = true
-	}
-
 	return options, nil
 }
 
-// providerAuthBindingsFromMeta decodes the injection map strictly. The
-// credential union rejects unknown and duplicate fields, empty required
-// strings, and every variant this adapter does not accept, so a binding that
-// does not decode fails session establishment instead of being ignored.
-func providerAuthBindingsFromMeta(value any) (map[string]ProviderAuthBinding, error) {
-	encoded, err := agentJSONMarshal(value)
-	if err != nil {
-		return nil, unsupportedField(providerAuthOptionPath)
-	}
-
-	var bindings map[string]ProviderAuthBinding
-	if err := agentJSONUnmarshal(encoded, &bindings); err != nil {
-		return nil, unsupportedField(providerAuthOptionPath)
-	}
-
-	for providerID, binding := range bindings {
-		if providerID == "" || !authValidConnectionID(binding.ConnectionID) || binding.Revision <= 0 || binding.BindingGeneration <= 0 {
-			return nil, unsupportedField(providerAuthOptionPath)
-		}
-	}
-
-	return bindings, nil
-}
-
-func validateLifecycleMeta(meta map[string]any, providerAuthEnabled bool) error {
+func validateLifecycleMeta(meta map[string]any) error {
 	if len(meta) == 0 {
 		return nil
 	}
@@ -163,10 +87,6 @@ func validateLifecycleMeta(meta map[string]any, providerAuthEnabled bool) error 
 						return unsupportedField("_meta.hermes.options.model")
 					}
 				case metaEnvKey:
-				case metaProviderAuthKey:
-					if !providerAuthEnabled {
-						return unsupportedField(providerAuthOptionPath)
-					}
 				case metaOutputSchemaKey:
 					return unsupportedField("_meta.hermes.options.outputSchema")
 				default:
@@ -293,21 +213,8 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	return map[string]any{hermesMetaKey: hermesMeta}
 }
 
-// lifecycleResponseMeta adds the values-free injection tri-state to a lifecycle
-// response. The field is absent when the option key was not supplied at all:
-// reporting noop there would claim an injection was evaluated and matched.
 func lifecycleResponseMeta(snapshot sessionSnapshot) map[string]any {
-	meta := sessionResponseMeta(snapshot)
-	if snapshot.providerAuthInjection == "" {
-		return meta
-	}
-
-	hermesMeta, _ := meta[hermesMetaKey].(map[string]any)
-	hermesMeta[metaProviderAuthKey] = map[string]any{
-		providerAuthInjectionName: snapshot.providerAuthInjection,
-	}
-
-	return meta
+	return sessionResponseMeta(snapshot)
 }
 
 func sessionInfoMeta(snapshot sessionSnapshot) map[string]any {

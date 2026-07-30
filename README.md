@@ -90,24 +90,20 @@ func main() {
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Hermes
 executable path, the scratch directory for ephemeral per-session state, default
 model, environment, session storage, concurrency limits, and OpenTelemetry
-providers. Hermes has no native config or auth root, so `WithHome` is
-unsupported: a non-empty `Home` is rejected as an unsupported option when a
-session is established. Use `WithScratchDir` to control where ephemeral state is
-materialized. `WithProviderAuthRoot` names the durable directory that holds the
-values-free provider-auth ledger; without it no provider-auth method is
-advertised, and `WithProviderAuthDirectHome` is declared for configuration
-symmetry and rejected fail-closed at session start.
+providers. `WithHome` is unsupported because each session runtime root is
+isolated. Use `WithScratchDir` for ephemeral state and `WithProviderAuthHome`
+for durable provider credentials. `WithProviderAuthRoot` names the durable
+directory that holds the values-free provider-auth ledger. Provider auth is
+advertised only when both provider-auth directories are configured.
 
 ## What It Provides
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
   delete, and fork.
-- Provider logins brokered through eight session-scoped `_hermes/auth/*`
-  extension methods over the `hermes serve` REST auth API, with a durable
-  values-free ledger, a reserved credential-pool slot per connection, and
-  injection through `_meta.hermes.options.providerAuth` for non-rotating
-  providers only — the adapter refuses to harvest or inject a refresh token the
-  provider invalidates when it is used.
+- Provider OAuth brokered through seven session-scoped `_hermes/auth/*`
+  extension methods over the `hermes serve` REST auth API. Native Hermes owns
+  credential bytes in a shared durable `HERMES_AUTH_HOME`; the adapter keeps
+  only values-free connection lineage.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
   freshly generated `HERMES_HOME`. Linux and Windows use authoritative OS
   containment. Darwin is disabled unless its explicitly risky best-effort
@@ -159,8 +155,9 @@ Live integration tests require a local authenticated `hermes` CLI. The live
 target sets `ACP_GO_HERMES_RUN_INTEGRATION=1` and
 `ACP_GO_HERMES_RUN_LIVE_TOKENS=1` and may spend model tokens. Set
 `ACP_GO_HERMES_MODEL` to override the model used by live tests. Live tests
-always launch Hermes with an isolated temp `HERMES_HOME` and never touch the
-user's real Hermes home.
+always launch Hermes with an isolated temp `HERMES_HOME`. Credentialed tests
+pass a durable `HERMES_AUTH_HOME` explicitly and never copy credential files
+into a session home.
 
 ## License
 

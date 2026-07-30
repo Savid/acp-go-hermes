@@ -286,10 +286,10 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	home := t.TempDir()
 
 	// Wire this live turn to the operator's xAI login: seed a config selecting
-	// the tool-capable grok-4.5/xai-oauth provider plus the ambient Hermes auth
-	// into the isolated HERMES_HOME. The default openrouter/free router is not
-	// reliably tool-capable and never issues the terminal / question tool calls
-	// that this test asserts on.
+	// the tool-capable grok-4.5/xai-oauth provider and point native Hermes at its
+	// durable auth home. The default openrouter/free router is not reliably
+	// tool-capable and never issues the terminal / question tool calls that this
+	// test asserts on.
 	//
 	// Hermes's approval.request flow is architecturally scoped to TERMINAL
 	// COMMANDS: the write_file tool is never approval-gated, so a file-write
@@ -303,8 +303,8 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	// dangerous-classified command to the gateway approval callback, which the
 	// adapter converts to session/request_permission — the exact surface this
 	// test asserts on. Approvals are never auto-granted by this config.
-	hermesAuth := filepath.Join(os.Getenv("HOME"), ".hermes", "auth.json")
-	if _, statErr := os.Stat(hermesAuth); statErr != nil {
+	hermesAuthHome := filepath.Join(os.Getenv("HOME"), ".hermes")
+	if _, statErr := os.Stat(filepath.Join(hermesAuthHome, "auth.json")); statErr != nil {
 		t.Skipf("ambient Hermes auth not available: %v", statErr)
 	}
 	xaiConfig := filepath.Join(t.TempDir(), "config.yaml")
@@ -321,7 +321,8 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	args := []string{
 		"-debug",
 		"-seed-file", "config.yaml=" + xaiConfig,
-		"-seed-file", "auth.json=" + hermesAuth,
+		"-provider-auth-root", t.TempDir(),
+		"-provider-auth-home", hermesAuthHome,
 	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)

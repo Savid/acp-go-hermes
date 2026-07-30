@@ -246,7 +246,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 func runFakeHermesServer(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.2 (fake)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (fake)")
 			return nil
 		}
 	}
@@ -426,7 +426,7 @@ func handleFakeGatewayRPC(
 			"result":  map[string]any{"probe": "authorized", "status": "ok"},
 		})
 		state.recordAssistant("fake response")
-		// Hermes 0.18.2 may deliver the entire assistant reply only on the
+		// Hermes 0.19.0 may deliver the entire assistant reply only on the
 		// authoritative completion event, with no preceding message.delta.
 		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{
 			"text":  "fake response",

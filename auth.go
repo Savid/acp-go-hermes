@@ -13,30 +13,22 @@ import (
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-// Session-scoped provider-auth extension methods. Hermes brokers a login
-// through its own REST auth API and hands the completed credential back out, so
-// it carries the credential leg and accepts injection. Only non-rotating
-// providers cross those two legs; material for the rest is refused and stays in
-// the session's own native home.
+// Session-scoped provider-auth extension methods. Hermes owns credential
+// material in the configured native auth home; this surface coordinates only
+// values-free flow and lineage state.
 const (
-	AuthMethodsMethod   = "_hermes/auth/methods"
-	AuthAuthorizeMethod = "_hermes/auth/authorize"
-	AuthCallbackMethod  = "_hermes/auth/callback"
-	AuthStatusMethod    = "_hermes/auth/status"
-	AuthCancelMethod    = "_hermes/auth/cancel"
-	AuthInventoryMethod = "_hermes/auth/inventory"
-	//nolint:gosec // G101 false positive: this is an ACP method name, not a credential.
-	AuthCredentialMethod = "_hermes/auth/credential"
+	AuthMethodsMethod    = "_hermes/auth/methods"
+	AuthAuthorizeMethod  = "_hermes/auth/authorize"
+	AuthCallbackMethod   = "_hermes/auth/callback"
+	AuthStatusMethod     = "_hermes/auth/status"
+	AuthCancelMethod     = "_hermes/auth/cancel"
+	AuthInventoryMethod  = "_hermes/auth/inventory"
 	AuthDisconnectMethod = "_hermes/auth/disconnect"
 )
 
 const (
 	providerAuthCapabilityKey = "providerAuth"
 	providerAuthMethodsField  = "methods"
-	providerAuthInjectionKey  = "injectionKey"
-	providerAuthOptionPath    = "_meta.hermes.options.providerAuth"
-	providerAuthInjectionName = "injection"
-	metaProviderAuthKey       = "providerAuth"
 
 	authFailedErrorTag = "hermes_auth_failed"
 
@@ -62,26 +54,12 @@ const (
 	authCauseTransport          = "transport"
 	authCauseProcess            = "process"
 	authCauseTimeout            = "timeout"
-	authCauseHarvestFailed      = "harvest_failed"
 	authCauseUnsupportedVariant = "unsupported_variant"
 	authCauseFlowExpired        = "flow_expired"
 	authCauseFlowState          = "flow_state"
 	authCauseFlowCancelled      = "flow_cancelled"
 	authCausePolicy             = "policy"
 	authCauseBindingConflict    = "binding_conflict"
-)
-
-// Native credential-store entry points. Every reserved-slot read and write on
-// this surface goes through exactly these.
-var (
-	authSlotPresent    = nativehermes.AuthSlotPresent
-	authReadSlot       = nativehermes.AuthReadSlot
-	authWriteSlot      = nativehermes.AuthWriteSlot
-	authMigrateSlot    = nativehermes.AuthMigrateSlot
-	authSnapshotPool   = nativehermes.AuthSnapshotPool
-	authRemoveSlot     = nativehermes.AuthRemoveSlot
-	authReadFlowExpiry = nativehermes.AuthReadFlowExpiry
-	authSlotLabel      = nativehermes.AuthSlotLabel
 )
 
 // authMethodNames lists every advertised leg in the order the capability
@@ -94,7 +72,6 @@ func authMethodNames() []string {
 		AuthStatusMethod,
 		AuthCancelMethod,
 		AuthInventoryMethod,
-		AuthCredentialMethod,
 		AuthDisconnectMethod,
 	}
 }
@@ -107,15 +84,14 @@ func authMethodNames() []string {
 // dispatches each inbound request on its own goroutine and cancels that
 // request's context when the handler returns; only notifications are
 // serialized. So two legs addressing the same flow, the same session, or the
-// same native credential store are ordinary, and every read state → native
+// same native provider are ordinary, and every read state → native
 // call → write state sequence on this surface is a check-then-set whose window
 // is the whole native call. Nothing in the field-level locking below closes
 // that window: each individual access is already guarded, so the outcome is a
 // lost update rather than a data race, and the race detector reports nothing.
 // The four admission primitives in auth_admission.go are what make those
 // sequences indivisible — session admission, the per-(session, provider)
-// authorize gate, the per-flow claim, and the credential-slot gate keyed on the
-// native home.
+// authorize gate, the per-flow claim, and the provider and ledger gates.
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
@@ -132,11 +108,10 @@ type providerAuth struct {
 	retired map[authFlowKey]map[string]struct{}
 	// closedSessions is the tombstone publication checks against.
 	closedSessions map[acp.SessionId]struct{}
-	// admissions gates authorize per (session, provider); slots gates every
-	// mutation of one native home's credential store; ledgers gates every
-	// read-modify-write of one provider's durable ledger entry.
+	// admissions gates authorize per (session, provider); providers gates native
+	// provider mutations; ledgers gates each provider's durable lineage record.
 	admissions map[authFlowKey]*authGate
-	slots      map[string]*authGate
+	providers  map[string]*authGate
 	ledgers    map[string]*authGate
 }
 
@@ -154,6 +129,15 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		return nil
 	}
 
+	home, err := prepareProviderAuthHome(agent.options.ProviderAuthHome)
+	if err != nil {
+		agent.log.WarnContext(context.Background(), "provider auth surface is unavailable", slog.String(jsonFieldError, err.Error()))
+
+		return nil
+	}
+
+	agent.options.ProviderAuthHome = home
+
 	ledger, err := newAuthLedger(agent.options)
 	if err != nil {
 		agent.log.WarnContext(context.Background(), "provider auth surface is unavailable", slog.String(jsonFieldError, err.Error()))
@@ -170,18 +154,16 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		retired:        make(map[authFlowKey]map[string]struct{}),
 		closedSessions: make(map[acp.SessionId]struct{}),
 		admissions:     make(map[authFlowKey]*authGate),
-		slots:          make(map[string]*authGate),
+		providers:      make(map[string]*authGate),
 		ledgers:        make(map[string]*authGate),
 	}
 }
 
-// capability reports the enabled leg names and the injection key. The array is
-// the host's only discovery surface for which legs exist, so an absent leg is
-// omitted rather than reported false.
+// capability reports the enabled leg names. The array is the host's only
+// discovery surface for which legs exist.
 func (p *providerAuth) capability() map[string]any {
 	return map[string]any{
 		providerAuthMethodsField: authMethodNames(),
-		providerAuthInjectionKey: providerAuthOptionPath,
 	}
 }
 
@@ -214,10 +196,6 @@ func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, pa
 		return result, true, err
 	case AuthInventoryMethod:
 		result, err := broker.inventory(ctx, params)
-
-		return result, true, err
-	case AuthCredentialMethod:
-		result, err := broker.credential(ctx, params)
 
 		return result, true, err
 	case AuthDisconnectMethod:
@@ -309,8 +287,6 @@ func authFlowTransition(cause string, materialInFlight bool) (string, string) {
 		}
 
 		return authStateFailed, authReasonTransport
-	case authCauseHarvestFailed:
-		return authStateFailed, authReasonHarvestFailed
 	case authCauseFlowExpired:
 		return authStateExpired, authReasonDeadline
 	default:
@@ -353,24 +329,12 @@ func (p *providerAuth) authSession(id string) (*session, error) {
 	return session, nil
 }
 
-// authNativeClient reports the session's live gateway, which is also the home
-// every provider-auth mutation targets.
+// authNativeClient reports the session's live gateway.
 func (s *session) authNativeClient() nativehermes.Server {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.client
-}
-
-// authHome reports the session's isolated HERMES_HOME, which is where the
-// credential pool and both flow-specific residences live.
-func (s *session) authHome() string {
-	client := s.authNativeClient()
-	if client == nil {
-		return ""
-	}
-
-	return client.XDGDirs().Root
 }
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,
@@ -447,11 +411,8 @@ func authRequiredString(fields map[string]json.RawMessage, name string) (string,
 // with room to spare.
 const authConnectionIDMaxBytes = 128
 
-// authRequiredConnectionID decodes and validates the connection id a leg
-// addresses. It is checked here, where the value enters, rather than at each
-// addressing site: the id becomes the reserved slot's native label verbatim, so
-// one entry check covers every leg that then reads, writes, migrates, or probes
-// that slot.
+// authRequiredConnectionID decodes and validates the host-minted connection id
+// where it enters the provider lineage.
 func authRequiredConnectionID(fields map[string]json.RawMessage) (string, error) {
 	value, err := authRequiredString(fields, authFieldConnectionID)
 	if err != nil {
@@ -468,7 +429,7 @@ func authRequiredConnectionID(fields map[string]json.RawMessage) (string, error)
 // authValidConnectionID reports whether id is an opaque bounded ASCII token.
 // Restricting it to that alphabet is what keeps the derived label free of the
 // adapter's own prefix, of separators and control characters, and of two wire
-// spellings that decode to one Go string and would alias one connection's slot.
+// spellings that decode to one Go string and would alias one connection.
 func authValidConnectionID(id string) bool {
 	if id == "" || len(id) > authConnectionIDMaxBytes {
 		return false
@@ -525,39 +486,6 @@ func (p *providerAuth) goSafe(name string, fn func()) {
 
 		fn()
 	}()
-}
-
-// injectProviderAuth applies the host's bound credentials to a native home
-// before the harness first reads it, and records the values-free tri-state on
-// the cell the lifecycle response reads.
-func (a *Agent) injectProviderAuth(ctx context.Context, home string, meta sessionMeta) {
-	if a.providerAuth == nil || meta.injectionOutcome == nil {
-		return
-	}
-
-	*meta.injectionOutcome = a.providerAuth.inject(ctx, home, meta.ProviderAuth)
-}
-
-// reinjectActiveSession re-evaluates injection for a lifecycle request that
-// reuses a running session. The home is live rather than fresh, so a resident
-// entry is answered rather than replaced: the tri-state is still what tells the
-// host whether the credential it holds is the one in the slot.
-func (a *Agent) reinjectActiveSession(ctx context.Context, existing *session, meta sessionMeta) {
-	if a.providerAuth == nil || meta.injectionOutcome == nil {
-		return
-	}
-
-	home := existing.authHome()
-	if home == "" {
-		*meta.injectionOutcome = authInjectionConflict
-	} else {
-		*meta.injectionOutcome = a.providerAuth.inject(ctx, home, meta.ProviderAuth)
-	}
-
-	existing.mu.Lock()
-	existing.providerAuth = meta.ProviderAuth
-	existing.providerAuthInjection = meta.injection()
-	existing.mu.Unlock()
 }
 
 func invalidAuthField(path string) error {

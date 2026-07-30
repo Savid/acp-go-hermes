@@ -14,13 +14,13 @@
 //
 // Hosts should use [Serve] for the JSON-RPC transport; hosts that embed the
 // agent directly construct one with [NewAgent] and the same [Option] values.
-// Hermes authentication and provider credentials remain owned by the local
-// Hermes installation. Each session runs under its own `HERMES_HOME`
-// materialized beneath the scratch parent from [WithScratchDir] (the system
-// temp directory by default), so native state never leaks between sessions.
-// [WithHome] is unsupported: Hermes has no native config or auth root the
-// adapter may target, so a non-empty Home is rejected when a session is
-// established.
+// Hermes authentication and provider credentials remain owned by native
+// Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
+// beneath the scratch parent from [WithScratchDir]. Provider OAuth requires the
+// paired [WithProviderAuthRoot] and [WithProviderAuthHome] options; every native
+// process receives the latter as `HERMES_AUTH_HOME`, while the former stores
+// only values-free connection lineage. [WithHome] remains unsupported for
+// session config and runtime state.
 //
 // Prompt images arrive either as embedded base64 or, for a co-located host that
 // sets [WithInputHandoffRoot], as digest-verified files under that read-only

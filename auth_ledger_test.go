@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -26,6 +25,7 @@ func restoreLedgerHooks(t *testing.T) {
 		ledgerReadDir = os.ReadDir
 		ledgerRemove = os.Remove
 		ledgerMarshal = json.Marshal
+		ledgerEvalPath = filepath.EvalSymlinks
 		ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
 			return os.CreateTemp(dir, pattern)
 		}
@@ -38,7 +38,7 @@ func restoreLedgerHooks(t *testing.T) {
 func newTestLedger(t *testing.T) *authLedger {
 	t.Helper()
 
-	ledger, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir()})
+	ledger, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), ProviderAuthHome: t.TempDir()})
 	if err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
@@ -49,7 +49,7 @@ func newTestLedger(t *testing.T) *authLedger {
 func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative"}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative", ProviderAuthHome: t.TempDir()}); err == nil {
 		t.Fatal("relative root accepted")
 	}
 
@@ -111,7 +111,7 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 				target = file
 			}
 
-			if _, err := newAuthLedger(Options{ProviderAuthRoot: target}); err == nil {
+			if _, err := newAuthLedger(Options{ProviderAuthRoot: target, ProviderAuthHome: t.TempDir()}); err == nil {
 				t.Fatal("unusable root accepted")
 			}
 		})
@@ -130,7 +130,7 @@ func TestAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 		t.Fatalf("relax root: %v", err)
 	}
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: root}); err != nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: t.TempDir()}); err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
 
@@ -373,7 +373,7 @@ func TestAuthProofSourceIsTheTotalFunctionOfLedgerAndProbe(t *testing.T) {
 	}
 }
 
-func TestInventoryReportsResidenceFromTheLedgerAndAProbe(t *testing.T) {
+func TestInventoryCombinesConfirmedLineageWithNativeStatus(t *testing.T) {
 	restoreLedgerHooks(t)
 
 	agent, client := newAuthAgent(t)
@@ -398,26 +398,23 @@ func TestInventoryReportsResidenceFromTheLedgerAndAProbe(t *testing.T) {
 		t.Fatalf("write removed: %v", err)
 	}
 
+	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: false}}
+
 	result, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
 
 	entries := mustType[authInventoryResult](t, result).Entries
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("entries = %#v", entries)
 	}
 
-	for _, entry := range entries {
-		if entry.ProofSource == authProofConfirmedPresent {
-			t.Fatalf("empty slot reported present: %#v", entry)
-		}
+	if entries[0].ProviderID != testProviderID || entries[0].ProofSource != authProofConfirmedAbsent {
+		t.Fatalf("logged-out entry = %#v", entries[0])
 	}
 
-	material := nativehermes.AuthMaterial{AuthType: nativehermes.AuthTypeOAuth, AccessToken: "token"}
-	if errLocal := nativehermes.AuthWriteSlot(client.xdg.Root, testProviderID, nativehermes.AuthSlotLabel(testConnectionID), material); errLocal != nil {
-		t.Fatalf("seed reserved slot: %v", err)
-	}
+	client.authProviders[0].LoggedIn = true
 
 	result, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
 	if err != nil {
@@ -425,34 +422,9 @@ func TestInventoryReportsResidenceFromTheLedgerAndAProbe(t *testing.T) {
 	}
 
 	entries = mustType[authInventoryResult](t, result).Entries
-	if entries[0].ProviderID != "pending" || entries[0].ProofSource != authProofNotConfirmed {
-		t.Fatalf("intent entry = %#v", entries[0])
-	}
-
-	if entries[1].ProviderID != testProviderID || entries[1].ProofSource != authProofConfirmedPresent {
-		t.Fatalf("confirmed entry = %#v", entries[1])
-	}
-}
-
-func TestInventoryNeverReportsAnAmbientEntry(t *testing.T) {
-	restoreLedgerHooks(t)
-
-	agent, client := newAuthAgent(t)
-
-	store := filepath.Join(client.xdg.Root, "auth.json")
-	ambient := `{"credential_pool":{"copilot":[{"auth_type":"oauth","` + testFieldAccessToken + `":"gh-derived","source":"gh"}]}}`
-
-	if err := os.WriteFile(store, []byte(ambient), 0o600); err != nil {
-		t.Fatalf("seed ambient store: %v", err)
-	}
-
-	result, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
-	if err != nil {
-		t.Fatalf("inventory: %v", err)
-	}
-
-	if entries := mustType[authInventoryResult](t, result).Entries; len(entries) != 0 {
-		t.Fatalf("ambient credential surfaced: %#v", entries)
+	if len(entries) != 1 || entries[0].ProviderID != testProviderID ||
+		entries[0].ProofSource != authProofConfirmedPresent {
+		t.Fatalf("logged-in entry = %#v", entries)
 	}
 }
 
@@ -475,16 +447,11 @@ func TestInventoryFailurePaths(t *testing.T) {
 		t.Fatalf("seed ledger: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(client.xdg.Root, "auth.json"), []byte("{"), 0o600); err != nil {
-		t.Fatalf("corrupt store: %v", err)
-	}
-
+	client.authProvidersErr = errors.New("catalog")
 	_, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
-	requireAuthCause(t, err, authCauseHarvestFailed)
+	requireAuthCause(t, err, authCauseTransport)
 
-	if errLocal := os.Remove(filepath.Join(client.xdg.Root, "auth.json")); errLocal != nil {
-		t.Fatalf("remove store: %v", err)
-	}
+	client.authProvidersErr = nil
 
 	session, err := agent.providerAuth.authSession(string(testSessionID))
 	if err != nil {
@@ -498,12 +465,16 @@ func TestInventoryFailurePaths(t *testing.T) {
 	_, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseTransport)
 
+	session.mu.Lock()
+	session.client = client
+	session.mu.Unlock()
+
 	restoreLedgerHooks(t)
 
 	ledgerReadDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("readdir") }
 
 	_, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
-	requireAuthCause(t, err, authCauseHarvestFailed)
+	requireAuthCause(t, err, authCauseProcess)
 }
 
 func TestAuthLedgerPathIsDeterministicAndScopedToTheRoot(t *testing.T) {
@@ -516,12 +487,100 @@ func TestAuthLedgerPathIsDeterministicAndScopedToTheRoot(t *testing.T) {
 		t.Fatal("ledger path is not deterministic")
 	}
 
-	if !strings.HasSuffix(filepath.Dir(first), filepath.Join(authLedgerVendorDir, authLedgerLeafDir)) {
+	if filepath.Base(filepath.Dir(first)) != authLedgerLeafDir ||
+		filepath.Base(filepath.Dir(filepath.Dir(first))) == authLedgerVendorDir {
 		t.Fatalf("ledger path %q is outside the vendor leaf", first)
 	}
 
-	if !authLedgerRootConfigured(Options{ProviderAuthRoot: "/root"}) || authLedgerRootConfigured(Options{}) {
+	if !authLedgerRootConfigured(Options{ProviderAuthRoot: "/root", ProviderAuthHome: "/home"}) ||
+		authLedgerRootConfigured(Options{}) {
 		t.Fatal("root configuration reported incorrectly")
+	}
+}
+
+func TestAuthLedgerIsScopedByCanonicalProviderAuthHome(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	homeA := t.TempDir()
+	homeB := t.TempDir()
+
+	ledgerA, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: homeA})
+	if err != nil {
+		t.Fatalf("new ledger A: %v", err)
+	}
+
+	ledgerB, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: homeB})
+	if err != nil {
+		t.Fatalf("new ledger B: %v", err)
+	}
+
+	if ledgerA.dir == ledgerB.dir {
+		t.Fatalf("distinct native homes share ledger %q", ledgerA.dir)
+	}
+
+	record := authLedgerRecord{
+		ProviderID:        testProviderID,
+		ConnectionID:      testConnectionID,
+		Revision:          1,
+		BindingGeneration: 1,
+		State:             authLedgerConfirmed,
+	}
+	if err := ledgerA.write(record); err != nil {
+		t.Fatalf("write ledger A: %v", err)
+	}
+
+	if _, ok, err := ledgerB.read(testProviderID); err != nil || ok {
+		t.Fatalf("ledger B observed ledger A lineage: %v, %v", ok, err)
+	}
+
+	if authLedgerHomeKey(filepath.Join(homeA, ".")) != authLedgerHomeKey(homeA) {
+		t.Fatal("equivalent clean paths produced different ledger scopes")
+	}
+}
+
+func TestInventorySurvivesAgentRestartWithoutReadingCredentialFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	home := t.TempDir()
+
+	first := NewAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	if first.providerAuth == nil {
+		t.Fatal("first provider auth surface unavailable")
+	}
+	seedConfirmedLineage(t, first, testProviderID)
+
+	second := NewAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	if second.providerAuth == nil {
+		t.Fatal("second provider auth surface unavailable")
+	}
+
+	client := newFakeHermesClient()
+	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: true}}
+	session := newSession(
+		second,
+		testSessionID,
+		"/cwd",
+		nil,
+		nil,
+		nativehermes.Session{ID: "native"},
+		client,
+		sessionMeta{},
+		idmapRecord{},
+	)
+	if err := second.storeStartedSession(session); err != nil {
+		t.Fatalf("register restarted session: %v", err)
+	}
+
+	result, err := callLeg(t, second, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
+	if err != nil {
+		t.Fatalf("restart inventory: %v", err)
+	}
+
+	entries := mustType[authInventoryResult](t, result).Entries
+	if len(entries) != 1 || entries[0].ProofSource != authProofConfirmedPresent {
+		t.Fatalf("restart inventory = %#v", entries)
 	}
 }
 
@@ -546,7 +605,7 @@ func TestNewAuthLedgerRejectsARootThatIsNotADirectory(t *testing.T) {
 	ledgerChmod = func(string, os.FileMode) error { return nil }
 	ledgerStat = func(string) (os.FileInfo, error) { return os.Stat(file) }
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir()}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), ProviderAuthHome: t.TempDir()}); err == nil {
 		t.Fatal("a root that is not a directory was accepted")
 	}
 }

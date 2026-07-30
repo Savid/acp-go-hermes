@@ -492,12 +492,13 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	defer cancel()
 	usedConfigure := false
 	proc, startErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:           t.TempDir(),
-		Cwd:            t.TempDir(),
-		Env:            map[string]string{"BASE_ENV": "1", "HERMES_WEB_DIST": "1"},
-		Timeout:        5 * time.Second,
-		LogWriter:      io.Discard,
+		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
+		Home:             t.TempDir(),
+		ProviderAuthHome: t.TempDir(),
+		Cwd:              t.TempDir(),
+		Env:              map[string]string{"BASE_ENV": "1", "HERMES_WEB_DIST": "1"},
+		Timeout:          5 * time.Second,
+		LogWriter:        io.Discard,
 		Configure: func(cmd *exec.Cmd) {
 			usedConfigure = true
 			cmd.Env = append(cmd.Env, "CONFIGURED=1")
@@ -631,7 +632,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 	restoreProcessSeams(t)
 	commandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
 		if len(args) == 1 && args[0] == "--version" {
-			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.18.2\\n'")
+			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.19.0\\n'")
 		}
 
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
@@ -926,7 +927,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 
 				return nil
 			}
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.18.2 (test)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (test)")
 
 			return nil
 		}
