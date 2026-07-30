@@ -84,6 +84,61 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 	}
 }
 
+func TestLinuxProcessCloseFallbackResultTracksContainmentProof(t *testing.T) {
+	tests := []struct {
+		name     string
+		proofErr error
+		wantErr  bool
+	}{
+		{name: "proved", wantErr: false},
+		{
+			name:     "incomplete",
+			proofErr: errors.New("descendant remains"),
+			wantErr:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			restoreProcessSeams(t)
+
+			releaseWait := make(chan struct{})
+			waitProcessCommand = func(*exec.Cmd) error {
+				<-releaseWait
+
+				return nil
+			}
+
+			process := &Process{
+				Cmd: fakeStartedCommand(),
+				tree: &processContainment{
+					terminateFn: func() error { return nil },
+					killFn: func() error {
+						close(releaseWait)
+
+						return nil
+					},
+					completeFn: func(time.Duration) error { return test.proofErr },
+				},
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			err := process.Close(ctx)
+			if test.wantErr {
+				if !errors.Is(err, ErrProcessContainmentIncomplete) {
+					t.Fatalf("Close error = %v, want incomplete containment", err)
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatalf("Close after proved fallback = %v", err)
+			}
+		})
+	}
+}
+
 func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 	t.Run("clean target exit", func(t *testing.T) {
 		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "exit 0"}, nil)

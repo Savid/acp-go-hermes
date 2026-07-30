@@ -612,12 +612,21 @@ func (p *Process) Close(ctx context.Context) error {
 		_ = killProcess(p.Cmd)
 	}
 
+	fallbackReaped := false
 	select {
 	case <-done:
+		fallbackReaped = true
 	case <-afterFn(time.Second):
 	}
 
-	return errors.Join(err, p.completeProcessContainment(), p.shim.remove())
+	hadContainment := p.tree != nil
+	containmentErr := p.completeProcessContainment()
+	cleanupErr := p.shim.remove()
+	if fallbackReaped && hadContainment && containmentErr == nil {
+		return cleanupErr
+	}
+
+	return errors.Join(err, containmentErr, cleanupErr)
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.
