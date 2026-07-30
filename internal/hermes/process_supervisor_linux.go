@@ -112,7 +112,11 @@ func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processCon
 
 	supervisor.Args = append([]string(nil), target.Args...)
 	supervisor.Dir = target.Dir
-	supervisor.Env = append([]string(nil), target.Env...)
+	targetEnv := target.Env
+	if targetEnv == nil {
+		targetEnv = os.Environ()
+	}
+	supervisor.Env = append([]string(nil), targetEnv...)
 	supervisor.Env = append(supervisor.Env,
 		envHermesSupervisor+"=1",
 		envHermesSupervisorTarget+"="+target.Path,

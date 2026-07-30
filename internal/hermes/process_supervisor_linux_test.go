@@ -84,6 +84,50 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 	}
 }
 
+func TestLinuxSupervisorPreservesCommandEnvironmentSemantics(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	t.Setenv("ACP_GO_HERMES_INHERITED_ENV_TEST", "expected")
+
+	tests := []struct {
+		name   string
+		script string
+		env    []string
+	}{
+		{name: "inherited", script: `test "$ACP_GO_HERMES_INHERITED_ENV_TEST" = expected`},
+		{
+			name:   "explicit",
+			script: `test -z "$ACP_GO_HERMES_INHERITED_ENV_TEST" && test "$ACP_GO_HERMES_EXPLICIT_ENV_TEST" = expected`,
+			env:    []string{"ACP_GO_HERMES_EXPLICIT_ENV_TEST=expected"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", test.script)
+			cmd.Env = test.env
+			configureHermesProcess(cmd)
+			tree, err := startContainedProcess(cmd)
+			if err != nil {
+				t.Fatalf("start supervised process: %v", err)
+			}
+			t.Cleanup(func() { _ = tree.close() })
+
+			wait := tree.directChild(cmd)
+			select {
+			case <-wait.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("supervised process did not exit")
+			}
+			if wait.err != nil {
+				t.Fatalf("supervised process: %v", wait.err)
+			}
+			if err := tree.complete(5 * time.Second); err != nil {
+				t.Fatalf("complete supervised process: %v", err)
+			}
+		})
+	}
+}
+
 func TestLinuxProcessCloseFallbackResultTracksContainmentProof(t *testing.T) {
 	tests := []struct {
 		name     string
