@@ -71,7 +71,7 @@ func TestAuthProvidersReadsIdentityFieldsOnly(t *testing.T) {
 	}
 
 	if providers[0].ID != "xai-oauth" || providers[0].Flow != AuthFlowDeviceCode ||
-		!providers[0].Disconnectable || !providers[0].LoggedIn {
+		!providers[0].LoggedIn {
 		t.Fatalf("provider = %#v", providers[0])
 	}
 }
@@ -224,15 +224,10 @@ func TestAuthSubmitPollAndCancel(t *testing.T) {
 		t.Fatalf("AuthCancelFlow: %v", err)
 	}
 
-	if err := server.AuthDisconnect(context.Background(), "anthropic"); err != nil {
-		t.Fatalf("AuthDisconnect: %v", err)
-	}
-
 	want := []string{
 		"POST /api/providers/oauth/anthropic/submit",
 		"GET /api/providers/oauth/anthropic/poll/s1",
 		"DELETE /api/providers/oauth/sessions/s1",
-		"DELETE /api/providers/oauth/anthropic",
 	}
 
 	for index, request := range want {
@@ -310,10 +305,6 @@ func TestAuthRequestFailurePaths(t *testing.T) {
 
 	if err := refusing.AuthCancelFlow(context.Background(), "s"); err == nil {
 		t.Fatal("a failing cancel was reported clean")
-	}
-
-	if err := refusing.AuthDisconnect(context.Background(), "p"); err == nil {
-		t.Fatal("a failing disconnect was reported clean")
 	}
 
 	if _, err := refusing.AuthStart(context.Background(), "p"); err == nil {

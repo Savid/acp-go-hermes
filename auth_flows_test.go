@@ -18,8 +18,8 @@ func seedCatalog(t *testing.T, agent *Agent, client *fakeHermesClient) string {
 	t.Helper()
 
 	client.authProviders = []nativehermes.AuthProvider{
-		{ID: testProviderID, Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode, Disconnectable: true},
-		{ID: "anthropic", Name: "Anthropic", Flow: nativehermes.AuthFlowPKCE, Disconnectable: true},
+		{ID: testProviderID, Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode},
+		{ID: "anthropic", Name: "Anthropic", Flow: nativehermes.AuthFlowPKCE},
 	}
 
 	result, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})

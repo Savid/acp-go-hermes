@@ -50,6 +50,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	if code := run(context.Background(), []string{
 		"-path", "hermes",
 		"-scratch-dir", "/tmp/scratch",
+		"-provider-auth-direct-home", "/tmp/direct",
 		"-model", "openai/gpt-test",
 		"-debug",
 	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
@@ -57,6 +58,13 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	}
 	if len(gotOptions) == 0 {
 		t.Fatal("serve received no options")
+	}
+	var configured hermesacp.Options
+	for _, option := range gotOptions {
+		option(&configured)
+	}
+	if configured.ProviderAuthDirectHome != "/tmp/direct" {
+		t.Fatalf("provider auth direct home = %q", configured.ProviderAuthDirectHome)
 	}
 
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {

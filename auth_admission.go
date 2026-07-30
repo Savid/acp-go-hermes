@@ -83,8 +83,8 @@ func (p *providerAuth) admit(ctx context.Context, key authFlowKey) (func(), bool
 	return authAcquireGate(ctx, &p.mu, p.admissions, key)
 }
 
-// lockProvider serializes native completion and disconnect work for one
-// provider in the shared native auth residence.
+// lockProvider serializes native completion work for one provider in the shared
+// native auth residence.
 func (p *providerAuth) lockProvider(ctx context.Context, providerID string) (func(), bool) {
 	return authAcquireGate(ctx, &p.mu, p.providers, providerID)
 }
@@ -99,13 +99,8 @@ func (p *providerAuth) lockFlowProvider(ctx context.Context, flow *authFlow) (fu
 }
 
 // lockLedger serializes every read-modify-write of one provider's durable
-// ledger entry: authorize's revision bump, disconnect's generation bump, a
-// completion's lineage check and confirmation. Each decides what to write from
-// what it just read, and
-// an interleaved write in between is read back and overwritten — a disconnect's
-// generation bump lost to an authorize's revision bump leaves the removal
-// standing in the native store under a record naming a generation the owner
-// retired.
+// ledger entry: authorize's revision bump and completion's lineage check and
+// confirmation. Each decides what to write from what it just read.
 //
 // The key is the provider id because the ledger is agent-wide, one file per
 // provider under the host's durable root. It is always taken inside the native

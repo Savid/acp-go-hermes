@@ -21,9 +21,6 @@ import (
 const (
 	envRunKeystore = "ACP_GO_HERMES_RUN_KEYSTORE"
 
-	keystoreEnvFile         = "/run/acp-go-hermes-keystore/env"
-	keystoreRoundTrip       = "/usr/local/bin/roundtrip.sh"
-	keystoreProbePath       = "/usr/local/bin/residence.test"
 	keystoreBrowserShimPath = "/usr/local/bin/browser-shim.test"
 	keystoreBrowserShimTest = "TestLoginNeverExecsABrowserLauncher"
 	keystoreBrowserShimCase = "^" + keystoreBrowserShimTest + "$"
@@ -34,7 +31,7 @@ func requireRunKeystore(t *testing.T) {
 	requireRunIntegration(t)
 
 	if os.Getenv(envRunKeystore) != "1" {
-		t.Skipf("set %s=1 to run the keystore credential-residence tier", envRunKeystore)
+		t.Skipf("set %s=1 to run the Linux state-boundary tier", envRunKeystore)
 	}
 }
 
@@ -47,98 +44,6 @@ func requireKeystoreRuntime(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("%s=1 requires a container runtime: %v", envRunKeystore, err)
 	}
-}
-
-// TestKeystoreLinuxCredentialResidence runs the two Linux thirds of the matrix
-// against a live Secret Service. Hermes ships no freedesktop client, so the
-// claim under test is an identity: the store under HERMES_HOME answers the same
-// way whether or not a secret service is on the box. Only running the read path
-// beside a real service establishes it, and a container's session bus does not
-// cross the host boundary, so the read path runs inside the fixture.
-func TestKeystoreLinuxCredentialResidence(t *testing.T) {
-	requireKeystoreRuntime(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	container := startKeystoreFixture(ctx, t)
-
-	if err := container.CopyFileToContainer(ctx, buildResidenceProbe(t), keystoreProbePath, 0o755); err != nil {
-		t.Fatalf("copy residence probe: %v", err)
-	}
-
-	runResidenceMatrix(ctx, t, container, false)
-	runResidenceMatrix(ctx, t, container, true)
-}
-
-// startKeystoreFixture builds and starts the Secret Service fixture.
-func startKeystoreFixture(ctx context.Context, t *testing.T) testcontainers.Container {
-	t.Helper()
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			FromDockerfile: testcontainers.FromDockerfile{
-				Context:    filepath.Join(".", "keystore"),
-				Dockerfile: "Dockerfile",
-				KeepImage:  true,
-			},
-			// Readiness is a store/lookup round trip executed in the container.
-			// A log line and a bus-name check both report ready against a
-			// service that answers no lookup.
-			WaitingFor: wait.ForExec([]string{keystoreRoundTrip}).WithStartupTimeout(3 * time.Minute),
-		},
-		Started: true,
-	})
-	if err != nil {
-		t.Fatalf("start keystore fixture: %v", err)
-	}
-
-	t.Cleanup(func() {
-		if err := container.Terminate(context.WithoutCancel(ctx)); err != nil {
-			t.Errorf("terminate keystore fixture: %v", err)
-		}
-	})
-
-	return container
-}
-
-// runResidenceMatrix runs the residence matrix in one Linux configuration. The
-// two differ only in whether the fixture's session bus is exported, so the
-// probe binary and the container are the same for both.
-func runResidenceMatrix(ctx context.Context, t *testing.T, container testcontainers.Container, bus bool) {
-	t.Helper()
-
-	name, prelude := "keystore-absent", ""
-	if bus {
-		name, prelude = "keystore-present", ". "+keystoreEnvFile+"; export DBUS_SESSION_BUS_ADDRESS; "
-	}
-
-	command := prelude + "export " + envRunIntegration + "=1 " + envRunKeystore + "=1; exec " +
-		keystoreProbePath + " -test.v -test.run '^TestKeystoreResidenceMatrix$'"
-
-	t.Run(name, func(t *testing.T) {
-		code, output, err := container.Exec(ctx, []string{"/bin/sh", "-c", command}, tcexec.Multiplexed())
-		if err != nil {
-			t.Fatalf("run residence matrix: %v", err)
-		}
-
-		logs, readErr := io.ReadAll(output)
-		if readErr != nil {
-			t.Fatalf("read residence output: %v", readErr)
-		}
-
-		t.Log(string(logs))
-
-		if code != 0 {
-			t.Fatalf("residence matrix exited %d", code)
-		}
-
-		// An exit status alone goes green on a skip, which is the silent success
-		// this tier exists to prevent.
-		if !strings.Contains(string(logs), "--- PASS: TestKeystoreResidenceMatrix") {
-			t.Fatalf("the residence matrix did not report a pass inside the fixture: %s", logs)
-		}
-	})
 }
 
 // TestKeystoreLinuxArtifactCarriesNoSecretServiceClient pins the mechanism
@@ -201,7 +106,7 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 		}
 	})
 
-	probe := buildResidenceProbe(t)
+	probe := buildLinuxProbe(t)
 
 	if copyErr := container.CopyFileToContainer(ctx, probe, keystoreBrowserShimPath, 0o755); copyErr != nil {
 		t.Fatalf("copy the launcher probe: %v", copyErr)
@@ -262,11 +167,9 @@ func keystoreBaseImage(t *testing.T) string {
 	return ""
 }
 
-// buildResidenceProbe compiles the package that owns the store read path and
-// the launch path for the fixture's platform. Neither Linux claim can be
-// observed from the host: only the container has a Secret Service to answer one
-// and a Linux PATH to resolve the other.
-func buildResidenceProbe(t *testing.T) string {
+// buildLinuxProbe compiles the package that owns the launch path for the
+// fixture's platform.
+func buildLinuxProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "residence.test")

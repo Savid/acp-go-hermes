@@ -38,6 +38,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	hermesHome := flags.String("home", "", "unsupported: each session runtime root is isolated (use -scratch-dir for ephemeral state and -provider-auth-home for durable provider credentials)")
 	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
+	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "unsupported: a non-empty value is rejected when a session is established")
 	providerAuthHome := flags.String("provider-auth-home", "", "durable native Hermes credential residence; provider auth requires this and -provider-auth-root")
 	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "opt into Darwin process-group containment with residual escape and PGID-reuse risks")
 	model := flags.String("model", "", "default Hermes model as provider/model")
@@ -106,6 +107,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		hermesacp.WithScratchDir(*scratchDir),
 		hermesacp.WithHome(*hermesHome),
 		hermesacp.WithProviderAuthRoot(*providerAuthRoot),
+		hermesacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
 		hermesacp.WithProviderAuthHome(*providerAuthHome),
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),

@@ -17,6 +17,10 @@ const (
 	// optionFieldHome names the unsupported Home option in the uniform
 	// unsupported-option error. Each session runtime root is isolated.
 	optionFieldHome = "home"
+
+	// optionFieldProviderAuthDirectHome names the unsupported exact-home consent
+	// gate.
+	optionFieldProviderAuthDirectHome = "providerAuthDirectHome"
 )
 
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {

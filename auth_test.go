@@ -155,8 +155,8 @@ func TestAuthCapabilityListsEveryLeg(t *testing.T) {
 	}
 
 	names, _ := capability[providerAuthMethodsField].([]string)
-	if len(names) != 7 {
-		t.Fatalf("advertised %d legs, want 7: %#v", len(names), names)
+	if len(names) != 6 {
+		t.Fatalf("advertised %d legs, want 6: %#v", len(names), names)
 	}
 
 	unset, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
@@ -261,18 +261,6 @@ func TestAuthFieldDecodersRejectMissingAndMalformedValues(t *testing.T) {
 
 	if value, err := authString(fields, "empty"); err != nil || value != "" {
 		t.Fatalf("authString = %q, %v", value, err)
-	}
-
-	if _, err := authRequiredInt64(fields, "missing"); err == nil {
-		t.Fatal("missing int accepted")
-	}
-
-	if _, err := authRequiredInt64(fields, "text"); err == nil {
-		t.Fatal("non-numeric int accepted")
-	}
-
-	if value, err := authRequiredInt64(fields, "number"); err != nil || value != 7 {
-		t.Fatalf("authRequiredInt64 = %d, %v", value, err)
 	}
 }
 
@@ -433,7 +421,7 @@ func adversarialConnectionIDs() map[string]string {
 	}
 }
 
-func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
+func TestAuthorizeRejectsInvalidConnectionIDs(t *testing.T) {
 	t.Parallel()
 
 	agent, _ := newAuthAgent(t)
@@ -446,12 +434,6 @@ func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
 				"sessionId": string(testSessionID), "providerId": testProviderID,
 				"connectionId": connectionID, "methodsGeneration": "generation",
 				"method": "device_code", "authorizeRequestId": "request-1",
-			})
-			requireInvalidField(t, err, authFieldConnectionID)
-
-			_, err = callLeg(t, agent, AuthDisconnectMethod, map[string]any{
-				"sessionId": string(testSessionID), "providerId": testProviderID,
-				"connectionId": connectionID, "bindingGeneration": 1,
 			})
 			requireInvalidField(t, err, authFieldConnectionID)
 		})

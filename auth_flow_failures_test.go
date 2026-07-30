@@ -524,75 +524,6 @@ func TestAuthSessionRejectsBrokerTombstone(t *testing.T) {
 	}
 }
 
-func TestDisconnectRejectsUnavailableClientAndCanceledGates(t *testing.T) {
-	t.Parallel()
-
-	params := map[string]any{
-		"sessionId":         string(testSessionID),
-		"providerId":        testProviderID,
-		"connectionId":      testConnectionID,
-		"bindingGeneration": 1,
-	}
-
-	agent, _ := newAuthAgent(t)
-	seedConfirmedLineage(t, agent, testProviderID)
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("auth session: %v", err)
-	}
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-	_, err = callLeg(t, agent, AuthDisconnectMethod, params)
-	requireAuthCause(t, err, authCauseTransport)
-
-	agent, _ = newAuthAgent(t)
-	seedConfirmedLineage(t, agent, testProviderID)
-	providerRelease, ok := agent.providerAuth.lockProvider(context.Background(), testProviderID)
-	if !ok {
-		t.Fatal("hold provider gate")
-	}
-	_, err = agent.providerAuth.disconnect(endedAuthContext(), authRawParams(t, params))
-	requireAuthCause(t, err, authCauseTimeout)
-	providerRelease()
-
-	ledgerRelease, ok := agent.providerAuth.lockLedger(context.Background(), testProviderID)
-	if !ok {
-		t.Fatal("hold ledger gate")
-	}
-	_, err = agent.providerAuth.disconnect(endedAuthContext(), authRawParams(t, params))
-	requireAuthCause(t, err, authCauseTimeout)
-	ledgerRelease()
-}
-
-func TestDisconnectRejectsMalformedFields(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-	base := map[string]any{
-		"sessionId":         string(testSessionID),
-		"providerId":        testProviderID,
-		"connectionId":      testConnectionID,
-		"bindingGeneration": 1,
-	}
-
-	for _, field := range []string{
-		authFieldSessionID,
-		authFieldProviderID,
-		authFieldConnectionID,
-		authFieldBindingGeneration,
-	} {
-		params := make(map[string]any, len(base))
-		for key, value := range base {
-			params[key] = value
-		}
-		delete(params, field)
-
-		_, err := callLeg(t, agent, AuthDisconnectMethod, params)
-		requireInvalidField(t, err, field)
-	}
-}
-
 func TestPublishFlowRejectsEndedSessionLifetime(t *testing.T) {
 	t.Parallel()
 
@@ -660,63 +591,6 @@ func TestAuthFailureRetriabilityIsClosed(t *testing.T) {
 	if !errors.As(authFailed(authCauseTransport, "", "", ""), &requestErr) {
 		t.Fatal("auth failure did not produce request error")
 	}
-}
-
-func TestDisconnectPersistenceFailuresStayClosed(t *testing.T) {
-	restoreLedgerHooks(t)
-
-	params := map[string]any{
-		"sessionId":         string(testSessionID),
-		"providerId":        testProviderID,
-		"connectionId":      testConnectionID,
-		"bindingGeneration": 1,
-	}
-
-	agent, _ := newAuthAgent(t)
-	_, err := callLeg(t, agent, AuthDisconnectMethod, map[string]any{
-		"sessionId": string(testSessionID), "extra": true,
-	})
-	requireInvalidField(t, err, "extra")
-
-	_, err = callLeg(t, agent, AuthDisconnectMethod, map[string]any{
-		"sessionId": "missing", "providerId": testProviderID,
-		"connectionId": testConnectionID, "bindingGeneration": 1,
-	})
-	if err == nil {
-		t.Fatal("unknown session accepted")
-	}
-
-	seedConfirmedLineage(t, agent, testProviderID)
-	if writeErr := os.WriteFile(agent.providerAuth.ledger.path(testProviderID), []byte("{"), 0o600); writeErr != nil {
-		t.Fatalf("corrupt ledger: %v", writeErr)
-	}
-	_, err = callLeg(t, agent, AuthDisconnectMethod, params)
-	requireAuthCause(t, err, authCauseProcess)
-
-	agent, _ = newAuthAgent(t)
-	seedConfirmedLineage(t, agent, testProviderID)
-	ledgerRename = func(string, string) error { return errors.New("intent rename") }
-	_, err = callLeg(t, agent, AuthDisconnectMethod, params)
-	requireAuthCause(t, err, authCauseProcess)
-
-	restoreLedgerHooks(t)
-	agent, client := newAuthAgent(t)
-	seedConfirmedLineage(t, agent, testProviderID)
-	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: false}}
-
-	originalRename := ledgerRename
-	renames := 0
-	ledgerRename = func(from string, to string) error {
-		renames++
-		if renames == 2 {
-			return errors.New("removed rename")
-		}
-
-		return originalRename(from, to)
-	}
-
-	_, err = callLeg(t, agent, AuthDisconnectMethod, params)
-	requireAuthCause(t, err, authCauseProcess)
 }
 
 func TestAuthorizeOuterValidationAndCloseRaces(t *testing.T) {

@@ -1,6 +1,6 @@
 ---
 title: Authentication
-description: Agent auth stays native, while provider OAuth is coordinated through seven values-free extension methods.
+description: Agent auth stays native, while provider OAuth is coordinated through six values-free extension methods.
 ---
 
 Hermes owns authentication and every provider credential byte. The adapter
@@ -18,8 +18,8 @@ SQLite state, and runtime files cannot leak between sessions.
 
 Provider auth uses a separate, durable `HERMES_AUTH_HOME`. Every session process
 receives the same canonical path, and native Hermes performs all credential
-reads, writes, and deletion there. The adapter never parses, copies, returns,
-injects, or snapshots credential material.
+reads and writes there. The adapter never parses, copies, returns, injects, or
+snapshots credential material.
 
 The launch environment also sets a random
 `HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser
@@ -36,6 +36,10 @@ Provider auth requires both:
   credential residence supplied to Hermes as `HERMES_AUTH_HOME`.
 - `WithProviderAuthRoot` / `-provider-auth-root`: the absolute durable root for
   the adapter's values-free ledger.
+
+`WithProviderAuthDirectHome` / `-provider-auth-direct-home` is part of the
+uniform adapter surface but unsupported by Hermes. A non-empty value fails
+closed at session start.
 
 The directories are created with mode `0700`; ledger entries use mode `0600`
 and atomic, fsynced writes. The ledger is scoped by the canonical auth-home path,
@@ -58,8 +62,7 @@ When enabled, `initialize` advertises exactly:
       "_hermes/auth/callback",
       "_hermes/auth/status",
       "_hermes/auth/cancel",
-      "_hermes/auth/inventory",
-      "_hermes/auth/disconnect"
+      "_hermes/auth/inventory"
     ]
   }
 }
@@ -116,17 +119,6 @@ remain available to later sessions and process restarts.
 `confirmed_absent` when confirmed lineage exists but Hermes reports logged out.
 Ambient native logins without adapter lineage are not attributed to a
 connection.
-
-## Disconnect
-
-`_hermes/auth/disconnect` requires the exact `providerId`, `connectionId`, and
-`bindingGeneration` reported by inventory. It serializes against authorization
-for that provider, advances the generation before mutation, cancels pending
-flows, calls Hermes' native provider DELETE route, and verifies the provider is
-no longer logged in before marking the lineage removed.
-
-An older or mismatched lineage fails with `cause: "binding_conflict"`. A native
-failure never produces a false removed record.
 
 ## Store exclusion
 

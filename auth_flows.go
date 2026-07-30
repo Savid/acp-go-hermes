@@ -274,9 +274,8 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 // recordAuthorizeIntent performs the one read-modify-write authorize makes on
 // the provider's ledger entry: the record it reads decides the revision this
 // flow claims and carries the binding generation forward. The gate is held
-// across the read and the write and released before the mint, so a disconnect
-// cannot have its generation bump read back and overwritten here, and no native
-// start runs while another session's authorize waits for the same entry.
+// across the read and the write and released before the mint, so no native start
+// runs while another session's authorize waits for the same entry.
 func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request authorizeRequest, flowID string, now time.Time) (authLedgerRecord, error) {
 	release, acquired := p.lockLedger(ctx, request.providerID)
 	if !acquired {
@@ -773,111 +772,6 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 	return nil
 }
 
-// confirmCause writes the confirmation and answers the cause that stopped it
-// rather than performing a transition: whether the flow is still the caller's
-// to close is the caller's question. It compares no lineage of its own. The
-// provider owns one entry and its gate is held from the check that admitted
-// this mutation through this write, so nothing can have moved the entry in
-// between — a comparison here would be asking a second time what the caller
-// already established it may write.
-func (p *providerAuth) confirmCause(flow *authFlow) string {
-	if err := p.ledger.write(authConfirmation(flow)); err != nil {
-		return authCauseProcess
-	}
-
-	return ""
-}
-
-// lineageCause reports the cause that stops a mutation this flow no longer owns
-// — the provider's recorded lineage has moved past it, or it could not be read
-// at all. Both callers hold the provider and ledger gates across the check, the
-// mutation it admits, and the confirmation that
-// follows, so what it reports cannot go stale under them. That unbroken hold is
-// the whole reason the confirmation compares nothing of its own: shorten it and
-// the check moves back into confirmCause, or a successor rewrites the entry
-// between the two and a native login is attributed to a lineage no surface
-// names.
-func (p *providerAuth) lineageCause(flow *authFlow) string {
-	prior, present, err := p.ledger.read(flow.providerID)
-	if err != nil {
-		return authCauseProcess
-	}
-
-	if present && authLedgerAdvancedPast(prior, authConfirmation(flow)) {
-		return authCauseBindingConflict
-	}
-
-	return ""
-}
-
-// authConfirmation is the record a completed leg writes and compares against.
-func authConfirmation(flow *authFlow) authLedgerRecord {
-	return authLedgerRecord{
-		ProviderID:         flow.providerID,
-		ConnectionID:       flow.connectionID,
-		Revision:           flow.revision,
-		BindingGeneration:  flow.bindingGeneration,
-		FlowID:             flow.id,
-		AuthorizeRequestID: flow.authorizeRequestID,
-		State:              authLedgerConfirmed,
-		CreatedAt:          flow.createdAt,
-		UpdatedAt:          authNow().UnixMilli(),
-	}
-}
-
-// authLedgerAdvancedPast reports whether the recorded lineage already belongs
-// to something later than the record offered. A removal moves the binding
-// generation and every fresh authorize moves the revision, so either one ahead
-// means a successor owns the provider's entry.
-func authLedgerAdvancedPast(prior authLedgerRecord, record authLedgerRecord) bool {
-	if prior.BindingGeneration != record.BindingGeneration {
-		return prior.BindingGeneration > record.BindingGeneration
-	}
-
-	return prior.Revision > record.Revision
-}
-
-// abandonedCause reports the cause a leg answers with when the flow reached a
-// terminal state while the native call this leg started was still in flight.
-// Such a leg owns no transition and confirms nothing: the record it addressed
-// is already closed, and the outcome it carries is no longer the flow's.
-func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	switch {
-	case !authTerminal(flow.state):
-		return "", false
-	case flow.state == authStateCancelled:
-		return authCauseFlowCancelled, true
-	default:
-		return authCauseFlowState, true
-	}
-}
-
-// failSettled answers a native outcome that could have arrived after the flow
-// closed. The transition it would otherwise perform belongs to whoever closed
-// the flow first, and a cause naming the provider over a login the owner
-// abandoned reports a refusal nobody made.
-func (p *providerAuth) failSettled(ctx context.Context, flow *authFlow, cause string, materialInFlight bool) error {
-	if abandoned, ok := p.abandonedCause(flow); ok {
-		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
-	}
-
-	return p.fail(ctx, flow, cause, materialInFlight)
-}
-
-// fail returns the leg's closed error and performs the transition its cause
-// pairs with. A cause with no transition consumes nothing.
-func (p *providerAuth) fail(ctx context.Context, flow *authFlow, cause string, materialInFlight bool) error {
-	if state, reason := authFlowTransition(cause, materialInFlight); state != "" {
-		p.terminalize(flow, state, reason)
-		p.cancelNative(ctx, flow)
-	}
-
-	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
-}
-
 // terminalize records the flow's one terminal transition and frees its pending
 // key. A flow that already reached one keeps it: a native answer still in
 // flight when the owner cancelled arrives into a record the owner already
@@ -1036,6 +930,29 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*session, *auth
 	}
 
 	return session, flow, nil
+}
+
+func (p *providerAuth) cancelProviderFlows(ctx context.Context, providerID string) {
+	p.mu.Lock()
+
+	flows := make([]*authFlow, 0)
+	for key, flow := range p.flows {
+		if key.providerID != providerID {
+			continue
+		}
+
+		delete(p.flows, key)
+
+		flow.state = authStateCancelled
+		flow.reason = authReasonSuperseded
+		flow.stopCompleter()
+		flows = append(flows, flow)
+	}
+	p.mu.Unlock()
+
+	for _, flow := range flows {
+		p.cancelNative(ctx, flow)
+	}
 }
 
 // closeSession cancels every pending flow the session owns, terminalizing each

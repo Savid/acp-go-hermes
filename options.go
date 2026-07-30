@@ -122,6 +122,9 @@ type Options struct {
 	// native generation, which is the one class of state a scratch parent must
 	// not hold. Provider auth is enabled only when ProviderAuthHome is also set.
 	ProviderAuthRoot string
+	// ProviderAuthDirectHome is unsupported. A non-empty value is rejected when
+	// a session is established.
+	ProviderAuthDirectHome string
 	// ProviderAuthHome is the absolute, durable native Hermes credential
 	// residence shared by every isolated session runtime. Hermes alone reads and
 	// writes credential material there; the adapter supplies it to native
@@ -253,6 +256,14 @@ func WithInputHandoffRoot(dir string) Option {
 func WithProviderAuthRoot(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthRoot = path
+	}
+}
+
+// WithProviderAuthDirectHome is unsupported. Establishing a session with a
+// non-empty value fails closed.
+func WithProviderAuthDirectHome(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthDirectHome = path
 	}
 }
 

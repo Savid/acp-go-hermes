@@ -68,11 +68,10 @@ type authStatusWire struct {
 
 type authInventoryWire struct {
 	Entries []struct {
-		ProviderID        string `json:"providerId"`
-		ConnectionID      string `json:"connectionId"`
-		Revision          int64  `json:"revision"`
-		BindingGeneration int64  `json:"bindingGeneration"`
-		ProofSource       string `json:"proofSource"`
+		ProviderID   string `json:"providerId"`
+		ConnectionID string `json:"connectionId"`
+		Revision     int64  `json:"revision"`
+		ProofSource  string `json:"proofSource"`
 	} `json:"entries"`
 }
 
@@ -226,24 +225,17 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 		t.Fatalf("_hermes/auth/inventory: %v", err)
 	}
 
-	var bindingGeneration int64
+	found := false
 	for _, entry := range inventory.Entries {
 		if entry.ProviderID == providerID && entry.ConnectionID == "attended-connection" {
-			bindingGeneration = entry.BindingGeneration
+			found = true
 			if entry.ProofSource != "confirmed_present" {
 				t.Fatalf("inventory proof = %q, want confirmed_present", entry.ProofSource)
 			}
 		}
 	}
-	if bindingGeneration == 0 {
+	if !found {
 		t.Fatalf("inventory = %#v", inventory)
-	}
-
-	if err := callAuthLeg(t, ctx, conn, "_hermes/auth/disconnect", map[string]any{
-		"sessionId": string(sessionID), "providerId": providerID,
-		"connectionId": "attended-connection", "bindingGeneration": bindingGeneration,
-	}, nil); err != nil {
-		t.Fatalf("_hermes/auth/disconnect: %v", err)
 	}
 }
 

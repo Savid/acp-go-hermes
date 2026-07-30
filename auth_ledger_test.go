@@ -46,6 +46,25 @@ func newTestLedger(t *testing.T) *authLedger {
 	return ledger
 }
 
+func seedConfirmedLineage(t *testing.T, agent *Agent, providerID string) authLedgerRecord {
+	t.Helper()
+
+	record := authLedgerRecord{
+		ProviderID:        providerID,
+		ConnectionID:      testConnectionID,
+		Revision:          1,
+		BindingGeneration: 1,
+		State:             authLedgerConfirmed,
+		CreatedAt:         1,
+		UpdatedAt:         1,
+	}
+	if err := agent.providerAuth.ledger.write(record); err != nil {
+		t.Fatalf("seed confirmed lineage: %v", err)
+	}
+
+	return record
+}
+
 func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 	restoreLedgerHooks(t)
 
@@ -390,12 +409,6 @@ func TestInventoryCombinesConfirmedLineageWithNativeStatus(t *testing.T) {
 		ProviderID: "pending", ConnectionID: "c2", Revision: 1, BindingGeneration: 1, State: authLedgerIntent,
 	}); err != nil {
 		t.Fatalf("write intent: %v", err)
-	}
-
-	if err := ledger.write(authLedgerRecord{
-		ProviderID: "gone", ConnectionID: "c3", Revision: 1, BindingGeneration: 1, State: authLedgerRemoved,
-	}); err != nil {
-		t.Fatalf("write removed: %v", err)
 	}
 
 	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: false}}

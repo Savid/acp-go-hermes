@@ -1753,6 +1753,24 @@ func TestAgentRejectsHomeOption(t *testing.T) {
 	requireUnsupportedField(t, forkErr, optionFieldHome, "fork session")
 }
 
+func TestAgentRejectsProviderAuthDirectHomeOption(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	agent := NewAgent(WithProviderAuthDirectHome(t.TempDir()))
+
+	_, newErr := agent.NewSession(ctx, NewSessionRequest(cwd))
+	requireUnsupportedField(t, newErr, optionFieldProviderAuthDirectHome, "new session")
+
+	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("session-1", cwd))
+	requireUnsupportedField(t, loadErr, optionFieldProviderAuthDirectHome, "load session")
+
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd))
+	requireUnsupportedField(t, resumeErr, optionFieldProviderAuthDirectHome, "resume session")
+
+	_, forkErr := agent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest("session-1", cwd)))
+	requireUnsupportedField(t, forkErr, optionFieldProviderAuthDirectHome, "fork session")
+}
+
 // TestAgentRejectsUnvalidatedOptionsWithoutInitialize proves the handshake is not
 // the only door: an embedded host that opens a session directly is still refused
 // when an option failed validation at construction, on every

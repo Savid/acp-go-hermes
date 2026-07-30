@@ -3068,6 +3068,7 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
 			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (fake)")
+			_, _ = fmt.Fprintln(os.Stdout, "Runtime capabilities: provider-auth-home-v1")
 
 			return nil
 		}

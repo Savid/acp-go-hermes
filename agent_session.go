@@ -1098,8 +1098,8 @@ func (a *Agent) homeRoot() string {
 }
 
 // rejectInvalidConfiguration fails session establishment on agent configuration
-// no session may run under: an option that failed validation at construction, or
-// a configured Home value, because each session runtime root is isolated. The
+// no session may run under: an option that failed validation at construction,
+// a configured Home value, or a configured ProviderAuthDirectHome value. The
 // handshake reports the option failures too, but an embedded host can open a
 // session and prompt without ever calling initialize, so options that never
 // validated must not reach a gateway process.
@@ -1110,6 +1110,10 @@ func (a *Agent) rejectInvalidConfiguration() error {
 
 	if a.options.Home != "" {
 		return unsupportedField(optionFieldHome)
+	}
+
+	if a.options.ProviderAuthDirectHome != "" {
+		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
 	return nil

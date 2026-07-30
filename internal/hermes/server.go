@@ -135,7 +135,6 @@ type Server interface {
 	AuthSubmit(context.Context, string, string, string) error
 	AuthPollFlow(context.Context, string, string) (AuthPoll, error)
 	AuthCancelFlow(context.Context, string) error
-	AuthDisconnect(context.Context, string) error
 }
 
 type StartOptions struct {

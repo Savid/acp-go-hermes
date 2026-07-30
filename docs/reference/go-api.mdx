@@ -39,6 +39,7 @@ still reach.
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithImageLimits` | Decoded-byte limits for image prompt input; all four fields default to 6 MiB when omitted. |
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Requires `WithProviderAuthHome`. |
+| `WithProviderAuthDirectHome` | Unsupported. A non-empty value fails closed at session start. |
 | `WithProviderAuthHome` | Absolute durable native credential residence supplied to every Hermes process as `HERMES_AUTH_HOME`. Requires `WithProviderAuthRoot`. |
 | `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |

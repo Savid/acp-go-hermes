@@ -15,6 +15,7 @@ acp-go-hermes [flags]
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-home` | Unsupported because each session runtime root is isolated. Use `-scratch-dir` for ephemeral state and `-provider-auth-home` for durable provider credentials. |
 | `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-provider-auth-home`. |
+| `-provider-auth-direct-home` | Unsupported. A non-empty value fails closed at session start. |
 | `-provider-auth-home` | Absolute durable native credential residence supplied to Hermes as `HERMES_AUTH_HOME`. Requires `-provider-auth-root`. |
 | `-model` | Default model value passed as `provider/model`. |
 | `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |

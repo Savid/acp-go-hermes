@@ -19,8 +19,8 @@
 // beneath the scratch parent from [WithScratchDir]. Provider OAuth requires the
 // paired [WithProviderAuthRoot] and [WithProviderAuthHome] options; every native
 // process receives the latter as `HERMES_AUTH_HOME`, while the former stores
-// only values-free connection lineage. [WithHome] remains unsupported for
-// session config and runtime state.
+// only values-free connection lineage. [WithHome] and
+// [WithProviderAuthDirectHome] remain unsupported.
 //
 // Prompt images arrive either as embedded base64 or, for a co-located host that
 // sets [WithInputHandoffRoot], as digest-verified files under that read-only

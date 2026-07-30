@@ -22,7 +22,7 @@ description: The ACP methods the adapter implements and the one native extension
 
 ## Provider-auth extension methods
 
-These seven session-scoped legs broker provider OAuth through the
+These six session-scoped legs broker provider OAuth through the
 `hermes serve` REST auth API. They are advertised — and answer — only while
 `-provider-auth-root` and `-provider-auth-home` name usable durable directories;
 otherwise every one returns method-not-found.
@@ -35,14 +35,12 @@ otherwise every one returns method-not-found.
 | `_hermes/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, expiresAt?, reason?}` |
 | `_hermes/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
 | `_hermes/auth/inventory` | `{sessionId}` | `{entries}` |
-| `_hermes/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
 
 Every request object is closed: an unknown, duplicate, or missing field is
 rejected with `-32602` naming the field path. `connectionId` is minted by the
 host and enters durable values-free lineage, so it is bounded where it enters:
 at most 128 bytes drawn from `A-Z`, `a-z`, `0-9`, `-`, and `_`. A value outside
-that shape is `-32602` on `connectionId`, on
-`authorize` and `disconnect` alike. Every leg failure is
+that shape is `-32602` on `connectionId`. Every leg failure is
 `hermes_auth_failed` (`-32000`) with a closed `cause`, and no native message
 text ever crosses. See [Authentication](/docs/features/authentication).
 

@@ -40,11 +40,10 @@ var authHTTPClient = func() *http.Client { return &http.Client{Timeout: 30 * tim
 
 // AuthProvider is the values-free subset of one native OAuth catalog entry.
 type AuthProvider struct {
-	ID             string
-	Name           string
-	Flow           string
-	Disconnectable bool
-	LoggedIn       bool
+	ID       string
+	Name     string
+	Flow     string
+	LoggedIn bool
 }
 
 // AuthStart is a decoded native flow start. The device-code and pkce shapes
@@ -85,11 +84,10 @@ func AuthRefused(err error) bool {
 func (s *hermesServer) AuthProviders(ctx context.Context) ([]AuthProvider, error) {
 	var payload struct {
 		Providers []struct {
-			ID             string `json:"id"`
-			Name           string `json:"name"`
-			Flow           string `json:"flow"`
-			Disconnectable bool   `json:"disconnectable"`
-			Status         struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Flow   string `json:"flow"`
+			Status struct {
 				LoggedIn bool `json:"logged_in"`
 			} `json:"status"`
 		} `json:"providers"`
@@ -102,11 +100,10 @@ func (s *hermesServer) AuthProviders(ctx context.Context) ([]AuthProvider, error
 	providers := make([]AuthProvider, 0, len(payload.Providers))
 	for _, entry := range payload.Providers {
 		providers = append(providers, AuthProvider{
-			ID:             entry.ID,
-			Name:           entry.Name,
-			Flow:           entry.Flow,
-			Disconnectable: entry.Disconnectable,
-			LoggedIn:       entry.Status.LoggedIn,
+			ID:       entry.ID,
+			Name:     entry.Name,
+			Flow:     entry.Flow,
+			LoggedIn: entry.Status.LoggedIn,
 		})
 	}
 
@@ -195,12 +192,6 @@ func (s *hermesServer) AuthPollFlow(ctx context.Context, providerID string, nati
 
 func (s *hermesServer) AuthCancelFlow(ctx context.Context, nativeSessionID string) error {
 	path := authProvidersPath + "/sessions/" + url.PathEscape(nativeSessionID)
-
-	return s.authRequest(ctx, http.MethodDelete, path, nil, nil)
-}
-
-func (s *hermesServer) AuthDisconnect(ctx context.Context, providerID string) error {
-	path := authProvidersPath + "/" + url.PathEscape(providerID)
 
 	return s.authRequest(ctx, http.MethodDelete, path, nil, nil)
 }

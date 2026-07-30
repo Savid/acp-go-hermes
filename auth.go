@@ -17,13 +17,12 @@ import (
 // material in the configured native auth home; this surface coordinates only
 // values-free flow and lineage state.
 const (
-	AuthMethodsMethod    = "_hermes/auth/methods"
-	AuthAuthorizeMethod  = "_hermes/auth/authorize"
-	AuthCallbackMethod   = "_hermes/auth/callback"
-	AuthStatusMethod     = "_hermes/auth/status"
-	AuthCancelMethod     = "_hermes/auth/cancel"
-	AuthInventoryMethod  = "_hermes/auth/inventory"
-	AuthDisconnectMethod = "_hermes/auth/disconnect"
+	AuthMethodsMethod   = "_hermes/auth/methods"
+	AuthAuthorizeMethod = "_hermes/auth/authorize"
+	AuthCallbackMethod  = "_hermes/auth/callback"
+	AuthStatusMethod    = "_hermes/auth/status"
+	AuthCancelMethod    = "_hermes/auth/cancel"
+	AuthInventoryMethod = "_hermes/auth/inventory"
 )
 
 const (
@@ -41,7 +40,6 @@ const (
 	authFieldInputs             = "inputs"
 	authFieldFlowID             = "flowId"
 	authFieldInput              = "input"
-	authFieldBindingGeneration  = "bindingGeneration"
 	authFieldParams             = "params"
 
 	authValueInvalid = "invalid"
@@ -72,7 +70,6 @@ func authMethodNames() []string {
 		AuthStatusMethod,
 		AuthCancelMethod,
 		AuthInventoryMethod,
-		AuthDisconnectMethod,
 	}
 }
 
@@ -196,10 +193,6 @@ func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, pa
 		return result, true, err
 	case AuthInventoryMethod:
 		result, err := broker.inventory(ctx, params)
-
-		return result, true, err
-	case AuthDisconnectMethod:
-		result, err := broker.disconnect(ctx, params)
 
 		return result, true, err
 	default:
@@ -461,20 +454,6 @@ func authString(fields map[string]json.RawMessage, name string) (string, error) 
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return "", invalidAuthField(name)
-	}
-
-	return value, nil
-}
-
-func authRequiredInt64(fields map[string]json.RawMessage, name string) (int64, error) {
-	raw, ok := fields[name]
-	if !ok {
-		return 0, invalidAuthField(name)
-	}
-
-	var value int64
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return 0, invalidAuthField(name)
 	}
 
 	return value, nil

@@ -14,8 +14,8 @@ func TestMethodsEnumeratesOnlyNativeOAuthCatalog(t *testing.T) {
 	agent, client := newAuthAgent(t)
 
 	client.authProviders = []nativehermes.AuthProvider{
-		{ID: "xai-oauth", Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode, Disconnectable: true},
-		{ID: "anthropic", Name: "Anthropic API Key", Flow: nativehermes.AuthFlowPKCE, Disconnectable: true},
+		{ID: "xai-oauth", Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode},
+		{ID: "anthropic", Name: "Anthropic API Key", Flow: nativehermes.AuthFlowPKCE},
 		{ID: "claude-code", Name: "Anthropic OAuth: Required Extra Usage Credits to Use Subscription", Flow: nativehermes.AuthFlowExternal},
 		{ID: "", Name: "nameless", Flow: nativehermes.AuthFlowDeviceCode},
 		{ID: "unlabelled", Name: "bad\u202Elabel", Flow: nativehermes.AuthFlowDeviceCode},
