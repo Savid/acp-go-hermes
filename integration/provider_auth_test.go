@@ -88,7 +88,7 @@ func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnec
 		t.TempDir(),
 		"-provider-auth-root",
 		authRoot,
-		"-provider-auth-home",
+		"-hermes-provider-auth-home",
 		authHome,
 	)
 

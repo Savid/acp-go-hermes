@@ -322,7 +322,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 		"-debug",
 		"-seed-file", "config.yaml=" + xaiConfig,
 		"-provider-auth-root", t.TempDir(),
-		"-provider-auth-home", hermesAuthHome,
+		"-hermes-provider-auth-home", hermesAuthHome,
 	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)

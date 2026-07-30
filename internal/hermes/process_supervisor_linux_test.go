@@ -86,18 +86,18 @@ func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 
 func TestLinuxSupervisorPreservesCommandEnvironmentSemantics(t *testing.T) {
 	restoreLinuxSupervisorSeams(t)
-	t.Setenv("ACP_GO_HERMES_INHERITED_ENV_TEST", "expected")
+	t.Setenv("SUPERVISOR_INHERITED_ENV_MARKER", "expected")
 
 	tests := []struct {
 		name   string
 		script string
 		env    []string
 	}{
-		{name: "inherited", script: `test "$ACP_GO_HERMES_INHERITED_ENV_TEST" = expected`},
+		{name: "inherited", script: `test "$SUPERVISOR_INHERITED_ENV_MARKER" = expected`},
 		{
 			name:   "explicit",
-			script: `test -z "$ACP_GO_HERMES_INHERITED_ENV_TEST" && test "$ACP_GO_HERMES_EXPLICIT_ENV_TEST" = expected`,
-			env:    []string{"ACP_GO_HERMES_EXPLICIT_ENV_TEST=expected"},
+			script: `test -z "$SUPERVISOR_INHERITED_ENV_MARKER" && test "$SUPERVISOR_EXPLICIT_ENV_MARKER" = expected`,
+			env:    []string{"SUPERVISOR_EXPLICIT_ENV_MARKER=expected"},
 		},
 	}
 
