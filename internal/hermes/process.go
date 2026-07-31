@@ -24,8 +24,7 @@ import (
 )
 
 const (
-	MinimumVersion             = "0.19.0"
-	providerAuthHomeCapability = "provider-auth-home-v1"
+	MinimumVersion = "0.19.0"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the compatibility sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
@@ -55,14 +54,9 @@ var (
 	startHermesContainedProcess = startContainedProcess
 	newProcessBrowserShim       = newBrowserShim
 	executableProbeMu           sync.Mutex
-	executableProbed            = map[string]executableProbe{}
+	executableProbed            = map[string]bool{}
 	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
 )
-
-type executableProbe struct {
-	complete         bool
-	providerAuthHome bool
-}
 
 type ProcessOptions struct {
 	ExecutablePath string
@@ -334,14 +328,10 @@ func upsertProcessEnv(env []string, key string, value string) []string {
 
 func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) (bool, error) {
 	executableProbeMu.Lock()
-	probe, ok := executableProbed[executable]
+	probed := executableProbed[executable]
 	executableProbeMu.Unlock()
 
-	if ok && probe.complete {
-		if err := requireProviderAuthHomeCapability(opts, probe.providerAuthHome); err != nil {
-			return false, err
-		}
-
+	if probed {
 		return false, nil
 	}
 	if opts.AcquireDiscoveryResources == nil || opts.RetainDiscoveryRoot == nil {
@@ -415,51 +405,13 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		return false, fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
 
-	providerAuthHome := hasRuntimeCapability(output.String(), providerAuthHomeCapability)
-	if err := requireProviderAuthHomeCapability(opts, providerAuthHome); err != nil {
-		return false, err
-	}
-
-	executableProbeMu.Lock()
-	probe = executableProbed[executable]
-	probe.providerAuthHome = providerAuthHome
-	executableProbed[executable] = probe
-	executableProbeMu.Unlock()
-
 	return true, nil
 }
 
 func markExecutableProbed(executable string) {
 	executableProbeMu.Lock()
-	probe := executableProbed[executable]
-	probe.complete = true
-	executableProbed[executable] = probe
+	executableProbed[executable] = true
 	executableProbeMu.Unlock()
-}
-
-func requireProviderAuthHomeCapability(opts ProcessOptions, supported bool) error {
-	if opts.ProviderAuthHome == "" || supported {
-		return nil
-	}
-
-	return fmt.Errorf("hermes --version output missing runtime capability %q", providerAuthHomeCapability)
-}
-
-func hasRuntimeCapability(output string, capability string) bool {
-	for _, line := range strings.Split(output, "\n") {
-		value, ok := strings.CutPrefix(strings.TrimSpace(line), "Runtime capabilities:")
-		if !ok {
-			continue
-		}
-
-		for field := range strings.FieldsSeq(value) {
-			if strings.Trim(field, ",") == capability {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 func parseVersion(output string) (string, bool) {

@@ -732,14 +732,6 @@ func assertStartFaultModes(t *testing.T, ctx context.Context) {
 		!strings.Contains(err.Error(), "missing semantic version") {
 		t.Fatalf("bad version error = %v", err)
 	}
-	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeNoAuthHome),
-		Home:             t.TempDir(),
-		ProviderAuthHome: t.TempDir(),
-		Timeout:          10 * time.Second,
-	})); err == nil || !strings.Contains(err.Error(), providerAuthHomeCapability) {
-		t.Fatalf("missing provider auth home capability error = %v", err)
-	}
 	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeMissingMethod), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 		!strings.Contains(err.Error(), "model.options") {
 		t.Fatalf("missing method probe error = %v", err)
@@ -893,7 +885,6 @@ const (
 	fakeProcessModeBadStatus      = "bad-status"
 	fakeProcessModeOldVersion     = "old-version"
 	fakeProcessModeBadVersion     = "bad-version"
-	fakeProcessModeNoAuthHome     = "no-auth-home"
 	fakeProcessModeMissingMethod  = "missing-method"
 )
 
@@ -937,9 +928,6 @@ func runFakeHermesProcess(args []string, mode string) error {
 				return nil
 			}
 			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (test)")
-			if mode != fakeProcessModeNoAuthHome {
-				_, _ = fmt.Fprintln(os.Stdout, "Runtime capabilities: provider-auth-home-v1")
-			}
 
 			return nil
 		}
@@ -1059,14 +1047,14 @@ func resetProcessSeams() {
 	newStatusHTTPClient = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	executableProbeMu.Lock()
-	executableProbed = map[string]executableProbe{}
+	executableProbed = map[string]bool{}
 	executableProbeMu.Unlock()
 }
 
-func cloneExecutableProbeCache() map[string]executableProbe {
+func cloneExecutableProbeCache() map[string]bool {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
-	out := make(map[string]executableProbe, len(executableProbed))
+	out := make(map[string]bool, len(executableProbed))
 	for key, value := range executableProbed {
 		out[key] = value
 	}
