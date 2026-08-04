@@ -32,6 +32,7 @@ func TestRunVersionAndFlagError(t *testing.T) {
 }
 
 func TestRunServeSuccessAndError(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	agentVersion = func() string { return "v-test" }
@@ -48,6 +49,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 		return nil
 	}
 	if code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "hermes",
 		"-scratch-dir", "/tmp/scratch",
 		"-provider-auth-direct-home", "/tmp/direct",
@@ -66,12 +68,15 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	if configured.ProviderAuthDirectHome != "/tmp/direct" {
 		t.Fatalf("provider auth direct home = %q", configured.ProviderAuthDirectHome)
 	}
+	if configured.ProcessIsolation == nil || configured.ProcessIsolation.UID != 20001 {
+		t.Fatalf("process isolation = %#v", configured.ProcessIsolation)
+	}
 
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return errors.New("boom")
 	}
 	var stderr bytes.Buffer
-	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, &stderr); code != 1 {
+	if code := run(context.Background(), isolatedArgs(), strings.NewReader(""), io.Discard, &stderr); code != 1 {
 		t.Fatalf("serve error code = %d", code)
 	}
 	if !strings.Contains(stderr.String(), "boom") {
@@ -83,7 +88,7 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return context.Canceled
 	}
-	if code := run(cancelled, nil, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
+	if code := run(cancelled, isolatedArgs(), strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 		t.Fatalf("cancelled serve code = %d", code)
 	}
 
@@ -99,12 +104,12 @@ func TestRunServeSuccessAndError(t *testing.T) {
 
 		return ctx.Err()
 	}
-	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, io.Discard); code != 143 {
+	if code := run(context.Background(), isolatedArgs(), strings.NewReader(""), io.Discard, io.Discard); code != 143 {
 		t.Fatalf("signalled serve code = %d", code)
 	}
 }
 
-func TestRunContainmentAndDarwinBestEffortFlag(t *testing.T) {
+func TestRunContainmentAndRemovedDarwinFlag(t *testing.T) {
 	restore := replaceGlobals(t)
 	defer restore()
 	var stdout, stderr bytes.Buffer
@@ -112,30 +117,12 @@ func TestRunContainmentAndDarwinBestEffortFlag(t *testing.T) {
 		t.Fatalf("containment dispatch code = %d", code)
 	}
 
-	mainRuntimePlatform = "linux"
 	stderr.Reset()
 	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
-		t.Fatalf("off-Darwin flag code = %d", code)
+		t.Fatalf("removed Darwin flag code = %d", code)
 	}
-
-	mainRuntimePlatform = "darwin"
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...hermesacp.Option) error {
-		var configured hermesacp.Options
-		for _, option := range options {
-			option(&configured)
-		}
-		if !configured.DarwinBestEffortContainment {
-			t.Fatal("Darwin best-effort containment option was not applied")
-		}
-
-		return nil
-	}
-	stderr.Reset()
-	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 0 {
-		t.Fatalf("Darwin flag code = %d", code)
-	}
-	if !strings.Contains(stderr.String(), "containment=best_effort") || !strings.Contains(stderr.String(), "PGID reuse") {
-		t.Fatalf("Darwin warning = %q", stderr.String())
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("removed Darwin flag stderr = %q", stderr.String())
 	}
 }
 
@@ -170,6 +157,7 @@ func TestSeedFileFlag(t *testing.T) {
 }
 
 func TestRunSeedFileFlag(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	agentVersion = func() string { return "v-test" }
@@ -188,6 +176,7 @@ func TestRunSeedFileFlag(t *testing.T) {
 		return nil
 	}
 	if code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "config.yaml=" + hostPath,
 	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 		t.Fatalf("seed-file run code = %d", code)
@@ -204,6 +193,7 @@ func TestRunSeedFileFlag(t *testing.T) {
 
 	var stderr bytes.Buffer
 	if code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "config.yaml=" + filepath.Join(dir, "absent"),
 	}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
 		t.Fatalf("missing host file code = %d, want 2", code)
@@ -235,6 +225,7 @@ func TestSignals(t *testing.T) {
 }
 
 func TestMainAndVersion(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	oldArgs := os.Args
@@ -247,7 +238,7 @@ func TestMainAndVersion(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return errors.New("main failed")
 	}
-	os.Args = []string{"acp-go-hermes"}
+	os.Args = []string{"acp-go-hermes", "-process-isolation-config", testProcessIsolationConfigPath}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 	main()
@@ -269,13 +260,11 @@ func replaceGlobals(t *testing.T) func() {
 	oldServe := serve
 	oldVersion := agentVersion
 	oldExit := exit
-	oldRuntime := mainRuntimePlatform
 
 	return func() {
 		serve = oldServe
 		agentVersion = oldVersion
 		exit = oldExit
-		mainRuntimePlatform = oldRuntime
 	}
 }
 

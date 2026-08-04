@@ -6,8 +6,9 @@
 // tree per ACP session, maps ACP requests into native gateway WebSocket JSON-RPC
 // calls, streams gateway events back to the client as ACP session updates,
 // and closes its platform containment boundary on cancellation, timeout, and
-// close. Linux and Windows provide authoritative containment; Darwin is
-// available only through explicit best-effort opt-in and cannot contain
+// close. Linux provides authoritative containment. Windows refuses native
+// launch because it cannot apply the mandatory Unix UID/GID isolation. Darwin
+// is available only through explicit best-effort opt-in and cannot contain
 // descendants that escape the original process group. A cancelled or timed-out session lazily resumes its exact native key
 // from the last committed snapshot on the next prompt. Hosts must complete ACP
 // initialization before issuing session or other agent methods.

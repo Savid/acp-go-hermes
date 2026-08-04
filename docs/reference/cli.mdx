@@ -7,11 +7,55 @@ description: Every flag the acp-go-hermes command accepts.
 acp-go-hermes [flags]
 ```
 
+## Required standalone isolation policy
+
+Normal serve mode is Linux-only and requires
+`-process-isolation-config=/absolute/path/process-isolation.json`.
+`-version` and the Darwin containment diagnostic subcommands are exempt.
+The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-hermes",
+    "USER": "acp-go-hermes",
+    "LOGNAME": "acp-go-hermes",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+standalone native mode rather than weakening this contract.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
 ## Flags
 
 | Flag | Meaning |
 |---|---|
 | `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
+| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-home` | Unsupported because each session runtime root is isolated. Use `-scratch-dir` for ephemeral state and `-hermes-provider-auth-home` for durable provider credentials. |
 | `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-hermes-provider-auth-home`. |
@@ -20,7 +64,6 @@ acp-go-hermes [flags]
 | `-model` | Default model value passed as `provider/model`. |
 | `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
 | `-debug` | Enable debug logging on stderr. |
-| `-darwin-best-effort-containment` | On Darwin only, accept process-group containment despite escaped-descendant, marker-scrubbing, and PGID-reuse risks. Emits an unconditional stderr warning before serving. |
 | `-version` | Print the adapter version and exit. |
 
 `-seed-file` reads the host file at startup and writes its contents to
@@ -39,7 +82,9 @@ acp-go-hermes -seed-file config.yaml=./hermes-config.yaml
 
 ## Darwin containment operations
 
-Diagnosis is read-only and emits exactly one JSON object:
+These commands inspect generations left by an embedded best-effort host; the
+standalone command does not launch native work on Darwin. Diagnosis is
+read-only and emits exactly one JSON object:
 
 ```sh
 acp-go-hermes containment diagnose -scratch-dir /path/to/scratch

@@ -110,7 +110,7 @@ func (a *Agent) rejectIncompleteHermesSession(id acp.SessionId) error {
 }
 
 func deleteHermesScratchRoot(root string, scratchRelease func()) error {
-	if err := runtimeRemoveAll(root); err != nil {
+	if err := errors.Join(runtimeRemoveAll(root), runtimeRemoveAll(nativehermes.ControlDirForXDG(root))); err != nil {
 		return err
 	}
 

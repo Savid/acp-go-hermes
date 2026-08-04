@@ -28,7 +28,7 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
 
-      - name: Check Windows permission lock build
+      - name: Check platform compile and refusal paths
         run: make test-cross-compile
 
       - name: Check module tidiness
@@ -46,3 +46,15 @@ jobs:
           path: |
             coverage.out
             coverage-summary.txt
+
+  trusted-supervisor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Trusted supervisor security suite
+        run: sudo env "PATH=$PATH" HOME=/root make test-trusted-supervisor

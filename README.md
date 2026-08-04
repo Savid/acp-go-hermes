@@ -106,8 +106,11 @@ directories are configured.
   credential bytes in a shared durable `HERMES_AUTH_HOME`; the adapter keeps
   only values-free connection lineage.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
-  freshly generated `HERMES_HOME`. Linux and Windows use authoritative OS
-  containment. Darwin is disabled unless its explicitly risky best-effort
+  freshly generated `HERMES_HOME`. Linux uses authoritative OS containment.
+  Windows native launch fails closed because its process API cannot apply the
+  mandatory Unix UID/GID identity boundary with empty supplementary groups;
+  cross-compilation proves only that this refusal path builds, not runtime
+  support. Darwin is disabled unless its explicitly risky best-effort
   process-group mode is selected.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.

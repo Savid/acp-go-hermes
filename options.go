@@ -156,11 +156,12 @@ type Options struct {
 	RuntimeResourceHooks        RuntimeResourceHooks
 	DarwinBestEffortContainment bool
 
-	clientFactory        func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
-	newPromptTimer       func(time.Duration) promptTimer
-	storeWriteTTL        time.Duration
-	beforeTerminalCommit func()
-	testOnlyNoCredential bool
+	clientFactory            func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
+	newPromptTimer           func(time.Duration) promptTimer
+	storeWriteTTL            time.Duration
+	beforeTerminalCommit     func()
+	testOnlyNoCredential     bool
+	testOnlyIdentityLockRoot string
 }
 
 func applyOptions(opts []Option) Options {

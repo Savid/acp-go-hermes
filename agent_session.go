@@ -896,6 +896,12 @@ func closeHermesClientAfterStartupFailure(client nativehermes.Server) error {
 }
 
 func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, scratchRelease func(), mcpServers ...[]acp.McpServer) (nativehermes.Server, error) {
+	if a.options.ProviderAuthHome != "" {
+		if err := validateNativeOwnedDirectory(a.options.ProviderAuthHome, a.options.ProcessIsolation); err != nil {
+			return nil, err
+		}
+	}
+
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = nativehermes.StartServer
@@ -938,7 +944,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		DefaultModel:     firstNonEmpty(meta.Model, a.options.DefaultModel),
 		ProviderAuthHome: a.options.ProviderAuthHome,
 		Env:              a.observe.InjectTraceEnv(ctx, env),
-		Isolation:        nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential),
+		Isolation:        nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential, a.options.testOnlyIdentityLockRoot),
 		Logger:           a.log,
 		ExistingXDG:      existing,
 		MCPServers:       servers,
@@ -995,15 +1001,18 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 	}, nil
 }
 
-func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bool) *nativehermes.ProcessIsolation {
+func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bool, testOnlyIdentityLockRoot string) *nativehermes.ProcessIsolation {
 	if isolation == nil {
 		return nil
 	}
 	base := cloneStringMap(isolation.BaseEnvironment)
 
 	return &nativehermes.ProcessIsolation{
-		UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base,
-		TestOnlyNoCredential: testOnlyNoCredential,
+		UID:                      isolation.UID,
+		GID:                      isolation.GID,
+		BaseEnvironment:          base,
+		TestOnlyNoCredential:     testOnlyNoCredential,
+		TestOnlyIdentityLockRoot: testOnlyIdentityLockRoot,
 	}
 }
 
@@ -1095,11 +1104,11 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 		return nil
 	}
 
-	if reapHermesLeaseFile(filepath.Join(record.XDGRoot, "state", nativehermes.LeaseFileName), a.log) {
+	if reapHermesLeaseFile(filepath.Join(nativehermes.ControlDirForXDG(record.XDGRoot), nativehermes.LeaseFileName), a.log) {
 		return fmt.Errorf("hermes delete cleanup kept live lease for session %q", record.SessionID)
 	}
 
-	return os.RemoveAll(record.XDGRoot)
+	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))
 }
 
 // homeRoot returns the parent directory under which isolated per-session

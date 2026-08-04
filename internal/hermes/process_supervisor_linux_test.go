@@ -166,7 +166,12 @@ func TestTrustedSupervisorRejectsNativeSignalsProofForgeryAndDaemonEscape(t *tes
 
 	root := os.Getenv("ACP_GO_HERMES_TEST_ROOT")
 	if root == "" {
-		root = t.TempDir()
+		var err error
+		root, err = os.MkdirTemp("", "acp-go-hermes-trusted-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
 	}
 	statusRoot := filepath.Join(root, "native")
 	if os.Getenv(phaseEnv) != "child" {
@@ -212,7 +217,7 @@ if kill -KILL "$supervisor" 2>/dev/null; then echo kill=allowed; else echo kill=
 			Path:      "/bin/sh",
 			Args:      []string{"sh", "-c", script, "probe", status, daemon, strconv.Itoa(int(proofFile.Fd()))},
 			Env:       []string{"PATH=/usr/bin:/bin"},
-			Isolation: ProcessIsolation{UID: 65534, GID: 65534},
+			Isolation: ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}},
 		}
 		if code := runHermesProcessSupervisorCore(config, controlRead, proofFile); code != 0 {
 			t.Fatalf("trusted supervisor code = %d", code)
@@ -388,7 +393,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 
 	t.Run("proof write failure", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
-		supervisorAcquireLock = func(uint32, bool, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
+		supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
 			return &agentIdentityLock{}, nil
 		}
 		controlRead, controlWrite, err := os.Pipe()
@@ -426,8 +431,9 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 
 	t.Run("plain stop failure", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
-		stopSupervisorDescendants = func(targetPID int, _ <-chan error) (error, bool) {
-			_ = signalPIDFD(targetPID, syscall.SIGKILL)
+		stopSupervisorDescendants = func(targetPID int, targetDone <-chan error) (error, bool) {
+			_ = syscall.Kill(-targetPID, syscall.SIGKILL)
+			<-targetDone
 
 			return errors.New("stop"), true
 		}
@@ -442,7 +448,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 	t.Run("unsettled root fails without proof", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
 		stopSupervisorDescendants = func(targetPID int, _ <-chan error) (error, bool) {
-			_ = signalPIDFD(targetPID, syscall.SIGKILL)
+			_ = syscall.Kill(-targetPID, syscall.SIGKILL)
 
 			return errors.New("unsettled"), false
 		}
@@ -456,6 +462,17 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 }
 
 func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+
+	target := hermesSupervisorTarget(hermesSupervisorConfig{
+		Path: "/bin/true",
+		Args: []string{"/bin/true"},
+	})
+	if target.SysProcAttr == nil || !target.SysProcAttr.Setpgid ||
+		target.SysProcAttr.Pdeathsig != syscall.SIGKILL {
+		t.Fatalf("supervised target attributes = %+v", target.SysProcAttr)
+	}
+
 	if parent, state, ok := supervisorProcStat("1 (name with spaces) S 42 0 0"); !ok || parent != 42 || state != 'S' {
 		t.Fatalf("parsed proc stat = %d/%q/%v", parent, state, ok)
 	}
@@ -502,8 +519,63 @@ func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
 		t.Fatal("target ExtraFiles accepted")
 	}
 
+	t.Setenv("GORACE", "halt_on_error=1 atexit_sleep_ms=1000")
+	supervisorExecutable = func() (string, error) { return "/bin/true", nil }
+	environmentTarget := exec.Command("/bin/true")
+	configureHermesProcess(environmentTarget)
+	environmentTree, err := startUnixContainedProcess(environmentTarget, ContainmentSpec{Isolation: testProcessIsolation()})
+	if err != nil {
+		t.Fatalf("start supervisor environment probe: %v", err)
+	}
+	if len(environmentTarget.Env) != 1 || environmentTarget.Env[0] != envHermesSupervisor+"=1" {
+		t.Fatalf("supervisor environment = %#v", environmentTarget.Env)
+	}
+	_ = environmentTree.close()
+
 	if err := proveAndReapSupervisorDescendants(time.Millisecond); err != nil {
 		t.Fatalf("prove empty test descendants: %v", err)
+	}
+}
+
+func TestHermesSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+
+	supervisorEffectiveUID = func() int { return 1000 }
+	if err := validateHermesSupervisorIdentity(testProcessIsolation()); err == nil || !strings.Contains(err.Error(), "trusted root") {
+		t.Fatalf("non-root identity validation = %v", err)
+	}
+	native := exec.Command("/bin/true")
+	configureHermesProcess(native)
+	if _, err := startUnixContainedProcess(native, ContainmentSpec{Isolation: testProcessIsolation()}); err == nil || !strings.Contains(err.Error(), "trusted root") {
+		t.Fatalf("non-root parent preparation = %v", err)
+	}
+
+	supervisorEffectiveUID = func() int { return 0 }
+	isolation := testProcessIsolation()
+	isolation.UID = 0
+	if err := validateHermesSupervisorIdentity(isolation); err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("shared root identity validation = %v", err)
+	}
+
+	isolation.UID = 11
+	if err := validateHermesSupervisorIdentity(isolation); err != nil {
+		t.Fatalf("distinct trusted identity validation = %v", err)
+	}
+
+	supervisorEffectiveUID = func() int { return 1000 }
+	if code := runHermesProcessSupervisor(); code != 125 {
+		t.Fatalf("non-root bootstrap code = %d, want 125", code)
+	}
+}
+
+func TestHermesSupervisorProductionIdentityRejectsNonRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires a non-root process")
+	}
+
+	_, err := startUnixContainedProcess(nil, ContainmentSpec{Isolation: testProcessIsolation()})
+	if err == nil || !strings.Contains(err.Error(), "trusted root") {
+		t.Fatalf("non-root production preparation = %v", err)
 	}
 }
 
@@ -559,7 +631,7 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 		return file
 	}
 	supervisorCloseOnExec = func(int) {}
-	supervisorAcquireLock = func(uint32, bool, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
+	supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
 		return &agentIdentityLock{}, nil
 	}
 	if code := runHermesProcessSupervisor(); code != 0 {
@@ -844,6 +916,8 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 	oldKillGrace := supervisorKillGrace
 	oldPoll := supervisorPollInterval
 	oldProcessKill := processKill
+	oldEffectiveUID := supervisorEffectiveUID
+	supervisorEffectiveUID = func() int { return 0 }
 	t.Cleanup(func() {
 		supervisorExit = oldExit
 		supervisorExecutable = oldExecutable
@@ -868,6 +942,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 		supervisorKillGrace = oldKillGrace
 		supervisorPollInterval = oldPoll
 		processKill = oldProcessKill
+		supervisorEffectiveUID = oldEffectiveUID
 	})
 }
 
@@ -886,7 +961,7 @@ func runSupervisorCoreTest(t *testing.T, args []string, trigger func(*os.File)) 
 		go trigger(controlWrite)
 	}
 	oldAcquire := supervisorAcquireLock
-	supervisorAcquireLock = func(uint32, bool, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
+	supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
 		return &agentIdentityLock{}, nil
 	}
 	defer func() { supervisorAcquireLock = oldAcquire }()
@@ -902,9 +977,11 @@ func runSupervisorCoreTest(t *testing.T, args []string, trigger func(*os.File)) 
 
 func supervisorTestConfig(args []string) hermesSupervisorConfig {
 	return hermesSupervisorConfig{
-		Path:      args[0],
-		Args:      append([]string(nil), args...),
-		Env:       os.Environ(),
-		Isolation: ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true},
+		Path: args[0],
+		Args: append([]string(nil), args...),
+		Env:  os.Environ(),
+		Isolation: ProcessIsolation{
+			UID: 11, GID: 22, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true,
+		},
 	}
 }

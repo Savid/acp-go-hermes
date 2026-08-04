@@ -59,10 +59,8 @@ func verifyProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("read supplementary groups: %w", err)
 	}
 
-	for _, group := range groups {
-		if int64(group) != int64(isolation.GID) {
-			return fmt.Errorf("unexpected supplementary group %d", group)
-		}
+	if len(groups) != 0 {
+		return fmt.Errorf("unexpected supplementary groups %v", groups)
 	}
 
 	return nil

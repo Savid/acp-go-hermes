@@ -17,7 +17,7 @@ func TestAgentIdentityLockSerializesAndCancels(t *testing.T) {
 	canceled := make(chan struct{})
 	signals := make(chan os.Signal, 1)
 
-	first, err := acquireAgentIdentityLock(1201, false, canceled, signals)
+	first, err := acquireAgentIdentityLock(1201, false, "", canceled, signals)
 	if err != nil {
 		t.Fatalf("acquire first identity lock: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestAgentIdentityLockSerializesAndCancels(t *testing.T) {
 	acquired := make(chan *agentIdentityLock, 1)
 	failed := make(chan error, 1)
 	go func() {
-		lock, acquireErr := acquireAgentIdentityLock(1201, false, make(chan struct{}), make(chan os.Signal))
+		lock, acquireErr := acquireAgentIdentityLock(1201, false, "", make(chan struct{}), make(chan os.Signal))
 		if acquireErr != nil {
 			failed <- acquireErr
 			return
@@ -57,13 +57,13 @@ func TestAgentIdentityLockSerializesAndCancels(t *testing.T) {
 
 	cancelWait := make(chan struct{})
 	close(cancelWait)
-	if _, err := acquireAgentIdentityLock(1201, false, cancelWait, make(chan os.Signal)); err == nil || err.Error() != "agent identity lock canceled" {
+	if _, err := acquireAgentIdentityLock(1201, false, "", cancelWait, make(chan os.Signal)); err == nil || err.Error() != "agent identity lock canceled" {
 		t.Fatalf("canceled identity lock wait = %v", err)
 	}
 
 	signalWait := make(chan os.Signal, 1)
 	signalWait <- syscall.SIGTERM
-	if _, err := acquireAgentIdentityLock(1201, false, make(chan struct{}), signalWait); err == nil {
+	if _, err := acquireAgentIdentityLock(1201, false, "", make(chan struct{}), signalWait); err == nil {
 		t.Fatal("signaled identity lock wait succeeded")
 	}
 
@@ -85,7 +85,7 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 		if err := os.Chmod(root, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := acquireAgentIdentityLock(1202, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1202, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("world-writable runtime root accepted")
 		}
 	})
@@ -93,10 +93,10 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 	t.Run("owner directory mode", func(t *testing.T) {
 		restoreAgentIdentityLockTestSeams(t)
 		root := configureAgentIdentityLockTestRoot(t)
-		if err := os.Mkdir(filepath.Join(root, "wagie"), 0o755); err != nil {
+		if err := os.Mkdir(filepath.Join(root, "acp-go"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := acquireAgentIdentityLock(1203, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1203, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("unsafe owner directory accepted")
 		}
 	})
@@ -104,10 +104,10 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 	t.Run("owner directory symlink", func(t *testing.T) {
 		restoreAgentIdentityLockTestSeams(t)
 		root := configureAgentIdentityLockTestRoot(t)
-		if err := os.Symlink(t.TempDir(), filepath.Join(root, "wagie")); err != nil {
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "acp-go")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := acquireAgentIdentityLock(1204, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1204, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("symlink owner directory accepted")
 		}
 	})
@@ -115,18 +115,18 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 	t.Run("lock mode", func(t *testing.T) {
 		restoreAgentIdentityLockTestSeams(t)
 		root := configureAgentIdentityLockTestRoot(t)
-		lock, err := acquireAgentIdentityLock(1205, false, make(chan struct{}), make(chan os.Signal))
+		lock, err := acquireAgentIdentityLock(1205, false, "", make(chan struct{}), make(chan os.Signal))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := lock.Close(); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(root, "wagie", "agent-identities", "1205.lock")
+		path := filepath.Join(root, "acp-go", "agent-identities", "1205.lock")
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := acquireAgentIdentityLock(1205, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1205, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("unsafe lock mode accepted")
 		}
 	})
@@ -134,18 +134,18 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 	t.Run("lock link count", func(t *testing.T) {
 		restoreAgentIdentityLockTestSeams(t)
 		root := configureAgentIdentityLockTestRoot(t)
-		lock, err := acquireAgentIdentityLock(1206, false, make(chan struct{}), make(chan os.Signal))
+		lock, err := acquireAgentIdentityLock(1206, false, "", make(chan struct{}), make(chan os.Signal))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := lock.Close(); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(root, "wagie", "agent-identities", "1206.lock")
+		path := filepath.Join(root, "acp-go", "agent-identities", "1206.lock")
 		if err := os.Link(path, filepath.Join(root, "linked.lock")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := acquireAgentIdentityLock(1206, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1206, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("multiply-linked identity lock accepted")
 		}
 	})
@@ -154,7 +154,7 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 		restoreAgentIdentityLockTestSeams(t)
 		configureAgentIdentityLockTestRoot(t)
 		agentIdentityLockTrustedUID++
-		if _, err := acquireAgentIdentityLock(1207, false, make(chan struct{}), make(chan os.Signal)); err == nil {
+		if _, err := acquireAgentIdentityLock(1207, false, "", make(chan struct{}), make(chan os.Signal)); err == nil {
 			t.Fatal("untrusted runtime root accepted")
 		}
 	})
@@ -175,8 +175,8 @@ func configureAgentIdentityLockTestRoot(t *testing.T) string {
 func assertAgentIdentityLockModes(t *testing.T, root string, uid uint32) {
 	t.Helper()
 	for _, path := range []string{
-		filepath.Join(root, "wagie"),
-		filepath.Join(root, "wagie", "agent-identities"),
+		filepath.Join(root, "acp-go"),
+		filepath.Join(root, "acp-go", "agent-identities"),
 	} {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -186,7 +186,7 @@ func assertAgentIdentityLockModes(t *testing.T, root string, uid uint32) {
 			t.Fatalf("%s mode = %o", path, info.Mode().Perm())
 		}
 	}
-	path := filepath.Join(root, "wagie", "agent-identities", strconv.FormatUint(uint64(uid), 10)+".lock")
+	path := filepath.Join(root, "acp-go", "agent-identities", strconv.FormatUint(uint64(uid), 10)+".lock")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)

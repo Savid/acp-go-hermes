@@ -161,12 +161,13 @@ A timeout is a failure, not a user cancel, so it surfaces as
 reason. A turn cancelled by the client returns the `cancelled` stop reason
 instead. Neither result settles after Hermes' cooperative interrupt alone.
 The adapter first completes the selected native containment boundary. Linux
-and Windows authoritatively empty the native tree, including background tools
-that Hermes intentionally leaves running. Darwin best effort only reaps the
-direct child and observes the captured original process group absent; a
-`setsid(2)` descendant may remain live. If the selected boundary does not
-complete, the prompt fails and the session is poisoned instead of reporting a
-normal timeout or cancellation.
+authoritatively empties the native tree, including background tools that Hermes
+intentionally leaves running. Windows native launch fails closed because the
+mandatory Unix UID/GID identity boundary is unavailable. Darwin best effort
+only reaps the direct child and observes the captured original process group
+absent; a `setsid(2)` descendant may remain live. If the selected boundary does
+not complete, the prompt fails and the session is poisoned instead of reporting
+a normal timeout or cancellation.
 </Note>
 
 After cancellation, timeout, provider/transport failure, or outbound update

@@ -6,6 +6,18 @@ description: Agent auth stays native, while provider OAuth is coordinated throug
 Hermes owns authentication and every provider credential byte. The adapter
 coordinates native OAuth flows and records only values-free lineage.
 
+## Standalone credential input
+
+The standalone root supervisor never forwards its ambient environment.
+To pass provider API-key variables, name each variable explicitly in the
+`inheritEnvironment` array of the root-owned
+`-process-isolation-config` policy. The value must be set in the supervisor
+environment or startup fails; identity, path, loader, XDG/native-home, and
+adapter-private variables cannot be inherited. File-backed or provider-broker
+credentials must live only in the explicit target-owned native home described
+by the adapter. No standalone path reads root `HOME`, root native config, or
+an unlisted root credential.
+
 ## No ACP auth methods
 
 The agent advertises `authMethods: []`, rejects `authenticate`, and treats
@@ -24,9 +36,10 @@ snapshots credential material.
 The launch environment also sets a random
 `HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser
 shim. The shim intercepts Hermes browser launches so the authorization URL can
-be relayed to the caller instead of opening on the worker desktop. On Windows,
-where that launch cannot be contained, authorization fails closed with
-`cause: "policy"`.
+be relayed to the caller instead of opening on the worker desktop. Windows
+rejects every native Hermes launch at the mandatory Unix UID/GID identity
+boundary, so authorization is unavailable there. Independently, its browser
+launch cannot be contained.
 
 ## Configuration
 

@@ -32,6 +32,11 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 		t.Fatalf("containment observations = %v", observed)
 	}
 
+	agentRuntimePlatform = agentRuntimeWindows
+	if got := newTestAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
+		t.Fatalf("Windows mode = %q", got)
+	}
+
 	agentRuntimePlatform = "darwin"
 	if got := newTestAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
 		t.Fatalf("Darwin default mode = %q", got)

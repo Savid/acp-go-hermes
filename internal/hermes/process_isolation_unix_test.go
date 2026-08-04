@@ -19,8 +19,8 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
-	processIsolationGetgroups = func() ([]int, error) { return []int{22}, nil }
-	policy := &ProcessIsolation{UID: 11, GID: 22}
+	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
+	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}}
 	require.NoError(t, verifyProcessIsolation(policy))
 	cmd := exec.Command("/usr/bin/true")
 	require.NoError(t, applyProcessIsolation(cmd, policy))
@@ -28,15 +28,15 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 
 	processIsolationGetgroups = func() ([]int, error) { return nil, errors.New("groups") }
 	require.Error(t, verifyProcessIsolation(policy))
-	processIsolationGetgroups = func() ([]int, error) { return []int{22, 23}, nil }
+	processIsolationGetgroups = func() ([]int, error) { return []int{22}, nil }
 	require.Error(t, verifyProcessIsolation(policy))
 	processIsolationGeteuid = func() int { return 12 }
 	require.Error(t, verifyProcessIsolation(policy))
 	require.Error(t, verifyProcessIsolation(nil))
 	require.Error(t, applyProcessIsolation(nil, policy))
 	require.Error(t, applyProcessIsolation(exec.Command("/usr/bin/true"), nil))
-	require.Error(t, applyProcessIsolation(nil, &ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true}))
-	require.NoError(t, applyProcessIsolation(exec.Command("/usr/bin/true"), &ProcessIsolation{UID: 11, GID: 22, TestOnlyNoCredential: true}))
+	require.Error(t, applyProcessIsolation(nil, &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}))
+	require.NoError(t, applyProcessIsolation(exec.Command("/usr/bin/true"), &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}))
 
 	cmd = exec.Command("/usr/bin/true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

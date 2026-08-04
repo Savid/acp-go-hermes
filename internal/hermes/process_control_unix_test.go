@@ -222,7 +222,7 @@ func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
 
 func testProcessIsolation() *ProcessIsolation {
 	return &ProcessIsolation{
-		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+		UID: 11, GID: 22,
 		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
 		TestOnlyNoCredential: true,
 	}

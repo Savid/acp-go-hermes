@@ -3,6 +3,8 @@ package hermesacp
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -15,9 +17,21 @@ func newTestAgent(opts ...Option) *Agent {
 	base = append(base, WithProcessIsolation(ProcessIsolation{
 		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
 		BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
-	}), func(options *Options) { options.testOnlyNoCredential = true })
+	}), func(options *Options) {
+		options.testOnlyNoCredential = true
+		options.testOnlyIdentityLockRoot = testIdentityLockRoot()
+	})
 
 	return NewAgent(append(base, opts...)...)
+}
+
+func testIdentityLockRoot() string {
+	root := filepath.Join(os.TempDir(), "acp-go-hermes-agent-identities-"+strconv.Itoa(os.Getpid()))
+	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
+		panic(err)
+	}
+
+	return root
 }
 
 // sessionMetaFromLifecycle decodes lifecycle meta through an agent with no

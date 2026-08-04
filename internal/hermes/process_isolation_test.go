@@ -29,9 +29,10 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	require.Error(t, err)
 	for _, invalid := range []*ProcessIsolation{
 		nil,
+		{UID: 1, GID: 1},
 		{UID: 0, GID: 1},
 		{UID: 1, GID: 0},
-		{UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_HERMES_INTERNAL_PROBE": "1"}},
+		{UID: 1, GID: 1, BaseEnvironment: map[string]string{envIsolationUID: "1"}},
 		{UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_HERMES_PROCESS_SUPERVISOR_TARGET": "/tmp/x"}},
 	} {
 		require.Error(t, validateProcessIsolation(invalid))
@@ -61,7 +62,7 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	require.Error(t, err)
 	supervisorEnv, err := supervisorEnvironment(
 		[]string{"A=B", "MODE=old", envIsolationUID + "=old", envIsolationGID + "=old", envIsolationTest + "=old"},
-		&ProcessIsolation{UID: 1, GID: 2, TestOnlyNoCredential: true}, "MODE=1",
+		&ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}, "MODE=1",
 	)
 	require.NoError(t, err)
 	values := envSliceMap(supervisorEnv)

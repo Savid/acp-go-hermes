@@ -29,7 +29,7 @@ still reach.
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Path to the `hermes` binary (falls back to `hermes` on `PATH`). |
-| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement base environment for every Hermes process and supervisor. |
+| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement environment for native Hermes processes. On Linux the embedded supervisor stays trusted root; only `hermes serve` receives the configured identity, with supplementary groups cleared. |
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported because each session runtime root is isolated. Use `WithScratchDir` for ephemeral state and `WithProviderAuthHome` for durable provider credentials. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
@@ -66,10 +66,12 @@ the deadline. A timeout is a failure, not a user cancel, so it is never reported
 as the `cancelled` stop reason — see
 [Prompt streaming](/docs/core/prompt-streaming).
 
-Linux and Windows completion authoritatively empties the native tree. Darwin
-best-effort completion means only direct-child reaping plus absence of the
-captured original process group; it does not establish that escaped descendants
-are gone.
+Linux completion authoritatively empties the native tree. Windows native launch
+is unavailable because the mandatory Unix UID/GID identity boundary with empty
+supplementary groups cannot be applied; cross-compilation proves only that the
+refusal path builds, not runtime support. Darwin best-effort completion means
+only direct-child reaping plus absence of the captured original process group;
+it does not establish that escaped descendants are gone.
 
 `WithImageLimits(ImageLimits)` replaces all four image limits:
 `MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
@@ -131,10 +133,10 @@ callbacks leave standalone operation unbounded. Hermes reserves the isolated
 session home before creating it, holds the native permit for the one
 `hermes serve` tree, and releases the reservation only after clean shutdown and
 root deletion. Linux process snapshots include the dedicated per-session
-subreaper plus every currently owned native descendant; Windows snapshots come
-from the Job Object. Descendant snapshots require authoritative containment;
-startup observations distinguish spawn, readiness, configuration, and native
-session creation.
+subreaper plus every currently owned native descendant. Windows produces no
+native-process snapshots because native launch is unavailable. Descendant
+snapshots require authoritative containment; startup observations distinguish
+spawn, readiness, configuration, and native session creation.
 
 ## Session store
 

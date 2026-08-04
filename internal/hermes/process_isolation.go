@@ -11,16 +11,19 @@ import (
 )
 
 type ProcessIsolation struct {
-	UID                  uint32
-	GID                  uint32
-	BaseEnvironment      map[string]string
-	TestOnlyNoCredential bool
+	UID                      uint32
+	GID                      uint32
+	BaseEnvironment          map[string]string
+	TestOnlyNoCredential     bool
+	TestOnlyIdentityLockRoot string
 }
 
 const (
-	envIsolationUID  = "ACP_GO_HERMES_INTERNAL_ISOLATION_UID"
-	envIsolationGID  = "ACP_GO_HERMES_INTERNAL_ISOLATION_GID"
-	envIsolationTest = "ACP_GO_HERMES_INTERNAL_ISOLATION_TEST_ONLY"
+	privateSupervisorEnvPrefix = "ACP_" + "GO_HERMES_INTERNAL_"
+	processSupervisorEnvPrefix = "ACP_" + "GO_HERMES_PROCESS_SUPERVISOR"
+	envIsolationUID            = privateSupervisorEnvPrefix + "ISOLATION_UID"
+	envIsolationGID            = privateSupervisorEnvPrefix + "ISOLATION_GID"
+	envIsolationTest           = privateSupervisorEnvPrefix + "ISOLATION_TEST_ONLY"
 )
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
@@ -31,6 +34,9 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation UID and GID must be nonzero")
 	}
+	if isolation.BaseEnvironment == nil {
+		return errors.New("process isolation base environment is required")
+	}
 
 	for key := range isolation.BaseEnvironment {
 		if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 {
@@ -38,7 +44,7 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		}
 
 		upper := strings.ToUpper(key)
-		if strings.HasPrefix(upper, "ACP_GO_HERMES_INTERNAL_") || strings.HasPrefix(upper, "ACP_GO_HERMES_PROCESS_SUPERVISOR") {
+		if strings.HasPrefix(upper, privateSupervisorEnvPrefix) || strings.HasPrefix(upper, processSupervisorEnvPrefix) {
 			return fmt.Errorf("process isolation base environment contains reserved key %q", key)
 		}
 	}

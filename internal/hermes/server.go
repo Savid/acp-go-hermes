@@ -140,6 +140,7 @@ type Server interface {
 type StartOptions struct {
 	ACPSessionID ACPSessionIDString
 	Root         string
+	ControlDir   string
 	// ScratchParent is the resolved parent directory for ephemeral on-disk
 	// materialization, supplied by the caller. The internal package never
 	// consults the system temp directory itself.
@@ -172,10 +173,11 @@ type XDGDirs struct {
 }
 
 type hermesServer struct {
-	cmd   *exec.Cmd
-	xdg   XDGDirs
-	log   *slog.Logger
-	lease ServerLease
+	cmd       *exec.Cmd
+	xdg       XDGDirs
+	log       *slog.Logger
+	lease     ServerLease
+	leasePath string
 
 	events chan TurnEvent
 	errs   chan error
@@ -527,11 +529,22 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	if err := ensureXDGDirs(xdg); err != nil {
 		return nil, err
 	}
+	controlDir := options.ControlDir
+	if controlDir == "" {
+		controlDir = ControlDirForXDG(xdg.Root)
+	}
+	if err := os.MkdirAll(controlDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create Hermes control directory: %w", err)
+	}
+	if err := os.Chmod(controlDir, 0o700); err != nil {
+		return nil, fmt.Errorf("protect Hermes control directory: %w", err)
+	}
+	leasePath := filepath.Join(controlDir, LeaseFileName)
 
 	// A server owns exactly one session XDG root. Recover only a predecessor
 	// that owned this same root: sweeping root/* here would treat every other
 	// live session in the shared agent home as stale and terminate its process.
-	if retained := hermesReapLeaseFile(filepath.Join(xdg.State, LeaseFileName), options.Logger); retained {
+	if retained := hermesReapLeaseFile(leasePath, options.Logger); retained {
 		return nil, fmt.Errorf("previous Hermes process for %q remains live", xdg.Root)
 	}
 
@@ -548,6 +561,11 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, configErr)
 
 		return nil, configErr
+	}
+	if ownershipErr := handoffGeneratedNativeTree(xdg.Root, options.Isolation); ownershipErr != nil {
+		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, ownershipErr)
+
+		return nil, ownershipErr
 	}
 
 	observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, nil)
@@ -597,7 +615,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		lease.ProcessStartTime = identity.StartTime
 	}
 
-	if err := hermesWriteLease(xdg.State, lease); err != nil {
+	if err := hermesWriteLease(controlDir, lease); err != nil {
 		closeErr := proc.Close(context.Background())
 
 		return nil, errors.Join(err, closeErr)
@@ -608,6 +626,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		xdg:          xdg,
 		log:          options.Logger,
 		lease:        lease,
+		leasePath:    leasePath,
 		events:       make(chan TurnEvent, 256),
 		errs:         make(chan error, 8),
 		closed:       make(chan struct{}),
@@ -653,7 +672,9 @@ func (s *hermesServer) Close(ctx context.Context) error {
 
 		s.supervisorWG.Wait()
 
-		err = errors.Join(err, removeLeaseFileIfOwned(filepath.Join(s.xdg.State, LeaseFileName), s.lease))
+		if s.leasePath != "" {
+			err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
+		}
 	})
 
 	return err
@@ -2628,6 +2649,10 @@ func PasswordHash(password string) string {
 	sum := sha256.Sum256([]byte(password))
 
 	return hex.EncodeToString(sum[:])
+}
+
+func ControlDirForXDG(root string) string {
+	return root + ".control"
 }
 
 type ServerLease struct {

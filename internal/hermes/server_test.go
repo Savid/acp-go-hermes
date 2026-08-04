@@ -2429,7 +2429,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if server.xdg.Root == "" || !strings.HasPrefix(filepath.Base(server.xdg.Root), "acp-go-hermes-runtime-") {
 		t.Fatalf("xdg dirs = %#v", server.xdg)
 	}
-	leasePath := filepath.Join(server.xdg.State, LeaseFileName)
+	leasePath := filepath.Join(ControlDirForXDG(server.xdg.Root), LeaseFileName)
 	leaseData, err := os.ReadFile(leasePath)
 	if err != nil {
 		t.Fatalf("read lease: %v", err)
@@ -2588,7 +2588,7 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 		t.Fatalf("replacement Close: %v", err)
 	}
 	replacementClosed = true
-	if _, err := os.Stat(filepath.Join(replacement.XDGDirs().State, LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(ControlDirForXDG(replacement.XDGDirs().Root), LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement lease after owner Close = %v", err)
 	}
 }
@@ -2603,7 +2603,11 @@ func TestStartHermesServerRequiresDiscoveryResourceCallbacks(t *testing.T) {
 func readServerLease(t *testing.T, dirs XDGDirs) ServerLease {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(dirs.State, LeaseFileName))
+	directory := dirs.State
+	if dirs.Root != "" {
+		directory = ControlDirForXDG(dirs.Root)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, LeaseFileName))
 	if err != nil {
 		t.Fatalf("read server lease: %v", err)
 	}

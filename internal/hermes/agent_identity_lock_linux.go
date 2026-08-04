@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -25,21 +24,21 @@ type agentIdentityLock struct {
 	file *os.File
 }
 
-func acquireAgentIdentityLock(uid uint32, testOnly bool, canceled <-chan struct{}, signals <-chan os.Signal) (*agentIdentityLock, error) {
+func acquireAgentIdentityLock(uid uint32, testOnly bool, testRoot string, canceled <-chan struct{}, signals <-chan os.Signal) (*agentIdentityLock, error) {
+	runRoot := agentIdentityLockRunRoot
+	trustedUID := agentIdentityLockTrustedUID
+	trustedGID := agentIdentityLockTrustedGID
 	if testOnly {
-		root := filepath.Join(os.TempDir(), "acp-go-hermes-agent-identities-"+strconv.Itoa(os.Getppid()))
-		if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("create test agent identity runtime root: %w", err)
+		if testRoot == "" {
+			return nil, errors.New("test agent identity lock root is required")
 		}
-		oldRoot, oldUID, oldGID := agentIdentityLockRunRoot, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID
-		agentIdentityLockRunRoot = root
-		agentIdentityLockTrustedUID = uint32(os.Geteuid())
-		agentIdentityLockTrustedGID = uint32(os.Getegid())
-		defer func() {
-			agentIdentityLockRunRoot, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID = oldRoot, oldUID, oldGID
-		}()
+		runRoot = testRoot
+		trustedUID = uint32(os.Geteuid())
+		trustedGID = uint32(os.Getegid())
+	} else if testRoot != "" {
+		return nil, errors.New("test agent identity lock root is forbidden")
 	}
-	directory, err := openAgentIdentityLockDirectory()
+	directory, err := openAgentIdentityLockDirectory(runRoot, trustedUID, trustedGID)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +51,7 @@ func acquireAgentIdentityLock(uid uint32, testOnly bool, canceled <-chan struct{
 	}
 
 	file := os.NewFile(uintptr(fd), name)
-	if err := validateAgentIdentityLockFile(file); err != nil {
+	if err := validateAgentIdentityLockFile(file, trustedUID, trustedGID); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -96,25 +95,25 @@ func acquireAgentIdentityLock(uid uint32, testOnly bool, canceled <-chan struct{
 	}
 }
 
-func openAgentIdentityLockDirectory() (*os.File, error) {
-	fd, err := unix.Open(agentIdentityLockRunRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+func openAgentIdentityLockDirectory(runRoot string, trustedUID, trustedGID uint32) (*os.File, error) {
+	fd, err := unix.Open(runRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open agent identity runtime root: %w", err)
 	}
-	run := os.NewFile(uintptr(fd), agentIdentityLockRunRoot)
-	if err := validateAgentIdentityDirectory(run, false); err != nil {
+	run := os.NewFile(uintptr(fd), runRoot)
+	if err := validateAgentIdentityDirectory(run, trustedUID, trustedGID, false); err != nil {
 		_ = run.Close()
 		return nil, fmt.Errorf("validate agent identity runtime root: %w", err)
 	}
 
-	wagie, err := openOrCreateAgentIdentityDirectory(int(run.Fd()), "wagie", 0o700)
+	acpGo, err := openOrCreateAgentIdentityDirectory(int(run.Fd()), "acp-go", 0o700, trustedUID, trustedGID)
 	_ = run.Close()
 	if err != nil {
 		return nil, fmt.Errorf("open agent identity owner directory: %w", err)
 	}
 
-	directory, err := openOrCreateAgentIdentityDirectory(int(wagie.Fd()), "agent-identities", 0o700)
-	_ = wagie.Close()
+	directory, err := openOrCreateAgentIdentityDirectory(int(acpGo.Fd()), "agent-identities", 0o700, trustedUID, trustedGID)
+	_ = acpGo.Close()
 	if err != nil {
 		return nil, fmt.Errorf("open agent identity lock directory: %w", err)
 	}
@@ -122,7 +121,7 @@ func openAgentIdentityLockDirectory() (*os.File, error) {
 	return directory, nil
 }
 
-func openOrCreateAgentIdentityDirectory(parentFD int, name string, mode uint32) (*os.File, error) {
+func openOrCreateAgentIdentityDirectory(parentFD int, name string, mode uint32, trustedUID, trustedGID uint32) (*os.File, error) {
 	err := unix.Mkdirat(parentFD, name, mode)
 	if err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, err
@@ -134,7 +133,7 @@ func openOrCreateAgentIdentityDirectory(parentFD int, name string, mode uint32) 
 	}
 
 	file := os.NewFile(uintptr(fd), name)
-	if err := validateAgentIdentityDirectory(file, true); err != nil {
+	if err := validateAgentIdentityDirectory(file, trustedUID, trustedGID, true); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -142,12 +141,12 @@ func openOrCreateAgentIdentityDirectory(parentFD int, name string, mode uint32) 
 	return file, nil
 }
 
-func validateAgentIdentityDirectory(file *os.File, exactMode bool) error {
+func validateAgentIdentityDirectory(file *os.File, trustedUID, trustedGID uint32, exactMode bool) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != agentIdentityLockTrustedUID || stat.Gid != agentIdentityLockTrustedGID {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != trustedUID || stat.Gid != trustedGID {
 		return errors.New("agent identity directory must be trusted-owned")
 	}
 	permissions := stat.Mode & 0o777
@@ -161,12 +160,12 @@ func validateAgentIdentityDirectory(file *os.File, exactMode bool) error {
 	return nil
 }
 
-func validateAgentIdentityLockFile(file *os.File) error {
+func validateAgentIdentityLockFile(file *os.File, trustedUID, trustedGID uint32) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != agentIdentityLockTrustedUID || stat.Gid != agentIdentityLockTrustedGID || stat.Nlink != 1 {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != trustedUID || stat.Gid != trustedGID || stat.Nlink != 1 {
 		return errors.New("agent identity lock must be a trusted-owned regular file with one link")
 	}
 	if permissions := stat.Mode & 0o777; permissions != 0o600 {

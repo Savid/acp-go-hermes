@@ -18,7 +18,7 @@ func containmentMode(options Options) RuntimeContainmentMode {
 	}
 
 	switch agentRuntimePlatform {
-	case "linux", agentRuntimeWindows:
+	case "linux":
 		return RuntimeContainmentAuthoritative
 	case agentRuntimeDarwin:
 		if options.DarwinBestEffortContainment {

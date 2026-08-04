@@ -235,6 +235,13 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 		return nil, err
 	}
+	if shim != nil {
+		if err := handoffGeneratedNativeTree(shim.dir, opts.Isolation); err != nil {
+			cancel()
+
+			return nil, errors.Join(err, shim.remove())
+		}
+	}
 
 	cmd.Env = shim.environ(env)
 	if opts.LogWriter != nil {

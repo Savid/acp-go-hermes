@@ -7,6 +7,24 @@ The adapter is built so that running it does not widen your attack surface: the
 gateway stays on loopback, the protocol stream stays clean, and stored snapshots
 never carry secrets.
 
+## Standalone command boundary
+
+The standalone command launches native work only on Linux and requires the
+root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
+must be root-owned and not writable by group or other, and the final single-link
+policy inode is read through the descriptor that was validated. The configured
+account home is resolved the same way, must be a target-owned mode-`0700`
+directory beneath protected root-owned ancestry, and cannot be `/root` or
+`/nonexistent`.
+
+The adapter remains root, but its ambient environment is never copied wholesale
+to the child. Only the complete literal `baseEnvironment` plus names in
+`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
+other platforms; Darwin best-effort containment remains an explicit
+embedded-Go option only. `-version` and Darwin containment diagnostics launch
+no native worker and are exempt.
+
 ## Loopback gateway
 
 Each `hermes serve` process binds to `127.0.0.1` and gates the dashboard
@@ -22,13 +40,24 @@ a dedicated self-executed subreaper owns Hermes and every orphaned tool
 descendant, including processes that detach with `setsid(2)`; pidfd-bound
 signals, an authoritative kernel `ECHILD` fence after the direct root waiter
 settles, and an explicit proof pipe make fork/reparent races and supervisor
-death fail closed. On Windows, a kill-on-close Job Object supplies the
-equivalent boundary.
+death fail closed. Windows rejects native launch before spawning Hermes because
+its process API cannot apply the mandatory Unix UID/GID identity boundary with
+empty supplementary groups. A Windows cross-compile proves only that this
+refusal path builds; it does not establish runtime support.
+
+The Linux supervisor stays root and runs from `/` with a closed private
+environment. Sealed launch configuration carries the target identity and native
+environment; only `hermes serve` receives the configured UID/GID with no
+supplementary groups. Before native start the supervisor acquires the
+root-owned `/run/acp-go/agent-identities/<uid>.lock` and holds it until the
+descendant wait queue is empty. Hermes inherits none of the launch, control,
+proof, or lock descriptors, so it cannot signal its supervisor, forge
+completion, or overlap another native tree using the same host identity.
 
 Native session startup fails with `ErrProcessContainmentIncomplete` where the
-adapter cannot establish its selected boundary. On Darwin the default is to
-reject startup. `WithDarwinBestEffortContainment` (or the CLI
-`-darwin-best-effort-containment` flag) explicitly accepts a weaker boundary:
+adapter cannot establish its selected boundary. Embedded Darwin hosts default
+to rejecting startup. `WithDarwinBestEffortContainment` explicitly accepts a
+weaker boundary:
 the adapter controls only the original process group. A descendant that calls
 `setsid(2)` can escape and survive; numeric PGID reuse can make later group
 signals collateral; environment-marker correlation is neither ownership nor

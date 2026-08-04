@@ -14,7 +14,7 @@ func validateProcessContainment(bestEffort bool) error {
 		return errors.New("darwin best-effort containment is supported only on darwin")
 	}
 
-	if processRuntimeGOOS != "linux" && processRuntimeGOOS != "windows" {
+	if processRuntimeGOOS != "linux" {
 		return ErrProcessContainmentIncomplete
 	}
 
