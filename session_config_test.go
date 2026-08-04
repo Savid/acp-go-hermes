@@ -77,7 +77,7 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 			},
 		}},
 	}}
-	agent := NewAgent()
+	agent := newTestAgent()
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	sess := testSession(agent, client)
@@ -158,7 +158,7 @@ func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
 	// Empty providers with a current model yields an ungrouped fallback option.
-	agent := NewAgent()
+	agent := newTestAgent()
 	sess := testSession(agent, client)
 	sess.providerID = "openai"
 	sess.modelID = "gpt-test"

@@ -144,7 +144,7 @@ func TestHandoffPathNeverReachesNativeRequest(t *testing.T) {
 	root, block, data := stagedHandoff(t, "valid.png", mimePNG)
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
-	agent := NewAgent(WithInputHandoffRoot(root))
+	agent := newTestAgent(WithInputHandoffRoot(root))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
 

@@ -50,7 +50,7 @@ func emitRaw(t *testing.T, session *session, raw string) {
 // Raw-event uniform test spec, cases 1-6.
 func TestRawEventOversizeEmitsFixedMarker(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
 
 	ctx := withTurnRoute(context.Background(), "turn-raw")
@@ -110,7 +110,7 @@ func TestRawEventOversizeEmitsFixedMarker(t *testing.T) {
 }
 func TestRawEventSequenceContiguousPerSession(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
 
 	emitRaw(t, session, `{"n":1}`)
@@ -131,7 +131,7 @@ func TestRawEventSequenceContiguousPerSession(t *testing.T) {
 }
 func TestRawEventCrossSessionIsolation(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	sessionA := enabledRawSession(t, agent, conn, "session-A")
 	sessionB := enabledRawSession(t, agent, conn, "session-B")
 
@@ -286,7 +286,7 @@ func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
 
 func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, acp.SessionId(strings.Repeat("s", rawEventMaxBytes)))
 	ctx := withTurnRoute(context.Background(), strings.Repeat("n", routeTurnNonceMaxBytes))
 
@@ -323,7 +323,7 @@ func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
 
 func TestRawEventSequenceCommitsOnlyAfterSuccessfulDelivery(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
 
 	conn.notifyErr = errors.New("delivery failed")
@@ -373,7 +373,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	conn.notifyErr = errors.New("client notify boom")
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
 	session.rawMessages = rawMessageConfig{enabled: true}
@@ -435,7 +435,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 }
 func TestRawEventDefaultOffEmitsNothing(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client) // rawMessages disabled by default
@@ -451,7 +451,7 @@ func TestRawEventDefaultOffEmitsNothing(t *testing.T) {
 
 func TestRawEventNilPayloadSkippedWithoutSequence(t *testing.T) {
 	conn := newRecordingAgentClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
 	ctx := context.Background()
 

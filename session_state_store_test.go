@@ -37,7 +37,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	client := newFakeHermesClient()
 	client.xdg = xdg
 	client.todos = []nativehermes.Todo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err2 := session.snapshotToStore(ctx); err2 != nil {
 		t.Fatalf("snapshotToStore: %v", err2)
@@ -251,7 +251,7 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	session := testSession(NewAgent(WithSessionStore(store)), client)
+	session := testSession(newTestAgent(WithSessionStore(store)), client)
 	if err5 := session.snapshotToStore(ctx); err5 != nil {
 		t.Fatalf("snapshotToStore: %v", err5)
 	}
@@ -338,7 +338,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			session := testSession(NewAgent(WithSessionStore(NewInMemorySessionStore())), newFakeHermesClient())
+			session := testSession(newTestAgent(WithSessionStore(NewInMemorySessionStore())), newFakeHermesClient())
 			cleanup := tt.set(session)
 			defer cleanup()
 			if err := session.snapshotToStore(ctx); err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -541,7 +541,7 @@ func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 }
 
 func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
-	if err := (&session{agent: NewAgent(), client: nil}).snapshotToStore(context.Background()); err != nil {
+	if err := (&session{agent: newTestAgent(), client: nil}).snapshotToStore(context.Background()); err != nil {
 		t.Fatalf("nil client snapshot: %v", err)
 	}
 	if _, ok, err := sqliteArchiveContent("", filepath.Join(t.TempDir(), "missing.db")); err == nil || ok {
@@ -1272,7 +1272,7 @@ func snapshotFaultSession(t *testing.T) *session {
 	}
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	agent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
 
 	return testSession(agent, client)
 }

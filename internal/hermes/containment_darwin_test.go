@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -143,6 +144,7 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 func TestDarwinLaunchBootstrapDispatch(t *testing.T) {
 	restoreDarwinLaunchSeams(t)
 	t.Setenv(darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode)
+	setTestIsolationBootstrapEnv(t)
 	darwinLaunchExec = func(string, []string, []string) error { return nil }
 	var exits []int
 	darwinLaunchExit = func(code int) { exits = append(exits, code) }
@@ -265,10 +267,11 @@ func TestDarwinLaunchPreparationAndStatusBranches(t *testing.T) {
 		requireLaunchError(t, func() { darwinLaunchExecutable = func() (string, error) { return "", wantErr } }, "injected")
 	})
 
-	t.Run("success and inherited environment", func(t *testing.T) {
+	t.Run("success and explicit environment", func(t *testing.T) {
 		restoreDarwinLaunchSeams(t)
-		t.Setenv("HERMES_LAUNCH_TEST", "present")
-		launch, err := prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir())
+		native := exec.Command("/usr/bin/true")
+		native.Env = []string{"HERMES_LAUNCH_TEST=present"}
+		launch, err := prepareDarwinLaunch(native, t.TempDir())
 		require.NoError(t, err)
 		require.True(t, launch.cmd.SysProcAttr.Setpgid)
 		require.Equal(t, darwinPipeWait, launch.cmd.WaitDelay)
@@ -328,7 +331,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	containmentRandomRead = originalRandom
 
 	t.Setenv("GORACE", "halt_on_error=1")
-	require.Contains(t, darwinBootstrapEnvironment(), "GORACE=halt_on_error=1")
+	require.NotContains(t, darwinBootstrapEnvironment(), "GORACE=halt_on_error=1")
 	marked := withDarwinContainmentMarkers(nil, "id", "/root")
 	require.Contains(t, marked, envRuntimeID+"=id")
 	require.Contains(t, marked, envScratchRoot+"=/root")
@@ -361,10 +364,11 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	require.ErrorIs(t, (&directChildWait{done: make(chan struct{})}).awaitReaped(time.Nanosecond), ErrProcessContainmentIncomplete)
 
 	restoreProcessSeams(t)
-	markExecutableProbed("covered-hermes")
+	markExecutableProbed("/usr/bin/true")
 	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("listen") }
 	_, err = Start(t.Context(), ProcessOptions{
-		ExecutablePath: "covered-hermes", Home: t.TempDir(), DarwinBestEffortContainment: true,
+		ExecutablePath: "/usr/bin/true", Home: t.TempDir(), DarwinBestEffortContainment: true,
+		Isolation: testProcessIsolation(),
 	})
 	require.ErrorContains(t, err, "listen")
 	processKill = previousKill
@@ -375,6 +379,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	cancel()
 	_, err = ensureExecutableVersion(probeCtx, script, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
+		Isolation:                 testProcessIsolation(),
 		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
 		RetainDiscoveryRoot:       func(string, error) {},
 	})
@@ -385,6 +390,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	nativeReleases, scratchReleases := 0, 0
 	needed, err := ensureExecutableVersion(t.Context(), versionScript, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
+		Isolation: testProcessIsolation(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -397,6 +403,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 
 	wantAdmissionErr := errors.New("discovery admission rejected")
 	_, err = ensureExecutableVersion(t.Context(), script+"-admission", ProcessOptions{
+		Isolation: testProcessIsolation(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return nil, nil, wantAdmissionErr
 		},
@@ -408,6 +415,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	mkdirTemp = func(string, string) (string, error) { return "", errors.New("probe generation failed") }
 	nativeReleases, scratchReleases = 0, 0
 	_, err = ensureExecutableVersion(t.Context(), script+"-generation", ProcessOptions{
+		Isolation: testProcessIsolation(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -442,6 +450,54 @@ func TestDarwinVersionDiscoveryRequiresCompleteResourceCallbacks(t *testing.T) {
 	require.Equal(t, 1, scratchReleases)
 }
 
+func TestDarwinProcessIsolationFailureBranches(t *testing.T) {
+	_, err := Start(t.Context(), ProcessOptions{DarwinBestEffortContainment: true})
+	require.ErrorContains(t, err, "process isolation")
+
+	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), ContainmentSpec{DarwinBestEffort: true})
+	require.ErrorContains(t, err, "isolation")
+
+	_, err = prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir(), nil)
+	require.ErrorContains(t, err, "process isolation")
+
+	originalGroups := processIsolationGetgroups
+	t.Cleanup(func() { processIsolationGetgroups = originalGroups })
+	processIsolationGetgroups = func() ([]int, error) { return []int{os.Getegid(), os.Getegid() + 1}, nil }
+	_, err = prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir(), &ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()), BaseEnvironment: map[string]string{},
+	})
+	require.ErrorContains(t, err, "supplementary group")
+}
+
+func TestDarwinVersionDiscoveryIsolationEnvironmentFailures(t *testing.T) {
+	for _, removeErr := range []error{nil, errors.New("remove failed")} {
+		t.Run(fmt.Sprint(removeErr), func(t *testing.T) {
+			restoreProcessSeams(t)
+			originalRemoveAll := removeAll
+			t.Cleanup(func() { removeAll = originalRemoveAll })
+			if removeErr != nil {
+				removeAll = func(string) error { return removeErr }
+			}
+			nativeReleases, scratchReleases := 0, 0
+			_, err := ensureExecutableVersion(t.Context(), filepath.Join(t.TempDir(), "unprobed"), ProcessOptions{
+				Isolation: &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"BAD=KEY": "x"}},
+				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
+					return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
+				},
+				RetainDiscoveryRoot: func(string, error) {},
+			})
+			require.Error(t, err)
+			require.Equal(t, 1, nativeReleases)
+			if removeErr == nil {
+				require.Equal(t, 1, scratchReleases)
+			} else {
+				require.Zero(t, scratchReleases)
+				require.ErrorIs(t, err, removeErr)
+			}
+		})
+	}
+}
+
 func TestDarwinVersionDiscoveryRetainsIncompleteGenerationAndAdmissions(t *testing.T) {
 	restoreDarwinLaunchSeams(t)
 	restoreProcessSeams(t)
@@ -457,6 +513,7 @@ func TestDarwinVersionDiscoveryRetainsIncompleteGenerationAndAdmissions(t *testi
 
 	_, err := ensureExecutableVersion(t.Context(), script, ProcessOptions{
 		ScratchParent: parent, DarwinBestEffortContainment: true,
+		Isolation: testProcessIsolation(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -726,7 +783,7 @@ func TestDarwinStartContainmentFailureBranches(t *testing.T) {
 
 	_, err = startUnixContainedProcess(&exec.Cmd{}, darwinTestContainmentSpec(t))
 	require.ErrorContains(t, err, "command is incomplete")
-	invalidSpec := ContainmentSpec{DarwinBestEffort: true, ScratchParent: t.TempDir(), GenerationRoot: filepath.Join(t.TempDir(), "outside"), LifecycleKind: "session"}
+	invalidSpec := ContainmentSpec{DarwinBestEffort: true, ScratchParent: t.TempDir(), GenerationRoot: filepath.Join(t.TempDir(), "outside"), LifecycleKind: "session", Isolation: testProcessIsolation()}
 	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), invalidSpec)
 	require.ErrorContains(t, err, "prepare Darwin containment record")
 

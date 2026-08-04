@@ -149,6 +149,7 @@ type StartOptions struct {
 	DefaultModel                string
 	ProviderAuthHome            string
 	Env                         map[string]string
+	Isolation                   *ProcessIsolation
 	HealthTimeout               time.Duration
 	Logger                      *slog.Logger
 	ExistingXDG                 XDGDirs
@@ -573,6 +574,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		Cwd:                         options.Cwd,
 		ProviderAuthHome:            options.ProviderAuthHome,
 		Env:                         processEnv,
+		Isolation:                   options.Isolation,
 		Timeout:                     options.HealthTimeout,
 		Configure:                   configureHermesProcess,
 		ObserveStartupStage:         options.ObserveStartupStage,

@@ -16,7 +16,7 @@ import (
 // unknown-session error shape.
 
 func TestInitializeCapabilitiesHardCutover(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -56,7 +56,7 @@ func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 }
 
 func TestInitializeAdvertisesMediaEnvelope(t *testing.T) {
-	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	resp, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
 		MaxInputBytesPerPrompt: int64(len(png)) * 3,
 	}
 
-	resp, err := NewAgent(WithImageLimits(limits)).Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	resp, err := newTestAgent(WithImageLimits(limits)).Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
 	ctx := context.Background()
 	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
 
-	withoutRoot, err := NewAgent().Initialize(ctx, request)
+	withoutRoot, err := newTestAgent().Initialize(ctx, request)
 	if err != nil {
 		t.Fatalf("Initialize without handoff root: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
 		t.Fatalf("handoff advertised without a configured root: %#v", withoutRoot.AgentCapabilities.Meta)
 	}
 
-	withRoot, err := NewAgent(WithInputHandoffRoot(t.TempDir())).Initialize(ctx, request)
+	withRoot, err := newTestAgent(WithInputHandoffRoot(t.TempDir())).Initialize(ctx, request)
 	if err != nil {
 		t.Fatalf("Initialize with handoff root: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
 }
 
 func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
-	agent := NewAgent(WithInputHandoffRoot("relative/handoff"))
+	agent := newTestAgent(WithInputHandoffRoot("relative/handoff"))
 
 	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 
@@ -174,7 +174,7 @@ func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 }
 
 func TestStableForkRouteMethodNotFound(t *testing.T) {
-	agent := NewAgent()
+	agent := newTestAgent()
 	conn := &localAgentConnection{agent: agent}
 	conn.initialized.Store(true)
 	_, reqErr := conn.handle(context.Background(), acp.AgentMethodSessionFork, json.RawMessage(`{}`))
@@ -191,27 +191,27 @@ func TestUnknownSessionErrorShape(t *testing.T) {
 	cwd := t.TempDir()
 
 	t.Run("load not in store", func(t *testing.T) {
-		_, err := NewAgent().LoadSession(ctx, LoadSessionRequest("missing", cwd))
+		_, err := newTestAgent().LoadSession(ctx, LoadSessionRequest("missing", cwd))
 		requireUnknownSession(t, err)
 	})
 	t.Run("resume not in store", func(t *testing.T) {
-		_, err := NewAgent().ResumeSession(ctx, ResumeSessionRequest("missing", cwd))
+		_, err := newTestAgent().ResumeSession(ctx, ResumeSessionRequest("missing", cwd))
 		requireUnknownSession(t, err)
 	})
 	t.Run("load tombstoned", func(t *testing.T) {
-		agent := NewAgent()
+		agent := newTestAgent()
 		agent.deleted["gone"] = struct{}{}
 		_, err := agent.LoadSession(ctx, LoadSessionRequest("gone", cwd))
 		requireUnknownSession(t, err)
 	})
 	t.Run("resume tombstoned", func(t *testing.T) {
-		agent := NewAgent()
+		agent := newTestAgent()
 		agent.deleted["gone"] = struct{}{}
 		_, err := agent.ResumeSession(ctx, ResumeSessionRequest("gone", cwd))
 		requireUnknownSession(t, err)
 	})
 	t.Run("close unknown", func(t *testing.T) {
-		_, err := NewAgent().CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
+		_, err := newTestAgent().CloseSession(ctx, acp.CloseSessionRequest{SessionId: "missing"})
 		requireUnknownSession(t, err)
 	})
 }

@@ -132,7 +132,7 @@ func TestManagedHermesServerResourceRelease(t *testing.T) {
 
 func TestHermesSessionResourceAdmission(t *testing.T) {
 	wantErr := errors.New("resource exhausted")
-	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
@@ -141,7 +141,7 @@ func TestHermesSessionResourceAdmission(t *testing.T) {
 	require.ErrorIs(t, err, wantErr)
 
 	scratchReleases := 0
-	agent = NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	agent = newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { scratchReleases++ }, nil
 		},
@@ -151,7 +151,7 @@ func TestHermesSessionResourceAdmission(t *testing.T) {
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 1, scratchReleases)
 
-	forkBlocked := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	forkBlocked := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
 	}))
 	client := newFakeHermesClient()
@@ -164,14 +164,14 @@ func TestHermesSessionResourceAdmission(t *testing.T) {
 	previousReap := reapHermesLeaseFile
 	reapHermesLeaseFile = func(string, *slog.Logger) bool { return true }
 	t.Cleanup(func() { reapHermesLeaseFile = previousReap })
-	err = NewAgent().cleanupDeletedSession(deleteCleanupRecord{SessionID: "session-1", XDGRoot: t.TempDir()})
+	err = newTestAgent().cleanupDeletedSession(deleteCleanupRecord{SessionID: "session-1", XDGRoot: t.TempDir()})
 	require.ErrorContains(t, err, "live lease")
 }
 
 func TestHermesVersionDiscoveryHasIndependentAdmissions(t *testing.T) {
 	var nativeKinds, scratchKinds []RuntimeResourceKind
 	var startOptions nativehermes.StartOptions
-	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(_ context.Context, kind RuntimeResourceKind) (func(), error) {
 			scratchKinds = append(scratchKinds, kind)
 
@@ -235,13 +235,13 @@ func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
 	t.Cleanup(func() { createHermesGeneration = previousCreate })
 
 	t.Run("new client", func(t *testing.T) {
-		agent := NewAgent(WithScratchDir(t.TempDir()))
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
 		_, err := agent.newHermesClient(t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{})
 		require.ErrorIs(t, err, wantErr)
 	})
 
 	t.Run("load", func(t *testing.T) {
-		agent := NewAgent(
+		agent := newTestAgent(
 			WithScratchDir(t.TempDir()),
 			WithSessionStore(validHydrateStore(t, t.Context())),
 		)
@@ -255,7 +255,7 @@ func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
 	})
 
 	t.Run("fork", func(t *testing.T) {
-		agent := NewAgent(WithScratchDir(t.TempDir()))
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
 		parentClient := newFakeHermesClient()
 		parentClient.forkSession = testNativeSession("native-child")
 		parent := testSession(agent, parentClient)
@@ -268,7 +268,7 @@ func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
 	t.Run("new client with scratch", func(t *testing.T) {
 		blockedRoot := filepath.Join(t.TempDir(), "file")
 		require.NoError(t, os.WriteFile(blockedRoot, []byte("blocked"), 0o600))
-		agent := NewAgent(WithScratchDir(blockedRoot))
+		agent := newTestAgent(WithScratchDir(blockedRoot))
 		_, err := agent.newHermesClientWithScratch(
 			t.Context(),
 			"session-1",
@@ -288,7 +288,7 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 	t.Run("factory sentinel retains native scratch and root", func(t *testing.T) {
 		runtimeRemoveAll = previousRemove
 		nativeReleases, scratchReleases := 0, 0
-		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { scratchReleases++ }, nil
 			},
@@ -322,7 +322,7 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 		runtimeRemoveAll = previousRemove
 		startupErr := errors.New("startup")
 		nativeReleases, scratchReleases := 0, 0
-		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { scratchReleases++ }, nil
 			},
@@ -351,7 +351,7 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 		deleteErr := errors.New("delete")
 		runtimeRemoveAll = func(string) error { return deleteErr }
 		nativeReleases, scratchReleases := 0, 0
-		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { scratchReleases++ }, nil
 			},
@@ -381,7 +381,7 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 	t.Run("load", func(t *testing.T) {
 		nativeReleases, scratchReleases := 0, 0
-		agent := NewAgent(
+		agent := newTestAgent(
 			WithScratchDir(t.TempDir()),
 			WithSessionStore(validHydrateStore(t, t.Context())),
 			WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -411,7 +411,7 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 
 	t.Run("fork", func(t *testing.T) {
 		nativeReleases, scratchReleases := 0, 0
-		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				return func() { scratchReleases++ }, nil
 			},
@@ -445,7 +445,7 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 		t.Cleanup(func() { sessionIDRandReader = previousReader })
 
 		scratchAcquires := 0
-		agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 				scratchAcquires++
 
@@ -494,7 +494,7 @@ func TestHermesLoadGetSessionFailureUnwind(t *testing.T) {
 			client := newFakeHermesClient()
 			client.getErr = getErr
 			client.closeErr = test.closeErr
-			agent := NewAgent(
+			agent := newTestAgent(
 				WithScratchDir(t.TempDir()),
 				WithSessionStore(validHydrateStore(t, t.Context())),
 				WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -544,7 +544,7 @@ func TestHermesLoadGetSessionFailureUnwind(t *testing.T) {
 
 func TestHermesForkGetSessionProofFailureRetainsOwnership(t *testing.T) {
 	nativeReleases, scratchReleases := 0, 0
-	agent := NewAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { scratchReleases++ }, nil
 		},
@@ -593,7 +593,7 @@ func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
 		nativeRelease:  func() { nativeReleases++ },
 		scratchRelease: func() { scratchReleases++ },
 	}
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := newSession(agent, "failed-start", t.TempDir(), nil, nil, testNativeSession("native-failed"), managed, sessionMeta{}, idmapRecord{})
 	agent.sessions[session.id] = session
 
@@ -621,7 +621,7 @@ func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
 		nativeRelease:  func() { nativeReleases++ },
 		scratchRelease: func() { scratchReleases++ },
 	}
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := newSession(agent, "deleted", t.TempDir(), nil, nil, testNativeSession("native-deleted"), managed, sessionMeta{}, idmapRecord{})
 	agent.sessions[session.id] = session
 

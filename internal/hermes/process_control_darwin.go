@@ -78,7 +78,12 @@ func runDarwinLaunchBootstrap() {
 	if os.Getenv(darwinLaunchBootstrapEnv) != darwinLaunchBootstrapMode {
 		return
 	}
-	configFile, gate, status, err := darwinLaunchInput()
+	err := verifyInheritedProcessIsolation()
+	var configFile, gate io.ReadCloser
+	var status io.WriteCloser
+	if err == nil {
+		configFile, gate, status, err = darwinLaunchInput()
+	}
 	if err == nil {
 		err = runDarwinLaunchBootstrapCore(configFile, gate)
 	}
@@ -174,6 +179,9 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if !spec.DarwinBestEffort {
 		return nil, fmt.Errorf("%w: Darwin containment is unavailable without explicit best-effort opt-in", ErrProcessContainmentIncomplete)
 	}
+	if err := validateProcessIsolation(spec.Isolation); err != nil {
+		return nil, fmt.Errorf("validate Darwin Hermes isolation: %w", err)
+	}
 	runtimeID, err := newContainmentRuntimeID()
 	if err != nil {
 		return nil, fmt.Errorf("create Darwin containment identity: %w", err)
@@ -184,7 +192,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if err != nil {
 		return nil, fmt.Errorf("prepare Darwin containment record: %w", err)
 	}
-	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot)
+	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot, spec.Isolation)
 	if err != nil {
 		return nil, errors.Join(err, completeContainmentRecord(record, containmentStateAbsent))
 	}
@@ -237,7 +245,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	return tree, nil
 }
 
-func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch, error) {
+func prepareDarwinLaunch(native *exec.Cmd, generationRoot string, isolations ...*ProcessIsolation) (*darwinLaunch, error) {
 	if native == nil || native.Path == "" || len(native.Args) == 0 {
 		return nil, errors.New("prepare Darwin native launch: command is incomplete")
 	}
@@ -252,9 +260,6 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 		return nil, chmodErr
 	}
 	config := darwinLaunchConfig{Path: native.Path, Args: append([]string(nil), native.Args...), Env: scrubDarwinInternalEnvironment(native.Env)}
-	if native.Env == nil {
-		config.Env = scrubDarwinInternalEnvironment(os.Environ())
-	}
 	if encodeErr := darwinLaunchEncodeConfig(configFile, config); encodeErr != nil {
 		cleanup()
 		return nil, encodeErr
@@ -290,7 +295,27 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 	}
 	helper := darwinLaunchCommand(self)
 	helper.Dir, helper.Stdin, helper.Stdout, helper.Stderr = native.Dir, native.Stdin, native.Stdout, native.Stderr
-	helper.Env = darwinBootstrapEnvironment()
+	if len(isolations) > 0 {
+		helper.Env, err = supervisorEnvironment(native.Env, isolations[0], darwinLaunchBootstrapEnv+"="+darwinLaunchBootstrapMode)
+		if err != nil {
+			cleanup()
+			_ = gateRead.Close()
+			_ = gateWrite.Close()
+			_ = statusRead.Close()
+			_ = statusWrite.Close()
+			return nil, err
+		}
+		if err := applyProcessIsolation(helper, isolations[0]); err != nil {
+			cleanup()
+			_ = gateRead.Close()
+			_ = gateWrite.Close()
+			_ = statusRead.Close()
+			_ = statusWrite.Close()
+			return nil, err
+		}
+	} else {
+		helper.Env = darwinBootstrapEnvironment()
+	}
 	helper.WaitDelay = darwinPipeWait
 	helper.ExtraFiles = []*os.File{configFile, gateRead, statusWrite}
 	configureHermesProcess(helper)
@@ -477,9 +502,6 @@ func newContainmentRuntimeID() (string, error) {
 }
 
 func withDarwinContainmentMarkers(environment []string, runtimeID, root string) []string {
-	if environment == nil {
-		environment = os.Environ()
-	}
 	filtered := make([]string, 0, len(environment)+2)
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
@@ -504,11 +526,5 @@ func scrubDarwinInternalEnvironment(environment []string) []string {
 }
 
 func darwinBootstrapEnvironment() []string {
-	environment := []string{darwinLaunchBootstrapEnv + "=" + darwinLaunchBootstrapMode}
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GORACE=") {
-			environment = append(environment, entry)
-		}
-	}
-	return environment
+	return []string{darwinLaunchBootstrapEnv + "=" + darwinLaunchBootstrapMode}
 }

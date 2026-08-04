@@ -68,6 +68,7 @@ type ProcessOptions struct {
 	Cwd                         string
 	ProviderAuthHome            string
 	Env                         map[string]string
+	Isolation                   *ProcessIsolation
 	Timeout                     time.Duration
 	Configure                   func(*exec.Cmd)
 	LogWriter                   io.Writer
@@ -85,6 +86,7 @@ type ContainmentSpec struct {
 	GenerationRoot   string
 	RuntimeID        string
 	LifecycleKind    string
+	Isolation        *ProcessIsolation
 }
 
 // synchronizedBuffer is used where exec may still be retiring its pipe-copy
@@ -149,6 +151,9 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err := validateProcessContainment(opts.DarwinBestEffortContainment); err != nil {
 		return nil, err
 	}
+	if err := validateProcessIsolation(opts.Isolation); err != nil {
+		return nil, fmt.Errorf("validate Hermes process isolation: %w", err)
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = defaultProcessTimeout
@@ -158,19 +163,22 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if executable == "" {
 		executable = valHermes
 	}
+	baseEnvironment, _ := isolationEnvironment(opts.Isolation, opts.Env)
+	executable, err := lookPathInEnvironment(executable, baseEnvironment)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Hermes executable: %w", err)
+	}
 
 	home := opts.Home
 	if home == "" {
-		var err error
-
 		home, err = mkdirTemp(opts.ScratchParent, "acp-go-hermes-runtime-")
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if err := mkdirAll(home, 0o700); err != nil {
-		return nil, err
+	if mkdirErr := mkdirAll(home, 0o700); mkdirErr != nil {
+		return nil, mkdirErr
 	}
 
 	versionCtx, versionCancel := context.WithTimeout(ctx, timeout)
@@ -204,10 +212,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		cmd.Dir = opts.Cwd
 	}
 
-	env := os.Environ()
-	for key, value := range opts.Env {
-		env = append(env, key+"="+value)
-	}
+	env := append([]string(nil), baseEnvironment...)
 
 	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
 	// TTY hermes block-buffers stdout and emits nothing while working normally.
@@ -250,6 +255,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		ScratchParent:    opts.ScratchParent,
 		GenerationRoot:   home,
 		LifecycleKind:    containmentSessionKind,
+		Isolation:        opts.Isolation,
 	})
 	if startErr != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, startErr)
@@ -363,6 +369,17 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 
 	var output synchronizedBuffer
 	cmd := command(executable, "--version")
+	probeEnvironment, envErr := isolationEnvironment(opts.Isolation, opts.Env)
+	if envErr != nil {
+		nativeRelease()
+		removeErr := removeAll(probeRoot)
+		if removeErr == nil {
+			scratchRelease()
+		}
+
+		return false, errors.Join(envErr, removeErr)
+	}
+	cmd.Env = probeEnvironment
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	configureHermesProcess(cmd)
@@ -372,6 +389,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		ScratchParent:    opts.ScratchParent,
 		GenerationRoot:   probeRoot,
 		LifecycleKind:    "discovery",
+		Isolation:        opts.Isolation,
 	})
 	if err == nil {
 		wait := tree.directChild(cmd)

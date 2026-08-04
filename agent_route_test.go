@@ -69,14 +69,14 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 }
 
 func TestInitializeAdvertisesRouteV1(t *testing.T) {
-	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
+	resp, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{"versions": []int{1}}, resp.AgentCapabilities.Meta[routeMetaKey])
 }
 
 func TestPromptAndActiveCancelRequireCurrentRoute(t *testing.T) {
 	session := &session{id: "session-1", turnInFlight: true, turnNonce: "active-turn"}
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.sessions[session.id] = session
 
 	_, err := agent.Prompt(t.Context(), acp.PromptRequest{SessionId: session.id})

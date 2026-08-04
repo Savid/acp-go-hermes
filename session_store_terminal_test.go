@@ -143,7 +143,7 @@ func TestPromptCommitsReplayStableTerminalIdentityAcrossTailCloseAndHydrate(t *t
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("storeStartedSession: %v", err)
@@ -192,7 +192,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 		store := newCountingSessionStore()
 		client := newFakeHermesClient()
 		client.skipHistory = true
-		session := testSession(NewAgent(WithSessionStore(store)), client)
+		session := testSession(newTestAgent(WithSessionStore(store)), client)
 
 		response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "empty-history", "reply"))
 		if err == nil || !strings.Contains(err.Error(), "missing a durable terminal assistant identity") {
@@ -209,7 +209,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 	t.Run("later user without assistant does not advance", func(t *testing.T) {
 		store := newCountingSessionStore()
 		client := newFakeHermesClient()
-		session := testSession(NewAgent(WithSessionStore(store)), client)
+		session := testSession(newTestAgent(WithSessionStore(store)), client)
 
 		first, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "first", "reply"))
 		if err != nil {
@@ -239,7 +239,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 	t.Run("failed replace preserves previous identity", func(t *testing.T) {
 		store := &toggleReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
 		client := newFakeHermesClient()
-		agent := NewAgent(WithSessionStore(store))
+		agent := newTestAgent(WithSessionStore(store))
 		session := testSession(agent, client)
 		if err := agent.storeStartedSession(session); err != nil {
 			t.Fatalf("storeStartedSession: %v", err)
@@ -284,7 +284,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 func TestSnapshotRejectsTerminalRegressionBeforeReplace(t *testing.T) {
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
-	session := testSession(NewAgent(WithSessionStore(store)), client)
+	session := testSession(newTestAgent(WithSessionStore(store)), client)
 
 	for _, nonce := range []string{"regression-first", "regression-second"} {
 		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, nonce, "reply")); err != nil {
@@ -344,7 +344,7 @@ func loadSeededTerminalSession(t *testing.T, skipAssistantHistory bool) (*counti
 	store := newCountingSessionStore()
 	cwd := t.TempDir()
 	sourceClient := newFakeHermesClient()
-	source := testSession(NewAgent(WithSessionStore(store)), sourceClient)
+	source := testSession(newTestAgent(WithSessionStore(store)), sourceClient)
 	source.cwd = cwd
 	if _, err := source.Prompt(t.Context(), TextPromptRequest(source.id, "seed", "reply")); err != nil {
 		t.Fatalf("seed Prompt: %v", err)
@@ -357,7 +357,7 @@ func loadSeededTerminalSession(t *testing.T, skipAssistantHistory bool) (*counti
 	loadedClient.messages = append([]nativehermes.NativeMessage(nil), sourceClient.messages...)
 	sourceClient.mu.Unlock()
 	loadedClient.skipAssistantHistory = skipAssistantHistory
-	loadedAgent := NewAgent(
+	loadedAgent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithSessionStore(store),
 		func(options *Options) {
@@ -390,7 +390,7 @@ func TestPromptSnapshotHistoryReadUsesIndependentDeadline(t *testing.T) {
 
 		return nil, ctx.Err()
 	}
-	agent := NewAgent(WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.storeWriteTTL = time.Millisecond
 	})
 	session := testSession(agent, client)
@@ -414,7 +414,7 @@ func TestPromptRequiresLiveClientForTerminalSnapshotCommit(t *testing.T) {
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	var session *session
-	agent := NewAgent(WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.beforeTerminalCommit = func() {
 			session.mu.Lock()
 			session.client = nil
@@ -442,7 +442,7 @@ func TestCancelAndTerminalReplaceHaveOneSettlementBoundary(t *testing.T) {
 	t.Run("cancel wins during capture", func(t *testing.T) {
 		store := newCountingSessionStore()
 		client := newFakeHermesClient()
-		session := testSession(NewAgent(WithSessionStore(store)), client)
+		session := testSession(newTestAgent(WithSessionStore(store)), client)
 		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "cancel-seed", "reply")); err != nil {
 			t.Fatalf("seed Prompt: %v", err)
 		}
@@ -496,7 +496,7 @@ func TestCancelAndTerminalReplaceHaveOneSettlementBoundary(t *testing.T) {
 	t.Run("commit wins before replace", func(t *testing.T) {
 		store := newBlockingTerminalReplaceStore(2)
 		client := newFakeHermesClient()
-		session := testSession(NewAgent(WithSessionStore(store)), client)
+		session := testSession(newTestAgent(WithSessionStore(store)), client)
 		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "commit-seed", "reply")); err != nil {
 			t.Fatalf("seed Prompt: %v", err)
 		}
@@ -663,7 +663,7 @@ func seededTerminalFailureSession(t *testing.T) (*countingSessionStore, *session
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
-	agent := NewAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
 	session.cwd = t.TempDir()
@@ -702,7 +702,7 @@ func promptWithFinalUpdate(
 func TestCloseSessionWaitsForTerminalSnapshotCommit(t *testing.T) {
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("storeStartedSession: %v", err)
@@ -785,7 +785,7 @@ func TestCloseWinningBeforeTerminalCommitCannotAdoptNativeSuccess(t *testing.T) 
 	client := newFakeHermesClient()
 	commitReady := make(chan struct{})
 	releaseCommit := make(chan struct{})
-	agent := NewAgent(WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.beforeTerminalCommit = func() {
 			close(commitReady)
 			<-releaseCommit
@@ -846,7 +846,7 @@ func TestIdleCloseSerializesAgainstPromptAdmission(t *testing.T) {
 
 		return testHistoryMessage("live", id, valAssistant, "stop"), nil
 	}
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("storeStartedSession: %v", err)
@@ -897,7 +897,7 @@ func TestRequiredTerminalSnapshotRejectsOtherPendingWork(t *testing.T) {
 				testHistoryMessage("history-1", "native-1", "user", ""),
 				testHistoryMessage("history-2", "native-1", valAssistant, "stop"),
 			}
-			session := testSession(NewAgent(WithSessionStore(store)), client)
+			session := testSession(newTestAgent(WithSessionStore(store)), client)
 			session.turnInFlight = true
 			configure(session)
 
@@ -918,7 +918,7 @@ func TestRequiredTerminalSnapshotRejectsOtherPendingWork(t *testing.T) {
 
 func TestTerminalCommitClaimRejectsInvalidSettlement(t *testing.T) {
 	newActive := func() (*session, context.Context) {
-		session := testSession(NewAgent(), newFakeHermesClient())
+		session := testSession(newTestAgent(), newFakeHermesClient())
 		session.turnInFlight = true
 		session.turnEpoch = 7
 		session.turnSettlement = turnSettlementOpen
@@ -965,7 +965,7 @@ func TestRequiredTerminalSnapshotPropagatesCancelledCommitClaim(t *testing.T) {
 		testHistoryMessage("history-1", "native-1", "user", ""),
 		testHistoryMessage("history-2", "native-1", valAssistant, "stop"),
 	}
-	session := testSession(NewAgent(WithSessionStore(store)), client)
+	session := testSession(newTestAgent(WithSessionStore(store)), client)
 	session.turnInFlight = true
 	session.turnEpoch = 1
 	session.turnSettlement = turnSettlementCancelled
@@ -1057,7 +1057,7 @@ func assertStoredTerminal(t *testing.T, store SessionStore, sessionID string, wa
 }
 
 func TestCommittedTerminalStateAndResponseMetaAreExact(t *testing.T) {
-	session := testSession(NewAgent(), newFakeHermesClient())
+	session := testSession(newTestAgent(), newFakeHermesClient())
 	session.markMessageCompleted("")
 	if got := session.committedTerminalState(); got != (SessionStoreTerminalState{}) {
 		t.Fatalf("empty committedTerminalState = %#v", got)

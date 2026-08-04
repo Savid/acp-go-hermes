@@ -57,7 +57,7 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 func TestHermesClientForwardsNativeStartupStages(t *testing.T) {
 	var gotKind RuntimeResourceKind
 	var gotStage RuntimeStartupStage
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ObserveStartupStage: func(_ context.Context, kind RuntimeResourceKind, stage RuntimeStartupStage, _ time.Duration, err error) {

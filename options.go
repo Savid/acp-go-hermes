@@ -24,6 +24,14 @@ const defaultImageLimitBytes int64 = 6 * 1024 * 1024
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
+// ProcessIsolation is the mandatory operating-system identity and complete
+// base environment for every native Hermes process and launch supervisor.
+type ProcessIsolation struct {
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
+}
+
 // ConcurrencyLimits bounds work accepted by one Agent.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
@@ -101,7 +109,8 @@ type Options struct {
 	AgentTitle   string
 	AgentVersion string
 
-	ExecutablePath string
+	ExecutablePath   string
+	ProcessIsolation *ProcessIsolation
 	// Home is unsupported because each session runtime root is isolated. Use
 	// ScratchDir for ephemeral state and ProviderAuthHome for durable provider
 	// credentials.
@@ -151,6 +160,7 @@ type Options struct {
 	newPromptTimer       func(time.Duration) promptTimer
 	storeWriteTTL        time.Duration
 	beforeTerminalCommit func()
+	testOnlyNoCredential bool
 }
 
 func applyOptions(opts []Option) Options {
@@ -175,6 +185,12 @@ func applyOptions(opts []Option) Options {
 	}
 	for _, opt := range opts {
 		opt(&options)
+	}
+
+	if options.ProcessIsolation != nil {
+		cloned := *options.ProcessIsolation
+		cloned.BaseEnvironment = cloneStringMap(options.ProcessIsolation.BaseEnvironment)
+		options.ProcessIsolation = &cloned
 	}
 
 	return options
@@ -207,6 +223,18 @@ func WithAgentVersion(version string) Option {
 func WithExecutablePath(path string) Option {
 	return func(options *Options) {
 		options.ExecutablePath = path
+	}
+}
+
+// WithProcessIsolation requires every Hermes process, version probe, and
+// supervisor to run as the supplied non-root identity with no supplementary
+// groups. BaseEnvironment replaces the adapter environment; WithEnv and
+// session values overlay it.
+func WithProcessIsolation(isolation ProcessIsolation) Option {
+	return func(options *Options) {
+		cloned := isolation
+		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
+		options.ProcessIsolation = &cloned
 	}
 }
 

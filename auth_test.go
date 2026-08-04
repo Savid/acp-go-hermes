@@ -32,7 +32,7 @@ func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	client := newFakeHermesClient()
 	client.xdg = nativehermes.XDGDirs{Root: home}
 
-	agent := NewAgent(WithProviderAuthRoot(t.TempDir()), WithProviderAuthHome(t.TempDir()))
+	agent := newTestAgent(WithProviderAuthRoot(t.TempDir()), WithProviderAuthHome(t.TempDir()))
 	if agent.providerAuth == nil {
 		t.Fatal("provider auth surface is unavailable with a usable root")
 	}
@@ -111,11 +111,11 @@ func requireInvalidField(t *testing.T, err error, field string) {
 func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 	t.Parallel()
 
-	if NewAgent().providerAuth != nil {
+	if newTestAgent().providerAuth != nil {
 		t.Fatal("unset root advertised the provider auth surface")
 	}
 
-	if NewAgent(WithProviderAuthRoot("relative"), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot("relative"), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
 		t.Fatal("relative root advertised the provider auth surface")
 	}
 
@@ -124,15 +124,15 @@ func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	if NewAgent(WithProviderAuthRoot(file), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot(file), WithProviderAuthHome(t.TempDir())).providerAuth != nil {
 		t.Fatal("root that is not a directory advertised the provider auth surface")
 	}
 
-	if NewAgent(WithProviderAuthRoot(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot(t.TempDir())).providerAuth != nil {
 		t.Fatal("ledger without native auth home advertised provider auth")
 	}
 
-	if NewAgent(WithProviderAuthHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthHome(t.TempDir())).providerAuth != nil {
 		t.Fatal("native auth home without ledger advertised provider auth")
 	}
 }
@@ -159,7 +159,7 @@ func TestAuthCapabilityListsEveryLeg(t *testing.T) {
 		t.Fatalf("advertised %d legs, want 6: %#v", len(names), names)
 	}
 
-	unset, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
+	unset, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAuthLegsAnswerOnlyWhileAdvertised(t *testing.T) {
 		}
 	}
 
-	bare := NewAgent()
+	bare := newTestAgent()
 
 	for _, method := range authMethodNames() {
 		_, err := callLeg(t, bare, method, map[string]any{"sessionId": "x"})

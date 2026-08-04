@@ -87,7 +87,7 @@ func (r *signalBlockingReader) Read([]byte) (int, error) {
 
 func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
 	conn := &localAgentConnection{agent: agent}
 
 	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionList, json.RawMessage(`{}`)); reqErr == nil {
@@ -118,7 +118,7 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionNew, mustJSON(t, acp.NewSessionRequest{})); reqErr == nil {
 		t.Fatal("invalid new-session params unexpectedly succeeded")
 	}
-	closedAgent := NewAgent()
+	closedAgent := newTestAgent()
 	if err := closedAgent.Close(); err != nil {
 		t.Fatalf("close agent: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 }
 
 func TestLocalAgentConnectionClientCallErrors(t *testing.T) {
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1, MaxConcurrentClientCalls: 1}))
 	conn := &localAgentConnection{agent: agent}
 
 	if err := conn.NotifyExtension(context.Background(), "bad/method", nil); err == nil {
@@ -210,7 +210,7 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 			return acp.CloseSessionResponse{}, errors.New("close failed")
 		},
 	)
-	if _, lifecycleErr := lifecycle(t.Context(), NewAgent(), json.RawMessage(`{"sessionId":"s"}`)); lifecycleErr == nil {
+	if _, lifecycleErr := lifecycle(t.Context(), newTestAgent(), json.RawMessage(`{"sessionId":"s"}`)); lifecycleErr == nil {
 		t.Fatal("local lifecycle response ignored agent error")
 	}
 	requestID := "request"
@@ -255,7 +255,7 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 		{name: "form explicit", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
 	} {
 		t.Run("elicitation "+tt.name, func(t *testing.T) {
-			agent := NewAgent()
+			agent := newTestAgent()
 			agent.clientCapabilities.Elicitation = tt.caps
 			if got := agent.clientSupportsFormElicitation(); got != tt.wantForm {
 				t.Fatalf("clientSupportsFormElicitation() = %v, want %v", got, tt.wantForm)
@@ -269,7 +269,7 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 
 func TestNewLocalAgentConnectionDone(t *testing.T) {
 	var output bytes.Buffer
-	conn := newLocalAgentConnection(NewAgent(), &output, strings.NewReader(""))
+	conn := newLocalAgentConnection(newTestAgent(), &output, strings.NewReader(""))
 	select {
 	case <-conn.Done():
 	case <-time.After(time.Second):
@@ -289,7 +289,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 		_ = a2cW.Close()
 	})
 
-	agent := NewAgent()
+	agent := newTestAgent()
 	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 		client := newFakeHermesClient()
 		xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), string(opts.ACPSessionID))
@@ -361,7 +361,7 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 
 	client := &pipeACPClient{}
 	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(conn)
 

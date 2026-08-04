@@ -495,7 +495,7 @@ func TestProviderAuthHomeValidationAndPreparationFailures(t *testing.T) {
 		t.Fatal("provider auth home beneath a file prepared")
 	}
 
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithProviderAuthRoot(t.TempDir()),
 		WithProviderAuthHome(filepath.Join(file, "child")),
 	)

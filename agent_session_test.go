@@ -54,7 +54,7 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	createClient.getSession = createClient.createSession
 	// A native close error during cleanup is joined with the snapshot failure.
 	createClient.closeErr = errors.New("close boom")
-	agent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
 			if err != nil {
@@ -106,7 +106,7 @@ func TestForkSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	child := newFakeHermesClient()
 	child.getSession = testNativeSession("native-child")
 	factoryCalls := 0
-	agent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryCalls++
 			client := parent
@@ -172,7 +172,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 	child.providers = parent.providers
 	store := NewInMemorySessionStore()
 	factoryCalls := 0
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(root),
 		WithSessionStore(store),
 		func(options *Options) {
@@ -299,7 +299,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	sourceClient.xdg = sourceXDG
-	agent := NewAgent(WithScratchDir(root), WithSessionStore(store))
+	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store))
 	session := testSession(agent, sourceClient)
 	session.cwd = root
 	mcpServer := HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)
@@ -547,7 +547,7 @@ func newResumeRuntimeTestSession(t *testing.T, options ...Option) (*session, *Ag
 	base := make([]Option, 0, 2+len(options))
 	base = append(base, WithScratchDir(t.TempDir()), WithSessionStore(store))
 	base = append(base, options...)
-	agent := NewAgent(base...)
+	agent := newTestAgent(base...)
 	session := testSession(agent, newFakeHermesClient())
 	session.runtimeNeedsResume = true
 	replaceResumeRuntimeRecords(t, store, session.idmap, resumeRuntimeSnapshot(session))
@@ -604,7 +604,7 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
@@ -651,7 +651,7 @@ func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
 	client := newFakeHermesClient()
 	client.xdg = xdg
 	client.closeFunc = func(context.Context) error { return os.RemoveAll(xdg.Root) }
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
@@ -675,7 +675,7 @@ func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
@@ -723,7 +723,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	client.createSession = testNativeSession("native-1")
 	client.getSession = client.createSession
 	factoryCalls := 0
-	agent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
+	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryCalls++
 			xdg := opts.ExistingXDG
@@ -855,23 +855,23 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 	cwd := t.TempDir()
 
 	t.Run("new session validation and native errors", func(t *testing.T) {
-		closed := NewAgent()
+		closed := newTestAgent()
 		if err := closed.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := closed.NewSession(ctx, NewSessionRequest(cwd)); err == nil {
 			t.Fatal("closed agent accepted new session")
 		}
-		if _, err := NewAgent().NewSession(ctx, NewSessionRequest("relative")); err == nil {
+		if _, err := newTestAgent().NewSession(ctx, NewSessionRequest("relative")); err == nil {
 			t.Fatal("relative cwd accepted")
 		}
-		if _, err := NewAgent().NewSession(ctx, NewSessionRequest(cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "http://example.test"}}))); err == nil {
+		if _, err := newTestAgent().NewSession(ctx, NewSessionRequest(cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "http://example.test"}}))); err == nil {
 			t.Fatal("SSE MCP accepted")
 		}
-		if _, err := NewAgent().NewSession(ctx, NewSessionRequest(cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"unknown": true}}))); err == nil {
+		if _, err := newTestAgent().NewSession(ctx, NewSessionRequest(cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"unknown": true}}))); err == nil {
 			t.Fatal("bad meta accepted")
 		}
-		factoryErr := NewAgent(func(options *Options) {
+		factoryErr := newTestAgent(func(options *Options) {
 			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 				return nil, errors.New("factory failed")
 			}
@@ -881,7 +881,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 		}
 		createErrClient := newFakeHermesClient()
 		createErrClient.createErr = errors.New("create failed")
-		agent := NewAgent(func(options *Options) {
+		agent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				createErrClient.xdg, _ = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
 
@@ -897,7 +897,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 	})
 
 	t.Run("load resume and close errors", func(t *testing.T) {
-		agent := NewAgent()
+		agent := newTestAgent()
 		if _, err := agent.LoadSession(ctx, LoadSessionRequest("", cwd)); err == nil {
 			t.Fatal("empty load id accepted")
 		}
@@ -913,7 +913,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("")); err == nil {
 			t.Fatal("empty delete accepted")
 		}
-		errStoreAgent := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("store failed")}))
+		errStoreAgent := newTestAgent(WithSessionStore(&errorSessionStore{err: errors.New("store failed")}))
 		if _, err := errStoreAgent.ListSessions(ctx, ListSessionsRequest()); err == nil {
 			t.Fatal("list ignored store error")
 		}
@@ -934,7 +934,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	sourceClient.xdg = sourceXDG
-	seedAgent := NewAgent(WithScratchDir(root), WithSessionStore(store))
+	seedAgent := newTestAgent(WithScratchDir(root), WithSessionStore(store))
 	seed := testSession(seedAgent, sourceClient)
 	seed.cwd = cwd
 	if err15 := seed.snapshotToStore(ctx); err15 != nil {
@@ -944,7 +944,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	loadedClient := newFakeHermesClient()
 	loadedClient.getSession = testNativeSession("native-rotated")
 	loadedClient.providers = testProviders()
-	loadAgent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
+	loadAgent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			loadedClient.xdg = opts.ExistingXDG
 
@@ -986,7 +986,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 
 	getErrClient := newFakeHermesClient()
 	getErrClient.getErr = errors.New("get failed")
-	getErrAgent := NewAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
+	getErrAgent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			getErrClient.xdg = opts.ExistingXDG
 
@@ -1012,7 +1012,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 			t.Fatalf("replace list store: %v", err22)
 		}
 	}
-	listAgent := NewAgent(WithSessionStore(listStore))
+	listAgent := newTestAgent(WithSessionStore(listStore))
 	listResp, err := listAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
@@ -1036,7 +1036,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 
 	parentClient := newFakeHermesClient()
 	parentClient.forkErr = errors.New("fork failed")
-	parent := testSession(NewAgent(), parentClient)
+	parent := testSession(newTestAgent(), parentClient)
 	parentAgent := parent.agent
 	parentAgent.mu.Lock()
 	parentAgent.sessions[parent.id] = parent
@@ -1056,11 +1056,11 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	invalidOptions := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}))
+	invalidOptions := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}))
 	if _, err := invalidOptions.Initialize(ctx, acp.InitializeRequest{}); err == nil {
 		t.Fatal("invalid construction options were not reported during initialize")
 	}
-	invalidImageOptions := NewAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
+	invalidImageOptions := newTestAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
 	if _, err := invalidImageOptions.Initialize(ctx, acp.InitializeRequest{}); err == nil {
 		t.Fatal("negative image limit was not reported during initialize")
 	}
@@ -1084,7 +1084,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 		t.Fatal("default store context was not cancellable")
 	}
 
-	closed := NewAgent()
+	closed := newTestAgent()
 	if err := closed.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1092,7 +1092,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 		t.Fatal("closed agent accepted extension method")
 	}
 
-	limitAgent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	limitAgent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	first := testSession(limitAgent, newFakeHermesClient())
 	if err := limitAgent.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
@@ -1118,7 +1118,7 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	}
 
 	client := newFakeHermesClient()
-	defaultSession := newSession(NewAgent(), "wrapper", cwd, nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
+	defaultSession := newSession(newTestAgent(), "wrapper", cwd, nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
 	if defaultSession.title != "Hermes session" || defaultSession.idmap.SessionID != "wrapper" ||
 		defaultSession.idmap.NativeSessionID != "native" || defaultSession.idmap.Format != SessionStoreFormat {
 		t.Fatalf("default session fields = %#v", defaultSession)
@@ -1154,7 +1154,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 
 	createClient := newFakeHermesClient()
 	createClient.createSession = testNativeSession("native-created")
-	snapshotErrAgent := NewAgent(
+	snapshotErrAgent := newTestAgent(
 		WithSessionStore(&errorSessionStore{err: errors.New("replace failed")}),
 		func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -1182,7 +1182,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 		t.Fatal(err)
 	}
 	sourceClient.xdg = sourceXDG
-	seedAgent := NewAgent(WithSessionStore(store))
+	seedAgent := newTestAgent(WithSessionStore(store))
 	seed := testSession(seedAgent, sourceClient)
 	seed.cwd = cwd
 	if err24 := seed.snapshotToStore(ctx); err24 != nil {
@@ -1191,7 +1191,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	replayErrClient := newFakeHermesClient()
 	replayErrClient.getSession = testNativeSession("native-1")
 	replayErrClient.messagesErr = errors.New("messages failed")
-	replayErrAgent := NewAgent(WithSessionStore(store), func(options *Options) {
+	replayErrAgent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			replayErrClient.xdg = opts.ExistingXDG
 
@@ -1205,31 +1205,31 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	if _, err26 := closed.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err26 == nil {
 		t.Fatal("closed agent resumed session")
 	}
-	if _, err27 := NewAgent(WithScratchDir(string([]byte{0}))).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err27 == nil {
+	if _, err27 := newTestAgent(WithScratchDir(string([]byte{0}))).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err27 == nil {
 		t.Fatal("invalid scratch root did not fail load")
 	}
-	if _, errNS := NewAgent(WithScratchDir(string([]byte{0}))).NewSession(ctx, NewSessionRequest(cwd)); errNS == nil {
+	if _, errNS := newTestAgent(WithScratchDir(string([]byte{0}))).NewSession(ctx, NewSessionRequest(cwd)); errNS == nil {
 		t.Fatal("invalid scratch root did not fail new session")
 	}
-	if _, err28 := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("load failed")})).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err28 == nil {
+	if _, err28 := newTestAgent(WithSessionStore(&errorSessionStore{err: errors.New("load failed")})).LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err28 == nil {
 		t.Fatal("hydrate store error was ignored")
 	}
 
 	parentClient := newFakeHermesClient()
 	parentClient.forkSession = testNativeSession("native-child")
-	parent := testSession(NewAgent(WithScratchDir(string([]byte{0}))), parentClient)
+	parent := testSession(newTestAgent(WithScratchDir(string([]byte{0}))), parentClient)
 	parentAgent := parent.agent
 	parentAgent.sessions[parent.id] = parent
 	if _, err29 := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err29 == nil {
 		t.Fatal("invalid fork scratch root did not fail")
 	}
-	if _, err30 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))); err30 == nil {
+	if _, err30 := newTestAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))); err30 == nil {
 		t.Fatal("unstable fork accepted SSE MCP")
 	}
-	if _, err31 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}})))); err31 == nil {
+	if _, err31 := newTestAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMCPServers(acp.McpServer{Acp: &acp.McpServerAcpInline{Name: "acp"}})))); err31 == nil {
 		t.Fatal("unstable fork accepted ACP MCP")
 	}
-	if _, err32 := NewAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"bad": true}})))); err32 == nil {
+	if _, err32 := newTestAgent().HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd, WithSessionMeta(map[string]any{hermesMetaKey: map[string]any{"bad": true}})))); err32 == nil {
 		t.Fatal("unstable fork accepted invalid meta")
 	}
 
@@ -1262,7 +1262,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 		defaultClient := newFakeHermesClient()
 		defaultClient.createSession = nativehermes.Session{ID: "native-default", Title: "Default"}
 		var defaultModel string
-		defaultAgent := NewAgent(WithDefaultModel("openai/gpt-default"), func(options *Options) {
+		defaultAgent := newTestAgent(WithDefaultModel("openai/gpt-default"), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				defaultModel = opts.DefaultModel
 				var err error
@@ -1288,14 +1288,14 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 
 		oldReader := sessionIDRandReader
 		sessionIDRandReader = errorReader{err: errors.New("id failed")}
-		if _, err := NewAgent().NewSession(ctx, NewSessionRequest(cwd)); err == nil {
+		if _, err := newTestAgent().NewSession(ctx, NewSessionRequest(cwd)); err == nil {
 			t.Fatal("NewSession ignored session id error")
 		}
 		sessionIDRandReader = oldReader
 
 		client := newFakeHermesClient()
 		client.createSession = testNativeSession("native-created")
-		agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
+		agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				var err error
 				client.xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
@@ -1321,7 +1321,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 	cwd := t.TempDir()
 
 	t.Run("load validation and startup errors", func(t *testing.T) {
-		agent := NewAgent()
+		agent := newTestAgent()
 		if _, err := agent.LoadSession(ctx, LoadSessionRequest("s", "relative")); err == nil {
 			t.Fatal("LoadSession accepted relative cwd")
 		}
@@ -1333,7 +1333,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		}
 
 		store := validHydrateStore(t, ctx)
-		factoryErrAgent := NewAgent(WithSessionStore(store), func(options *Options) {
+		factoryErrAgent := newTestAgent(WithSessionStore(store), func(options *Options) {
 			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 				return nil, errors.New("factory failed")
 			}
@@ -1344,7 +1344,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 
 		loadedClient := newFakeHermesClient()
 		loadedClient.getSession = testNativeSession("n")
-		limitAgent := NewAgent(WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
+		limitAgent := newTestAgent(WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				loadedClient.xdg = opts.ExistingXDG
 
@@ -1358,7 +1358,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 	})
 
 	t.Run("list filters and errors", func(t *testing.T) {
-		closed := NewAgent()
+		closed := newTestAgent()
 		if err := closed.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -1366,7 +1366,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			t.Fatal("closed agent listed sessions")
 		}
 		relative := "relative"
-		if _, err := NewAgent().ListSessions(ctx, acp.ListSessionsRequest{Cwd: &relative}); err == nil {
+		if _, err := newTestAgent().ListSessions(ctx, acp.ListSessionsRequest{Cwd: &relative}); err == nil {
 			t.Fatal("ListSessions accepted relative cwd")
 		}
 
@@ -1388,7 +1388,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		agent := NewAgent(WithSessionStore(store))
+		agent := newTestAgent(WithSessionStore(store))
 		active := testSession(agent, newFakeHermesClient())
 		active.id = "active"
 		active.cwd = cwd
@@ -1410,7 +1410,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 	t.Run("delete active close error", func(t *testing.T) {
 		client := newFakeHermesClient()
 		client.closeErr = errors.New("close failed")
-		agent := NewAgent()
+		agent := newTestAgent()
 		session := testSession(agent, client)
 		agent.sessions[session.id] = session
 		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err == nil {
@@ -1421,7 +1421,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 	t.Run("delete active ignores native delete error after tombstone", func(t *testing.T) {
 		client := newFakeHermesClient()
 		client.deleteErr = errors.New("native delete failed")
-		agent := NewAgent()
+		agent := newTestAgent()
 		session := testSession(agent, client)
 		agent.sessions[session.id] = session
 		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err != nil {
@@ -1436,7 +1436,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		root := t.TempDir()
 		for _, name := range []string{"list", "load", "resume", "delete"} {
 			t.Run(name, func(t *testing.T) {
-				agent := NewAgent(WithScratchDir(root))
+				agent := newTestAgent(WithScratchDir(root))
 				xdg, err := nativehermes.CreateXDGDirs(root, name)
 				if err != nil {
 					t.Fatal(err)
@@ -1473,7 +1473,7 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 	cwd := t.TempDir()
 
 	t.Run("deleted cleanup helper branches", func(t *testing.T) {
-		agent := NewAgent(WithScratchDir(t.TempDir()))
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
 		agent.rememberDeleteCleanup(deleteCleanupRecord{})
 		if len(agent.deleteCleanup) != 0 {
 			t.Fatalf("empty cleanup record was remembered: %#v", agent.deleteCleanup)
@@ -1495,14 +1495,14 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 		if err := agent.retryDeletedSessionCleanup(cancelled); err == nil {
 			t.Fatal("cancelled cleanup retry returned nil")
 		}
-		errorAgent := NewAgent()
+		errorAgent := newTestAgent()
 		errorAgent.deleteCleanup["bad"] = deleteCleanupRecord{SessionID: "bad", XDGRoot: string([]byte{0})}
 		if err := errorAgent.retryDeletedSessionCleanup(ctx); err == nil {
 			t.Fatal("cleanup error retry returned nil")
 		}
 		for _, name := range []string{"list", "load", "delete"} {
 			t.Run("entrypoint retry error "+name, func(t *testing.T) {
-				entryAgent := NewAgent(WithScratchDir(t.TempDir()))
+				entryAgent := newTestAgent(WithScratchDir(t.TempDir()))
 				entryXDG, err := nativehermes.CreateXDGDirs(entryAgent.options.ScratchDir, name)
 				if err != nil {
 					t.Fatal(err)
@@ -1542,7 +1542,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		parentClient := newFakeHermesClient()
 		parentClient.forkSession = testNativeSession("native-child")
 		parentClient.xdg, _ = nativehermes.CreateXDGDirs(t.TempDir(), "parent")
-		parentAgent := NewAgent()
+		parentAgent := newTestAgent()
 		parent := testSession(parentAgent, parentClient)
 		parentAgent.sessions[parent.id] = parent
 
@@ -1558,7 +1558,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		}
 		parentClient.xdg, _ = nativehermes.CreateXDGDirs(t.TempDir(), "parent")
 
-		factoryErrAgent := NewAgent(func(options *Options) {
+		factoryErrAgent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 				return nil, errors.New("child factory failed")
 			}
@@ -1571,7 +1571,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 
 		getErrClient := newFakeHermesClient()
 		getErrClient.getErr = errors.New("get failed")
-		getErrAgent := NewAgent(func(options *Options) {
+		getErrAgent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				getErrClient.xdg = opts.ExistingXDG
 
@@ -1589,7 +1589,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 
 		limitChild := newFakeHermesClient()
 		limitChild.getSession = testNativeSession("native-child")
-		limitAgent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
+		limitAgent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				limitChild.xdg = opts.ExistingXDG
 
@@ -1604,7 +1604,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 
 		snapshotErrChild := newFakeHermesClient()
 		snapshotErrChild.getSession = testNativeSession("native-child")
-		snapshotErrAgent := NewAgent(WithSessionStore(&errorSessionStore{err: errors.New("replace failed")}), func(options *Options) {
+		snapshotErrAgent := newTestAgent(WithSessionStore(&errorSessionStore{err: errors.New("replace failed")}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				snapshotErrChild.xdg = opts.ExistingXDG
 
@@ -1627,13 +1627,13 @@ func TestAgentClientFactoryDefaultsAndEnvMerge(t *testing.T) {
 	cwd := t.TempDir()
 
 	t.Run("client factory defaults and env merge", func(t *testing.T) {
-		defaultAgent := NewAgent()
+		defaultAgent := newTestAgent()
 		defaultAgent.options.clientFactory = nil
 		if _, err := defaultAgent.newHermesClient(ctx, "s", cwd, sessionMeta{}, nativehermes.XDGDirs{Root: filepath.Join(t.TempDir(), "root")}); err == nil {
 			t.Fatal("default client factory unexpectedly succeeded with incomplete XDG")
 		}
 		var captured nativehermes.StartOptions
-		agent := NewAgent(func(options *Options) {
+		agent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				captured = opts
 
@@ -1654,7 +1654,7 @@ func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
 
 	ctx := context.Background()
 	authHome := filepath.Join(t.TempDir(), "native-auth")
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithProviderAuthRoot(t.TempDir()),
 		WithProviderAuthHome(authHome),
@@ -1738,7 +1738,7 @@ func testProviders() nativehermes.ProvidersResponse {
 func TestAgentRejectsHomeOption(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
-	agent := NewAgent(WithHome(t.TempDir()))
+	agent := newTestAgent(WithHome(t.TempDir()))
 
 	_, newErr := agent.NewSession(ctx, NewSessionRequest(cwd))
 	requireUnsupportedField(t, newErr, optionFieldHome, "new session")
@@ -1756,7 +1756,7 @@ func TestAgentRejectsHomeOption(t *testing.T) {
 func TestAgentRejectsProviderAuthDirectHomeOption(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
-	agent := NewAgent(WithProviderAuthDirectHome(t.TempDir()))
+	agent := newTestAgent(WithProviderAuthDirectHome(t.TempDir()))
 
 	_, newErr := agent.NewSession(ctx, NewSessionRequest(cwd))
 	requireUnsupportedField(t, newErr, optionFieldProviderAuthDirectHome, "new session")
@@ -1778,7 +1778,7 @@ func TestAgentRejectsProviderAuthDirectHomeOption(t *testing.T) {
 func TestAgentRejectsUnvalidatedOptionsWithoutInitialize(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithExecutablePath(filepath.Join(t.TempDir(), "absent-hermes")),
 		WithImageLimits(ImageLimits{MaxOutputBytesPerImage: -1}),
 	)

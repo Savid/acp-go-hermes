@@ -558,13 +558,13 @@ func TestInventorySurvivesAgentRestartWithoutReadingCredentialFiles(t *testing.T
 	root := t.TempDir()
 	home := t.TempDir()
 
-	first := NewAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	first := newTestAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
 	if first.providerAuth == nil {
 		t.Fatal("first provider auth surface unavailable")
 	}
 	seedConfirmedLineage(t, first, testProviderID)
 
-	second := NewAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	second := newTestAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
 	if second.providerAuth == nil {
 		t.Fatal("second provider auth surface unavailable")
 	}

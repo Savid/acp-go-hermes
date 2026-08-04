@@ -619,7 +619,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 
 	restoreProcessSeams(t)
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if name != "hermes" {
+		if filepath.Base(name) != "hermes" {
 			t.Fatalf("default executable = %q", name)
 		}
 
@@ -835,6 +835,7 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 
 	restoreProcessSeams(t)
 	releaseWait := make(chan struct{})
+	processTreeClose = func(*processContainment) error { return nil }
 	waitProcessCommand = func(*exec.Cmd) error {
 		<-releaseWait
 
@@ -855,8 +856,11 @@ func TestProcessCloseFaultBranches(t *testing.T) {
 
 		return ch
 	}
-	if err := (&Process{Cmd: fakeStartedCommand()}).Close(context.Background()); err == nil || !strings.Contains(err.Error(), "did not exit") {
-		t.Fatalf("kill-wait Close error = %v", err)
+	if err := (&Process{
+		Cmd:  fakeStartedCommand(),
+		tree: provedProcessContainment(),
+	}).Close(context.Background()); err != nil {
+		t.Fatalf("proved kill-wait Close error = %v", err)
 	}
 
 	restoreProcessSeams(t)
@@ -1083,6 +1087,7 @@ func (f fakeFileInfo) Sys() any           { return nil }
 
 func darwinTestProcessOptions(t *testing.T, options ProcessOptions) ProcessOptions {
 	t.Helper()
+	options.Isolation = testProcessIsolation()
 	if options.AcquireDiscoveryResources == nil {
 		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
 	}

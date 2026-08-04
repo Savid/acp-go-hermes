@@ -29,10 +29,11 @@ still reach.
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Path to the `hermes` binary (falls back to `hermes` on `PATH`). |
+| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement base environment for every Hermes process and supervisor. |
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported because each session runtime root is isolated. Use `WithScratchDir` for ephemeral state and `WithProviderAuthHome` for durable provider credentials. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Environment injected into each `hermes serve` process. |
+| `WithEnv` | Environment overlaid on `ProcessIsolation.BaseEnvironment` for each `hermes serve` process. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |

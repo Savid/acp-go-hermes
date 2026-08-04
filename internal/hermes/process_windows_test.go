@@ -16,6 +16,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func testProcessIsolation() *ProcessIsolation {
+	return &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"PATH": `C:\Windows\System32`}, TestOnlyNoCredential: true}
+}
+
+func provedProcessContainment() *processContainment {
+	return &processContainment{}
+}
+
 const (
 	envWindowsContainmentHelper = "ACP_GO_HERMES_WINDOWS_CONTAINMENT_HELPER"
 	envWindowsContainmentPID    = "ACP_GO_HERMES_WINDOWS_CONTAINMENT_PID"

@@ -276,7 +276,7 @@ func TestPromptImageValidationPrecedesNativeTurnAndUnknownModelForwards(t *testi
 			"text-looking": {ID: "text-looking", Modalities: nativehermes.ProviderModelModalities{Input: []string{"text"}}},
 		},
 	}}}
-	session := testSession(NewAgent(), client)
+	session := testSession(newTestAgent(), client)
 	session.providerID = "provider"
 	session.modelID = "text-looking"
 

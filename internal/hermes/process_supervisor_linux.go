@@ -57,6 +57,11 @@ func runHermesSupervisorInit() {
 	if os.Getenv(envHermesSupervisor) == "" {
 		return
 	}
+	if err := verifyInheritedProcessIsolation(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "acp-go-hermes process supervisor:", err)
+		supervisorExit(125)
+		return
+	}
 
 	supervisorExit(runHermesProcessSupervisor())
 }
@@ -66,7 +71,10 @@ func runHermesSupervisorInit() {
 // tool can call setsid(2) and escape. The subreaper remains the parent of every
 // orphaned native descendant, kills/reaps that complete tree, and emits a proof
 // byte before it exits. Absence of that byte is fail-closed.
-func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processContainment, error) {
+func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*processContainment, error) {
+	if err := validateProcessIsolation(spec.Isolation); err != nil {
+		return nil, fmt.Errorf("validate Hermes supervisor isolation: %w", err)
+	}
 	if target == nil || target.Path == "" || len(target.Args) == 0 {
 		return nil, errors.New("hermes supervisor target is unavailable")
 	}
@@ -75,7 +83,7 @@ func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processCon
 		return nil, errors.New("hermes Linux supervisor target containment is not configured")
 	}
 
-	if _, err := exec.LookPath(target.Path); err != nil {
+	if _, err := executableFile(target.Path); err != nil {
 		return nil, err
 	}
 
@@ -113,21 +121,23 @@ func startUnixContainedProcess(target *exec.Cmd, _ ContainmentSpec) (*processCon
 	supervisor.Args = append([]string(nil), target.Args...)
 	supervisor.Dir = target.Dir
 
-	targetEnv := target.Env
-	if targetEnv == nil {
-		targetEnv = os.Environ()
-	}
-
-	supervisor.Env = append([]string(nil), targetEnv...)
-	supervisor.Env = append(supervisor.Env,
+	supervisor.Env, err = supervisorEnvironment(target.Env, spec.Isolation,
 		envHermesSupervisor+"=1",
 		envHermesSupervisorTarget+"="+target.Path,
 	)
+	if err != nil {
+		cleanupPipes()
+		return nil, fmt.Errorf("build Hermes supervisor environment: %w", err)
+	}
 	supervisor.Stdin = target.Stdin
 	supervisor.Stdout = target.Stdout
 	supervisor.Stderr = target.Stderr
 	supervisor.ExtraFiles = []*os.File{controlRead, proofWrite}
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := applyProcessIsolation(supervisor, spec.Isolation); err != nil {
+		cleanupPipes()
+		return nil, fmt.Errorf("apply Hermes supervisor isolation: %w", err)
+	}
 	// Install the wrapper command before launch. exec.Cmd must not be copied
 	// after Start: its private waiter and pipe-copy state belong to the exact
 	// value that was started, and copying it races version-probe output drains.
@@ -299,7 +309,10 @@ func supervisorTargetEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, entry := range env {
 		if strings.HasPrefix(entry, envHermesSupervisor+"=") ||
-			strings.HasPrefix(entry, envHermesSupervisorTarget+"=") {
+			strings.HasPrefix(entry, envHermesSupervisorTarget+"=") ||
+			strings.HasPrefix(entry, envIsolationUID+"=") ||
+			strings.HasPrefix(entry, envIsolationGID+"=") ||
+			strings.HasPrefix(entry, envIsolationTest+"=") {
 			continue
 		}
 

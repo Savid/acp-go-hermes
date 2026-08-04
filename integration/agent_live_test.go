@@ -34,6 +34,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
 	agent := hermesacp.NewAgent(
+		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
@@ -59,6 +60,7 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 
 	restoreHome := t.TempDir()
 	restored := hermesacp.NewAgent(
+		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
@@ -86,6 +88,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
 	agent := hermesacp.NewAgent(
+		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
@@ -140,6 +143,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 
 	restoreHome := t.TempDir()
 	restored := hermesacp.NewAgent(
+		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),

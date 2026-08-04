@@ -35,7 +35,7 @@ func TestHandleAgentGoroutinePanicBranches(t *testing.T) {
 	if agentLogger(nil) != nil {
 		t.Fatal("nil agent logger returned non-nil")
 	}
-	agent := NewAgent()
+	agent := newTestAgent()
 	if agentLogger(agent) != agent.log {
 		t.Fatal("agent logger mismatch")
 	}

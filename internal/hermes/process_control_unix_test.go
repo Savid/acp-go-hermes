@@ -207,8 +207,9 @@ func TestUnixProcessContainmentCompletionBranches(t *testing.T) {
 
 func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
 	t.Helper()
+	isolation := testProcessIsolation()
 	if runtime.GOOS != "darwin" {
-		return ContainmentSpec{}
+		return ContainmentSpec{Isolation: isolation}
 	}
 	parent := t.TempDir()
 	dirs, err := CreateGenerationXDGDirs(parent)
@@ -216,7 +217,30 @@ func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
 		t.Fatalf("CreateGenerationXDGDirs: %v", err)
 	}
 
-	return ContainmentSpec{DarwinBestEffort: true, ScratchParent: parent, GenerationRoot: dirs.Root, LifecycleKind: "session"}
+	return ContainmentSpec{DarwinBestEffort: true, ScratchParent: parent, GenerationRoot: dirs.Root, LifecycleKind: "session", Isolation: isolation}
+}
+
+func testProcessIsolation() *ProcessIsolation {
+	return &ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+		TestOnlyNoCredential: true,
+	}
+}
+
+func provedProcessContainment() *processContainment {
+	return &processContainment{
+		terminateFn: func() error { return nil },
+		killFn:      func() error { return nil },
+		completeFn:  func(time.Duration) error { return nil },
+	}
+}
+
+func setTestIsolationBootstrapEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(envIsolationUID, strconv.Itoa(os.Geteuid()))
+	t.Setenv(envIsolationGID, strconv.Itoa(os.Getegid()))
+	t.Setenv(envIsolationTest, "true")
 }
 
 func TestProcessContainmentCompletionFailures(t *testing.T) {

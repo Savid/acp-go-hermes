@@ -19,7 +19,7 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 
 	agentRuntimePlatform = "linux"
 	var observed []RuntimeContainmentMode
-	defaultAgent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	defaultAgent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
 			observed = append(observed, mode)
 		},
@@ -33,12 +33,12 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}
 
 	agentRuntimePlatform = "darwin"
-	if got := NewAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
+	if got := newTestAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
 		t.Fatalf("Darwin default mode = %q", got)
 	}
 	var logs bytes.Buffer
 	var snapshots int
-	opted := NewAgent(
+	opted := newTestAgent(
 		WithDarwinBestEffortContainment(),
 		WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
@@ -59,10 +59,10 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}
 
 	agentRuntimePlatform = "freebsd"
-	if got := NewAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
+	if got := newTestAgent().ContainmentMode(); got != RuntimeContainmentUnavailable {
 		t.Fatalf("unsupported mode = %q", got)
 	}
-	opted = NewAgent(WithDarwinBestEffortContainment())
+	opted = newTestAgent(WithDarwinBestEffortContainment())
 	if opted.ContainmentMode() != RuntimeContainmentUnavailable {
 		t.Fatalf("off-Darwin opted mode = %q", opted.ContainmentMode())
 	}

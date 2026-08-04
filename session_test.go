@@ -13,7 +13,7 @@ import (
 )
 
 func TestTurnFenceHelperBranches(t *testing.T) {
-	session := testSession(NewAgent(), newFakeHermesClient())
+	session := testSession(newTestAgent(), newFakeHermesClient())
 	if !session.claimPermissionRequest("") || !session.claimQuestionRequest("") {
 		t.Fatal("empty request ids should not be fenced")
 	}
@@ -51,7 +51,7 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 
 func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 	wantResumeErr := errors.New("resume admission")
-	resumeAgent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+	resumeAgent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
 		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return nil, wantResumeErr
 		},
@@ -62,7 +62,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 		t.Fatalf("prepare resume error = %v", err)
 	}
 
-	nilClient := testSession(NewAgent(), newFakeHermesClient())
+	nilClient := testSession(newTestAgent(), newFakeHermesClient())
 	nilClient.client = nil
 	nilClient.cancelTurn()
 	if err := nilClient.fenceTurnLocked(t.Context(), 0, true); err != nil {
@@ -76,7 +76,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 		t.Fatalf("nil runtime fence error = %v", err)
 	}
 
-	closed := testSession(NewAgent(), newFakeHermesClient())
+	closed := testSession(newTestAgent(), newFakeHermesClient())
 	closed.client = nil
 	if err := closed.Close(t.Context()); err != nil {
 		t.Fatalf("close nil runtime: %v", err)
@@ -86,7 +86,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 func TestSessionMarkPartAcceptsFirstEmptyRawPayload(t *testing.T) {
 	t.Parallel()
 
-	session := testSession(NewAgent(), newFakeHermesClient())
+	session := testSession(newTestAgent(), newFakeHermesClient())
 	part := nativehermes.Part{ID: "completion-only", Type: "text", Text: "final answer"}
 	if !session.markPart(part) {
 		t.Fatal("first completion-only part was suppressed")
@@ -101,7 +101,7 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	store := newCountingSessionStore()
-	agent := NewAgent(WithSessionStore(store))
+	agent := newTestAgent(WithSessionStore(store))
 	agent.setAgentClient(conn)
 	s := testSession(agent, client)
 	agent.mu.Lock()

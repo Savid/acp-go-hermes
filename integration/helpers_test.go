@@ -62,6 +62,17 @@ func integrationContainmentOption() hermesacp.Option {
 	return func(*hermesacp.Options) {}
 }
 
+func integrationProcessIsolationOption() hermesacp.Option {
+	return hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
+		UID: uint32(os.Geteuid()),
+		GID: uint32(os.Getegid()),
+		BaseEnvironment: map[string]string{
+			"PATH": os.Getenv("PATH"),
+			"HOME": os.Getenv("HOME"),
+		},
+	})
+}
+
 func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
 	t.Helper()
 	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)

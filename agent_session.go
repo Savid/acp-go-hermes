@@ -938,6 +938,7 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		DefaultModel:     firstNonEmpty(meta.Model, a.options.DefaultModel),
 		ProviderAuthHome: a.options.ProviderAuthHome,
 		Env:              a.observe.InjectTraceEnv(ctx, env),
+		Isolation:        nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential),
 		Logger:           a.log,
 		ExistingXDG:      existing,
 		MCPServers:       servers,
@@ -992,6 +993,18 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		retainIncomplete: a.recordIncompleteContainment,
 		processRoot:      processRoot,
 	}, nil
+}
+
+func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bool) *nativehermes.ProcessIsolation {
+	if isolation == nil {
+		return nil
+	}
+	base := cloneStringMap(isolation.BaseEnvironment)
+
+	return &nativehermes.ProcessIsolation{
+		UID: isolation.UID, GID: isolation.GID, BaseEnvironment: base,
+		TestOnlyNoCredential: testOnlyNoCredential,
+	}
 }
 
 type deleteCleanupRecord struct {
@@ -1114,6 +1127,24 @@ func (a *Agent) rejectInvalidConfiguration() error {
 
 	if a.options.ProviderAuthDirectHome != "" {
 		return unsupportedField(optionFieldProviderAuthDirectHome)
+	}
+
+	if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateProcessIsolationOption(isolation *ProcessIsolation) error {
+	if isolation == nil {
+		return errors.New("process isolation policy is required")
+	}
+	if isolation.UID == 0 || isolation.GID == 0 {
+		return errors.New("process isolation UID and GID must be nonzero")
+	}
+	if agentRuntimePlatform == agentRuntimeWindows {
+		return errors.New("process isolation is unsupported on windows")
 	}
 
 	return nil

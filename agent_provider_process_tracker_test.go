@@ -234,7 +234,7 @@ func TestHermesProductionProcessSnapshotLifecycle(t *testing.T) {
 				options = append(options, WithDarwinBestEffortContainment())
 				test.wantSnapshots = nil
 			}
-			agent := NewAgent(options...)
+			agent := newTestAgent(options...)
 
 			server, err := agent.newHermesClient(
 				t.Context(), "snapshot-session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{Root: root},

@@ -10,11 +10,21 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+func newTestAgent(opts ...Option) *Agent {
+	base := make([]Option, 0, 2+len(opts))
+	base = append(base, WithProcessIsolation(ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+		BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+	}), func(options *Options) { options.testOnlyNoCredential = true })
+
+	return NewAgent(append(base, opts...)...)
+}
+
 // sessionMetaFromLifecycle decodes lifecycle meta through an agent with no
 // provider-auth root, which is the configuration every test that does not set
 // one runs under.
 func sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
-	return NewAgent().sessionMetaFromLifecycle(meta)
+	return newTestAgent().sessionMetaFromLifecycle(meta)
 }
 
 type fakeHermesClient struct {

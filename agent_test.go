@@ -32,7 +32,7 @@ func TestServeCloseErrorAndAgentCloneFallbacks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := newFakeHermesClient()
 	client.closeErr = errors.Join(errors.New("close failed"), ErrProcessContainmentIncomplete)
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 
@@ -92,7 +92,7 @@ func TestAgentCloseSingleflightPreservesContainmentEvidence(t *testing.T) {
 
 		return ErrProcessContainmentIncomplete
 	}
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 
@@ -121,7 +121,7 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 
 	spawnStarted := make(chan struct{})
 	releaseSpawn := make(chan struct{})
-	agent := NewAgent(
+	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithLogger(slog.New(slog.DiscardHandler)),
 		func(options *Options) {
@@ -192,7 +192,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 		sessionIDRandReader = reader
 		t.Cleanup(func() { sessionIDRandReader = oldReader })
 
-		agent := NewAgent()
+		agent := newTestAgent()
 		done := make(chan error, 1)
 		go func() {
 			_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
@@ -216,7 +216,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 		}
 		t.Cleanup(func() { reapHermesLeaseFile = oldReap })
 
-		agent := NewAgent()
+		agent := newTestAgent()
 		cleanupRoot := t.TempDir()
 		agent.deleteCleanup["deleted"] = deleteCleanupRecord{SessionID: "deleted", XDGRoot: cleanupRoot}
 		done := make(chan error, 1)
@@ -231,7 +231,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 	})
 
 	t.Run("fork", func(t *testing.T) {
-		agent := NewAgent()
+		agent := newTestAgent()
 		require.NoError(t, agent.Close())
 		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{SessionId: "parent", Cwd: t.TempDir()})
 		require.ErrorContains(t, err, "agent closed")
@@ -241,7 +241,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 
@@ -254,7 +254,7 @@ func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
 func TestServePreservesContainmentEvidenceAfterSessionRemoval(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
@@ -285,7 +285,7 @@ func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.createErr = errors.New("create failed")
 	client.closeErr = ErrProcessContainmentIncomplete
-	agent := NewAgent(func(options *Options) {
+	agent := newTestAgent(func(options *Options) {
 		options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return client, nil
 		}

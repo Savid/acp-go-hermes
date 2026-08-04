@@ -197,15 +197,15 @@ func TestCallForkSessionHelper(t *testing.T) {
 	ctx := context.Background()
 	for name, handler := range map[string]forkExtensionAgent{
 		"success": {
-			Agent:    NewAgent(),
+			Agent:    newTestAgent(),
 			response: acp.UnstableForkSessionResponse{SessionId: "forked"},
 		},
 		"agent error": {
-			Agent: NewAgent(),
+			Agent: newTestAgent(),
 			err:   errors.New("fork failed"),
 		},
 		"decode error": {
-			Agent:    NewAgent(),
+			Agent:    newTestAgent(),
 			response: json.RawMessage(`"bad"`),
 		},
 	} {
@@ -229,7 +229,7 @@ func TestCallForkSessionHelper(t *testing.T) {
 
 func TestAgentConnectionHelpers(t *testing.T) {
 	ctx := context.Background()
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
 	release, err := agent.acquireClientCall(ctx)
 	if err != nil {
 		t.Fatalf("acquireClientCall: %v", err)
@@ -359,7 +359,7 @@ func (noopACPClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExi
 func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
-	agent := NewAgent()
+	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
