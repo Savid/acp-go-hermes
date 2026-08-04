@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -231,6 +232,18 @@ func runHermesProcessSupervisor() int {
 	return runHermesProcessSupervisorCore(targetPath, supervisorArgs(), supervisorEnviron(), control, proof)
 }
 
+func startHermesSupervisorTarget(target *exec.Cmd) (error, error) {
+	runtime.LockOSThread()
+
+	defer runtime.UnlockOSThread()
+
+	if err := supervisorPrctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return err, nil
+	}
+
+	return nil, target.Start()
+}
+
 func runHermesProcessSupervisorCore(targetPath string, args []string, env []string, control *os.File, proof *os.File) int {
 	defer control.Close()
 	defer proof.Close()
@@ -243,7 +256,9 @@ func runHermesProcessSupervisorCore(targetPath string, args []string, env []stri
 	target.Stderr = os.Stderr
 	target.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 
-	if err := target.Start(); err != nil {
+	privilegeErr, startErr := startHermesSupervisorTarget(target)
+
+	if privilegeErr != nil || startErr != nil {
 		return 125
 	}
 
