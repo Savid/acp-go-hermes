@@ -25,7 +25,7 @@ const defaultImageLimitBytes int64 = 6 * 1024 * 1024
 type Option func(*Options)
 
 // ProcessIsolation is the mandatory operating-system identity and complete
-// base environment for every native Hermes process and launch supervisor.
+// base environment for every native Hermes process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -226,8 +226,8 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every Hermes process, version probe, and
-// supervisor to run as the supplied non-root identity with no supplementary
+// WithProcessIsolation requires every Hermes process and version probe to run
+// as the supplied non-root identity with no supplementary
 // groups. BaseEnvironment replaces the adapter environment; WithEnv and
 // session values overlay it.
 func WithProcessIsolation(isolation ProcessIsolation) Option {

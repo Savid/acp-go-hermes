@@ -3,6 +3,7 @@
 package hermes
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,11 +22,20 @@ import (
 )
 
 const (
-	envHermesSupervisor       = "ACP_GO_HERMES_PROCESS_SUPERVISOR"
-	envHermesSupervisorTarget = "ACP_GO_HERMES_PROCESS_SUPERVISOR_TARGET"
-	supervisorControlFD       = 3
-	supervisorProofFD         = 4
+	envHermesSupervisor  = "ACP_GO_HERMES_PROCESS_SUPERVISOR"
+	supervisorConfigFD   = 3
+	supervisorControlFD  = 4
+	supervisorProofFD    = 5
+	supervisorConfigName = "acp-go-hermes-process-supervisor"
 )
+
+type hermesSupervisorConfig struct {
+	Path      string           `json:"path"`
+	Args      []string         `json:"args"`
+	Dir       string           `json:"dir"`
+	Env       []string         `json:"env"`
+	Isolation ProcessIsolation `json:"isolation"`
+}
 
 var (
 	supervisorExit             = os.Exit
@@ -34,12 +44,13 @@ var (
 	supervisorCommand          = exec.Command
 	supervisorPrctl            = unix.Prctl
 	supervisorSetrlimit        = unix.Setrlimit
+	supervisorMemfd            = unix.MemfdCreate
+	supervisorSealConfig       = unix.FcntlInt
+	supervisorAcquireLock      = acquireAgentIdentityLock
 	supervisorPIDFDOpen        = unix.PidfdOpen
 	supervisorPIDFDSendSignal  = unix.PidfdSendSignal
 	supervisorNewFile          = os.NewFile
 	supervisorCloseOnExec      = unix.CloseOnExec
-	supervisorArgs             = func() []string { return os.Args }
-	supervisorEnviron          = os.Environ
 	supervisorReadDir          = os.ReadDir
 	supervisorReadFile         = os.ReadFile
 	supervisorWait4            = syscall.Wait4
@@ -56,12 +67,7 @@ func init() { //nolint:gochecknoinits // A private self-exec mode is required be
 }
 
 func runHermesSupervisorInit() {
-	if os.Getenv(envHermesSupervisor) == "" {
-		return
-	}
-	if err := verifyInheritedProcessIsolation(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "acp-go-hermes process supervisor:", err)
-		supervisorExit(125)
+	if os.Getenv(envHermesSupervisor) != "1" {
 		return
 	}
 
@@ -98,13 +104,36 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 		return nil, fmt.Errorf("resolve Hermes supervisor executable: %w", err)
 	}
 
+	config := hermesSupervisorConfig{
+		Path:      target.Path,
+		Args:      append([]string(nil), target.Args...),
+		Dir:       target.Dir,
+		Env:       append([]string(nil), target.Env...),
+		Isolation: *spec.Isolation,
+	}
+	configFD, err := supervisorMemfd(supervisorConfigName, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return nil, fmt.Errorf("create Hermes supervisor config: %w", err)
+	}
+	configFile := os.NewFile(uintptr(configFD), supervisorConfigName)
+	if err := writeHermesSupervisorConfig(configFile, config); err != nil {
+		_ = configFile.Close()
+		return nil, err
+	}
+	if _, err := supervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+		_ = configFile.Close()
+		return nil, fmt.Errorf("seal Hermes supervisor config: %w", err)
+	}
+
 	controlRead, controlWrite, err := supervisorPipe()
 	if err != nil {
+		_ = configFile.Close()
 		return nil, fmt.Errorf("create Hermes supervisor control pipe: %w", err)
 	}
 
 	proofRead, proofWrite, err := supervisorPipe()
 	if err != nil {
+		_ = configFile.Close()
 		_ = controlRead.Close()
 		_ = controlWrite.Close()
 
@@ -112,6 +141,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	}
 
 	cleanupPipes := func() {
+		_ = configFile.Close()
 		_ = controlRead.Close()
 		_ = controlWrite.Close()
 		_ = proofRead.Close()
@@ -120,26 +150,13 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 
 	supervisor := supervisorCommand(self) // #nosec G204 -- self-exec enters the private subreaper mode above.
 
-	supervisor.Args = append([]string(nil), target.Args...)
-	supervisor.Dir = target.Dir
-
-	supervisor.Env, err = supervisorEnvironment(target.Env, spec.Isolation,
-		envHermesSupervisor+"=1",
-		envHermesSupervisorTarget+"="+target.Path,
-	)
-	if err != nil {
-		cleanupPipes()
-		return nil, fmt.Errorf("build Hermes supervisor environment: %w", err)
-	}
+	supervisor.Dir = "/"
+	supervisor.Env = []string{envHermesSupervisor + "=1", "GORACE=atexit_sleep_ms=0"}
 	supervisor.Stdin = target.Stdin
 	supervisor.Stdout = target.Stdout
 	supervisor.Stderr = target.Stderr
-	supervisor.ExtraFiles = []*os.File{controlRead, proofWrite}
+	supervisor.ExtraFiles = []*os.File{configFile, controlRead, proofWrite}
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := applyProcessIsolation(supervisor, spec.Isolation); err != nil {
-		cleanupPipes()
-		return nil, fmt.Errorf("apply Hermes supervisor isolation: %w", err)
-	}
 	// Install the wrapper command before launch. exec.Cmd must not be copied
 	// after Start: its private waiter and pipe-copy state belong to the exact
 	// value that was started, and copying it races version-probe output drains.
@@ -154,6 +171,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 
 	_ = controlRead.Close()
 	_ = proofWrite.Close()
+	_ = configFile.Close()
 
 	proof := make(chan bool, 1)
 	go func() {
@@ -181,7 +199,9 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 			return closeErr
 		},
 		killFn: func() error {
-			return signalLeaseGroup(supervisor.Process.Pid, syscall.SIGKILL)
+			terminateOnce.Do(func() { closeErr = controlWrite.Close() })
+
+			return closeErr
 		},
 		descendantCountFn: func() (int, bool) {
 			descendants, err := listSupervisorDescendants(supervisor.Process.Pid)
@@ -206,12 +226,10 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 }
 
 func runHermesProcessSupervisor() int {
-	targetPath := os.Getenv(envHermesSupervisorTarget)
-	if targetPath == "" {
+	if err := supervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return 125
 	}
-
-	if err := supervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+	if err := supervisorPrctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return 125
 	}
 
@@ -224,16 +242,41 @@ func runHermesProcessSupervisor() int {
 
 	_ = unix.Close(selfPIDFD)
 
+	configInput := supervisorNewFile(supervisorConfigFD, "hermes-supervisor-config")
 	control := supervisorNewFile(supervisorControlFD, "hermes-supervisor-control")
 	proof := supervisorNewFile(supervisorProofFD, "hermes-supervisor-proof")
 
+	supervisorCloseOnExec(supervisorConfigFD)
 	supervisorCloseOnExec(supervisorControlFD)
 	supervisorCloseOnExec(supervisorProofFD)
+	if configInput == nil || control == nil || proof == nil {
+		return 125
+	}
+	defer configInput.Close()
 
-	return runHermesProcessSupervisorCore(targetPath, supervisorArgs(), supervisorEnviron(), control, proof)
+	var config hermesSupervisorConfig
+	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
+		return 125
+	}
+	if config.Path == "" || len(config.Args) == 0 || validateProcessIsolation(&config.Isolation) != nil {
+		return 125
+	}
+
+	return runHermesProcessSupervisorCore(config, control, proof)
 }
 
-func startHermesSupervisorTarget(target *exec.Cmd) (error, error) {
+func writeHermesSupervisorConfig(file io.WriteSeeker, config hermesSupervisorConfig) error {
+	if err := json.NewEncoder(file).Encode(config); err != nil {
+		return fmt.Errorf("encode Hermes supervisor config: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind Hermes supervisor config: %w", err)
+	}
+
+	return nil
+}
+
+func startHermesSupervisorTarget(target *exec.Cmd, isolation *ProcessIsolation) (error, error) {
 	runtime.LockOSThread()
 
 	defer runtime.UnlockOSThread()
@@ -244,23 +287,43 @@ func startHermesSupervisorTarget(target *exec.Cmd) (error, error) {
 	if err := supervisorPrctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return err, nil
 	}
+	if err := applyProcessIsolation(target, isolation); err != nil {
+		return fmt.Errorf("apply Hermes native process isolation: %w", err), nil
+	}
 
 	return nil, target.Start()
 }
 
-func runHermesProcessSupervisorCore(targetPath string, args []string, env []string, control *os.File, proof *os.File) int {
+func runHermesProcessSupervisorCore(config hermesSupervisorConfig, control *os.File, proof *os.File) int {
 	defer control.Close()
 	defer proof.Close()
 
-	target := exec.Command(targetPath, args[1:]...) // #nosec G204,G702 -- target path and argv came from the validated parent command.
-	target.Args[0] = args[0]
-	target.Env = supervisorTargetEnv(env)
+	target := exec.Command(config.Path, config.Args[1:]...) // #nosec G204,G702 -- target path and argv came through the private parent descriptor.
+	target.Args = append([]string(nil), config.Args...)
+	target.Dir = config.Dir
+	target.Env = append([]string(nil), config.Env...)
 	target.Stdin = os.Stdin
 	target.Stdout = os.Stdout
 	target.Stderr = os.Stderr
 	target.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 
-	privilegeErr, startErr := startHermesSupervisorTarget(target)
+	shutdown := make(chan struct{}, 1)
+	go func() {
+		_, _ = io.Copy(io.Discard, control)
+		shutdown <- struct{}{}
+	}()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+
+	identityLock, err := supervisorAcquireLock(config.Isolation.UID, config.Isolation.TestOnlyNoCredential, shutdown, signals)
+	if err != nil {
+		return 125
+	}
+	defer identityLock.Close()
+
+	privilegeErr, startErr := startHermesSupervisorTarget(target, &config.Isolation)
 
 	if privilegeErr != nil || startErr != nil {
 		return 125
@@ -269,20 +332,6 @@ func runHermesProcessSupervisorCore(targetPath string, args []string, env []stri
 	targetDone := make(chan error, 1)
 
 	go func() { targetDone <- target.Wait() }()
-
-	shutdown := make(chan struct{}, 1)
-
-	go func() {
-		_, _ = io.Copy(io.Discard, control)
-
-		shutdown <- struct{}{}
-	}()
-
-	signals := make(chan os.Signal, 1)
-
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
-
-	defer signal.Stop(signals)
 
 	var (
 		targetErr     error
@@ -301,11 +350,21 @@ func runHermesProcessSupervisorCore(targetPath string, args []string, env []stri
 	// call wait4(-1) only after that result was consumed; otherwise the two
 	// waiters can race and a root-timeout path could manufacture false proof.
 	if !targetSettled {
-		return 126
+		for !targetSettled {
+			_ = signalSupervisorDescendants(syscall.SIGKILL)
+			select {
+			case targetErr = <-targetDone:
+				targetSettled = true
+			case <-time.After(supervisorPollInterval):
+			}
+		}
 	}
 
-	if err := proveSupervisorDescendants(5 * time.Second); err != nil {
-		return 126
+	for {
+		if err := proveSupervisorDescendants(5 * time.Second); err == nil {
+			break
+		}
+		time.Sleep(time.Second)
 	}
 
 	if _, err := proof.Write([]byte{1}); err != nil {
@@ -322,23 +381,6 @@ func runHermesProcessSupervisorCore(targetPath string, args []string, env []stri
 	}
 
 	return 1
-}
-
-func supervisorTargetEnv(env []string) []string {
-	out := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, envHermesSupervisor+"=") ||
-			strings.HasPrefix(entry, envHermesSupervisorTarget+"=") ||
-			strings.HasPrefix(entry, envIsolationUID+"=") ||
-			strings.HasPrefix(entry, envIsolationGID+"=") ||
-			strings.HasPrefix(entry, envIsolationTest+"=") {
-			continue
-		}
-
-		out = append(out, entry)
-	}
-
-	return out
 }
 
 func stopSupervisedDescendants(targetPID int, targetDone <-chan error) (error, bool) {
