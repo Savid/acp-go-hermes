@@ -128,7 +128,7 @@ func TestLinuxSupervisorPreservesCommandEnvironmentSemantics(t *testing.T) {
 	}
 }
 
-func TestLinuxSupervisorNativeChildHasNoNewPrivileges(t *testing.T) {
+func TestLinuxSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	const (
 		phaseEnv  = "ACP_GO_HERMES_TEST_NO_NEW_PRIVS_PHASE"
 		statusEnv = "ACP_GO_HERMES_TEST_NO_NEW_PRIVS_STATUS"
@@ -136,7 +136,7 @@ func TestLinuxSupervisorNativeChildHasNoNewPrivileges(t *testing.T) {
 	if os.Getenv(phaseEnv) == "child" {
 		restoreLinuxSupervisorSeams(t)
 		status := os.Getenv(statusEnv)
-		script := `while read -r key value rest; do if [ "$key" = "NoNewPrivs:" ]; then printf '%s\n' "$value" > "$1"; exit 0; fi; done < /proc/self/status; exit 1`
+		script := `nnp=$(awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status); printf '%s %s\n' "$nnp" "$(ulimit -c)" > "$1"`
 		code, proof := runSupervisorCoreTest(t, []string{"/bin/sh", "-c", script, "nnp", status}, nil)
 		if code != 0 || proof != 1 {
 			t.Fatalf("native proof code/value = %d/%d", code, proof)
@@ -146,14 +146,14 @@ func TestLinuxSupervisorNativeChildHasNoNewPrivileges(t *testing.T) {
 	}
 
 	restoreLinuxSupervisorSeams(t)
-	status := filepath.Join(t.TempDir(), "no-new-privileges")
-	process := exec.Command(os.Args[0], "-test.run=^TestLinuxSupervisorNativeChildHasNoNewPrivileges$")
+	status := filepath.Join(t.TempDir(), "security-limits")
+	process := exec.Command(os.Args[0], "-test.run=^TestLinuxSupervisorNativeChildHasSecurityLimits$")
 	process.Env = append(os.Environ(), phaseEnv+"=child", statusEnv+"="+status)
 	if output, err := process.CombinedOutput(); err != nil {
 		t.Fatalf("native proof process: %v\n%s", err, output)
 	}
-	if value, err := os.ReadFile(status); err != nil || string(value) != "1\n" {
-		t.Fatalf("native NoNewPrivs = %q, %v", value, err)
+	if value, err := os.ReadFile(status); err != nil || string(value) != "1 0\n" {
+		t.Fatalf("native security limits = %q, %v", value, err)
 	}
 }
 
@@ -213,6 +213,15 @@ func TestLinuxProcessCloseFallbackResultTracksContainmentProof(t *testing.T) {
 }
 
 func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
+	t.Run("core-limit failure", func(t *testing.T) {
+		restoreLinuxSupervisorSeams(t)
+		supervisorSetrlimit = func(int, *unix.Rlimit) error { return errors.New("setrlimit") }
+		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "exit 0"}, nil)
+		if code != 125 || proof != 0 {
+			t.Fatalf("core result code/proof = %d/%d", code, proof)
+		}
+	})
+
 	t.Run("no new privileges failure", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
 		supervisorPrctl = func(option int, _, _, _, _ uintptr) error {
@@ -701,6 +710,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 	oldPipe := supervisorPipe
 	oldCommand := supervisorCommand
 	oldPrctl := supervisorPrctl
+	oldSetrlimit := supervisorSetrlimit
 	oldPIDFDOpen := supervisorPIDFDOpen
 	oldPIDFDSendSignal := supervisorPIDFDSendSignal
 	oldNewFile := supervisorNewFile
@@ -723,6 +733,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 		supervisorPipe = oldPipe
 		supervisorCommand = oldCommand
 		supervisorPrctl = oldPrctl
+		supervisorSetrlimit = oldSetrlimit
 		supervisorPIDFDOpen = oldPIDFDOpen
 		supervisorPIDFDSendSignal = oldPIDFDSendSignal
 		supervisorNewFile = oldNewFile

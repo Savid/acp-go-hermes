@@ -33,6 +33,7 @@ var (
 	supervisorPipe             = os.Pipe
 	supervisorCommand          = exec.Command
 	supervisorPrctl            = unix.Prctl
+	supervisorSetrlimit        = unix.Setrlimit
 	supervisorPIDFDOpen        = unix.PidfdOpen
 	supervisorPIDFDSendSignal  = unix.PidfdSendSignal
 	supervisorNewFile          = os.NewFile
@@ -237,6 +238,9 @@ func startHermesSupervisorTarget(target *exec.Cmd) (error, error) {
 
 	defer runtime.UnlockOSThread()
 
+	if err := supervisorSetrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
+		return fmt.Errorf("disable Hermes native core dumps: %w", err), nil
+	}
 	if err := supervisorPrctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return err, nil
 	}
