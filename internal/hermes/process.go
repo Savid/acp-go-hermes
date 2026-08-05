@@ -53,6 +53,7 @@ var (
 	processTreeClose            = func(tree *processContainment) error { return tree.close() }
 	startHermesContainedProcess = startContainedProcess
 	newProcessBrowserShim       = newBrowserShim
+	processNativeTreeHandoff    = handoffGeneratedNativeTree
 	executableProbeMu           sync.Mutex
 	executableProbed            = map[string]bool{}
 	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
@@ -236,10 +237,10 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		return nil, err
 	}
 	if shim != nil {
-		if err := handoffGeneratedNativeTree(shim.dir, opts.Isolation); err != nil {
+		if handoffErr := processNativeTreeHandoff(shim.dir, opts.Isolation); handoffErr != nil {
 			cancel()
 
-			return nil, errors.Join(err, shim.remove())
+			return nil, errors.Join(handoffErr, shim.remove())
 		}
 	}
 
@@ -385,6 +386,16 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		}
 
 		return false, errors.Join(envErr, removeErr)
+	}
+	probeEnvironment = upsertProcessEnv(probeEnvironment, "HERMES_HOME", probeRoot)
+	if handoffErr := processNativeTreeHandoff(probeRoot, opts.Isolation); handoffErr != nil {
+		nativeRelease()
+		removeErr := removeAll(probeRoot)
+		if removeErr == nil {
+			scratchRelease()
+		}
+
+		return false, fmt.Errorf("handoff Hermes version-probe generation: %w", errors.Join(handoffErr, removeErr))
 	}
 	cmd.Env = probeEnvironment
 	cmd.Stdout = &output
@@ -670,6 +681,12 @@ func (p *Process) waitReady(ctx context.Context) error {
 		}
 
 		select {
+		case <-p.waitDone:
+			if p.Cmd != nil && p.Cmd.ProcessState != nil {
+				return fmt.Errorf("hermes process exited before readiness: %s", p.Cmd.ProcessState)
+			}
+
+			return errors.New("hermes process exited before readiness")
 		case <-ctx.Done():
 			if err != nil {
 				return fmt.Errorf("hermes status check failed: %w", err)

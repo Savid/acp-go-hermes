@@ -490,6 +490,9 @@ var (
 	hermesUnmarshalYAML = yaml.Unmarshal
 	hermesWriteLease    = WriteLease
 	hermesReapLeaseFile = ReapLeaseFile
+	hermesControlMkdir  = os.MkdirAll
+	hermesControlChmod  = os.Chmod
+	hermesNativeHandoff = handoffGeneratedNativeTree
 	InspectProcess      = inspectHermesProcess
 )
 
@@ -529,16 +532,20 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	if err := ensureXDGDirs(xdg); err != nil {
 		return nil, err
 	}
+
 	controlDir := options.ControlDir
 	if controlDir == "" {
 		controlDir = ControlDirForXDG(xdg.Root)
 	}
-	if err := os.MkdirAll(controlDir, 0o700); err != nil {
+
+	if err := hermesControlMkdir(controlDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create Hermes control directory: %w", err)
 	}
-	if err := os.Chmod(controlDir, 0o700); err != nil {
+
+	if err := hermesControlChmod(controlDir, 0o700); err != nil {
 		return nil, fmt.Errorf("protect Hermes control directory: %w", err)
 	}
+
 	leasePath := filepath.Join(controlDir, LeaseFileName)
 
 	// A server owns exactly one session XDG root. Recover only a predecessor
@@ -562,7 +569,8 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 
 		return nil, configErr
 	}
-	if ownershipErr := handoffGeneratedNativeTree(xdg.Root, options.Isolation); ownershipErr != nil {
+
+	if ownershipErr := hermesNativeHandoff(xdg.Root, options.Isolation); ownershipErr != nil {
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, ownershipErr)
 
 		return nil, ownershipErr

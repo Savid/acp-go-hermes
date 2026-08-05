@@ -61,13 +61,21 @@ func authAcquireGate[K comparable](ctx context.Context, mu *sync.Mutex, gates ma
 	default:
 	}
 
-	select {
-	case gate.ch <- struct{}{}:
+	if waitForAuthGate(ctx, gate.ch) {
 		return held, true
-	case <-ctx.Done():
-		leave()
+	}
 
-		return nil, false
+	leave()
+
+	return nil, false
+}
+
+func waitForAuthGate(ctx context.Context, ch chan<- struct{}) bool {
+	select {
+	case ch <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

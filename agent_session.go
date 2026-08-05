@@ -1013,6 +1013,10 @@ func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bo
 		BaseEnvironment:          base,
 		TestOnlyNoCredential:     testOnlyNoCredential,
 		TestOnlyIdentityLockRoot: testOnlyIdentityLockRoot,
+		IdentityLock:             isolation.IdentityLock,
+		AuthorityDomain:          isolation.AuthorityDomain,
+		StandaloneOwnerID:        isolation.StandaloneOwnerID,
+		StandaloneStateRoot:      isolation.StandaloneStateRoot,
 	}
 }
 
@@ -1140,20 +1144,6 @@ func (a *Agent) rejectInvalidConfiguration() error {
 
 	if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
 		return err
-	}
-
-	return nil
-}
-
-func validateProcessIsolationOption(isolation *ProcessIsolation) error {
-	if isolation == nil {
-		return errors.New("process isolation policy is required")
-	}
-	if isolation.UID == 0 || isolation.GID == 0 {
-		return errors.New("process isolation UID and GID must be nonzero")
-	}
-	if agentRuntimePlatform == agentRuntimeWindows {
-		return errors.New("process isolation is unsupported on windows")
 	}
 
 	return nil

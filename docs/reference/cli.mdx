@@ -21,6 +21,8 @@ fields and trailing JSON values are rejected.
 {
   "uid": 20001,
   "gid": 20001,
+  "standaloneOwnerId": "hermes-deployment-1",
+  "standaloneStateRoot": "/var/lib/acp-go-hermes",
   "baseEnvironment": {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "HOME": "/var/lib/acp-go-hermes",
@@ -31,6 +33,18 @@ fields and trailing JSON values are rejected.
   "inheritEnvironment": []
 }
 ```
+
+`standaloneOwnerId` is the nonsecret, case-sensitive deployment identity:
+1--256 ASCII bytes, beginning alphanumeric, with remaining bytes limited to
+alphanumerics and `._:@/-`. `standaloneStateRoot` is an existing dedicated
+durable provider-state anchor. It is neither `/` nor equal to or beneath
+`/var/lib/acp-go/agent-identities`. Its clean absolute UTF-8 path is limited to
+4096 bytes with no control character. Linux resolves the path componentwise
+from `/` without following symlinks or magic links. Every ancestor is
+root-owned and not group/world writable; the final directory is owned by the
+configured UID:GID with mode `0700`. The authority permanently binds its exact
+path, device, and inode. Hermes still gives each session a separate ephemeral
+`HERMES_HOME`; this durable anchor does not become a shared session home.
 
 The supervisor must run as root. The UID/GID must name a nonroot account with
 that same-name private primary group, no supplementary groups, and a target-owned mode

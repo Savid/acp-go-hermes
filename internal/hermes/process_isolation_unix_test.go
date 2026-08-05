@@ -32,6 +32,10 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	require.Error(t, verifyProcessIsolation(policy))
 	processIsolationGeteuid = func() int { return 12 }
 	require.Error(t, verifyProcessIsolation(policy))
+	cmd = exec.Command("/usr/bin/true")
+	require.NoError(t, applyProcessIsolation(cmd, policy))
+	require.NotNil(t, cmd.SysProcAttr)
+	require.NotNil(t, cmd.SysProcAttr.Credential)
 	require.Error(t, verifyProcessIsolation(nil))
 	require.Error(t, applyProcessIsolation(nil, policy))
 	require.Error(t, applyProcessIsolation(exec.Command("/usr/bin/true"), nil))

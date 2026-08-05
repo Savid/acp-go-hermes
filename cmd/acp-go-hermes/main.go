@@ -114,9 +114,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
 		hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
-			UID:             isolation.UID,
-			GID:             isolation.GID,
-			BaseEnvironment: isolation.BaseEnvironment,
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
 		}),
 	)
 	if len(seeded) > 0 {

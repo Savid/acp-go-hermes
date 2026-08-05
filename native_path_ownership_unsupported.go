@@ -8,16 +8,8 @@ import (
 	"runtime"
 )
 
-func handoffGeneratedNativeTreePlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
-		return nil
-	}
-
-	return fmt.Errorf("native path ownership handoff is unsupported on %s", runtime.GOOS)
-}
-
 func validateNativeOwnedDirectoryPlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+	if int64(uid) == int64(os.Geteuid()) && int64(gid) == int64(os.Getegid()) {
 		return nil
 	}
 

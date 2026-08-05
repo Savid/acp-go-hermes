@@ -2636,6 +2636,25 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 
 	restoreHermesClientSeams(t)
+	hermesControlMkdir = func(string, os.FileMode) error { return errors.New("control mkdir") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "control mkdir") {
+		t.Fatalf("control mkdir error = %v", err)
+	}
+	hermesControlMkdir = os.MkdirAll
+	hermesControlChmod = func(string, os.FileMode) error { return errors.New("control chmod") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "control chmod") {
+		t.Fatalf("control chmod error = %v", err)
+	}
+	hermesControlChmod = os.Chmod
+	hermesNativeHandoff = func(string, *ProcessIsolation) error { return errors.New("native handoff") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "native handoff") {
+		t.Fatalf("native handoff error = %v", err)
+	}
+	hermesNativeHandoff = handoffGeneratedNativeTree
+
 	hermesReapLeaseFile = func(string, *slog.Logger) bool { return true }
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil || !strings.Contains(err.Error(), "remains live") {
 		t.Fatalf("retained lease error = %v", err)
@@ -3180,11 +3199,17 @@ func restoreHermesClientSeams(t *testing.T) {
 	marshalIndent := hermesMarshalIndent
 	writeLease2 := hermesWriteLease
 	reapLeaseFile := hermesReapLeaseFile
+	controlMkdir := hermesControlMkdir
+	controlChmod := hermesControlChmod
+	nativeHandoff := hermesNativeHandoff
 	inspectProcess := InspectProcess
 	t.Cleanup(func() {
 		hermesMarshalIndent = marshalIndent
 		hermesWriteLease = writeLease2
 		hermesReapLeaseFile = reapLeaseFile
+		hermesControlMkdir = controlMkdir
+		hermesControlChmod = controlChmod
+		hermesNativeHandoff = nativeHandoff
 		InspectProcess = inspectProcess
 	})
 }

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -82,6 +84,12 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	}
 	if config.BaseEnvironment == nil {
 		return processIsolationConfig{}, fmt.Errorf("baseEnvironment must be a JSON object")
+	}
+	if !validProcessIsolationOwnerID(config.StandaloneOwnerID) {
+		return processIsolationConfig{}, fmt.Errorf("standaloneOwnerId is invalid")
+	}
+	if !validProcessIsolationStateRoot(config.StandaloneStateRoot) {
+		return processIsolationConfig{}, fmt.Errorf("standaloneStateRoot must be a clean absolute UTF-8 path of at most 4096 bytes without control characters")
 	}
 
 	account, err := processIsolationLookupUserID(strconv.FormatUint(uint64(config.UID), 10))
@@ -165,6 +173,38 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	config.InheritEnvironment = nil
 
 	return config, nil
+}
+
+func validProcessIsolationOwnerID(value string) bool {
+	if len(value) == 0 || len(value) > 256 {
+		return false
+	}
+	letterOrDigit := func(value byte) bool {
+		return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+	}
+	if !letterOrDigit(value[0]) {
+		return false
+	}
+	for _, character := range []byte(value[1:]) {
+		if letterOrDigit(character) || strings.ContainsRune("._:@/-", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validProcessIsolationStateRoot(value string) bool {
+	if len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+		filepath.Clean(value) != value || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateTargetHome(path string, uid uint32, gid uint32) error {

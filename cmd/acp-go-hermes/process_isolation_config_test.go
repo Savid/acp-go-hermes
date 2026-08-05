@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -17,9 +19,11 @@ func stubProcessIsolationConfig(t *testing.T) {
 		}
 
 		return processIsolationConfig{
-			UID:             20001,
-			GID:             20001,
-			BaseEnvironment: map[string]string{"PATH": "/usr/bin", "HOME": "/var/empty/acp", "USER": "acp", "LOGNAME": "acp"},
+			UID:                 20001,
+			GID:                 20001,
+			BaseEnvironment:     map[string]string{"PATH": "/usr/bin", "HOME": "/var/empty/acp", "USER": "acp", "LOGNAME": "acp"},
+			StandaloneOwnerID:   "test-owner",
+			StandaloneStateRoot: "/var/empty/acp",
 		}, nil
 	}
 	t.Cleanup(func() { processIsolationConfigLoader = original })
@@ -30,11 +34,12 @@ func isolatedArgs(args ...string) []string {
 }
 
 func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
-	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"]}`))
+	config, err := decodeProcessIsolationConfig([]byte(`{"uid":20001,"gid":20002,"baseEnvironment":{"PATH":"/usr/bin"},"inheritEnvironment":["AMP_API_KEY"],"standaloneOwnerId":"deployment-a","standaloneStateRoot":"/var/lib/acp"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.UID != 20001 || config.GID != 20002 || config.BaseEnvironment["PATH"] != "/usr/bin" || len(config.InheritEnvironment) != 1 {
+	if config.UID != 20001 || config.GID != 20002 || config.BaseEnvironment["PATH"] != "/usr/bin" || len(config.InheritEnvironment) != 1 ||
+		config.StandaloneOwnerID != "deployment-a" || config.StandaloneStateRoot != "/var/lib/acp" {
 		t.Fatalf("decoded config = %#v", config)
 	}
 
@@ -42,12 +47,26 @@ func TestDecodeProcessIsolationConfigStrict(t *testing.T) {
 		`{"uid":1,"gid":2,"baseEnvironment":{},"unknown":true}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{}} {}`,
 		`{"uid":1,"uid":2,"gid":2,"baseEnvironment":{}}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},"standaloneOwnerId":"a","standaloneOwnerId":"b"}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{},"standaloneStateRoot":"/a","standaloneStateRoot":"/b"}`,
 		`{"uid":1,"gid":2,"baseEnvironment":{"PATH":"/bin","PATH":"/usr/bin"}}`,
+		`{"uid":1,"gid":2,"baseEnvironment":{}} trailing`,
+		`{"uid":1 "gid":2}`,
+		`[1,`,
 		``,
 	} {
 		if _, err := decodeProcessIsolationConfig([]byte(document)); err == nil {
 			t.Fatalf("decode unexpectedly accepted %q", document)
 		}
+	}
+	if _, err := decodeProcessIsolationConfig([]byte{0xff}); err == nil {
+		t.Fatal("invalid UTF-8 was accepted")
+	}
+	if err := scanJSONValue(json.NewDecoder(bytes.NewBufferString(`]`))); err == nil {
+		t.Fatal("unexpected closing delimiter was accepted")
+	}
+	if err := scanJSONDelimitedValue(json.NewDecoder(bytes.NewBufferString(`null`)), json.Delim(']')); err == nil {
+		t.Fatal("unexpected delimiter was accepted")
 	}
 }
 

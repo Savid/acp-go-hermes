@@ -58,3 +58,15 @@ jobs:
 
       - name: Trusted supervisor security suite
         run: sudo env "PATH=$PATH" HOME=/root make test-trusted-supervisor
+
+  native-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Native browser containment canary
+        run: make test-integration-native-browser

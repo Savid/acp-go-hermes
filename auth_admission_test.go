@@ -38,6 +38,20 @@ func TestAuthAcquireGateSerializesAndHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestWaitForAuthGateAcquiresAfterRelease(t *testing.T) {
+	ch := make(chan struct{}, 1)
+	ch <- struct{}{}
+	acquired := make(chan bool, 1)
+	go func() {
+		acquired <- waitForAuthGate(context.Background(), ch)
+	}()
+	<-ch
+	if !<-acquired {
+		t.Fatal("waiter did not acquire the released gate")
+	}
+	<-ch
+}
+
 func TestProviderAndLedgerGatesAreProviderScoped(t *testing.T) {
 	t.Parallel()
 

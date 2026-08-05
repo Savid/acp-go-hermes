@@ -5,10 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
 
 type ProcessIsolation struct {
 	UID                      uint32
@@ -16,7 +23,13 @@ type ProcessIsolation struct {
 	BaseEnvironment          map[string]string
 	TestOnlyNoCredential     bool
 	TestOnlyIdentityLockRoot string
+	IdentityLock             ProcessIdentityLockCapability `json:"-"`
+	AuthorityDomain          ProcessIdentityLockCapability `json:"-"`
+	StandaloneOwnerID        string                        `json:"standaloneOwnerId"`
+	StandaloneStateRoot      string                        `json:"standaloneStateRoot"`
 }
+
+var processIsolationPlatform = runtime.GOOS
 
 const (
 	privateSupervisorEnvPrefix = "ACP_" + "GO_HERMES_INTERNAL_"
@@ -34,8 +47,16 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation UID and GID must be nonzero")
 	}
+
 	if isolation.BaseEnvironment == nil {
 		return errors.New("process isolation base environment is required")
+	}
+
+	if processIsolationPlatform == "linux" &&
+		(!isolation.TestOnlyNoCredential || isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "") {
+		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
+			return err
+		}
 	}
 
 	for key := range isolation.BaseEnvironment {
@@ -50,6 +71,77 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 	}
 
 	return validateProcessIsolationPlatform()
+}
+
+func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
+	identityLock := isolation.IdentityLock != nil
+	authorityDomain := isolation.AuthorityDomain != nil
+
+	if identityLock != authorityDomain {
+		return errors.New("process identity lock and authority domain must be provided together")
+	}
+
+	if identityLock {
+		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("borrowed process identity forbids standalone owner fields")
+		}
+
+		return nil
+	}
+
+	if !validStandaloneOwnerID(isolation.StandaloneOwnerID) {
+		return errors.New("standalone owner id must be 1..256 valid UTF-8 bytes without whitespace or control characters")
+	}
+
+	if !validStandaloneStateRootPath(isolation.StandaloneStateRoot) {
+		return errors.New("standalone state root must be a clean absolute path")
+	}
+
+	return nil
+}
+
+func validStandaloneStateRootPath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+		filepath.Clean(value) != value || value == "/" || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+
+	const authorityRoot = "/var/lib/acp-go/agent-identities"
+
+	if value == authorityRoot || strings.HasPrefix(value, authorityRoot+string(filepath.Separator)) {
+		return false
+	}
+
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func validStandaloneOwnerID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+
+	letterOrDigit := func(value byte) bool {
+		return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+	}
+	if !letterOrDigit(value[0]) {
+		return false
+	}
+
+	for _, character := range []byte(value[1:]) {
+		if letterOrDigit(character) || strings.ContainsRune("._:@/-", rune(character)) {
+			continue
+		}
+
+		return false
+	}
+
+	return true
 }
 
 func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]string) ([]string, error) {

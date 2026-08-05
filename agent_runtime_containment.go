@@ -9,6 +9,7 @@ var agentRuntimePlatform = runtime.GOOS
 
 const (
 	agentRuntimeDarwin  = "darwin"
+	agentRuntimeLinux   = "linux"
 	agentRuntimeWindows = "windows"
 )
 
@@ -18,7 +19,7 @@ func containmentMode(options Options) RuntimeContainmentMode {
 	}
 
 	switch agentRuntimePlatform {
-	case "linux":
+	case agentRuntimeLinux:
 		return RuntimeContainmentAuthoritative
 	case agentRuntimeDarwin:
 		if options.DarwinBestEffortContainment {

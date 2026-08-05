@@ -546,7 +546,7 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	assertProcessStartSeams(t, ctx)
 }
 
-func TestProcessFailsClosedWhenSupervisorDiesBeforeProof(t *testing.T) {
+func TestProcessSupervisorShutdownRetainsContainmentProof(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -574,13 +574,8 @@ func TestProcessFailsClosedWhenSupervisorDiesBeforeProof(t *testing.T) {
 	if proc.Cmd.ProcessState == nil {
 		t.Fatal("process waiter completed without recording process state")
 	}
-	closeErr := proc.Close(ctx)
-	if runtime.GOOS == "darwin" {
-		if closeErr != nil {
-			t.Fatalf("Darwin best-effort Close after completed boundary = %v", closeErr)
-		}
-	} else if !errors.Is(closeErr, ErrProcessContainmentIncomplete) {
-		t.Fatalf("Close after forced supervisor death = %v, want containment failure", closeErr)
+	if err := proc.Close(ctx); err != nil {
+		t.Fatalf("Close after supervised shutdown = %v", err)
 	}
 }
 
@@ -611,6 +606,124 @@ func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
 	}
 	if err := methodPresent("broken.method", errors.New("broken")); err == nil {
 		t.Fatal("methodPresent accepted ordinary error")
+	}
+}
+
+func TestExecutableVersionProbeUsesGenerationHome(t *testing.T) {
+	restoreProcessSeams(t)
+	originalCommand := command
+	originalRemoveAll := removeAll
+	t.Cleanup(func() {
+		command = originalCommand
+		removeAll = originalRemoveAll
+	})
+
+	probeRoot := filepath.Join(t.TempDir(), "probe-root")
+	mkdirTemp = func(string, string) (string, error) { return probeRoot, nil }
+	command = func(string, ...string) *exec.Cmd { return &exec.Cmd{} }
+	wantStart := errors.New("probe start failed")
+	var capturedEnv []string
+	startHermesContainedProcess = func(cmd *exec.Cmd, specs ...ContainmentSpec) (*processContainment, error) {
+		capturedEnv = append([]string(nil), cmd.Env...)
+		if len(specs) != 1 || specs[0].GenerationRoot != probeRoot {
+			t.Fatalf("containment specs = %+v", specs)
+		}
+
+		return nil, wantStart
+	}
+	var handedOff string
+	processNativeTreeHandoff = func(root string, isolation *ProcessIsolation) error {
+		handedOff = root
+		if isolation == nil {
+			t.Fatal("probe handoff omitted isolation")
+		}
+
+		return nil
+	}
+	removed := ""
+	removeAll = func(root string) error {
+		removed = root
+
+		return nil
+	}
+	nativeReleases, scratchReleases := 0, 0
+	_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
+		Isolation: &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"HERMES_HOME": "/account-home"}},
+		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
+			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
+		},
+		RetainDiscoveryRoot: func(string, error) {},
+	})
+	if !errors.Is(err, wantStart) {
+		t.Fatalf("version probe error = %v", err)
+	}
+	if got := envValue(capturedEnv, "HERMES_HOME"); got != probeRoot {
+		t.Fatalf("HERMES_HOME = %q, want %q", got, probeRoot)
+	}
+	if handedOff != probeRoot || removed != probeRoot {
+		t.Fatalf("handoff=%q remove=%q, want %q", handedOff, removed, probeRoot)
+	}
+	if nativeReleases != 1 || scratchReleases != 1 {
+		t.Fatalf("releases native=%d scratch=%d", nativeReleases, scratchReleases)
+	}
+}
+
+func TestExecutableVersionProbeHandoffFailure(t *testing.T) {
+	for _, removeErr := range []error{nil, errors.New("remove failed")} {
+		t.Run(fmt.Sprint(removeErr), func(t *testing.T) {
+			restoreProcessSeams(t)
+			originalCommand := command
+			originalRemoveAll := removeAll
+			t.Cleanup(func() {
+				command = originalCommand
+				removeAll = originalRemoveAll
+			})
+
+			probeRoot := filepath.Join(t.TempDir(), "probe-root")
+			mkdirTemp = func(string, string) (string, error) { return probeRoot, nil }
+			command = func(string, ...string) *exec.Cmd { return &exec.Cmd{} }
+			wantHandoff := errors.New("handoff failed")
+			processNativeTreeHandoff = func(root string, _ *ProcessIsolation) error {
+				if root != probeRoot {
+					t.Fatalf("handoff root = %q", root)
+				}
+
+				return wantHandoff
+			}
+			startHermesContainedProcess = func(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
+				t.Fatal("probe started after handoff failure")
+
+				return nil, errors.New("unreachable")
+			}
+			removeAll = func(root string) error {
+				if root != probeRoot {
+					t.Fatalf("remove root = %q", root)
+				}
+
+				return removeErr
+			}
+			nativeReleases, scratchReleases := 0, 0
+			_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
+				Isolation: &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{}},
+				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
+					return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
+				},
+				RetainDiscoveryRoot: func(string, error) {},
+			})
+			if !errors.Is(err, wantHandoff) || (removeErr != nil && !errors.Is(err, removeErr)) {
+				t.Fatalf("version probe handoff error = %v", err)
+			}
+			if nativeReleases != 1 {
+				t.Fatalf("native releases = %d", nativeReleases)
+			}
+			wantScratchReleases := 1
+			if removeErr != nil {
+				wantScratchReleases = 0
+			}
+			if scratchReleases != wantScratchReleases {
+				t.Fatalf("scratch releases = %d, want %d", scratchReleases, wantScratchReleases)
+			}
+		})
 	}
 }
 
@@ -648,6 +761,16 @@ func TestProcessFaultBranches(t *testing.T) {
 	assertStartFaultModes(t, ctx)
 
 	restoreProcessSeams(t)
+	processNativeTreeHandoff = func(string, *ProcessIsolation) error { return errors.New("handoff failed") }
+	handoffExecutable := fakeHermesExecutable(t, fakeProcessModeOK)
+	markExecutableProbed(handoffExecutable)
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
+		ExecutablePath: handoffExecutable, Home: t.TempDir(),
+	})); err == nil || !strings.Contains(err.Error(), "handoff failed") {
+		t.Fatalf("Start handoff error = %v", err)
+	}
+
+	restoreProcessSeams(t)
 	mkdirTemp = func(string, string) (string, error) { return "", errors.New("mktemp failed") }
 	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK)})); err == nil {
 		t.Fatal("mktemp error ignored")
@@ -668,7 +791,9 @@ func TestProcessFaultBranches(t *testing.T) {
 	if _, err := randomToken(); err == nil {
 		t.Fatal("randomToken entropy error ignored")
 	}
-	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK), Home: t.TempDir()})); err == nil {
+	entropyExecutable := fakeHermesExecutable(t, fakeProcessModeOK)
+	markExecutableProbed(entropyExecutable)
+	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: entropyExecutable, Home: t.TempDir()})); err == nil {
 		t.Fatal("Start ignored randomToken error")
 	}
 
@@ -784,6 +909,35 @@ func assertProcessWaitBranches(t *testing.T, ctx context.Context) {
 	defer cancelStatus()
 	if err := (&Process{StatusURL: statusServer.URL}).waitReady(statusCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waitReady bad status error = %v", err)
+	}
+	waitDone := make(chan struct{})
+	close(waitDone)
+	exitCtx, exitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer exitCancel()
+	if err := (&Process{
+		StatusURL: "http://127.0.0.1:1/api/status",
+		waitDone:  waitDone,
+	}).waitReady(exitCtx); err == nil || !strings.Contains(err.Error(), "process exited before readiness") {
+		t.Fatalf("waitReady exited process error = %v", err)
+	}
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := exec.Command(testExecutable, "-test.run=^$")
+	if output, err := exited.CombinedOutput(); err != nil {
+		t.Fatalf("run exited process fixture: %v: %s", err, output)
+	}
+	exitedDone := make(chan struct{})
+	close(exitedDone)
+	stateCtx, stateCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer stateCancel()
+	if err := (&Process{
+		Cmd:       exited,
+		StatusURL: "http://127.0.0.1:1/api/status",
+		waitDone:  exitedDone,
+	}).waitReady(stateCtx); err == nil || !strings.Contains(err.Error(), "process exited before readiness:") {
+		t.Fatalf("waitReady process-state error = %v", err)
 	}
 
 	closedEvents := &Client{events: make(chan Event), errs: make(chan error)}
@@ -1020,6 +1174,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldHTTPClient := newStatusHTTPClient
 	oldWait := waitProcessCommand
 	oldStartContained := startHermesContainedProcess
+	oldNativeTreeHandoff := processNativeTreeHandoff
 	oldProbed := cloneExecutableProbeCache()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
@@ -1033,6 +1188,7 @@ func restoreProcessSeams(t *testing.T) {
 		newStatusHTTPClient = oldHTTPClient
 		waitProcessCommand = oldWait
 		startHermesContainedProcess = oldStartContained
+		processNativeTreeHandoff = oldNativeTreeHandoff
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
 		executableProbeMu.Unlock()

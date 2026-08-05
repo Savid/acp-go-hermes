@@ -37,15 +37,11 @@ type liveAgent struct {
 }
 
 // integrationAgentArgs builds the launch args every wrapper subprocess in this
-// tier shares. Darwin's containment boundary is opt-in, and a session refuses to
-// start without the operator's acceptance; every other platform rejects the flag.
+// tier shares.
 func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) []string {
 	args := []string{
 		"-path", hermesPath,
 		"-scratch-dir", home,
-	}
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-darwin-best-effort-containment")
 	}
 
 	return append(args, extraArgs...)

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 type darwinTestReadCloser struct {
@@ -57,7 +58,7 @@ func restoreDarwinLaunchSeams(t *testing.T) {
 	executable, command := darwinLaunchExecutable, darwinLaunchCommand
 	exit, execNative := darwinLaunchExit, darwinLaunchExec
 	input, openFile := darwinLaunchInput, darwinLaunchOpenFile
-	closeOnExec, createTemp := darwinLaunchCloseOnExec, darwinLaunchCreateTemp
+	fcntl, closeOnExec, createTemp := darwinLaunchFcntl, darwinLaunchCloseOnExec, darwinLaunchCreateTemp
 	chmod, encode := darwinLaunchFileChmod, darwinLaunchEncodeConfig
 	seek, remove := darwinLaunchFileSeek, darwinLaunchRemove
 	pipe, statusWait := darwinLaunchPipe, darwinLaunchStatusWait
@@ -66,7 +67,7 @@ func restoreDarwinLaunchSeams(t *testing.T) {
 		darwinLaunchExecutable, darwinLaunchCommand = executable, command
 		darwinLaunchExit, darwinLaunchExec = exit, execNative
 		darwinLaunchInput, darwinLaunchOpenFile = input, openFile
-		darwinLaunchCloseOnExec, darwinLaunchCreateTemp = closeOnExec, createTemp
+		darwinLaunchFcntl, darwinLaunchCloseOnExec, darwinLaunchCreateTemp = fcntl, closeOnExec, createTemp
 		darwinLaunchFileChmod, darwinLaunchEncodeConfig = chmod, encode
 		darwinLaunchFileSeek, darwinLaunchRemove = seek, remove
 		darwinLaunchPipe, darwinLaunchStatusWait = pipe, statusWait
@@ -190,7 +191,16 @@ func TestDarwinInheritedLaunchInputAndLaunchLifecycle(t *testing.T) {
 		return file
 	}
 	closedOnExec := -1
-	darwinLaunchCloseOnExec = func(fd int) { closedOnExec = fd }
+	wantCloseErr := errors.New("close-on-exec")
+	darwinLaunchCloseOnExec = func(int) error { return wantCloseErr }
+	failedConfig, failedGate, failedStatus, err := inheritedDarwinLaunchInput()
+	require.ErrorIs(t, err, wantCloseErr)
+	require.Same(t, files[0], failedConfig)
+	require.Same(t, files[1], failedGate)
+	require.Same(t, files[2], failedStatus)
+
+	calls = 0
+	darwinLaunchCloseOnExec = func(fd int) error { closedOnExec = fd; return nil }
 	config, gate, status, err = inheritedDarwinLaunchInput()
 	require.NoError(t, err)
 	require.Equal(t, int(files[2].Fd()), closedOnExec)
@@ -219,6 +229,37 @@ func TestDarwinInheritedLaunchInputAndLaunchLifecycle(t *testing.T) {
 	launch = &darwinLaunch{inherited: []*os.File{inherited}, gate: closedGate, status: closedStatus}
 	launch.close()
 	launch.close()
+}
+
+func TestDarwinLaunchCloseOnExecChecked(t *testing.T) {
+	restoreDarwinLaunchSeams(t)
+	calls := 0
+	darwinLaunchFcntl = func(_ uintptr, command int, argument int) (int, error) {
+		calls++
+		if calls == 1 {
+			require.Equal(t, unix.F_GETFD, command)
+			require.Zero(t, argument)
+			return 0, nil
+		}
+		require.Equal(t, unix.F_SETFD, command)
+		require.NotZero(t, argument&unix.FD_CLOEXEC)
+		return 0, nil
+	}
+	require.NoError(t, setDarwinLaunchCloseOnExec(5))
+	require.Equal(t, 2, calls)
+
+	want := errors.New("fcntl")
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) { return 0, want }
+	require.ErrorIs(t, setDarwinLaunchCloseOnExec(5), want)
+	calls = 0
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, nil
+		}
+		return 0, want
+	}
+	require.ErrorIs(t, setDarwinLaunchCloseOnExec(5), want)
 }
 
 func TestDarwinLaunchPreparationAndStatusBranches(t *testing.T) {

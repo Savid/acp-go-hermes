@@ -50,6 +50,17 @@ still reach.
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
 
+`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
+optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
+for the already-held canonical UID lock and shared `domain.lock` lease. Each
+capability keeps ownership of its original descriptor; caller-owned duplicates
+reach only the trusted supervisor, which validates the named inodes, held locks,
+and strict matching domain record and protects them with checked `FD_CLOEXEC`.
+Set both fields together for
+host-borrowed authority or leave both nil for standalone domain, disposition,
+and UID-lock acquisition. A mixed nil/non-nil pair fails closed. Native
+processes receive neither capability nor descriptor.
+
 ## Provider auth
 
 `WithProviderAuthRoot` and `WithProviderAuthHome` are a required pair. The

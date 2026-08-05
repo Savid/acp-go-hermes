@@ -511,6 +511,24 @@ func TestProviderAuthHomeValidationAndPreparationFailures(t *testing.T) {
 	}
 }
 
+func TestAuthMintRequiresLiveNativeClientAndCompleterDisarmsOnce(t *testing.T) {
+	flow := &authFlow{
+		id:            "flow",
+		expiresAt:     time.Now().Add(time.Minute),
+		probeInterval: time.Second,
+		method:        authCatalogMethod{Label: "Login"},
+		disarm:        make(chan struct{}),
+	}
+
+	_, cause := (&providerAuth{}).buildMint(t.Context(), &session{}, flow)
+	if cause != authCauseTransport {
+		t.Fatalf("mint cause = %q", cause)
+	}
+
+	flow.stopCompleter()
+	flow.stopCompleter()
+}
+
 func TestAuthSessionRejectsBrokerTombstone(t *testing.T) {
 	t.Parallel()
 

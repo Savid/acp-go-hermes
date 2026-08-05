@@ -16,7 +16,8 @@ func newTestAgent(opts ...Option) *Agent {
 	base := make([]Option, 0, 2+len(opts))
 	base = append(base, WithProcessIsolation(ProcessIsolation{
 		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
-		BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+		BaseEnvironment:   map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+		StandaloneOwnerID: "acp-go-hermes-tests", StandaloneStateRoot: os.TempDir(),
 	}), func(options *Options) {
 		options.testOnlyNoCredential = true
 		options.testOnlyIdentityLockRoot = testIdentityLockRoot()

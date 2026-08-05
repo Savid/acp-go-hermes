@@ -51,7 +51,9 @@ func TestValidateProcessIsolationConfigBuildsClosedEnvironment(t *testing.T) {
 		BaseEnvironment: map[string]string{
 			"PATH": "/usr/bin", "HOME": "/var/lib/acp", "USER": "acp", "LOGNAME": "acp",
 		},
-		InheritEnvironment: []string{"OPENAI_API_KEY"},
+		InheritEnvironment:  []string{"OPENAI_API_KEY"},
+		StandaloneOwnerID:   "test-owner",
+		StandaloneStateRoot: "/var/lib/acp",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +80,9 @@ func TestValidateProcessIsolationConfigBuildsClosedEnvironment(t *testing.T) {
 				BaseEnvironment: map[string]string{
 					"PATH": "/usr/bin", "HOME": "/var/lib/acp", "USER": "acp", "LOGNAME": "acp",
 				},
-				InheritEnvironment: []string{"OPENAI_API_KEY"},
+				InheritEnvironment:  []string{"OPENAI_API_KEY"},
+				StandaloneOwnerID:   "test-owner",
+				StandaloneStateRoot: "/var/lib/acp",
 			}
 			mutate(&candidate)
 			if _, err := validateProcessIsolationConfig(candidate); err == nil {
@@ -96,6 +100,8 @@ func TestValidateProcessIsolationConfigBuildsClosedEnvironment(t *testing.T) {
 		BaseEnvironment: map[string]string{
 			"PATH": "/usr/bin", "HOME": "/var/lib/acp", "USER": "acp", "LOGNAME": "acp",
 		},
+		StandaloneOwnerID:   "test-owner",
+		StandaloneStateRoot: "/var/lib/acp",
 	}); err == nil {
 		t.Fatal("shared primary group was accepted")
 	}

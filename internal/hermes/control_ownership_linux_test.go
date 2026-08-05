@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestHermesNativeCannotMutateTrustedLease(t *testing.T) {
+func TestTrustedSupervisorHermesNativeCannotMutateTrustedLease(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")
 	}

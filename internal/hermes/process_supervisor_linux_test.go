@@ -3,20 +3,42 @@
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+type unavailableIdentityDispositionCapability struct{}
+
+func (unavailableIdentityDispositionCapability) Duplicate() (*os.File, error) {
+	return nil, errors.New("unavailable")
+}
+
+func TestSupervisorIdentityDispositionRejectsMixedCapabilities(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	isolation := testProcessIsolation()
+	isolation.IdentityLock = unavailableIdentityDispositionCapability{}
+	cmd := exec.Command("/bin/true")
+	configureHermesProcess(cmd)
+	_, err := startUnixContainedProcess(cmd, ContainmentSpec{Isolation: isolation})
+	if err == nil || !strings.Contains(err.Error(), "must be provided together") {
+		t.Fatalf("mixed identity disposition = %v", err)
+	}
+}
 
 func TestLinuxSupervisorKillsAndReapsDetachedStubbornDescendant(t *testing.T) {
 	restoreLinuxSupervisorSeams(t)
@@ -158,113 +180,425 @@ func TestLinuxSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	}
 }
 
-func TestTrustedSupervisorRejectsNativeSignalsProofForgeryAndDaemonEscape(t *testing.T) {
-	const phaseEnv = "ACP_GO_HERMES_TEST_TRUSTED_SUPERVISOR_PHASE"
+func TestProcessIsolationActualHermesTrustedSupervisorIdentityGroupsAmbientAndContainment(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("trusted supervisor credential boundary requires root")
 	}
+	setsid, err := exec.LookPath("setsid")
+	if err != nil {
+		t.Skip("setsid is unavailable")
+	}
 
-	root := os.Getenv("ACP_GO_HERMES_TEST_ROOT")
-	if root == "" {
-		var err error
-		root, err = os.MkdirTemp("", "acp-go-hermes-trusted-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(root) })
+	const (
+		uid = uint32(64581)
+		gid = uint32(64582)
+	)
+	root, err := os.MkdirTemp("/var/lib", "acp-go-hermes-trusted-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err = os.Chmod(root, 0o711); err != nil {
+		t.Fatal(err)
 	}
 	statusRoot := filepath.Join(root, "native")
-	if os.Getenv(phaseEnv) != "child" {
-		if err := os.Chmod(root, 0o711); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(statusRoot, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chown(statusRoot, 65534, 65534); err != nil {
-			t.Fatal(err)
-		}
+	if err = os.Mkdir(statusRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(statusRoot, int(uid), int(gid)); err != nil {
+		t.Fatal(err)
 	}
 	status := filepath.Join(statusRoot, "status")
 	daemon := filepath.Join(statusRoot, "daemon.pid")
-	proof := filepath.Join(root, "proof")
-
-	if os.Getenv(phaseEnv) == "child" {
-		if err := supervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-			t.Fatal(err)
-		}
-		if err := supervisorPrctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-			t.Fatal(err)
-		}
-		proofFile, err := os.OpenFile(proof, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer proofFile.Close()
-		unix.CloseOnExec(int(proofFile.Fd()))
-		controlRead, controlWrite, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer controlRead.Close()
-		defer controlWrite.Close()
-		script := `supervisor=$PPID
-if kill -STOP "$supervisor" 2>/dev/null; then echo stop=allowed; else echo stop=blocked; fi > "$1"
-if printf 'forged\n' > "/proc/$supervisor/fd/$3" 2>/dev/null; then echo forge=allowed; else echo forge=blocked; fi >> "$1"
-setsid sh -c 'trap "" INT TERM; while :; do sleep 30; done' & echo $! > "$2"
-if kill -KILL "$supervisor" 2>/dev/null; then echo kill=allowed; else echo kill=blocked; fi >> "$1"`
-		config := hermesSupervisorConfig{
-			Path:      "/bin/sh",
-			Args:      []string{"sh", "-c", script, "probe", status, daemon, strconv.Itoa(int(proofFile.Fd()))},
-			Env:       []string{"PATH=/usr/bin:/bin"},
-			Isolation: ProcessIsolation{UID: 65534, GID: 65534, BaseEnvironment: map[string]string{}},
-		}
-		if code := runHermesProcessSupervisorCore(config, controlRead, proofFile); code != 0 {
-			t.Fatalf("trusted supervisor code = %d", code)
-		}
-		return
+	wrappers := filepath.Join(statusRoot, "wrappers.pid")
+	authorityRoot := filepath.Join(root, "acp-go", "agent-identities")
+	t.Setenv("ACP_GO_HERMES_TEST_ACTUAL_AMBIENT", "secret")
+	script := `liveness=$PPID
+guardian=$(awk '$1 == "PPid:" { print $2 }' "/proc/$liveness/status")
+printf '%s %s\n' "$liveness" "$guardian" > "$3"
+if kill -STOP "$liveness" 2>/dev/null; then echo liveness-stop=allowed; kill -CONT "$liveness" 2>/dev/null || true; else echo liveness-stop=blocked; fi > "$1"
+if kill -STOP "$guardian" 2>/dev/null; then echo guardian-stop=allowed; kill -CONT "$guardian" 2>/dev/null || true; else echo guardian-stop=blocked; fi >> "$1"
+if printf 'forged\n' > "/proc/$liveness/fd/5" 2>/dev/null; then echo liveness-status-forge=allowed; else echo liveness-status-forge=blocked; fi >> "$1"
+if printf 'forged\n' > "/proc/$liveness/fd/8" 2>/dev/null; then echo liveness-proof-forge=allowed; else echo liveness-proof-forge=blocked; fi >> "$1"
+if printf 'forged\n' > "/proc/$guardian/fd/5" 2>/dev/null; then echo guardian-proof-forge=allowed; else echo guardian-proof-forge=blocked; fi >> "$1"
+groups=$(sed -n 's/^Groups:[[:space:]]*//p' "/proc/$$/status")
+if [ -z "$groups" ]; then echo groups=empty; else echo groups="$groups"; fi >> "$1"
+echo uid=$(id -u) >> "$1"
+echo gid=$(id -g) >> "$1"
+if env | grep -q '^ACP_GO_HERMES_TEST_ACTUAL_AMBIENT='; then echo ambient=leaked; else echo ambient=scrubbed; fi >> "$1"
+echo nnp=$(awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status) >> "$1"
+echo core=$(ulimit -c) >> "$1"
+authorityfds=none
+for fd in /proc/self/fd/*; do
+  target=$(readlink "$fd" 2>/dev/null || true)
+  case "$target" in "$5"*) authorityfds=leaked;; esac
+done
+echo authorityfds=$authorityfds >> "$1"
+"$4" sh -c 'trap "" INT TERM HUP; while :; do sleep 30; done' & echo $! > "$2"
+if kill -KILL "$liveness" 2>/dev/null; then echo liveness-kill=allowed; else echo liveness-kill=blocked; fi >> "$1"
+if kill -KILL "$guardian" 2>/dev/null; then echo guardian-kill=allowed; else echo guardian-kill=blocked; fi >> "$1"`
+	command := exec.Command("/bin/sh", "-c", script, "probe", status, daemon, wrappers, setsid, authorityRoot)
+	command.Dir = "/"
+	command.Env = []string{"PATH=/usr/bin:/bin"}
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	configureHermesProcess(command)
+	isolation := &ProcessIsolation{
+		UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"},
+		TestOnlyIdentityLockRoot: root, StandaloneOwnerID: "trusted-supervisor-e2e",
+		StandaloneStateRoot: createAgentStandaloneProtectedStateRoot(t, uid, gid),
 	}
-
-	if _, err := exec.LookPath("setsid"); err != nil {
-		t.Skip("setsid is unavailable")
+	tree, err := startUnixContainedProcess(command, ContainmentSpec{Isolation: isolation})
+	if err != nil {
+		t.Fatalf("start production trusted supervisor: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTrustedSupervisorRejectsNativeSignalsProofForgeryAndDaemonEscape$")
-	child.Env = append(os.Environ(), phaseEnv+"=child", "ACP_GO_HERMES_TEST_ROOT="+root)
-	child.Dir = root
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		if child.Process != nil {
-			_ = child.Process.Signal(syscall.SIGCONT)
-		}
-	}()
-	output, err := child.CombinedOutput()
+	wait := tree.directChild(command)
 	t.Cleanup(func() {
-		pidBytes, readErr := os.ReadFile(daemon)
-		if readErr == nil {
-			pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-			if pid > 0 {
+		if pidBytes, readErr := os.ReadFile(wrappers); readErr == nil {
+			for _, value := range strings.Fields(string(pidBytes)) {
+				if pid, parseErr := strconv.Atoi(value); parseErr == nil && pid > 0 {
+					_ = syscall.Kill(pid, syscall.SIGCONT)
+				}
+			}
+		}
+		_ = tree.close()
+		if pidBytes, readErr := os.ReadFile(daemon); readErr == nil {
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes))); parseErr == nil && pid > 0 {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
 		}
 	})
-	if err != nil {
-		t.Fatalf("trusted supervisor helper: %v\n%s", err, output)
+	select {
+	case <-wait.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("production trusted supervisor did not exit")
+	}
+	if wait.err != nil {
+		t.Fatalf("production trusted supervisor: %v\n%s", wait.err, output.Bytes())
+	}
+	if err = tree.complete(10 * time.Second); err != nil {
+		t.Fatalf("complete production trusted supervisor: %v", err)
+	}
+	if err = tree.close(); err != nil {
+		t.Fatalf("close production trusted supervisor: %v", err)
 	}
 	result, err := os.ReadFile(status)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result) != "stop=blocked\nforge=blocked\nkill=blocked\n" {
+	want := "liveness-stop=blocked\nguardian-stop=blocked\nliveness-status-forge=blocked\nliveness-proof-forge=blocked\nguardian-proof-forge=blocked\ngroups=empty\nuid=64581\ngid=64582\nambient=scrubbed\nnnp=1\ncore=0\nauthorityfds=none\nliveness-kill=blocked\nguardian-kill=blocked\n"
+	if string(result) != want {
 		t.Fatalf("native attack results = %q", result)
 	}
-	if pidBytes, err := os.ReadFile(daemon); err == nil {
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-		if pid > 0 {
-			if process, findErr := os.FindProcess(pid); findErr == nil && process.Signal(syscall.Signal(0)) == nil {
-				t.Fatalf("daemonized native descendant %d survived containment", pid)
+	pidBytes, err := os.ReadFile(daemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitSupervisorProcessGone(t, pid)
+	assertSupervisorAuthorityLocks(t, authorityRoot, uid, true)
+}
+func TestHermesSupervisorGuardianSIGKILLPreReadinessRefusesNativeLaunch(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	peerRead, peerWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerRead.Close()
+	guardian := exec.Command("/bin/sleep", "30")
+	guardian.ExtraFiles = []*os.File{peerWrite}
+	if err = guardian.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = peerWrite.Close()
+	if err = guardian.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err = guardian.Wait(); err == nil {
+		t.Fatal("SIGKILLed guardian exited successfully")
+	}
+	marker := filepath.Join(t.TempDir(), "native-launched")
+	config := supervisorTestConfig([]string{"/bin/sh", "-c", "touch \"$1\"", "probe", marker})
+	var status bytes.Buffer
+	var proof bytes.Buffer
+	code := runHermesProcessSupervisorNative(
+		config, []io.Reader{strings.NewReader("control")}, peerRead, &status, &proof, true,
+	)
+	if code != 125 || status.String() != "done\n" || !bytes.Equal(proof.Bytes(), []byte{1}) {
+		t.Fatalf("pre-readiness guardian death code=%d status=%q proof=%v", code, status.String(), proof.Bytes())
+	}
+	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native launch marker exists after guardian death: %v", err)
+	}
+}
+
+func TestHermesSupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfterECHILD(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	peerRead, peerWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerRead.Close()
+	defer peerWrite.Close()
+
+	originalPrctl := supervisorPrctl
+	var closePeer sync.Once
+	supervisorPrctl = func(option int, argument2, argument3, argument4, argument5 uintptr) error {
+		if option == unix.PR_SET_NO_NEW_PRIVS {
+			closePeer.Do(func() { _ = peerWrite.Close() })
+
+			return nil
+		}
+
+		return originalPrctl(option, argument2, argument3, argument4, argument5)
+	}
+
+	marker := filepath.Join(t.TempDir(), "native-launched")
+	config := supervisorTestConfig([]string{"/bin/sh", "-c", "touch \"$1\"", "probe", marker})
+	var status bytes.Buffer
+	var proof bytes.Buffer
+	code := runHermesProcessSupervisorNative(
+		config, []io.Reader{strings.NewReader("control")}, peerRead, &status, &proof, true,
+	)
+	if code != 125 || status.String() != "done\n" || !bytes.Equal(proof.Bytes(), []byte{1}) {
+		t.Fatalf("native-start guardian death code=%d status=%q proof=%v", code, status.String(), proof.Bytes())
+	}
+	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native launch marker exists after guardian death at Start: %v", err)
+	}
+}
+
+type supervisorPeerDeathFixture struct {
+	cmd            *exec.Cmd
+	tree           *processContainment
+	wait           *directChildWait
+	guardianPID    int
+	livenessPID    int
+	descendantPIDs []int
+	authorityRoot  string
+	uid            uint32
+}
+
+func TestProcessIsolationSupervisorGuardianSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
+	fixture := startSupervisorPeerDeathFixture(t, 64331, 64332, "guardian-death")
+	exerciseSupervisorPeerDeath(t, fixture, fixture.livenessPID, fixture.guardianPID)
+}
+
+func TestProcessIsolationSupervisorLivenessSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
+	fixture := startSupervisorPeerDeathFixture(t, 64341, 64342, "liveness-death")
+	exerciseSupervisorPeerDeath(t, fixture, fixture.guardianPID, fixture.livenessPID)
+}
+
+func startSupervisorPeerDeathFixture(t *testing.T, uid, gid uint32, ownerID string) *supervisorPeerDeathFixture {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("dual trusted supervisor containment requires root")
+	}
+	setsid, err := exec.LookPath("setsid")
+	if err != nil {
+		t.Skip("setsid is unavailable")
+	}
+	root := t.TempDir()
+	state := filepath.Join(root, "processes")
+	if err = os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(root, "leaf.sh")
+	double := filepath.Join(root, "double.sh")
+	nativeScript := filepath.Join(root, "native.sh")
+	if err = os.WriteFile(leaf, []byte("#!/bin/sh\ntrap '' INT TERM HUP\necho $$ > \"$1\"\nwhile :; do sleep 30; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(double, []byte("#!/bin/sh\n\"$1\" \"$2\" &\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nativeBody := `#!/bin/sh
+set -eu
+echo $$ > "$HERMES_TEST_NATIVE_PID"
+"$HERMES_TEST_LEAF" "$HERMES_TEST_ORDINARY_PID" &
+"$HERMES_TEST_SETSID" "$HERMES_TEST_LEAF" "$HERMES_TEST_SESSION_PID" &
+"$HERMES_TEST_SETSID" "$HERMES_TEST_DOUBLE" "$HERMES_TEST_LEAF" "$HERMES_TEST_DOUBLE_PID" &
+while [ ! -s "$HERMES_TEST_ORDINARY_PID" ] || [ ! -s "$HERMES_TEST_SESSION_PID" ] || [ ! -s "$HERMES_TEST_DOUBLE_PID" ]; do sleep 0.01; done
+while :; do sleep 30; done
+`
+	if err = os.WriteFile(nativeScript, []byte(nativeBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pidPaths := []string{
+		filepath.Join(state, "native.pid"), filepath.Join(state, "ordinary.pid"),
+		filepath.Join(state, "session.pid"), filepath.Join(state, "double.pid"),
+	}
+	cmd := exec.Command(nativeScript)
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin", "HERMES_TEST_NATIVE_PID=" + pidPaths[0],
+		"HERMES_TEST_ORDINARY_PID=" + pidPaths[1], "HERMES_TEST_SESSION_PID=" + pidPaths[2],
+		"HERMES_TEST_DOUBLE_PID=" + pidPaths[3], "HERMES_TEST_LEAF=" + leaf,
+		"HERMES_TEST_DOUBLE=" + double, "HERMES_TEST_SETSID=" + setsid,
+	}
+	configureHermesProcess(cmd)
+	identityRoot := t.TempDir()
+	isolation := &ProcessIsolation{
+		UID: uid, GID: gid, BaseEnvironment: map[string]string{},
+		TestOnlyNoCredential: true, TestOnlyIdentityLockRoot: identityRoot,
+		StandaloneOwnerID: ownerID, StandaloneStateRoot: createAgentStandaloneProtectedStateRoot(t, uid, gid),
+	}
+	tree, err := startUnixContainedProcess(cmd, ContainmentSpec{Isolation: isolation})
+	if err != nil {
+		t.Fatalf("start dual trusted supervisor fixture: %v", err)
+	}
+	fixture := &supervisorPeerDeathFixture{
+		cmd: cmd, tree: tree, wait: tree.directChild(cmd), guardianPID: cmd.Process.Pid,
+		authorityRoot: filepath.Join(identityRoot, "acp-go", "agent-identities"), uid: uid,
+	}
+	for _, path := range pidPaths {
+		fixture.descendantPIDs = append(fixture.descendantPIDs, awaitSupervisorPIDFile(t, path))
+	}
+	identity, err := readSupervisorProcessIdentity(fixture.descendantPIDs[0])
+	if err != nil {
+		t.Fatalf("read native parent identity: %v", err)
+	}
+	fixture.livenessPID = identity.parentPID
+	if fixture.livenessPID <= 0 || fixture.livenessPID == fixture.guardianPID {
+		t.Fatalf("invalid guardian/liveness topology guardian=%d liveness=%d", fixture.guardianPID, fixture.livenessPID)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(fixture.guardianPID, syscall.SIGCONT)
+		_ = syscall.Kill(fixture.livenessPID, syscall.SIGCONT)
+		_ = fixture.tree.close()
+		for _, pid := range append(fixture.descendantPIDs, fixture.guardianPID, fixture.livenessPID) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		select {
+		case <-fixture.wait.done:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	return fixture
+}
+
+type supervisorTestProcessIdentity struct {
+	parentPID int
+	state     byte
+}
+
+func readSupervisorProcessIdentity(pid int) (supervisorTestProcessIdentity, error) {
+	payload, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return supervisorTestProcessIdentity{}, err
+	}
+	parentPID, state, ok := supervisorProcStat(string(payload))
+	if !ok {
+		return supervisorTestProcessIdentity{}, fmt.Errorf("parse process identity for pid %d", pid)
+	}
+
+	return supervisorTestProcessIdentity{parentPID: parentPID, state: state}, nil
+}
+
+func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixture, survivorPID, victimPID int) {
+	t.Helper()
+	if err := syscall.Kill(survivorPID, syscall.SIGSTOP); err != nil {
+		t.Fatalf("stop surviving trusted supervisor %d: %v", survivorPID, err)
+	}
+	awaitSupervisorProcessState(t, survivorPID, 'T')
+	if err := syscall.Kill(victimPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill trusted supervisor peer %d: %v", victimPID, err)
+	}
+	assertSupervisorAuthorityLocks(t, fixture.authorityRoot, fixture.uid, false)
+
+	if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
+		t.Fatalf("resume surviving trusted supervisor %d: %v", survivorPID, err)
+	}
+	if err := fixture.tree.complete(10 * time.Second); err != nil {
+		t.Fatalf("dual trusted supervisor containment proof: %v", err)
+	}
+	select {
+	case <-fixture.wait.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dual trusted supervisor direct child was not reaped")
+	}
+	for _, pid := range fixture.descendantPIDs {
+		awaitSupervisorProcessGone(t, pid)
+	}
+	assertSupervisorAuthorityLocks(t, fixture.authorityRoot, fixture.uid, true)
+}
+
+func awaitSupervisorPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		payload, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(payload)))
+			if parseErr == nil && pid > 0 {
+				return pid
 			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("supervised process pid file %q was not published", path)
+
+	return 0
+}
+
+func awaitSupervisorProcessState(t *testing.T, pid int, want byte) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		identity, err := readSupervisorProcessIdentity(pid)
+		if err == nil && identity.state == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("supervised process %d did not enter state %q", pid, want)
+}
+
+func awaitSupervisorProcessGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		t.Fatalf("supervised descendant %d survived ECHILD containment proof", pid)
+	}
+}
+
+func assertSupervisorAuthorityLocks(t *testing.T, authorityRoot string, uid uint32, available bool) {
+	t.Helper()
+	for _, name := range []string{strconv.FormatUint(uint64(uid), 10) + ".lock", "domain.lock"} {
+		path := filepath.Join(authorityRoot, name)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			file, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatalf("open authority contender %q: %v", name, err)
+			}
+			lockErr := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+			if lockErr == nil {
+				_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+			}
+			_ = file.Close()
+			if !available {
+				if !errors.Is(lockErr, unix.EWOULDBLOCK) && !errors.Is(lockErr, unix.EAGAIN) {
+					t.Fatalf("authority lock %q was not retained by frozen survivor: %v", name, lockErr)
+				}
+				break
+			}
+			if lockErr == nil {
+				break
+			}
+			if !errors.Is(lockErr, unix.EWOULDBLOCK) && !errors.Is(lockErr, unix.EAGAIN) {
+				t.Fatalf("reacquire authority lock %q: %v", name, lockErr)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("authority lock %q remained held after ECHILD", name)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
@@ -393,8 +727,8 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 
 	t.Run("proof write failure", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
-		supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
-			return &agentIdentityLock{}, nil
+		supervisorAcquireStandalone = func(uint32, uint32, string, string, bool, string, <-chan struct{}, <-chan os.Signal) (*agentStandaloneIdentity, error) {
+			return &agentStandaloneIdentity{identity: &agentIdentityLock{}, authority: &agentIdentityLock{}}, nil
 		}
 		controlRead, controlWrite, err := os.Pipe()
 		if err != nil {
@@ -408,7 +742,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 		_ = proofRead.Close()
 		_ = proofWrite.Close()
 		config := supervisorTestConfig([]string{"sh", "-c", "exit 0"})
-		if code := runHermesProcessSupervisorCore(config, controlRead, proofWrite); code != 126 {
+		if code := runHermesProcessSupervisorNative(config, []io.Reader{controlRead}, nil, nil, proofWrite, false); code != 126 {
 			t.Fatalf("proof write failure code = %d", code)
 		}
 	})
@@ -527,7 +861,7 @@ func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start supervisor environment probe: %v", err)
 	}
-	if len(environmentTarget.Env) != 1 || environmentTarget.Env[0] != envHermesSupervisor+"=1" {
+	if len(environmentTarget.Env) != 1 || environmentTarget.Env[0] != envHermesSupervisor+"="+hermesSupervisorGuardian {
 		t.Fatalf("supervisor environment = %#v", environmentTarget.Env)
 	}
 	_ = environmentTree.close()
@@ -563,7 +897,7 @@ func TestHermesSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
 	}
 
 	supervisorEffectiveUID = func() int { return 1000 }
-	if code := runHermesProcessSupervisor(); code != 125 {
+	if code := runHermesProcessSupervisor(hermesSupervisorGuardian); code != 125 {
 		t.Fatalf("non-root bootstrap code = %d, want 125", code)
 	}
 }
@@ -584,20 +918,24 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 
 	exitCode := -1
 	supervisorExit = func(code int) { exitCode = code }
-	t.Setenv(envHermesSupervisor, "1")
+	supervisorCloseOnExec = func(int) error { return nil }
+	supervisorNewFile = func(uintptr, string) *os.File { return nil }
+	t.Setenv(envHermesSupervisor, hermesSupervisorGuardian)
 	runHermesSupervisorInit()
 	if exitCode != 125 {
 		t.Fatalf("supervisor init exit = %d, want 125", exitCode)
 	}
+	supervisorNewFile = os.NewFile
+	supervisorCloseOnExec = setHermesSupervisorCloseOnExec
 
 	supervisorPrctl = func(int, uintptr, uintptr, uintptr, uintptr) error { return errors.New("prctl") }
-	if code := runHermesProcessSupervisor(); code != 125 {
+	if code := runHermesProcessSupervisor(hermesSupervisorGuardian); code != 125 {
 		t.Fatalf("prctl failure code = %d", code)
 	}
 
 	supervisorPrctl = func(int, uintptr, uintptr, uintptr, uintptr) error { return nil }
 	supervisorPIDFDOpen = func(int, int) (int, error) { return -1, errors.New("pidfd") }
-	if code := runHermesProcessSupervisor(); code != 125 {
+	if code := runHermesProcessSupervisor(hermesSupervisorGuardian); code != 125 {
 		t.Fatalf("pidfd failure code = %d", code)
 	}
 
@@ -611,7 +949,7 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.NewEncoder(configWrite).Encode(supervisorTestConfig([]string{"sh", "-c", "exit 0"})); err != nil {
+	if err := json.NewEncoder(configWrite).Encode(supervisorTestConfig([]string{"/bin/sh", "-c", "exit 0"})); err != nil {
 		t.Fatal(err)
 	}
 	_ = configWrite.Close()
@@ -630,11 +968,11 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 
 		return file
 	}
-	supervisorCloseOnExec = func(int) {}
-	supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
-		return &agentIdentityLock{}, nil
+	supervisorCloseOnExec = func(int) error { return nil }
+	supervisorAcquireStandalone = func(uint32, uint32, string, string, bool, string, <-chan struct{}, <-chan os.Signal) (*agentStandaloneIdentity, error) {
+		return &agentStandaloneIdentity{identity: &agentIdentityLock{}, authority: &agentIdentityLock{}}, nil
 	}
-	if code := runHermesProcessSupervisor(); code != 0 {
+	if code := runHermesProcessSupervisor(hermesSupervisorGuardian); code != 0 {
 		t.Fatalf("supervisor wrapper code = %d", code)
 	}
 	_ = controlWrite.Close()
@@ -902,10 +1240,11 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 	oldPIDFDOpen := supervisorPIDFDOpen
 	oldPIDFDSendSignal := supervisorPIDFDSendSignal
 	oldNewFile := supervisorNewFile
+	oldFcntl := supervisorFcntl
 	oldCloseOnExec := supervisorCloseOnExec
 	oldMemfd := supervisorMemfd
 	oldSealConfig := supervisorSealConfig
-	oldAcquireLock := supervisorAcquireLock
+	oldAcquireStandalone := supervisorAcquireStandalone
 	oldReadDir := supervisorReadDir
 	oldReadFile := supervisorReadFile
 	oldWait4 := supervisorWait4
@@ -917,6 +1256,7 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 	oldPoll := supervisorPollInterval
 	oldProcessKill := processKill
 	oldEffectiveUID := supervisorEffectiveUID
+	oldSupervisorPoll := supervisorPoll
 	supervisorEffectiveUID = func() int { return 0 }
 	t.Cleanup(func() {
 		supervisorExit = oldExit
@@ -928,10 +1268,11 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 		supervisorPIDFDOpen = oldPIDFDOpen
 		supervisorPIDFDSendSignal = oldPIDFDSendSignal
 		supervisorNewFile = oldNewFile
+		supervisorFcntl = oldFcntl
 		supervisorCloseOnExec = oldCloseOnExec
 		supervisorMemfd = oldMemfd
 		supervisorSealConfig = oldSealConfig
-		supervisorAcquireLock = oldAcquireLock
+		supervisorAcquireStandalone = oldAcquireStandalone
 		supervisorReadDir = oldReadDir
 		supervisorReadFile = oldReadFile
 		supervisorWait4 = oldWait4
@@ -943,7 +1284,46 @@ func restoreLinuxSupervisorSeams(t *testing.T) {
 		supervisorPollInterval = oldPoll
 		processKill = oldProcessKill
 		supervisorEffectiveUID = oldEffectiveUID
+		supervisorPoll = oldSupervisorPoll
 	})
+}
+
+func TestHermesSupervisorCheckedCloseOnExec(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	calls := 0
+	supervisorFcntl = func(_ uintptr, command int, argument int) (int, error) {
+		calls++
+		if calls == 1 {
+			if command != unix.F_GETFD || argument != 0 {
+				t.Fatalf("get flags call = (%d,%d)", command, argument)
+			}
+			return 0, nil
+		}
+		if command != unix.F_SETFD || argument&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("set flags call = (%d,%d)", command, argument)
+		}
+		return 0, nil
+	}
+	if err := setHermesSupervisorCloseOnExec(supervisorProofFD); err != nil || calls != 2 {
+		t.Fatalf("checked close-on-exec calls=%d err=%v", calls, err)
+	}
+
+	want := errors.New("fcntl")
+	supervisorFcntl = func(uintptr, int, int) (int, error) { return 0, want }
+	if err := setHermesSupervisorCloseOnExec(supervisorProofFD); !errors.Is(err, want) {
+		t.Fatalf("get flags error = %v", err)
+	}
+	calls = 0
+	supervisorFcntl = func(uintptr, int, int) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, nil
+		}
+		return 0, want
+	}
+	if err := setHermesSupervisorCloseOnExec(supervisorProofFD); !errors.Is(err, want) {
+		t.Fatalf("set flags error = %v", err)
+	}
 }
 
 func runSupervisorCoreTest(t *testing.T, args []string, trigger func(*os.File)) (int, byte) {
@@ -960,12 +1340,14 @@ func runSupervisorCoreTest(t *testing.T, args []string, trigger func(*os.File)) 
 	if trigger != nil {
 		go trigger(controlWrite)
 	}
-	oldAcquire := supervisorAcquireLock
-	supervisorAcquireLock = func(uint32, bool, string, <-chan struct{}, <-chan os.Signal) (*agentIdentityLock, error) {
-		return &agentIdentityLock{}, nil
+	oldAcquire := supervisorAcquireStandalone
+	supervisorAcquireStandalone = func(uint32, uint32, string, string, bool, string, <-chan struct{}, <-chan os.Signal) (*agentStandaloneIdentity, error) {
+		return &agentStandaloneIdentity{identity: &agentIdentityLock{}, authority: &agentIdentityLock{}}, nil
 	}
-	defer func() { supervisorAcquireLock = oldAcquire }()
-	code := runHermesProcessSupervisorCore(supervisorTestConfig(args), controlRead, proofWrite)
+	defer func() { supervisorAcquireStandalone = oldAcquire }()
+	code := runHermesProcessSupervisorNative(
+		supervisorTestConfig(args), []io.Reader{controlRead}, nil, nil, proofWrite, false,
+	)
 	_ = controlWrite.Close()
 	_ = proofWrite.Close()
 	var proof [1]byte

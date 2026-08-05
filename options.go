@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"log/slog"
+	"os"
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -26,10 +27,21 @@ type Option func(*Options)
 
 // ProcessIsolation is the mandatory operating-system identity and complete
 // base environment for every native Hermes process.
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
 	BaseEnvironment map[string]string
+	// IdentityLock is an optional trusted-supervisor descriptor for the
+	// host-global UID lock. Linux supervisors validate it and never expose it to
+	// the native Hermes process. Standalone embeddings should leave it nil.
+	IdentityLock        ProcessIdentityLockCapability
+	AuthorityDomain     ProcessIdentityLockCapability
+	StandaloneOwnerID   string
+	StandaloneStateRoot string
 }
 
 // ConcurrencyLimits bounds work accepted by one Agent.

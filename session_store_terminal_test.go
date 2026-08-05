@@ -983,6 +983,37 @@ func TestRequiredTerminalSnapshotPropagatesCancelledCommitClaim(t *testing.T) {
 	}
 }
 
+func TestRequiredTerminalSnapshotStopsAfterCaptureCancellation(t *testing.T) {
+	store := newCountingSessionStore()
+	client := newFakeHermesClient()
+	turnCtx, cancelTurn := context.WithCancel(t.Context())
+	client.messagesFunc = func(snapshotCtx context.Context, _ string) ([]nativehermes.NativeMessage, error) {
+		cancelTurn()
+		<-snapshotCtx.Done()
+
+		return []nativehermes.NativeMessage{
+			testHistoryMessage("history-1", "native-1", "user", ""),
+			testHistoryMessage("history-2", "native-1", valAssistant, "stop"),
+		}, nil
+	}
+	session := testSession(newTestAgent(WithSessionStore(store)), client)
+	session.turnInFlight = true
+	session.turnEpoch = 1
+	session.turnSettlement = turnSettlementOpen
+
+	session.lifecycleMu.Lock()
+	err := session.snapshotToStoreLocked(t.Context(), &terminalSnapshotRequirement{
+		baseline: SessionStoreTerminalState{}, turnEpoch: 1,
+	}, turnCtx)
+	session.lifecycleMu.Unlock()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled capture error = %v", err)
+	}
+	if store.replaceCount() != 0 {
+		t.Fatalf("cancelled capture Replace count = %d", store.replaceCount())
+	}
+}
+
 func TestUsageUpdateDoesNotClaimTerminalIdentity(t *testing.T) {
 	update := usageUpdateFromTokens(nativehermes.Tokens{Total: 7}, 128)
 	if update == nil || update.UsageUpdate == nil {

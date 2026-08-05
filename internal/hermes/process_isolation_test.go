@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+type processIsolationTestCapability struct{}
+
+func (processIsolationTestCapability) Duplicate() (*os.File, error) {
+	return nil, errors.New("process isolation test capability is not duplicable")
+}
 
 func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	t.Setenv("AMBIENT_ISOLATION_CANARY", "must-not-leak")
@@ -69,6 +76,62 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	require.Equal(t, "B", values["A"])
 	require.Equal(t, "1", values["MODE"])
 	require.Equal(t, "true", values[envIsolationTest])
+}
+
+func TestProcessIsolationStandaloneDisposition(t *testing.T) {
+	originalPlatform := processIsolationPlatform
+	processIsolationPlatform = "linux"
+	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+
+	borrowed := &ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
+		IdentityLock: processIsolationTestCapability{}, AuthorityDomain: processIsolationTestCapability{},
+	}
+	require.NoError(t, validateProcessIsolation(borrowed))
+	require.Error(t, validateProcessIsolation(&ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{}, IdentityLock: processIsolationTestCapability{},
+	}))
+	require.Error(t, validateStandaloneIdentityDisposition(&ProcessIsolation{
+		IdentityLock: processIsolationTestCapability{},
+	}))
+	require.Error(t, validateStandaloneIdentityDisposition(&ProcessIsolation{
+		IdentityLock: processIsolationTestCapability{}, AuthorityDomain: processIsolationTestCapability{},
+		StandaloneOwnerID: "mixed",
+	}))
+	require.Error(t, validateStandaloneIdentityDisposition(&ProcessIsolation{
+		StandaloneOwnerID: "-deployment", StandaloneStateRoot: "/var/lib/hermes",
+	}))
+	require.Error(t, validateStandaloneIdentityDisposition(&ProcessIsolation{
+		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "relative",
+	}))
+	require.NoError(t, validateStandaloneIdentityDisposition(&ProcessIsolation{
+		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/hermes",
+	}))
+
+	processIsolationPlatform = "darwin"
+	require.NoError(t, validateProcessIsolation(&ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
+	}))
+}
+
+func TestProcessIsolationStandaloneFieldGrammar(t *testing.T) {
+	for _, value := range []string{
+		"", strings.Repeat("a", 257), "-deployment", "deployment space",
+	} {
+		require.False(t, validStandaloneOwnerID(value), value)
+	}
+	for _, value := range []string{"A", "deployment-1", "org.example:worker/1"} {
+		require.True(t, validStandaloneOwnerID(value), value)
+	}
+
+	for _, value := range []string{
+		"", strings.Repeat("/a", 2049), string([]byte{0xff}), "relative", "/tmp/../tmp/native",
+		"/", "/tmp/native\x00", "/tmp/native\n", "/var/lib/acp-go/agent-identities",
+		"/var/lib/acp-go/agent-identities/provider",
+	} {
+		require.False(t, validStandaloneStateRootPath(value), value)
+	}
+	require.True(t, validStandaloneStateRootPath("/var/lib/hermes"))
 }
 
 func envSliceMap(environment []string) map[string]string {

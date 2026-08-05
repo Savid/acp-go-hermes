@@ -126,6 +126,27 @@ func TestRunContainmentAndRemovedDarwinFlag(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnreadableProcessIsolationConfig(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+	originalLoader := processIsolationConfigLoader
+	t.Cleanup(func() { processIsolationConfigLoader = originalLoader })
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		return processIsolationConfig{}, errors.New("unreadable policy")
+	}
+	var stderr bytes.Buffer
+	if code := run(
+		t.Context(), []string{"-process-isolation-config", "/missing"},
+		strings.NewReader(""), io.Discard, &stderr,
+	); code != 1 {
+		t.Fatalf("process isolation config error code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unreadable policy") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestSeedFileFlag(t *testing.T) {
 	var flag seedFileFlag
 	if err := flag.Set("config.yaml=/host/config.yaml"); err != nil {

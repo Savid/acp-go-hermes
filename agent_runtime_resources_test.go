@@ -279,6 +279,19 @@ func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
 		)
 		require.Error(t, err)
 	})
+
+	t.Run("provider auth home ownership", func(t *testing.T) {
+		agent := newTestAgent(
+			WithProviderAuthHome(t.TempDir()),
+			WithProcessIsolation(ProcessIsolation{
+				UID: uint32(os.Geteuid() + 1), GID: uint32(os.Getegid() + 1),
+			}),
+		)
+		_, err := agent.newHermesClientWithScratch(
+			t.Context(), "session-1", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
+		)
+		require.Error(t, err)
+	})
 }
 
 func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.T) {

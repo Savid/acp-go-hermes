@@ -36,23 +36,153 @@ listens off-host.
 Hermes' cooperative interrupt stops its foreground command but intentionally
 leaves background servers and watchers running. The adapter therefore closes
 the selected native containment boundary before cancellation settles. On Linux,
-a dedicated self-executed subreaper owns Hermes and every orphaned tool
-descendant, including processes that detach with `setsid(2)`; pidfd-bound
-signals, an authoritative kernel `ECHILD` fence after the direct root waiter
-settles, and an explicit proof pipe make fork/reparent races and supervisor
-death fail closed. Windows rejects native launch before spawning Hermes because
+independent self-executed guardian and liveness subreapers own Hermes and every
+orphaned tool descendant, including processes that detach with `setsid(2)`.
+Both trusted processes exist before native launch and retain duplicates of the
+same authority leases. If either one dies, the survivor adopts, terminates, and
+reaps ordinary, new-process-group, and `setsid(2)` descendants until `wait4(2)`
+reports `ECHILD`; pidfd-bound signals and an explicit proof pipe make
+fork/reparent races fail closed. Windows rejects native launch before spawning Hermes because
 its process API cannot apply the mandatory Unix UID/GID identity boundary with
 empty supplementary groups. A Windows cross-compile proves only that this
 refusal path builds; it does not establish runtime support.
 
-The Linux supervisor stays root and runs from `/` with a closed private
-environment. Sealed launch configuration carries the target identity and native
-environment; only `hermes serve` receives the configured UID/GID with no
-supplementary groups. Before native start the supervisor acquires the
-root-owned `/run/acp-go/agent-identities/<uid>.lock` and holds it until the
-descendant wait queue is empty. Hermes inherits none of the launch, control,
-proof, or lock descriptors, so it cannot signal its supervisor, forge
-completion, or overlap another native tree using the same host identity.
+The Linux guardian and liveness supervisor stay root and run from `/` with
+closed private environments. Sealed launch configuration carries the target
+identity and native environment; only `hermes serve` receives the configured
+UID/GID with no supplementary groups. Before native start, both supervisors
+hold validated duplicates of identical UID EX and domain SH open file
+descriptions: the exact same exclusive
+`/var/lib/acp-go/agent-identities/<uid>.lock` and shared `domain.lock` open file
+descriptions. The independent trusted-root guardian/liveness pair survives a
+primary guardian `SIGKILL` or a liveness `SIGKILL`; the survivor retains both
+authority leases while it contains and reaps the tree. Liveness synchronously
+polls its dedicated guardian peer-liveness descriptor immediately before native
+start and refuses native launch after a peer HUP, error, or EOF. Reciprocal
+peer-death containment keeps both leases through the survivor's kernel `ECHILD`;
+completion and the managed-root permit wait for that proof. Hermes
+inherits none of the launch, control, peer, proof, or authority descriptors, so
+it cannot signal a supervisor, forge completion, or overlap another native tree
+using the same host identity.
+The identity root must be a persistent local-lock volume shared by every
+service or container using the same numeric UID namespace. Otherwise those
+participants require disjoint UID pools. Lock inodes are permanent and are
+never unlinked, renamed, or replaced.
+Before any identity operation, the adapter joins permanent `domain.lock`
+through matching strict `domain.json`, binding the boot, PID/user namespaces,
+canonical UID/GID maps, and unrestricted root procfs view. It and its trusted
+supervisors retain a shared checked-CLOEXEC lease through containment; native
+inherits no domain descriptor. Before launch the supervisor re-reads matching
+strict `domain.json` under that lease. Borrowed adoption strictly parses
+`/proc/self/fdinfo/<fd>` and requires the supplied open file description's
+matching whole-file `FLOCK`: UID `WRITE` and domain `READ`. Missing, unreadable,
+malformed, ambiguous, wrong-inode, partial-range, or wrong-mode state refuses;
+the adapter never calls mode-converting `flock` on the supplied descriptor.
+Separate-open contention remains an independent proof. Contended pristine same-domain bootstrap uses a
+bounded shared-lock rejoin; a retained shared lease protecting a live mismatch
+refuses. Rebind requires an
+exclusive lease, a boot-aware whole-root audit, durable atomic record replacement,
+and a shared-lock re-read. A contender that sees a peer's matching record after
+obtaining EX performs a real EX-to-SH conversion and shared re-read; it never
+returns a mislabeled exclusive lifetime lease. The full local-durable-noncloned
+filesystem probe reruns immediately before every initial publish, rebind, or
+replacement. Failure preserves the old record and blocks downgrade and launch.
+Same-boot exact-owner `ACTIVE` may rebind only while this provider holds that
+UID lock exclusively and proves task vacancy; a live UID-lock holder blocks
+rebind, and every other owner or `ACTIVE` refuses. A changed boot carries every
+valid standalone owner+`ACTIVE` unchanged and excluded, while ownerless
+`CLEAN_READY` may be carried. A provider never recovers ownerless `ACTIVE`: it
+performs no kill, path deletion, disposition rewrite, or CLEAN publish and
+fails with `Wagie recovery required`. The host authority alone owns that
+destructive recovery grammar. Only the exact standalone owner may roll retained
+`ACTIVE` after publication and two consecutive vacancy scans. Missing domain
+state plus any owner or disposition fails closed. Every authorized cleanup
+requires exact persisted root device/inode; device renumber and cleanup-root
+filesystem substitution fail closed.
+Registration proves the writer's authorized roots before publication. Reboot
+recovery does not use the recoverer's in-memory allowlist; it trusts only the
+strict root-owned v2 manifest, persisted root device/inode, and a
+descriptor-relative no-follow cleanup walk. Every cleanup, including changed
+boot, requires exact persisted root device/inode; device renumber and
+cleanup-root filesystem substitution fail closed.
+Canonical crash temps are metadata-checked and never parsed. Domain temps are
+unlinked and directory-synced only under domain EX; marker temps only under
+their UID EX lock. A live-writer conflict is untouched, and malformed temp
+names or metadata fail closed. A matching-domain participant still joins SH
+while a valid canonical marker temp is protected by a live UID lock; its cleanup
+needs UID EX, not domain EX. Domain-record temps remain domain-EX-only.
+A matching-domain provider audit validates but tolerates a canonical unrelated
+marker temp. After target UID EX, it cleans target marker temps and re-reads the
+final disposition. A domain-rebind audit under domain EX drains all canonical
+marker temps under their UID EX locks.
+Pre-join filesystem probes hold a checked-CLOEXEC inode EX lease through unlink
+and directory sync across both canonical
+`.authority-probe-<24-lowercase-hex>` and
+`.authority-probe-<24-lowercase-hex>.renamed` names. Audit validates the named inode and
+metadata, takes inode `LOCK_EX|LOCK_NB`, then unlinks and directory-syncs. That
+inode lease permits matching shared cleanup; domain EX alone is insufficient.
+A live conflict remains untouched, matching shared join proceeds, and bootstrap
+cleanup bounded-waits. An authority `/proc/self/fd/<fd>` path ending in the
+kernel ` (deleted)` suffix fails closed.
+Permanent coordination inodes are never reconstructed beside durable state.
+`domain.lock` creation requires a truly empty authority root; `owners.lock`
+creation requires an established domain with no owner, disposition, UID-lock,
+or affinity-lock state. A missing UID lock refuses beside its owner,
+disposition, or temp; a missing affinity lock refuses when a marker maps to its
+shard. This prevents an old unlinked open file description from becoming
+split-brain authority. An exact-owner restart still validates the named
+owners-lock metadata even though it skips that flock.
+With both host capabilities nil, standalone acquisition requires the explicit
+owner ID and state-root fields and strictly validates `<uid>.owner` and
+`<uid>.quarantine`. A new claim takes domain SH, permanent checked-CLOEXEC
+`owners.lock` EX, then nonblocking UID EX, and retains them through owner plus
+`ACTIVE` publication. It audits every owner and disposition globally and
+refuses duplicate UID, GID, provider+owner ID, state-root path, or state-root
+device/inode. It requires both owner and disposition absent and never claims
+ownerless `CLEAN_READY`. No provider waits for UID while holding owners EX; a
+busy candidate releases owners and boundedly retries the complete global scan.
+An exact-owner restart skips owners and may wait for UID with cancellation. The
+permanent owner kind is `standalone-provider` and permanently binds UID:GID,
+fixed provider module `github.com/savid/acp-go-hermes`, canonical owner ID, and
+the exact no-symlink state-root path/device/inode.
+
+Before any audit passes, the provider drains every canonical owner temp,
+including temps for unrelated UIDs, under owners EX plus that temp's
+nonblocking UID EX lock. A busy temp UID releases owners and retries the whole
+scan. An exact-owner fast path that encounters a temp releases its target UID
+and joins owners-before-UID cleanup; unknown temp names refuse.
+
+The state root is dedicated, never `/`, and outside and not beneath the
+authority root. This exact provider resolves it componentwise from `/` without
+symlinks or magic links, and every ancestor except the final directory is
+root-owned and not group- or world-writable; the final directory is owned by
+the configured UID:GID with mode `0700`. It revalidates the protected path,
+ownership, mode, device, and inode immediately before `ACTIVE` publication and
+native launch. Host authority and foreign providers validate the tuple but
+carry or refuse it without requiring the path in their mount namespace.
+
+Publication uses a synced `<uid>.owner.next-` temporary,
+`RENAME_NOREPLACE`, named revalidation, and directory sync. Two consecutive
+full scans of every task's four `Uid`, four `Gid`, and supplementary `Groups`
+values are required before owner and `ACTIVE` publication. Every status has
+exactly one `Uid`, one `Gid`, and one `Groups`; missing, duplicate, or malformed
+fields refuse, while an empty `Groups` value is valid. `ACTIVE` has a fresh
+lease, empty paths, and `standalone:` plus lowercase SHA-256 of the compact
+canonical owner JSON without the file newline. Only the exact owner may restart
+matching retained `ACTIVE`, or finish an absent-disposition owner-sync crash
+marker, after two new consecutive scans. `CLEAN_READY`, unreadable or hidden
+credentials, survivors, and every tuple or state-root mismatch fail closed.
+Standalone never becomes `CLEAN_READY`, including on clean exit. With host
+capabilities, the adapter rejects any owner and never rewrites the ownerless
+host record.
+Participants sharing a pool must also share identical user-namespace UID/GID
+mappings and authoritative PID visibility, or use disjoint pools. The authority
+root rejects network, FUSE, pseudo, read-only, overlay, tmpfs, and unknown
+filesystems. Only probed ext2/3/4-magic, XFS, btrfs, f2fs, ZFS, and bcachefs backing
+filesystems are accepted. It probes separate-open lock exclusion, file sync,
+same-directory atomic rename,
+and directory sync. Each newly created directory level is parent-synced before
+any lock becomes authoritative.
 
 Native session startup fails with `ErrProcessContainmentIncomplete` where the
 adapter cannot establish its selected boundary. Embedded Darwin hosts default

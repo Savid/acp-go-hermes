@@ -10,10 +10,12 @@ import (
 const processIsolationConfigFlag = "process-isolation-config"
 
 type processIsolationConfig struct {
-	UID                uint32            `json:"uid"`
-	GID                uint32            `json:"gid"`
-	BaseEnvironment    map[string]string `json:"baseEnvironment"`
-	InheritEnvironment []string          `json:"inheritEnvironment"`
+	UID                 uint32            `json:"uid"`
+	GID                 uint32            `json:"gid"`
+	BaseEnvironment     map[string]string `json:"baseEnvironment"`
+	InheritEnvironment  []string          `json:"inheritEnvironment"`
+	StandaloneOwnerID   string            `json:"standaloneOwnerId"`
+	StandaloneStateRoot string            `json:"standaloneStateRoot"`
 }
 
 var processIsolationConfigLoader = loadProcessIsolationConfig
@@ -28,15 +30,6 @@ func decodeProcessIsolationConfig(data []byte) (processIsolationConfig, error) {
 
 	var config processIsolationConfig
 	if err := decoder.Decode(&config); err != nil {
-		return processIsolationConfig{}, fmt.Errorf("decode policy: %w", err)
-	}
-
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return processIsolationConfig{}, fmt.Errorf("decode policy: trailing JSON value")
-		}
-
 		return processIsolationConfig{}, fmt.Errorf("decode policy: %w", err)
 	}
 
@@ -70,6 +63,11 @@ func scanJSONValue(decoder *json.Decoder) error {
 		return nil
 	}
 
+	return scanJSONDelimitedValue(decoder, delimiter)
+}
+
+//nolint:wsl_v5 // The token parser keeps each structural check adjacent.
+func scanJSONDelimitedValue(decoder *json.Decoder, delimiter json.Delim) error {
 	switch delimiter {
 	case '{':
 		seen := make(map[string]struct{})
@@ -78,10 +76,7 @@ func scanJSONValue(decoder *json.Decoder) error {
 			if keyErr != nil {
 				return keyErr
 			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return fmt.Errorf("object key is not a string")
-			}
+			key := keyToken.(string) //nolint:errcheck // JSON object-key tokens are strings by contract.
 			if _, exists := seen[key]; exists {
 				return fmt.Errorf("duplicate object key %q", key)
 			}

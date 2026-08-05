@@ -104,7 +104,9 @@ directories are configured.
 - Provider OAuth brokered through six session-scoped `_hermes/auth/*`
   extension methods over the `hermes serve` REST auth API. Native Hermes owns
   credential bytes in a shared durable `HERMES_AUTH_HOME`; the adapter keeps
-  only values-free connection lineage.
+  only values-free connection lineage. Hermes v0.19.0 returns its authorization
+  URL on this API path without executing a browser launcher; a required pinned
+  Linux canary verifies that no-launch behavior through the production adapter.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
   freshly generated `HERMES_HOME`. Linux uses authoritative OS containment.
   Windows native launch fails closed because its process API cannot apply the
