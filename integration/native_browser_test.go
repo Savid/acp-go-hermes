@@ -134,8 +134,12 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	if inspection.AppArmorProfile != "" && inspection.AppArmorProfile != "docker-default" {
 		t.Fatalf("native browser fixture AppArmor profile = %q, want docker-default", inspection.AppArmorProfile)
 	}
-	if len(inspection.HostConfig.SecurityOpt) != 0 {
-		t.Fatalf("native browser fixture security overrides = %q, want none", inspection.HostConfig.SecurityOpt)
+	securityOptions := inspection.HostConfig.SecurityOpt
+	if len(securityOptions) > 1 || len(securityOptions) == 1 && securityOptions[0] != "label=disable" {
+		t.Fatalf(
+			"native browser fixture security options = %q, want none or Docker's automatic host-PID label disablement",
+			securityOptions,
+		)
 	}
 	wantExtraHost := nativeBrowserHostname + ":127.0.0.1"
 	if len(inspection.HostConfig.ExtraHosts) != 1 || inspection.HostConfig.ExtraHosts[0] != wantExtraHost {

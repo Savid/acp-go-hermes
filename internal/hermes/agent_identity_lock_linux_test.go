@@ -822,6 +822,26 @@ func TestBorrowedIdentityAdoptionRequiresFlockOnSuppliedOFD(t *testing.T) {
 	}
 }
 
+func TestInheritedAgentIdentityFlockAllowsMountNamespaceDeviceTranslation(t *testing.T) {
+	descriptor := unix.Stat_t{
+		Dev: unix.Mkdev(0, 0x2a),
+		Ino: 52599113,
+	}
+	fields := []string{"lock:", "1:", "FLOCK", "ADVISORY", "WRITE", "0", "00:26:52599113", "0", "EOF"}
+	if err := validateInheritedAgentIdentityFlockLine(fields, descriptor, "WRITE"); err != nil {
+		t.Fatalf("validate translated mount device: %v", err)
+	}
+
+	fields[6] = "00:26:52599114"
+	if err := validateInheritedAgentIdentityFlockLine(fields, descriptor, "WRITE"); err == nil {
+		t.Fatal("flock validation accepted the wrong inode")
+	}
+	fields[6] = "not-hex:26:52599113"
+	if err := validateInheritedAgentIdentityFlockLine(fields, descriptor, "WRITE"); err == nil {
+		t.Fatal("flock validation accepted a malformed device")
+	}
+}
+
 func TestBorrowedDomainAdoptionRejectsExclusiveOFDWithoutMutatingIt(t *testing.T) {
 	restoreAgentIdentityLockTestSeams(t)
 	root := configureAgentIdentityLockTestRoot(t)

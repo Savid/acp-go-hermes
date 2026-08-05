@@ -571,12 +571,19 @@ func validateInheritedAgentIdentityFlockLine(fields []string, descriptor unix.St
 	if len(identity) != 3 {
 		return errors.New("inherited agent identity descriptor has malformed flock inode")
 	}
-	major, majorErr := strconv.ParseUint(identity[0], 16, 32)
-	minor, minorErr := strconv.ParseUint(identity[1], 16, 32)
+	_, majorErr := strconv.ParseUint(identity[0], 16, 32)
+	_, minorErr := strconv.ParseUint(identity[1], 16, 32)
 	inode, inodeErr := strconv.ParseUint(identity[2], 10, 64)
-	if majorErr != nil || minorErr != nil || inodeErr != nil ||
-		uint32(major) != unix.Major(uint64(descriptor.Dev)) ||
-		uint32(minor) != unix.Minor(uint64(descriptor.Dev)) || inode != descriptor.Ino {
+	if majorErr != nil || minorErr != nil || inodeErr != nil {
+		return errors.New("inherited agent identity descriptor has malformed flock inode")
+	}
+	// The fdinfo flock entry carries the backing superblock device, while
+	// fstat reports the mount's device. Those device numbers can differ when
+	// the descriptor crosses a mount namespace, such as for a Docker volume.
+	// The adoption path separately matches descriptor.Dev and descriptor.Ino
+	// against the exact trusted named authority. Identity-lock adoption also
+	// proves that a fresh contender is blocked.
+	if inode != descriptor.Ino {
 		return errors.New("inherited agent identity descriptor flock does not cover its exact inode")
 	}
 
