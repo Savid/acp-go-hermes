@@ -128,6 +128,15 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	if inspection.HostConfig.PidMode != container.PidMode("host") {
 		t.Fatalf("native browser fixture PID mode = %q, want host", inspection.HostConfig.PidMode)
 	}
+	if inspection.HostConfig.Privileged {
+		t.Fatal("native browser fixture unexpectedly has privileged access")
+	}
+	if inspection.AppArmorProfile != "" && inspection.AppArmorProfile != "docker-default" {
+		t.Fatalf("native browser fixture AppArmor profile = %q, want docker-default", inspection.AppArmorProfile)
+	}
+	if len(inspection.HostConfig.SecurityOpt) != 0 {
+		t.Fatalf("native browser fixture security overrides = %q, want none", inspection.HostConfig.SecurityOpt)
+	}
 	wantExtraHost := nativeBrowserHostname + ":127.0.0.1"
 	if len(inspection.HostConfig.ExtraHosts) != 1 || inspection.HostConfig.ExtraHosts[0] != wantExtraHost {
 		t.Fatalf("native browser fixture extra hosts = %q, want [%q]", inspection.HostConfig.ExtraHosts, wantExtraHost)

@@ -142,6 +142,10 @@ var agentStandaloneLockDirectorySync = unix.Fsync
 var agentStandaloneLockClose = func(file *os.File) error { return file.Close() }
 var agentStandaloneLockFstatat = unix.Fstatat
 var agentStandaloneFilesystemProbe = probeAgentStandaloneFilesystem
+var agentStandaloneProbeFstatfs = unix.Fstatfs
+var agentStandaloneReadlink = os.Readlink
+var agentStandaloneProcessID = os.Getpid
+var agentStandaloneNamespaceIdentity = agentAuthorityNamespaceIdentity
 var agentStandaloneProbeFcntl = unix.FcntlInt
 var agentStandaloneProbeUnlinkat = unix.Unlinkat
 var agentStandaloneProbeDirectorySync = unix.Fsync
@@ -1075,12 +1079,8 @@ func validateAgentStandaloneBinder() error {
 	if err != nil {
 		return err
 	}
-	initNamespace, err := agentAuthorityNamespaceIdentity("/proc/1/ns/pid")
-	if err != nil {
+	if err = validateAgentStandalonePIDNamespaceAnchor(self); err != nil {
 		return err
-	}
-	if self != initNamespace {
-		return errors.New("standalone agent authority binder requires self and procfs PID namespaces to match")
 	}
 	if _, err = os.ReadFile("/proc/1/status"); err != nil {
 		return fmt.Errorf("prove unrestricted root procfs visibility: %w", err)
@@ -1093,9 +1093,30 @@ func validateAgentStandaloneBinder() error {
 	return nil
 }
 
+func validateAgentStandalonePIDNamespaceAnchor(self agentAuthorityDomainInode) error {
+	processID := agentStandaloneProcessID()
+	anchor, err := agentStandaloneReadlink("/proc/self")
+	if err != nil {
+		return fmt.Errorf("resolve procfs self anchor: %w", err)
+	}
+	wantAnchor := strconv.Itoa(processID)
+	if anchor != wantAnchor {
+		return fmt.Errorf("procfs self anchor = %q, want %q", anchor, wantAnchor)
+	}
+	anchorNamespace, err := agentStandaloneNamespaceIdentity(filepath.Join("/proc", anchor, "ns/pid"))
+	if err != nil {
+		return fmt.Errorf("inspect procfs self PID namespace anchor: %w", err)
+	}
+	if self != anchorNamespace {
+		return errors.New("standalone agent authority binder requires self and procfs PID namespaces to match")
+	}
+
+	return nil
+}
+
 func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr error) {
 	var filesystem unix.Statfs_t
-	if err := unix.Fstatfs(int(directory.Fd()), &filesystem); err != nil {
+	if err := agentStandaloneProbeFstatfs(int(directory.Fd()), &filesystem); err != nil {
 		return err
 	}
 	if filesystem.Flags&unix.ST_RDONLY != 0 {
@@ -2034,10 +2055,21 @@ func validateAgentStandaloneOwnerUniqueness(
 }
 
 func validateAgentStandalonePriorDisposition(directory *os.File, owner agentStandaloneOwner, ownerUID, ownerGID uint32) error {
-	marker, err := loadAgentStandaloneMarker(directory, owner.UID, ownerUID, ownerGID)
+	err := validateAgentStandaloneRetainedActiveDisposition(directory, owner, ownerUID, ownerGID)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
+
+	return err
+}
+
+func validateAgentStandaloneRetainedActiveDisposition(
+	directory *os.File,
+	owner agentStandaloneOwner,
+	ownerUID uint32,
+	ownerGID uint32,
+) error {
+	marker, err := loadAgentStandaloneMarker(directory, owner.UID, ownerUID, ownerGID)
 	if err != nil {
 		return err
 	}

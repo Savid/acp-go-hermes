@@ -7,10 +7,271 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T) {
+	restoreAgentIdentityLockTestSeams(t)
+	root := configureAgentIdentityLockTestRoot(t)
+	const (
+		uid = uint32(62401)
+		gid = uint32(62402)
+	)
+	directory, err := bootstrapAgentIdentityLockDirectory(root, uint32(os.Geteuid()), uint32(os.Getegid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	deadline := time.Now().Add(agentStandaloneClaimMax)
+	domainFile, err := acquireAgentStandaloneDomain(
+		directory,
+		agentStandaloneOwner{},
+		uint32(os.Geteuid()),
+		uint32(os.Getegid()),
+		true,
+		deadline,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer domainFile.Close()
+	owners, err := openAgentStandaloneNamedLock(
+		directory,
+		"owners.lock",
+		true,
+		uint32(os.Geteuid()),
+		uint32(os.Getegid()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = owners.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identityFile, err := openAgentStandaloneNamedLock(
+		directory,
+		strconv.FormatUint(uint64(uid), 10)+".lock",
+		true,
+		uint32(os.Geteuid()),
+		uint32(os.Getegid()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer identityFile.Close()
+	if err = unix.Flock(int(identityFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	const sessionKey = "host-owned-session"
+	affinity, err := openAgentStandaloneNamedLock(
+		directory,
+		agentStandaloneAffinityLockName(sessionKey),
+		true,
+		uint32(os.Geteuid()),
+		uint32(os.Getegid()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = affinity.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = publishAgentStandaloneActive(
+		directory,
+		uid,
+		gid,
+		uint32(os.Geteuid()),
+		uint32(os.Getegid()),
+		sessionKey,
+		deadline,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	authorityPath := filepath.Join(root, "acp-go", "agent-identities")
+	markerPath := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".quarantine")
+	before, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err != nil {
+		t.Fatalf("validate ownerless ACTIVE: %v", err)
+	}
+	after, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("borrowed validation rewrote the host disposition")
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid+1, true, root); err == nil {
+		t.Fatal("borrowed validation accepted the wrong gid")
+	}
+	configFile, err := os.CreateTemp(t.TempDir(), "borrowed-supervisor-config-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configFile.Close()
+	config := hermesSupervisorConfig{
+		Isolation: ProcessIsolation{
+			UID: uid,
+			GID: gid,
+			IdentityLock: &agentIdentityLock{
+				file: identityFile,
+			},
+			AuthorityDomain: &agentIdentityLock{
+				file: domainFile,
+			},
+			TestOnlyIdentityLockRoot: root,
+		},
+		IdentityLock:    true,
+		AuthorityDomain: true,
+	}
+	if err = writeHermesSupervisorConfig(configFile, config); err != nil {
+		t.Fatal(err)
+	}
+	var decoded hermesSupervisorConfig
+	if err = json.NewDecoder(configFile).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Isolation.IdentityLock != nil || decoded.Isolation.AuthorityDomain != nil ||
+		!decoded.IdentityLock || !decoded.AuthorityDomain {
+		t.Fatalf("borrowed supervisor transport = %#v", decoded)
+	}
+	identityFD, err := unix.FcntlInt(identityFile.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domainFD, err := unix.FcntlInt(domainFile.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		_ = unix.Close(identityFD)
+		t.Fatal(err)
+	}
+	authority, err := acquireHermesSupervisorAuthority(decoded, uintptr(identityFD), uintptr(domainFD), nil, nil)
+	if err != nil {
+		t.Fatalf("adopt production transported borrowed authority: %v", err)
+	}
+	if err = authority.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPath := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".owner")
+	if err = os.WriteFile(ownerPath, []byte("bound\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
+		t.Fatal("borrowed validation accepted a permanent owner binding")
+	}
+	if err = os.Remove(ownerPath); err != nil {
+		t.Fatal(err)
+	}
+
+	clean, err := json.Marshal(agentStandaloneMarker{
+		Version: 2, UID: uid, GID: gid, SessionKey: sessionKey, State: "clean-ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(markerPath, append(clean, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
+		t.Fatal("borrowed validation accepted CLEAN_READY")
+	}
+
+	for name, payload := range map[string][]byte{
+		"malformed": []byte("{}\n"),
+		"duplicate": []byte(`{"version":2,"uid":62401,"gid":62402,"sessionKey":"host-owned-session","state":"active","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n"),
+		"trailing":  append(append([]byte(nil), before...), []byte("{}\n")...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if writeErr := os.WriteFile(markerPath, payload, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if validationErr := validateBorrowedAgentIdentityDisposition(uid, gid, true, root); validationErr == nil {
+				t.Fatalf("borrowed validation accepted %s disposition", name)
+			}
+		})
+	}
+	if err = os.WriteFile(markerPath, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	temporary := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".quarantine.next-0123456789abcdef01234567")
+	if err = os.WriteFile(temporary, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
+		t.Fatal("borrowed validation accepted an unresolved disposition temporary")
+	}
+	if err = os.Remove(temporary); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
+		t.Fatal("borrowed validation accepted a missing disposition")
+	}
+}
+
+func TestAgentStandaloneInheritedDispositionRequiresExactRetainedActive(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("inherited standalone disposition test requires root")
+	}
+	restoreAgentIdentityLockTestSeams(t)
+	root := configureAgentIdentityLockTestRoot(t)
+	const (
+		uid     = uint32(62411)
+		gid     = uint32(62412)
+		ownerID = "inherited-owner"
+	)
+	stateRoot := createAgentStandaloneProtectedStateRoot(t, uid, gid)
+	identity, err := acquireAgentStandaloneIdentity(
+		uid, gid, ownerID, stateRoot, true, root, make(chan struct{}), make(chan os.Signal),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer identity.Close()
+	if err = validateInheritedStandaloneAgentIdentityDisposition(
+		uid, gid, ownerID, stateRoot, true, root,
+	); err != nil {
+		t.Fatalf("validate exact inherited standalone disposition: %v", err)
+	}
+	if err = validateInheritedStandaloneAgentIdentityDisposition(
+		uid, gid, ownerID+"-wrong", stateRoot, true, root,
+	); err == nil {
+		t.Fatal("inherited standalone disposition accepted the wrong owner")
+	}
+	otherStateRoot := createAgentStandaloneProtectedStateRoot(t, uid, gid)
+	if err = validateInheritedStandaloneAgentIdentityDisposition(
+		uid, gid, ownerID, otherStateRoot, true, root,
+	); err == nil {
+		t.Fatal("inherited standalone disposition accepted the wrong state root")
+	}
+	markerPath := filepath.Join(
+		root,
+		"acp-go",
+		"agent-identities",
+		strconv.FormatUint(uint64(uid), 10)+".quarantine",
+	)
+	if err = os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = validateInheritedStandaloneAgentIdentityDisposition(
+		uid, gid, ownerID, stateRoot, true, root,
+	); err == nil {
+		t.Fatal("inherited standalone disposition accepted a missing ACTIVE marker")
+	}
+}
 
 func TestBorrowedAuthorityDomainValidatesStrictCurrentRecord(t *testing.T) {
 	restoreAgentIdentityLockTestSeams(t)
@@ -622,6 +883,7 @@ func restoreAgentIdentityLockTestSeams(t *testing.T) {
 	fstatat := agentIdentityDirectoryFstatat
 	closeDirectory := agentIdentityDirectoryClose
 	readFile := agentIdentityLockReadFile
+	closeLock := agentIdentityLockClose
 	t.Cleanup(func() {
 		agentIdentityLockRunRoot = root
 		agentIdentityLockTrustedUID = uid
@@ -634,5 +896,6 @@ func restoreAgentIdentityLockTestSeams(t *testing.T) {
 		agentIdentityDirectoryFstatat = fstatat
 		agentIdentityDirectoryClose = closeDirectory
 		agentIdentityLockReadFile = readFile
+		agentIdentityLockClose = closeLock
 	})
 }

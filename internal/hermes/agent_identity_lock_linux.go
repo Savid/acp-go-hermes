@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,6 +32,7 @@ var agentIdentityDirectoryFsync = unix.Fsync
 var agentIdentityDirectoryFstatat = unix.Fstatat
 var agentIdentityDirectoryClose = func(file *os.File) error { return file.Close() }
 var agentIdentityLockReadFile = os.ReadFile
+var agentIdentityLockClose = func(file *os.File) error { return file.Close() }
 
 func bootstrapAgentIdentityLockDirectory(runRoot string, trustedUID, trustedGID uint32) (*os.File, error) {
 	run, err := openAgentIdentityRuntimeRoot(runRoot, trustedUID, trustedGID)
@@ -331,6 +333,153 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 	return &agentIdentityLock{file: file}, nil
 }
 
+func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, testRoot string) error {
+	runRoot := agentIdentityLockRunRoot
+	trustedUID := agentIdentityLockTrustedUID
+	trustedGID := agentIdentityLockTrustedGID
+	if testOnly {
+		if testRoot == "" {
+			return errors.New("test agent identity lock root is required")
+		}
+		runRoot = testRoot
+		trustedUID = uint32(os.Geteuid())
+		trustedGID = uint32(os.Getegid())
+	} else if testRoot != "" {
+		return errors.New("test agent identity lock root is forbidden")
+	}
+
+	directory, err := openAgentIdentityLockDirectory(runRoot, trustedUID, trustedGID)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(agentStandaloneClaimMax)
+	if err = auditAgentStandaloneAuthorityRoot(
+		directory,
+		trustedUID,
+		trustedGID,
+		false,
+		false,
+		true,
+		deadline,
+		nil,
+		nil,
+	); err != nil {
+		return fmt.Errorf("audit borrowed agent identity authority: %w", err)
+	}
+
+	ownerName := strconv.FormatUint(uint64(uid), 10) + ".owner"
+	var owner unix.Stat_t
+	ownerErr := unix.Fstatat(int(directory.Fd()), ownerName, &owner, unix.AT_SYMLINK_NOFOLLOW)
+	if ownerErr == nil {
+		return fmt.Errorf("borrowed agent identity uid %d has a permanent owner binding", uid)
+	}
+	if !errors.Is(ownerErr, unix.ENOENT) {
+		return fmt.Errorf("inspect borrowed agent identity owner %s: %w", ownerName, ownerErr)
+	}
+
+	marker, err := loadAgentStandaloneMarker(directory, uid, trustedUID, trustedGID)
+	if err != nil {
+		return fmt.Errorf("load borrowed agent identity disposition: %w", err)
+	}
+	if marker.State != "active" || marker.GID != gid {
+		return fmt.Errorf("borrowed agent identity uid %d does not have its matching ownerless ACTIVE disposition", uid)
+	}
+
+	return nil
+}
+
+func validateInheritedStandaloneAgentIdentityDisposition(
+	uid uint32,
+	gid uint32,
+	ownerID string,
+	stateRoot string,
+	testOnly bool,
+	testRoot string,
+) error {
+	boundRoot, err := bindAgentStandaloneStateRoot(stateRoot, uid, gid)
+	if err != nil {
+		return fmt.Errorf("bind inherited standalone state root: %w", err)
+	}
+	runRoot := agentIdentityLockRunRoot
+	trustedUID := agentIdentityLockTrustedUID
+	trustedGID := agentIdentityLockTrustedGID
+	if testOnly {
+		if testRoot == "" {
+			return errors.New("test agent identity lock root is required")
+		}
+		runRoot = testRoot
+		trustedUID = uint32(os.Geteuid())
+		trustedGID = uint32(os.Getegid())
+	} else if testRoot != "" {
+		return errors.New("test agent identity lock root is forbidden")
+	}
+
+	directory, err := openAgentIdentityLockDirectory(runRoot, trustedUID, trustedGID)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(agentStandaloneClaimMax)
+	if err = auditAgentStandaloneAuthorityRoot(
+		directory,
+		trustedUID,
+		trustedGID,
+		false,
+		false,
+		true,
+		deadline,
+		nil,
+		nil,
+	); err != nil {
+		return fmt.Errorf("audit inherited standalone agent identity authority: %w", err)
+	}
+	want := agentStandaloneOwner{
+		Version:   1,
+		UID:       uid,
+		GID:       gid,
+		Kind:      agentStandaloneOwnerKind,
+		Provider:  agentStandaloneOwnerID,
+		OwnerID:   ownerID,
+		StateRoot: boundRoot,
+	}
+	owner, err := loadAgentStandaloneOwner(directory, uid, trustedUID, trustedGID)
+	if err != nil {
+		return fmt.Errorf("load inherited standalone owner: %w", err)
+	}
+	if owner != want {
+		return fmt.Errorf("inherited standalone agent identity uid %d does not match its immutable owner tuple", uid)
+	}
+	if err = validateAgentStandaloneRetainedActiveDisposition(directory, owner, trustedUID, trustedGID); err != nil {
+		return fmt.Errorf("validate inherited standalone disposition: %w", err)
+	}
+
+	return nil
+}
+
+func rejectBorrowedAgentIdentityTemporaries(directory *os.File) error {
+	entries, err := agentStandaloneAuthorityEntries(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "domain.json.next-") || strings.HasPrefix(name, ".authority-probe-") ||
+			strings.Contains(name, ".owner.next-") || strings.Contains(name, ".quarantine.next-") {
+			return fmt.Errorf("borrowed agent identity authority contains unresolved temporary %q", name)
+		}
+	}
+
+	return nil
+}
+
 func setAgentIdentityLockCloseOnExec(file *os.File) error {
 	flags, err := agentIdentityLockFcntl(file.Fd(), unix.F_GETFD, 0)
 	if err != nil {
@@ -438,7 +587,7 @@ func (lock *agentIdentityLock) Close() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}
-	closeErr := lock.file.Close()
+	closeErr := agentIdentityLockClose(lock.file)
 	lock.file = nil
 
 	return closeErr

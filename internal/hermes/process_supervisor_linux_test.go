@@ -328,7 +328,7 @@ func TestHermesSupervisorGuardianSIGKILLPreReadinessRefusesNativeLaunch(t *testi
 	code := runHermesProcessSupervisorNative(
 		config, []io.Reader{strings.NewReader("control")}, peerRead, &status, &proof, true,
 	)
-	if code != 125 || status.String() != "done\n" || !bytes.Equal(proof.Bytes(), []byte{1}) {
+	if code != 125 || status.Len() != 0 || !bytes.Equal(proof.Bytes(), []byte{1}) {
 		t.Fatalf("pre-readiness guardian death code=%d status=%q proof=%v", code, status.String(), proof.Bytes())
 	}
 	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -364,12 +364,149 @@ func TestHermesSupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndComplet
 	code := runHermesProcessSupervisorNative(
 		config, []io.Reader{strings.NewReader("control")}, peerRead, &status, &proof, true,
 	)
-	if code != 125 || status.String() != "done\n" || !bytes.Equal(proof.Bytes(), []byte{1}) {
+	if code != 125 || status.Len() != 0 || !bytes.Equal(proof.Bytes(), []byte{1}) {
 		t.Fatalf("native-start guardian death code=%d status=%q proof=%v", code, status.String(), proof.Bytes())
 	}
 	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("native launch marker exists after guardian death at Start: %v", err)
 	}
+}
+
+func TestHermesSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	originalClose := agentIdentityLockClose
+	t.Cleanup(func() { agentIdentityLockClose = originalClose })
+	proveSupervisorDescendants = func(time.Duration) error { return nil }
+
+	newAuthority := func(t *testing.T) (*hermesSupervisorAuthority, []*os.File) {
+		t.Helper()
+		identity, err := os.CreateTemp(t.TempDir(), "identity")
+		if err != nil {
+			t.Fatal(err)
+		}
+		domain, err := os.CreateTemp(t.TempDir(), "domain")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return &hermesSupervisorAuthority{
+			identity: &agentIdentityLock{file: identity},
+			domain:   &agentIdentityLock{file: domain},
+		}, []*os.File{identity, domain}
+	}
+
+	t.Run("guardian success", func(t *testing.T) {
+		authority, _ := newAuthority(t)
+		var order []string
+		agentIdentityLockClose = func(file *os.File) error {
+			order = append(order, "close")
+
+			return file.Close()
+		}
+		var proof bytes.Buffer
+		writer := io.MultiWriter(&proof, hermesSupervisorOrderWriter{order: &order})
+		if err := completeHermesSupervisorAuthority(&authority, nil, nil, writer, false); err != nil {
+			t.Fatal(err)
+		}
+		if authority != nil || !bytes.Equal(proof.Bytes(), []byte{1}) || strings.Join(order, ",") != "close,close,proof" {
+			t.Fatalf("guardian completion authority=%v proof=%v order=%v", authority, proof.Bytes(), order)
+		}
+	})
+
+	t.Run("close failure", func(t *testing.T) {
+		authority, files := newAuthority(t)
+		want := errors.New("close identity")
+		calls := 0
+		agentIdentityLockClose = func(file *os.File) error {
+			calls++
+			if calls == 1 {
+				return want
+			}
+
+			return file.Close()
+		}
+		var proof bytes.Buffer
+		err := completeHermesSupervisorAuthority(&authority, nil, nil, &proof, false)
+		if !errors.Is(err, want) || authority != nil || calls != 2 || proof.Len() != 0 {
+			t.Fatalf("close failure error=%v authority=%v calls=%d proof=%v", err, authority, calls, proof.Bytes())
+		}
+		_ = files[0].Close()
+	})
+
+	t.Run("liveness routing", func(t *testing.T) {
+		for _, guardianExited := range []bool{false, true} {
+			t.Run(strconv.FormatBool(guardianExited), func(t *testing.T) {
+				authority, _ := newAuthority(t)
+				agentIdentityLockClose = func(file *os.File) error { return file.Close() }
+				guardianDone := make(chan struct{})
+				if guardianExited {
+					close(guardianDone)
+				}
+				var status, proof bytes.Buffer
+				if err := completeHermesSupervisorAuthority(
+					&authority, guardianDone, &status, &proof, true,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if guardianExited {
+					if status.Len() != 0 || !bytes.Equal(proof.Bytes(), []byte{1}) {
+						t.Fatalf("survivor status=%q proof=%v", status.String(), proof.Bytes())
+					}
+				} else if status.String() != "done\n" || proof.Len() != 0 {
+					t.Fatalf("paired status=%q proof=%v", status.String(), proof.Bytes())
+				}
+			})
+		}
+	})
+
+	t.Run("unavailable", func(t *testing.T) {
+		var proof bytes.Buffer
+		if err := completeHermesSupervisorAuthority(nil, nil, nil, &proof, false); err == nil {
+			t.Fatal("missing authority completed")
+		}
+		if proof.Len() != 0 {
+			t.Fatalf("unavailable completion proof=%v", proof.Bytes())
+		}
+	})
+}
+
+func TestHermesSupervisorConfigRequiresExplicitAuthorityOrigin(t *testing.T) {
+	config := supervisorTestConfig([]string{"/bin/true"})
+	config.StandaloneAuthority = true
+	if err := validateHermesSupervisorConfig(config); err == nil {
+		t.Fatal("standalone authority without capabilities was accepted")
+	}
+
+	config.IdentityLock = true
+	config.AuthorityDomain = true
+	if err := validateHermesSupervisorConfig(config); err == nil {
+		t.Fatal("standalone authority without its owner tuple was accepted")
+	}
+	config.Isolation.StandaloneOwnerID = "supervisor-origin"
+	config.Isolation.StandaloneStateRoot = "/var/lib/hermes-origin"
+	if err := validateHermesSupervisorConfig(config); err != nil {
+		t.Fatalf("valid inherited standalone authority: %v", err)
+	}
+
+	config.StandaloneAuthority = false
+	if err := validateHermesSupervisorConfig(config); err == nil {
+		t.Fatal("external borrowed authority accepted standalone owner fields")
+	}
+	config.IdentityLock = false
+	config.AuthorityDomain = false
+	if err := validateHermesSupervisorConfig(config); err != nil {
+		t.Fatalf("valid initial standalone authority: %v", err)
+	}
+}
+
+type hermesSupervisorOrderWriter struct {
+	order *[]string
+}
+
+func (writer hermesSupervisorOrderWriter) Write(value []byte) (int, error) {
+	*writer.order = append(*writer.order, "proof")
+
+	return len(value), nil
 }
 
 type supervisorPeerDeathFixture struct {
@@ -663,7 +800,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
 		supervisorSetrlimit = func(int, *unix.Rlimit) error { return errors.New("setrlimit") }
 		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "exit 0"}, nil)
-		if code != 125 || proof != 0 {
+		if code != 125 || proof != 1 {
 			t.Fatalf("core result code/proof = %d/%d", code, proof)
 		}
 	})
@@ -678,7 +815,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 			return errors.New("no-new-privs")
 		}
 		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "exit 0"}, nil)
-		if code != 125 || proof != 0 {
+		if code != 125 || proof != 1 {
 			t.Fatalf("core result code/proof = %d/%d", code, proof)
 		}
 	})
@@ -699,7 +836,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 
 	t.Run("target start failure", func(t *testing.T) {
 		code, proof := runSupervisorCoreTest(t, []string{"missing", "arg"}, nil)
-		if code != 125 || proof != 0 {
+		if code != 125 || proof != 1 {
 			t.Fatalf("core result code/proof = %d/%d", code, proof)
 		}
 	})
@@ -779,7 +916,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 		}
 	})
 
-	t.Run("unsettled root fails without proof", func(t *testing.T) {
+	t.Run("unsettled root awaits containment before proof", func(t *testing.T) {
 		restoreLinuxSupervisorSeams(t)
 		stopSupervisorDescendants = func(targetPID int, _ <-chan error) (error, bool) {
 			_ = syscall.Kill(-targetPID, syscall.SIGKILL)

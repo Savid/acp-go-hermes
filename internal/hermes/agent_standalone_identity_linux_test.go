@@ -604,10 +604,22 @@ func TestAgentStandaloneRebindRejectsOverlayFilesystemBeforeDomainMutation(t *te
 	before, err := os.ReadFile(recordPath)
 	require.NoError(t, err)
 	previousProbe := agentStandaloneFilesystemProbe
+	previousFstatfs := agentStandaloneProbeFstatfs
 	agentStandaloneFilesystemProbe = func(dir *os.File, _ bool) error {
 		return probeAgentStandaloneFilesystem(dir, false)
 	}
-	t.Cleanup(func() { agentStandaloneFilesystemProbe = previousProbe })
+	agentStandaloneProbeFstatfs = func(fd int, filesystem *unix.Statfs_t) error {
+		if err := previousFstatfs(fd, filesystem); err != nil {
+			return err
+		}
+		filesystem.Type = 0x794c7630
+
+		return nil
+	}
+	t.Cleanup(func() {
+		agentStandaloneFilesystemProbe = previousProbe
+		agentStandaloneProbeFstatfs = previousFstatfs
+	})
 	want := agentStandaloneOwner{
 		Version: 1, UID: 62097, GID: 62098, Kind: agentStandaloneOwnerKind,
 		Provider: agentStandaloneOwnerID, OwnerID: "overlay-rebind",
@@ -1058,7 +1070,7 @@ func TestAgentStandaloneFinalStateRootRevalidationAfterLastScanPreventsActive(t 
 	) error {
 		scans++
 		if scans == 2 {
-			require.NoError(t, os.Remove(stateRoot))
+			require.NoError(t, os.Rename(stateRoot, stateRoot+".replaced"))
 			require.NoError(t, os.Mkdir(stateRoot, 0o700))
 			require.NoError(t, os.Chown(stateRoot, int(uid), int(gid)))
 		}
@@ -1073,6 +1085,48 @@ func TestAgentStandaloneFinalStateRootRevalidationAfterLastScanPreventsActive(t 
 	require.Equal(t, 2, scans)
 	require.FileExists(t, filepath.Join(directory.Name(), "62073.owner"))
 	require.NoFileExists(t, filepath.Join(directory.Name(), "62073.quarantine"))
+}
+
+func TestAgentStandalonePIDNamespaceAnchorUsesCurrentProcess(t *testing.T) {
+	previousReadlink := agentStandaloneReadlink
+	previousProcessID := agentStandaloneProcessID
+	previousNamespaceIdentity := agentStandaloneNamespaceIdentity
+	t.Cleanup(func() {
+		agentStandaloneReadlink = previousReadlink
+		agentStandaloneProcessID = previousProcessID
+		agentStandaloneNamespaceIdentity = previousNamespaceIdentity
+	})
+
+	wantNamespace := agentAuthorityDomainInode{Dev: 11, Ino: 12}
+	agentStandaloneProcessID = func() int { return 4321 }
+	agentStandaloneReadlink = func(path string) (string, error) {
+		require.Equal(t, "/proc/self", path)
+
+		return "4321", nil
+	}
+	agentStandaloneNamespaceIdentity = func(path string) (agentAuthorityDomainInode, error) {
+		require.Equal(t, "/proc/4321/ns/pid", path)
+
+		return wantNamespace, nil
+	}
+	require.NoError(t, validateAgentStandalonePIDNamespaceAnchor(wantNamespace))
+
+	agentStandaloneReadlink = func(string) (string, error) { return "1", nil }
+	require.ErrorContains(t, validateAgentStandalonePIDNamespaceAnchor(wantNamespace), "want \"4321\"")
+
+	agentStandaloneReadlink = func(string) (string, error) { return "4321", nil }
+	agentStandaloneNamespaceIdentity = func(string) (agentAuthorityDomainInode, error) {
+		return agentAuthorityDomainInode{Dev: 11, Ino: 13}, nil
+	}
+	require.ErrorContains(t, validateAgentStandalonePIDNamespaceAnchor(wantNamespace), "requires self and procfs")
+
+	wantErr := errors.New("denied")
+	agentStandaloneNamespaceIdentity = func(string) (agentAuthorityDomainInode, error) {
+		return agentAuthorityDomainInode{}, wantErr
+	}
+	err := validateAgentStandalonePIDNamespaceAnchor(wantNamespace)
+	require.ErrorIs(t, err, wantErr)
+	require.ErrorContains(t, err, "inspect procfs self PID namespace anchor")
 }
 
 func TestAgentStandaloneEndToEndRetainsActiveAndNativeChildHasNoAuthorityFD(t *testing.T) {
