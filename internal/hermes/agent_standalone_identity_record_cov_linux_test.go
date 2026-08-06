@@ -31,7 +31,7 @@ func agentStandaloneCovWriteRegistryFile(t *testing.T, directory *os.File, name,
 func agentStandaloneCovActiveMarker(uid, gid uint32, sessionKey, leaseID, paths string) string {
 	return `{"version":2,"uid":` + strconv.FormatUint(uint64(uid), 10) +
 		`,"gid":` + strconv.FormatUint(uint64(gid), 10) +
-		`,"sessionKey":"` + sessionKey + `","state":"active","leaseId":"` + leaseID +
+		`,"ownerDigest":"` + sessionKey + `","state":"active","leaseId":"` + leaseID +
 		`","paths":` + paths + `}`
 }
 
@@ -67,7 +67,7 @@ func TestAgentStandaloneCovMarkerRefusesEveryMalformedPayload(t *testing.T) {
 		},
 		{
 			name:    "unknown field",
-			payload: `{"version":2,"uid":62301,"gid":62302,"sessionKey":"k","state":"clean-ready","surprise":1}`,
+			payload: `{"version":2,"uid":62301,"gid":62302,"ownerDigest":"k","state":"clean-ready","surprise":1}`,
 			want:    `unknown field "surprise"`,
 		},
 		{
@@ -82,7 +82,7 @@ func TestAgentStandaloneCovMarkerRefusesEveryMalformedPayload(t *testing.T) {
 		},
 		{
 			name:    "active marker without lease and paths",
-			payload: `{"version":2,"uid":62301,"gid":62302,"sessionKey":"k","state":"active"}`,
+			payload: `{"version":2,"uid":62301,"gid":62302,"ownerDigest":"k","state":"active"}`,
 			want:    "ACTIVE marker lacks exact v2 fields",
 		},
 		{
@@ -92,7 +92,7 @@ func TestAgentStandaloneCovMarkerRefusesEveryMalformedPayload(t *testing.T) {
 		},
 		{
 			name:    "unknown state",
-			payload: `{"version":2,"uid":62301,"gid":62302,"sessionKey":"k","state":"quarantined"}`,
+			payload: `{"version":2,"uid":62301,"gid":62302,"ownerDigest":"k","state":"quarantined"}`,
 			want:    "marker state is invalid",
 		},
 		{

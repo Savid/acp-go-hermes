@@ -56,7 +56,7 @@ func agentStandaloneCovWriteCleanMarker(t *testing.T, directory *os.File, uid, g
 		t, directory, strconv.FormatUint(uint64(uid), 10)+".quarantine",
 		`{"version":2,"uid":`+strconv.FormatUint(uint64(uid), 10)+
 			`,"gid":`+strconv.FormatUint(uint64(gid), 10)+
-			`,"sessionKey":"`+key+`","state":"clean-ready"}`+"\n",
+			`,"ownerDigest":"`+key+`","state":"clean-ready"}`+"\n",
 	)
 }
 

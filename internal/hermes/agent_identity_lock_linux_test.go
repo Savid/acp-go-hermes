@@ -175,7 +175,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	}
 
 	clean, err := json.Marshal(agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, SessionKey: sessionKey, State: "clean-ready",
+		Version: 2, UID: uid, GID: gid, OwnerDigest: sessionKey, State: "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 
 	for name, payload := range map[string][]byte{
 		"malformed": []byte("{}\n"),
-		"duplicate": []byte(`{"version":2,"uid":62401,"gid":62402,"sessionKey":"host-owned-session","state":"active","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n"),
+		"duplicate": []byte(`{"version":2,"uid":62401,"gid":62402,"ownerDigest":"host-owned-session","state":"active","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n"),
 		"trailing":  append(append([]byte(nil), before...), []byte("{}\n")...),
 	} {
 		t.Run(name, func(t *testing.T) {

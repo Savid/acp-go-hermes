@@ -43,9 +43,7 @@ func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) 
 		return err
 	}
 
-	sudo := exec.CommandContext(ctx, "/usr/bin/sudo", "-n", "-U", account.Username, "-l")
-	sudo.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
-	output, commandErr := sudo.CombinedOutput()
+	output, commandErr := runAccountAuthorityCombined(ctx, "/usr/bin/sudo", "-n", "-U", account.Username, "-l")
 
 	return validateTargetAccountHasNoSudo(output, commandErr, account.Username)
 }
@@ -55,6 +53,16 @@ func runAccountAuthorityCommand(ctx context.Context, path string, args ...string
 	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
 
 	return command.Output()
+}
+
+// runAccountAuthorityCombined runs an account-authority probe that reports its
+// refusal on stderr, so the caller needs both streams. It is otherwise the same
+// fixed-environment invocation runAccountAuthorityCommand makes.
+func runAccountAuthorityCombined(ctx context.Context, path string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, path, args...)
+	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
+
+	return command.CombinedOutput()
 }
 
 func validatePrivateTargetAccount(passwd []byte, groups []byte, account *user.User, uid uint32, gid uint32) error {

@@ -323,15 +323,18 @@ func canonicalAgentAuthorityIDMap(path string) ([]agentAuthorityDomainExtent, er
 			return nil, errors.New("agent authority id map has an invalid extent")
 		}
 
-		values := make([]uint64, 3)
+		values := make([]uint32, 3)
+
 		for index, field := range fields {
-			values[index], err = strconv.ParseUint(field, 10, 32)
-			if err != nil || (index == 2 && values[index] == 0) {
+			parsed, parseErr := strconv.ParseUint(field, 10, 32)
+			if parseErr != nil || (index == 2 && parsed == 0) {
 				return nil, errors.New("agent authority id map has an invalid extent value")
 			}
+
+			values[index] = uint32(parsed)
 		}
 
-		extents = append(extents, agentAuthorityDomainExtent{Inside: uint32(values[0]), Outside: uint32(values[1]), Length: uint32(values[2])})
+		extents = append(extents, agentAuthorityDomainExtent{Inside: values[0], Outside: values[1], Length: values[2]})
 	}
 
 	if err = validateAgentAuthorityExtents(extents); err != nil {

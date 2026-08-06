@@ -161,7 +161,7 @@ func TestAgentStandalonePermanentLocksAreNeverRecreatedAcrossSplitInodes(t *test
 		require.NoError(t, unix.Unlinkat(int(directory.Fd()), "62041.lock", 0))
 		require.NoError(t, os.WriteFile(
 			filepath.Join(directory.Name(), "62041.quarantine"),
-			[]byte(`{"version":2,"uid":62041,"gid":62042,"sessionKey":"held","state":"clean-ready"}`+"\n"),
+			[]byte(`{"version":2,"uid":62041,"gid":62042,"ownerDigest":"held","state":"clean-ready"}`+"\n"),
 			0o600,
 		))
 
@@ -710,7 +710,7 @@ func TestAgentStandaloneOwnerlessMarkerRequiresLegacyAffinityLock(t *testing.T) 
 	require.NoError(t, owners.Close())
 	uidLock := createAgentStandaloneTestLock(t, directory, "62051.lock", ownerUID, ownerGID)
 	require.NoError(t, uidLock.Close())
-	marker := []byte(`{"version":2,"uid":62051,"gid":62052,"sessionKey":"hosted-session","state":"clean-ready"}` + "\n")
+	marker := []byte(`{"version":2,"uid":62051,"gid":62052,"ownerDigest":"hosted-session","state":"clean-ready"}` + "\n")
 	require.NoError(t, os.WriteFile(filepath.Join(directory.Name(), "62051.quarantine"), marker, 0o600))
 	deadline := time.Now().Add(time.Second)
 
@@ -738,7 +738,7 @@ func TestAgentStandaloneSameDomainAllowsUnrelatedActiveAndLiveMarkerTemporary(t 
 		t, directory, agentStandaloneAffinityLockName("unrelated-live"), ownerUID, ownerGID,
 	)
 	require.NoError(t, affinity.Close())
-	marker := []byte(`{"version":2,"uid":62055,"gid":62056,"sessionKey":"unrelated-live","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n")
+	marker := []byte(`{"version":2,"uid":62055,"gid":62056,"ownerDigest":"unrelated-live","state":"active","leaseId":"0123456789abcdef0123456789abcdef","paths":[]}` + "\n")
 	require.NoError(t, os.WriteFile(filepath.Join(directory.Name(), "62055.quarantine"), marker, 0o600))
 	temporary := filepath.Join(directory.Name(), "62055.quarantine.next-0123456789abcdef01234567")
 	require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
@@ -768,7 +768,7 @@ func TestAgentStandaloneTargetMarkerTemporaryCleanupPreservesFinalDisposition(t 
 	uidLock := createAgentStandaloneTestLock(t, directory, "62057.lock", ownerUID, ownerGID)
 	require.NoError(t, unix.Flock(int(uidLock.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 	markerPath := filepath.Join(directory.Name(), "62057.quarantine")
-	marker := []byte(`{"version":2,"uid":62057,"gid":62058,"sessionKey":"target-final","state":"clean-ready"}` + "\n")
+	marker := []byte(`{"version":2,"uid":62057,"gid":62058,"ownerDigest":"target-final","state":"clean-ready"}` + "\n")
 	require.NoError(t, os.WriteFile(markerPath, marker, 0o600))
 	temporary := filepath.Join(directory.Name(), "62057.quarantine.next-0123456789abcdef01234567")
 	require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
