@@ -347,6 +347,13 @@ func TestSupervisorStopEscalatesToKillAndReportsAnUnsettledRoot(t *testing.T) {
 // still there, and proceeds when the peer descriptor is quiet. The guardian
 // holds the containment proof for the whole tree, so launching after it died
 // would leave a native process whose exit nobody reports.
+//
+// Each of the three verdicts is separated. A quiet peer proceeds. A peer whose
+// guardian has gone refuses by naming the departed guardian, driven by a real
+// POLLHUP rather than by a stubbed poll, so the case pins what the kernel
+// actually reports for a closed peer. A poll that cannot answer at all refuses
+// by naming the failed poll instead, because a supervisor that cannot ask the
+// question must not conclude the guardian is alive.
 func TestSupervisorGuardianPeerIsProvenLiveBeforeTheNativeLaunch(t *testing.T) {
 	restoreLinuxSupervisorSeams(t)
 	peerRead, peerWrite, err := os.Pipe()
@@ -355,6 +362,20 @@ func TestSupervisorGuardianPeerIsProvenLiveBeforeTheNativeLaunch(t *testing.T) {
 	t.Cleanup(func() { _ = peerWrite.Close() })
 
 	require.NoError(t, validateHermesSupervisorGuardianPeer(peerRead, make(chan struct{})))
+
+	// A guardian that has exited leaves its end of the peer pipe closed, so the
+	// liveness supervisor's own end polls POLLHUP through the real unix.Poll.
+	// The refusal has to come from the descriptor rather than from the done
+	// channel, so the channel handed in here stays open.
+	deadRead, deadWrite, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = deadRead.Close() })
+	require.NoError(t, deadWrite.Close())
+
+	hangup := validateHermesSupervisorGuardianPeer(deadRead, make(chan struct{}))
+	require.ErrorContains(t, hangup, "Hermes guardian exited before native launch")
+	require.NotErrorIs(t, hangup, unix.EINVAL)
+	require.NotContains(t, hangup.Error(), "poll Hermes guardian before native launch")
 
 	supervisorPoll = func([]unix.PollFd, int) (int, error) { return -1, unix.EINVAL }
 	require.ErrorContains(
