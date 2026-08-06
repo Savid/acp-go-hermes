@@ -50,11 +50,6 @@ func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
 	}
 
 	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-
-		return processIsolationConfig{}, fmt.Errorf("open -%s: invalid file descriptor", processIsolationConfigFlag)
-	}
 	defer file.Close()
 
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 || stat.Uid != 0 || stat.Nlink != 1 {
@@ -254,16 +249,11 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 		return -1, nil, err
 	}
 
-	for index, component := range components {
-		last := index == len(components)-1
-		flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW
-		if last {
-			flags |= finalFlags
-		} else {
-			flags |= unix.O_DIRECTORY
-		}
-
-		childFD, openErr := unix.Openat(parentFD, component, flags, 0)
+	final := len(components) - 1
+	for _, component := range components[:final] {
+		childFD, openErr := unix.Openat(
+			parentFD, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0,
+		)
 		if openErr != nil {
 			return -1, nil, fmt.Errorf("open component %q: %w", component, openErr)
 		}
@@ -273,9 +263,6 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 			_ = unix.Close(childFD)
 
 			return -1, nil, fmt.Errorf("stat component %q: %w", component, statErr)
-		}
-		if last {
-			return childFD, &stat, nil
 		}
 		if err := validateProtectedAncestorStat(&stat, component); err != nil {
 			_ = unix.Close(childFD)
@@ -287,7 +274,23 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 		parentFD = childFD
 	}
 
-	return -1, nil, fmt.Errorf("path has no final component")
+	leaf := components[final]
+
+	childFD, openErr := unix.Openat(
+		parentFD, leaf, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|finalFlags, 0,
+	)
+	if openErr != nil {
+		return -1, nil, fmt.Errorf("open component %q: %w", leaf, openErr)
+	}
+
+	var stat unix.Stat_t
+	if statErr := processIsolationFstat(childFD, &stat); statErr != nil {
+		_ = unix.Close(childFD)
+
+		return -1, nil, fmt.Errorf("stat component %q: %w", leaf, statErr)
+	}
+
+	return childFD, &stat, nil
 }
 
 func validateProtectedAncestor(fd int, component string) error {

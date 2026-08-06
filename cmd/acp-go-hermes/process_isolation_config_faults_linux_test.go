@@ -376,7 +376,30 @@ func TestOpenProtectedAbsolutePathRefusesUnprotectedResolution(t *testing.T) {
 	}
 	processIsolationOpen = unix.Open
 
-	for name, failAt := range map[string]int{"filesystem root": 1, "policy component": 2} {
+	// The leaf's stat is the last one a clean resolution makes: the ancestor
+	// walk validates each directory, then the policy file itself is opened and
+	// stated. Count a clean run so the leaf case faults exactly that call.
+	leafStat := 0
+	countingStat := processIsolationFstat
+	processIsolationFstat = func(fd int, stat *unix.Stat_t) error {
+		leafStat++
+
+		return countingStat(fd, stat)
+	}
+
+	if _, err := loadProcessIsolationConfig(trusted); err != nil {
+		t.Fatalf("trusted policy load = %v", err)
+	}
+
+	processIsolationFstat = countingStat
+
+	if leafStat < 3 {
+		t.Fatalf("clean resolution made %d stats, want the root, an ancestor and the leaf", leafStat)
+	}
+
+	for name, failAt := range map[string]int{
+		"filesystem root": 1, "policy component": 2, "policy leaf": leafStat,
+	} {
 		t.Run(name, func(t *testing.T) {
 			isolationConfigCovSeams(t)
 			statFailure := errors.New("kernel stopped answering for " + name)

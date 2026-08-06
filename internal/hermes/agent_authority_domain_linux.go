@@ -149,9 +149,6 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 	if err = decoder.Decode(&record); err != nil {
 		return agentAuthorityDomainRecord{}, err
 	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record contains trailing data")
-	}
 	if record.Version != agentAuthorityDomainVersion || len(record.AuthorityID) != 32 ||
 		record.AuthorityRoot.Dev == 0 || record.AuthorityRoot.Ino == 0 || record.Filesystem.Type == 0 ||
 		record.Filesystem.ID == [2]int32{} || record.PIDNamespace.Dev == 0 || record.PIDNamespace.Ino == 0 ||
@@ -399,18 +396,15 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 		if !ok {
 			return nil
 		}
-		switch delimiter {
-		case '{':
+		if delimiter == '{' {
 			seen := make(map[string]struct{})
 			for decoder.More() {
 				keyToken, keyErr := decoder.Token()
 				if keyErr != nil {
 					return keyErr
 				}
-				key, ok := keyToken.(string)
-				if !ok {
-					return errors.New("json object key is not a string")
-				}
+				// Decoder object-member tokens are strings by contract.
+				key, _ := keyToken.(string)
 				if _, duplicate := seen[key]; duplicate {
 					return fmt.Errorf("json object contains duplicate key %q", key)
 				}
@@ -420,18 +414,18 @@ func rejectAgentAuthorityDuplicateJSONKeys(payload []byte) error {
 				}
 			}
 			_, err = decoder.Token()
+
 			return err
-		case '[':
-			for decoder.More() {
-				if err = visit(); err != nil {
-					return err
-				}
-			}
-			_, err = decoder.Token()
-			return err
-		default:
-			return errors.New("json contains an unexpected closing delimiter")
 		}
+
+		for decoder.More() {
+			if err = visit(); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+
+		return err
 	}
 	if err := visit(); err != nil {
 		return err
