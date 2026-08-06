@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -140,6 +141,13 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 			require.Error(t, runDarwinLaunchBootstrapCore(test.config, test.gate))
 		})
 	}
+}
+
+func setTestIsolationBootstrapEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(envIsolationUID, strconv.Itoa(os.Geteuid()))
+	t.Setenv(envIsolationGID, strconv.Itoa(os.Getegid()))
+	t.Setenv(envIsolationTest, "true")
 }
 
 func TestDarwinLaunchBootstrapDispatch(t *testing.T) {

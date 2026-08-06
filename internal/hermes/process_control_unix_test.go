@@ -236,13 +236,6 @@ func provedProcessContainment() *processContainment {
 	}
 }
 
-func setTestIsolationBootstrapEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv(envIsolationUID, strconv.Itoa(os.Geteuid()))
-	t.Setenv(envIsolationGID, strconv.Itoa(os.Getegid()))
-	t.Setenv(envIsolationTest, "true")
-}
-
 func TestProcessContainmentCompletionFailures(t *testing.T) {
 	oldKill := processKill
 	oldClose := processTreeClose
