@@ -242,7 +242,7 @@ func duplicateAgentIdentityLock(file *os.File) (*os.File, error) {
 		return nil, err
 	}
 
-	return os.NewFile(uintptr(fd), "amp-agent-identity-lock"), nil
+	return os.NewFile(uintptr(fd), "hermes-agent-identity-lock"), nil
 }
 
 func adoptAgentIdentityLock(file *os.File, uid uint32, testOnly bool, testRoot string) (*agentIdentityLock, error) {
