@@ -961,35 +961,35 @@ func TestLinuxSupervisorHelpersAndStartValidation(t *testing.T) {
 		t.Fatalf("scan descendants: %v", err)
 	}
 	_ = descendantPIDs(descendants)
-	if err := signalPIDFD(os.Getpid(), 0); err != nil {
-		t.Fatalf("pidfd identity signal: %v", err)
+	if signalErr := signalPIDFD(os.Getpid(), 0); signalErr != nil {
+		t.Fatalf("pidfd identity signal: %v", signalErr)
 	}
-	if err := signalPIDFD(1<<30, 0); err != nil {
-		t.Fatalf("gone pidfd signal: %v", err)
+	if signalErr := signalPIDFD(1<<30, 0); signalErr != nil {
+		t.Fatalf("gone pidfd signal: %v", signalErr)
 	}
-	if err := signalPIDFD(-1, 0); err == nil {
+	if signalErr := signalPIDFD(-1, 0); signalErr == nil {
 		t.Fatal("negative pidfd unexpectedly succeeded")
 	}
-	if err := signalSupervisorDescendants(0); err != nil {
-		t.Fatalf("signal empty descendants: %v", err)
+	if signalErr := signalSupervisorDescendants(0); signalErr != nil {
+		t.Fatalf("signal empty descendants: %v", signalErr)
 	}
 	_, _ = reapSupervisorChildren()
 
-	if _, err := startUnixContainedProcess(nil, ContainmentSpec{}); err == nil {
+	if _, startErr := startUnixContainedProcess(nil, ContainmentSpec{}); startErr == nil {
 		t.Fatal("nil target accepted")
 	}
-	if _, err := startUnixContainedProcess(exec.Command("sh", "-c", "exit 0"), ContainmentSpec{}); err == nil {
+	if _, startErr := startUnixContainedProcess(exec.Command("sh", "-c", "exit 0"), ContainmentSpec{}); startErr == nil {
 		t.Fatal("unconfigured target accepted")
 	}
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
 	configureHermesProcess(missing)
-	if _, err := startUnixContainedProcess(missing, ContainmentSpec{}); err == nil {
+	if _, startErr := startUnixContainedProcess(missing, ContainmentSpec{}); startErr == nil {
 		t.Fatal("missing target accepted")
 	}
 	extra := exec.Command("sh", "-c", "exit 0")
 	configureHermesProcess(extra)
 	extra.ExtraFiles = []*os.File{os.Stdin}
-	if _, err := startUnixContainedProcess(extra, ContainmentSpec{}); err == nil {
+	if _, startErr := startUnixContainedProcess(extra, ContainmentSpec{}); startErr == nil {
 		t.Fatal("target ExtraFiles accepted")
 	}
 
@@ -1089,8 +1089,8 @@ func TestLinuxSupervisorInitWrapperAndFailureSeams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.NewEncoder(configWrite).Encode(supervisorTestConfig([]string{"/bin/sh", "-c", "exit 0"})); err != nil {
-		t.Fatal(err)
+	if encodeErr := json.NewEncoder(configWrite).Encode(supervisorTestConfig([]string{"/bin/sh", "-c", "exit 0"})); encodeErr != nil {
+		t.Fatal(encodeErr)
 	}
 	_ = configWrite.Close()
 	controlRead, controlWrite, err := os.Pipe()

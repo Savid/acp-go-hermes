@@ -494,8 +494,8 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(root, "acp-go", "agent-identities", "1205.lock")
-		if err := os.Chmod(path, 0o644); err != nil {
-			t.Fatal(err)
+		if chmodErr := os.Chmod(path, 0o644); chmodErr != nil {
+			t.Fatal(chmodErr)
 		}
 		if _, err = openAgentStandaloneNamedLock(
 			directory, "1205.lock", false, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
@@ -524,8 +524,8 @@ func TestAgentIdentityLockRejectsUnsafePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(root, "acp-go", "agent-identities", "1206.lock")
-		if err := os.Link(path, filepath.Join(root, "linked.lock")); err != nil {
-			t.Fatal(err)
+		if linkErr := os.Link(path, filepath.Join(root, "linked.lock")); linkErr != nil {
+			t.Fatal(linkErr)
 		}
 		if _, err = openAgentStandaloneNamedLock(
 			directory, "1206.lock", false, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,

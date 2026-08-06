@@ -42,8 +42,8 @@ func bindAgentStandaloneStateRoot(path string, uid, gid uint32) (agentStandalone
 
 	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
 		var parent unix.Stat_t
-		if err = agentStandaloneStateRootFstat(fd, &parent); err != nil {
-			return agentStandaloneStateRoot{}, err
+		if agentErr := agentStandaloneStateRootFstat(fd, &parent); agentErr != nil {
+			return agentStandaloneStateRoot{}, agentErr
 		}
 
 		if parent.Mode&unix.S_IFMT != unix.S_IFDIR || parent.Uid != 0 || parent.Mode&0o022 != 0 {
@@ -60,8 +60,8 @@ func bindAgentStandaloneStateRoot(path string, uid, gid uint32) (agentStandalone
 	}
 
 	var final unix.Stat_t
-	if err = agentStandaloneStateRootFstat(fd, &final); err != nil {
-		return agentStandaloneStateRoot{}, err
+	if agentErr := agentStandaloneStateRootFstat(fd, &final); agentErr != nil {
+		return agentStandaloneStateRoot{}, agentErr
 	}
 
 	if final.Mode&unix.S_IFMT != unix.S_IFDIR || final.Uid != uid || final.Gid != gid ||
@@ -323,8 +323,8 @@ func acquireAgentStandaloneOwnerIdentity(
 
 			if cleaned || busy {
 				if busy {
-					if err = waitAgentStandaloneRetry(deadline, canceled, signals); err != nil {
-						return nil, err
+					if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+						return nil, waitErr
 					}
 				}
 
@@ -366,13 +366,13 @@ func acquireAgentStandaloneOwnerIdentity(
 		}
 
 		if cleaned || busy {
-			if err = agentStandaloneReleaseLock(ownersLock); err != nil {
-				return nil, err
+			if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
+				return nil, agentErr
 			}
 
 			if busy {
-				if err = waitAgentStandaloneRetry(deadline, canceled, signals); err != nil {
-					return nil, err
+				if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+					return nil, waitErr
 				}
 			}
 
@@ -411,12 +411,12 @@ func acquireAgentStandaloneOwnerIdentity(
 		}
 
 		if !acquired {
-			if err = agentStandaloneReleaseLock(ownersLock); err != nil {
-				return nil, err
+			if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
+				return nil, agentErr
 			}
 
-			if err = waitAgentStandaloneRetry(deadline, canceled, signals); err != nil {
-				return nil, err
+			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+				return nil, waitErr
 			}
 
 			continue
@@ -625,8 +625,8 @@ func acquireAgentStandaloneDomain(
 					return shared, nil
 				}
 
-				if err = agentStandaloneReleaseLock(shared); err != nil {
-					return nil, err
+				if agentErr := agentStandaloneReleaseLock(shared); agentErr != nil {
+					return nil, agentErr
 				}
 
 				exclusive, exclusiveErr := acquireAgentStandaloneNamedLock(
@@ -682,8 +682,8 @@ func acquireAgentStandaloneDomain(
 			return nil, loadErr
 		}
 
-		if err = agentStandaloneReleaseLock(shared); err != nil {
-			return nil, err
+		if agentErr := agentStandaloneReleaseLock(shared); agentErr != nil {
+			return nil, agentErr
 		}
 
 		exclusive, err := acquireAgentStandaloneNamedLock(
@@ -947,14 +947,14 @@ func adjudicateAgentStandaloneMatchingDomainTemporaries(
 		name := entry.Name()
 		switch {
 		case strings.HasPrefix(name, "domain.json.next"):
-			if err = parseAgentStandaloneTemporarySuffix(name, "domain.json.next-", false); err != nil {
-				return false, err
+			if parseErr := parseAgentStandaloneTemporarySuffix(name, "domain.json.next-", false); parseErr != nil {
+				return false, parseErr
 			}
 
-			if err = validateAgentStandaloneTemporary(
+			if validateErr := validateAgentStandaloneTemporary(
 				directory, name, ownerUID, ownerGID, agentAuthorityDomainMaxSize,
-			); err != nil {
-				return false, err
+			); validateErr != nil {
+				return false, validateErr
 			}
 
 			if !domainExclusive {
@@ -963,8 +963,8 @@ func adjudicateAgentStandaloneMatchingDomainTemporaries(
 				continue
 			}
 
-			if err = cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); err != nil {
-				return false, err
+			if cleanupErr := cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
+				return false, cleanupErr
 			}
 		case strings.HasPrefix(name, ".authority-probe"):
 			err = cleanupAgentStandaloneProbeTemporary(directory, name, ownerUID, ownerGID)
@@ -1290,8 +1290,8 @@ func validateAgentStandaloneBinder() error {
 		return err
 	}
 
-	if err = validateAgentStandalonePIDNamespaceAnchor(self); err != nil {
-		return err
+	if validateErr := validateAgentStandalonePIDNamespaceAnchor(self); validateErr != nil {
+		return validateErr
 	}
 
 	if _, err = agentStandaloneReadFile("/proc/1/status"); err != nil {
@@ -1371,20 +1371,20 @@ func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr
 		probeErr = errors.Join(probeErr, file.Close())
 	}()
 
-	if err = setAgentStandaloneProbeCloseOnExec(file); err != nil {
-		return err
+	if setErr := setAgentStandaloneProbeCloseOnExec(file); setErr != nil {
+		return setErr
 	}
 
-	if err = agentStandaloneDurableFchown(fd, os.Geteuid(), os.Getegid()); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchown(fd, os.Geteuid(), os.Getegid()); agentErr != nil {
+		return agentErr
 	}
 
-	if err = agentStandaloneDurableFchmod(fd, 0o600); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchmod(fd, 0o600); agentErr != nil {
+		return agentErr
 	}
 
-	if err = agentStandaloneDurableFlock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFlock(fd, unix.LOCK_EX|unix.LOCK_NB); agentErr != nil {
+		return agentErr
 	}
 
 	contender, err := unix.Openat(int(directory.Fd()), first, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -1407,17 +1407,17 @@ func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr
 		return err
 	}
 
-	if err = agentStandaloneDurableSync(file); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableSync(file); agentErr != nil {
+		return agentErr
 	}
 
 	var before, after unix.Stat_t
-	if err = agentStandaloneDurableFstat(fd, &before); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFstat(fd, &before); agentErr != nil {
+		return agentErr
 	}
 
-	if err = unix.Renameat(int(directory.Fd()), first, int(directory.Fd()), second); err != nil {
-		return err
+	if renameatErr := unix.Renameat(int(directory.Fd()), first, int(directory.Fd()), second); renameatErr != nil {
+		return renameatErr
 	}
 
 	if err = agentStandaloneDurableFstatat(int(directory.Fd()), second, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
@@ -1581,8 +1581,8 @@ func auditAgentStandaloneAuthorityRoot(
 	}
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return checkErr
 		}
 
 		name := entry.Name()
@@ -1602,8 +1602,8 @@ func auditAgentStandaloneAuthorityRoot(
 	}
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return checkErr
 		}
 
 		name := entry.Name()
@@ -1639,8 +1639,8 @@ func auditAgentStandaloneAuthorityRoot(
 				return fmt.Errorf("domain record temporary %q requires domain-exclusive cleanup", name)
 			}
 
-			if err = cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); err != nil {
-				return err
+			if cleanupErr := cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
+				return cleanupErr
 			}
 
 			continue
@@ -1651,8 +1651,8 @@ func auditAgentStandaloneAuthorityRoot(
 				return fmt.Errorf("authority probe temporary %q requires domain-exclusive cleanup", name)
 			}
 
-			if err = cleanupAgentStandaloneProbeTemporary(directory, name, ownerUID, ownerGID); err != nil {
-				return err
+			if cleanupErr := cleanupAgentStandaloneProbeTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
+				return cleanupErr
 			}
 
 			continue
@@ -1664,8 +1664,8 @@ func auditAgentStandaloneAuthorityRoot(
 				return parseErr
 			}
 
-			if err = validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); err != nil {
-				return err
+			if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
+				return validateErr
 			}
 
 			if !allowCleanup {
@@ -1676,8 +1676,8 @@ func auditAgentStandaloneAuthorityRoot(
 				return fmt.Errorf("marker temporary %q requires domain-exclusive cleanup", name)
 			}
 
-			if err = cleanupAgentStandaloneMarkerTemporary(directory, uid, name, ownerUID, ownerGID); err != nil {
-				return err
+			if cleanupErr := cleanupAgentStandaloneMarkerTemporary(directory, uid, name, ownerUID, ownerGID); cleanupErr != nil {
+				return cleanupErr
 			}
 
 			continue
@@ -1987,8 +1987,8 @@ func drainAgentStandaloneOwnerTemporariesUnderLock(
 	}
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return cleaned, false, err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return cleaned, false, checkErr
 		}
 
 		if !strings.Contains(entry.Name(), ".owner.next-") {
@@ -2104,8 +2104,8 @@ func cleanupAgentStandaloneProbeTemporary(
 		return err
 	}
 
-	if err = agentStandaloneDurableUnlinkat(int(directory.Fd()), name, 0); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableUnlinkat(int(directory.Fd()), name, 0); agentErr != nil {
+		return agentErr
 	}
 
 	return unix.Fsync(int(directory.Fd()))
@@ -2131,12 +2131,12 @@ func cleanupAgentStandaloneMarkerTemporary(
 
 	defer uidLock.Close()
 
-	if err = validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); err != nil {
-		return err
+	if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
+		return validateErr
 	}
 
-	if err = agentStandaloneDurableUnlinkat(int(directory.Fd()), name, 0); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableUnlinkat(int(directory.Fd()), name, 0); agentErr != nil {
+		return agentErr
 	}
 
 	return unix.Fsync(int(directory.Fd()))
@@ -2177,8 +2177,8 @@ func cleanupAgentStandaloneTargetMarkerTemporaries(
 	cleaned := false
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return checkErr
 		}
 
 		if !strings.HasPrefix(entry.Name(), prefix) {
@@ -2190,14 +2190,14 @@ func cleanupAgentStandaloneTargetMarkerTemporaries(
 			return errors.Join(fmt.Errorf("target marker temporary %q is invalid", entry.Name()), parseErr)
 		}
 
-		if err = validateAgentStandaloneTemporary(
+		if validateErr := validateAgentStandaloneTemporary(
 			directory, entry.Name(), ownerUID, ownerGID, agentStandaloneMarkerMax,
-		); err != nil {
-			return err
+		); validateErr != nil {
+			return validateErr
 		}
 
-		if err = agentStandaloneDurableUnlinkat(int(directory.Fd()), entry.Name(), 0); err != nil {
-			return err
+		if agentErr := agentStandaloneDurableUnlinkat(int(directory.Fd()), entry.Name(), 0); agentErr != nil {
+			return agentErr
 		}
 
 		cleaned = true
@@ -2232,25 +2232,25 @@ func replaceAgentStandaloneDomainRecord(directory *os.File, ownerUID, ownerGID u
 		}
 	}()
 
-	if err = agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); agentErr != nil {
+		return agentErr
 	}
 
-	if err = agentStandaloneDurableFchmod(fd, 0o600); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchmod(fd, 0o600); agentErr != nil {
+		return agentErr
 	}
 
 	if _, err = agentStandaloneDurableWrite(file, append(payload, '\n')); err != nil {
 		return err
 	}
 
-	if err = agentStandaloneDurableSync(file); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableSync(file); agentErr != nil {
+		return agentErr
 	}
 
 	var descriptor unix.Stat_t
-	if err = agentStandaloneDurableFstat(fd, &descriptor); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFstat(fd, &descriptor); agentErr != nil {
+		return agentErr
 	}
 
 	err = agentStandaloneCloseTemporary(file)
@@ -2260,8 +2260,8 @@ func replaceAgentStandaloneDomainRecord(directory *os.File, ownerUID, ownerGID u
 		return fmt.Errorf("close agent authority record temporary before publication: %w", err)
 	}
 
-	if err = unix.Renameat(int(directory.Fd()), temporary, int(directory.Fd()), "domain.json"); err != nil {
-		return err
+	if renameatErr := unix.Renameat(int(directory.Fd()), temporary, int(directory.Fd()), "domain.json"); renameatErr != nil {
+		return renameatErr
 	}
 
 	published, err := loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
@@ -2300,10 +2300,10 @@ func claimAgentStandaloneOwner(
 			return fmt.Errorf("agent identity uid %d is permanently bound to another standalone owner", want.UID)
 		}
 
-		if err = validateAgentStandaloneOwnerUniqueness(
+		if validateErr := validateAgentStandaloneOwnerUniqueness(
 			directory, want, ownerUID, ownerGID, deadline, canceled, signals,
-		); err != nil {
-			return err
+		); validateErr != nil {
+			return validateErr
 		}
 
 		return validateAgentStandalonePriorDisposition(directory, want, ownerUID, ownerGID)
@@ -2323,18 +2323,18 @@ func claimAgentStandaloneOwner(
 		return markerErr
 	}
 
-	if err = validateAgentStandaloneOwnerUniqueness(
+	if validateErr := validateAgentStandaloneOwnerUniqueness(
 		directory, want, ownerUID, ownerGID, deadline, canceled, signals,
-	); err != nil {
-		return err
+	); validateErr != nil {
+		return validateErr
 	}
 
-	if err = agentStandaloneVacancyScan(want.UID, want.GID, deadline, canceled, signals); err != nil {
-		return err
+	if agentErr := agentStandaloneVacancyScan(want.UID, want.GID, deadline, canceled, signals); agentErr != nil {
+		return agentErr
 	}
 
-	if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-		return err
+	if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+		return checkErr
 	}
 
 	return createAgentStandaloneOwner(directory, want, ownerUID, ownerGID)
@@ -2365,8 +2365,8 @@ func validateAgentStandaloneOwnerUniqueness(
 	}
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return checkErr
 		}
 
 		if strings.Contains(entry.Name(), ".owner.next-") {
@@ -2383,10 +2383,10 @@ func validateAgentStandaloneOwnerUniqueness(
 				return parseErr
 			}
 
-			if err = validateAgentStandaloneTemporary(
+			if validateErr := validateAgentStandaloneTemporary(
 				directory, entry.Name(), ownerUID, ownerGID, agentStandaloneMarkerMax,
-			); err != nil {
-				return err
+			); validateErr != nil {
+				return validateErr
 			}
 
 			if temporaryUID == want.UID {
@@ -2505,25 +2505,25 @@ func createAgentStandaloneOwner(directory *os.File, owner agentStandaloneOwner, 
 		}
 	}()
 
-	if err = agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); agentErr != nil {
+		return agentErr
 	}
 
-	if err = agentStandaloneDurableFchmod(fd, 0o600); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchmod(fd, 0o600); agentErr != nil {
+		return agentErr
 	}
 
 	if _, err = agentStandaloneDurableWrite(file, payload); err != nil {
 		return err
 	}
 
-	if err = agentStandaloneDurableSync(file); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableSync(file); agentErr != nil {
+		return agentErr
 	}
 
 	var descriptor unix.Stat_t
-	if err = agentStandaloneDurableFstat(fd, &descriptor); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFstat(fd, &descriptor); agentErr != nil {
+		return agentErr
 	}
 
 	err = agentStandaloneCloseTemporary(file)
@@ -2559,8 +2559,8 @@ func loadAgentStandaloneOwner(directory *os.File, uid, ownerUID, ownerGID uint32
 		return agentStandaloneOwner{}, err
 	}
 
-	if err = rejectAgentAuthorityDuplicateJSONKeys(payload); err != nil {
-		return agentStandaloneOwner{}, err
+	if rejectErr := rejectAgentAuthorityDuplicateJSONKeys(payload); rejectErr != nil {
+		return agentStandaloneOwner{}, rejectErr
 	}
 
 	fields, err := exactAgentAuthorityFields(payload, "version", "uid", "gid", "kind", "provider", "ownerId", "stateRoot")
@@ -2577,8 +2577,8 @@ func loadAgentStandaloneOwner(directory *os.File, uid, ownerUID, ownerGID uint32
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 
-	if err = decoder.Decode(&owner); err != nil {
-		return agentStandaloneOwner{}, err
+	if decodeErr := decoder.Decode(&owner); decodeErr != nil {
+		return agentStandaloneOwner{}, decodeErr
 	}
 
 	if canonical, _ := json.Marshal(owner); !bytes.Equal(payload, append(canonical, '\n')) {
@@ -2627,13 +2627,13 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 		return agentStandaloneMarker{}, errors.New("agent identity marker is not UTF-8")
 	}
 
-	if err = rejectAgentAuthorityDuplicateJSONKeys(payload); err != nil {
-		return agentStandaloneMarker{}, err
+	if rejectErr := rejectAgentAuthorityDuplicateJSONKeys(payload); rejectErr != nil {
+		return agentStandaloneMarker{}, rejectErr
 	}
 
 	var raw map[string]json.RawMessage
-	if err = json.Unmarshal(payload, &raw); err != nil {
-		return agentStandaloneMarker{}, err
+	if unmarshalErr := json.Unmarshal(payload, &raw); unmarshalErr != nil {
+		return agentStandaloneMarker{}, unmarshalErr
 	}
 
 	var marker agentStandaloneMarker
@@ -2641,8 +2641,8 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 
-	if err = decoder.Decode(&marker); err != nil {
-		return agentStandaloneMarker{}, err
+	if decodeErr := decoder.Decode(&marker); decodeErr != nil {
+		return agentStandaloneMarker{}, decodeErr
 	}
 
 	if marker.Version != 2 || marker.UID != uid || marker.UID == 0 || marker.GID == 0 ||
@@ -2762,8 +2762,8 @@ func readAgentStandaloneFile(directory *os.File, name string, ownerUID, ownerGID
 	defer file.Close()
 
 	var descriptor, named unix.Stat_t
-	if err = agentStandaloneDurableFstat(fd, &descriptor); err != nil {
-		return nil, err
+	if agentErr := agentStandaloneDurableFstat(fd, &descriptor); agentErr != nil {
+		return nil, agentErr
 	}
 
 	if err = agentStandaloneDurableFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
@@ -2818,25 +2818,25 @@ func replaceAgentStandaloneFile(
 		}
 	}()
 
-	if err = agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchown(fd, int(ownerUID), int(ownerGID)); agentErr != nil {
+		return agentErr
 	}
 
-	if err = agentStandaloneDurableFchmod(fd, 0o600); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFchmod(fd, 0o600); agentErr != nil {
+		return agentErr
 	}
 
 	if _, err = agentStandaloneDurableWrite(file, append(payload, '\n')); err != nil {
 		return err
 	}
 
-	if err = agentStandaloneDurableSync(file); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableSync(file); agentErr != nil {
+		return agentErr
 	}
 
 	var descriptor unix.Stat_t
-	if err = agentStandaloneDurableFstat(fd, &descriptor); err != nil {
-		return err
+	if agentErr := agentStandaloneDurableFstat(fd, &descriptor); agentErr != nil {
+		return agentErr
 	}
 
 	err = agentStandaloneCloseTemporary(file)
@@ -2846,12 +2846,12 @@ func replaceAgentStandaloneFile(
 		return fmt.Errorf("close agent identity marker temporary before publication: %w", err)
 	}
 
-	if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-		return err
+	if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+		return checkErr
 	}
 
-	if err = unix.Renameat(int(directory.Fd()), temporary, int(directory.Fd()), name); err != nil {
-		return err
+	if renameatErr := unix.Renameat(int(directory.Fd()), temporary, int(directory.Fd()), name); renameatErr != nil {
+		return renameatErr
 	}
 
 	published, err := readAgentStandaloneFile(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax)
@@ -2895,8 +2895,8 @@ func proveAgentStandaloneIdentityVacant(
 	}
 
 	for _, entry := range entries {
-		if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-			return err
+		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+			return checkErr
 		}
 
 		pid, parseErr := strconv.Atoi(entry.Name())
@@ -2904,8 +2904,8 @@ func proveAgentStandaloneIdentityVacant(
 			continue
 		}
 
-		if err = proveAgentStandaloneProcessTasksVacant(pid, uid, gid, deadline, canceled, signals); err != nil {
-			return err
+		if proveErr := proveAgentStandaloneProcessTasksVacant(pid, uid, gid, deadline, canceled, signals); proveErr != nil {
+			return proveErr
 		}
 	}
 
@@ -2941,8 +2941,8 @@ func proveAgentStandaloneProcessTasksVacant(
 		unstable := false
 
 		for _, task := range before {
-			if err = checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
-				return err
+			if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
+				return checkErr
 			}
 
 			if _, parseErr := strconv.ParseUint(task.Name(), 10, 32); parseErr != nil {

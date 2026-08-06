@@ -146,16 +146,16 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	}
 
 	configFile := os.NewFile(uintptr(configFD), supervisorConfigName)
-	if err := writeHermesSupervisorConfig(configFile, config); err != nil {
+	if writeErr := writeHermesSupervisorConfig(configFile, config); writeErr != nil {
 		_ = configFile.Close()
 
-		return nil, err
+		return nil, writeErr
 	}
 
-	if _, err := supervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+	if _, supervisorErr := supervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); supervisorErr != nil {
 		_ = configFile.Close()
 
-		return nil, fmt.Errorf("seal Hermes supervisor config: %w", err)
+		return nil, fmt.Errorf("seal Hermes supervisor config: %w", supervisorErr)
 	}
 
 	controlRead, controlWrite, err := supervisorPipe()

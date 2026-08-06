@@ -612,8 +612,8 @@ func TestAgentStandaloneRebindRejectsOverlayFilesystemBeforeDomainMutation(t *te
 		return probeAgentStandaloneFilesystem(dir, false)
 	}
 	agentStandaloneProbeFstatfs = func(fd int, filesystem *unix.Statfs_t) error {
-		if err := previousFstatfs(fd, filesystem); err != nil {
-			return err
+		if previousErr := previousFstatfs(fd, filesystem); previousErr != nil {
+			return previousErr
 		}
 		filesystem.Type = 0x794c7630
 

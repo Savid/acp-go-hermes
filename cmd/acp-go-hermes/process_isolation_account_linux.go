@@ -30,8 +30,8 @@ func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) 
 		return fmt.Errorf("enumerate operating-system groups: %w", err)
 	}
 
-	if err = validatePrivateTargetAccount(passwd, groups, account, uid, gid); err != nil {
-		return err
+	if validateErr := validatePrivateTargetAccount(passwd, groups, account, uid, gid); validateErr != nil {
+		return validateErr
 	}
 
 	status, err := processIsolationAccountAuthorityCommand(ctx, "/usr/bin/passwd", "-S", account.Username)
@@ -39,8 +39,8 @@ func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) 
 		return fmt.Errorf("read target account password status: %w", err)
 	}
 
-	if err = validateLockedTargetAccount(status, account.Username); err != nil {
-		return err
+	if validateErr := validateLockedTargetAccount(status, account.Username); validateErr != nil {
+		return validateErr
 	}
 
 	output, commandErr := runAccountAuthorityCombined(ctx, "/usr/bin/sudo", "-n", "-U", account.Username, "-l")
