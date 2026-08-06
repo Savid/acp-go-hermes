@@ -613,6 +613,8 @@ func acquireAgentStandaloneDomain(
 				return nil, currentErr
 			}
 			if record.sameDomain(current) {
+				current.AuthorityID = record.AuthorityID
+
 				if err = agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
 					_ = exclusive.Close()
 					return nil, err
