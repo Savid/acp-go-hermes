@@ -140,6 +140,7 @@ var agentStandaloneLockFchmod = unix.Fchmod
 var agentStandaloneLockFileSync = func(file *os.File) error { return file.Sync() }
 var agentStandaloneLockDirectorySync = unix.Fsync
 var agentStandaloneLockClose = func(file *os.File) error { return file.Close() }
+var agentStandaloneReleaseLock = func(file *os.File) error { return file.Close() }
 var agentStandaloneLockFstatat = unix.Fstatat
 var agentStandaloneFilesystemProbe = probeAgentStandaloneFilesystem
 var agentStandaloneProbeFstatfs = unix.Fstatfs
@@ -313,7 +314,7 @@ func acquireAgentStandaloneOwnerIdentity(
 			return nil, errors.Join(cleanupErr, ownersLock.Close())
 		}
 		if cleaned || busy {
-			if err = ownersLock.Close(); err != nil {
+			if err = agentStandaloneReleaseLock(ownersLock); err != nil {
 				return nil, err
 			}
 			if busy {
@@ -325,7 +326,7 @@ func acquireAgentStandaloneOwnerIdentity(
 		}
 		existing, err = loadAgentStandaloneOwner(directory, want.UID, ownerUID, ownerGID)
 		if err == nil {
-			closeErr := ownersLock.Close()
+			closeErr := agentStandaloneReleaseLock(ownersLock)
 			if existing != want {
 				return nil, errors.Join(
 					fmt.Errorf("agent identity uid %d is permanently bound to another standalone owner", want.UID), closeErr,
@@ -349,7 +350,7 @@ func acquireAgentStandaloneOwnerIdentity(
 			return nil, errors.Join(err, ownersLock.Close())
 		}
 		if !acquired {
-			if err = ownersLock.Close(); err != nil {
+			if err = agentStandaloneReleaseLock(ownersLock); err != nil {
 				return nil, err
 			}
 			if err = waitAgentStandaloneRetry(deadline, canceled, signals); err != nil {
@@ -375,7 +376,7 @@ func acquireAgentStandaloneOwnerIdentity(
 		); err != nil {
 			return fail(err)
 		}
-		if err = ownersLock.Close(); err != nil {
+		if err = agentStandaloneReleaseLock(ownersLock); err != nil {
 			return nil, errors.Join(err, identityFile.Close())
 		}
 		return identityFile, nil
@@ -402,7 +403,7 @@ func acquireAgentStandaloneExistingOwner(
 	if err != nil {
 		return nil, errors.Join(err, identityFile.Close())
 	}
-	if err = ownersLock.Close(); err != nil {
+	if err = agentStandaloneReleaseLock(ownersLock); err != nil {
 		return nil, errors.Join(err, identityFile.Close())
 	}
 	if err = cleanupAgentStandaloneTargetMarkerTemporaries(
@@ -535,7 +536,7 @@ func acquireAgentStandaloneDomain(
 
 					return shared, nil
 				}
-				if err = shared.Close(); err != nil {
+				if err = agentStandaloneReleaseLock(shared); err != nil {
 					return nil, err
 				}
 				exclusive, exclusiveErr := acquireAgentStandaloneNamedLock(
@@ -578,7 +579,7 @@ func acquireAgentStandaloneDomain(
 			_ = shared.Close()
 			return nil, loadErr
 		}
-		if err = shared.Close(); err != nil {
+		if err = agentStandaloneReleaseLock(shared); err != nil {
 			return nil, err
 		}
 		exclusive, err := acquireAgentStandaloneNamedLock(
@@ -661,7 +662,7 @@ func acquireAgentStandaloneDomain(
 				return nil, errors.Join(err, exclusive.Close())
 			}
 			if rebindIdentity != nil {
-				if err = rebindIdentity.Close(); err != nil {
+				if err = agentStandaloneReleaseLock(rebindIdentity); err != nil {
 					_ = exclusive.Close()
 					return nil, err
 				}
@@ -1299,7 +1300,7 @@ func validateAgentStandaloneSameBootRebind(
 	); err != nil {
 		return failIdentity(fmt.Errorf("same-boot standalone task vacancy proof: %w", err))
 	}
-	if err = ownersLock.Close(); err != nil {
+	if err = agentStandaloneReleaseLock(ownersLock); err != nil {
 		return nil, errors.Join(err, uidLock.Close())
 	}
 
@@ -1364,7 +1365,7 @@ func auditAgentStandaloneAuthorityRoot(
 			if openErr != nil {
 				return openErr
 			}
-			if closeErr := lock.Close(); closeErr != nil {
+			if closeErr := agentStandaloneReleaseLock(lock); closeErr != nil {
 				return closeErr
 			}
 			ownersLockPresent = true
@@ -1458,7 +1459,7 @@ func auditAgentStandaloneAuthorityRoot(
 			if openErr != nil {
 				return openErr
 			}
-			if closeErr := lock.Close(); closeErr != nil {
+			if closeErr := agentStandaloneReleaseLock(lock); closeErr != nil {
 				return closeErr
 			}
 			registryStatePresent = true
