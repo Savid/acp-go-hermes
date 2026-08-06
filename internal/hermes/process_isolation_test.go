@@ -10,6 +10,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// standaloneTestOwnerID and standaloneTestStateRoot satisfy the standalone
+// identity disposition Linux requires of every policy that neither borrows a
+// process identity nor opts out of credentials. Without them a Linux run is
+// rejected before it reaches the behaviour under test, and the case proves
+// nothing it names.
+const (
+	standaloneTestOwnerID   = "acp-go-hermes-tests"
+	standaloneTestStateRoot = "/var/lib/acp-go-hermes-tests"
+)
+
 type processIsolationTestCapability struct{}
 
 func (processIsolationTestCapability) Duplicate() (*os.File, error) {
@@ -21,7 +31,10 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "hermes")
 	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700))
-	isolation := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"}}
+	isolation := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"},
+		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+	}
 	environment, err := isolationEnvironment(isolation, map[string]string{"BASE": "two", "EXPLICIT": "yes"})
 	require.NoError(t, err)
 	require.Contains(t, environment, "BASE=two")
@@ -32,15 +45,24 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	require.Equal(t, executable, resolved)
 	_, err = lookPathInEnvironment("relative/hermes", environment)
 	require.Error(t, err)
-	_, err = isolationEnvironment(&ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"BAD=KEY": "x"}})
+	_, err = isolationEnvironment(&ProcessIsolation{
+		UID: 1, GID: 1, BaseEnvironment: map[string]string{"BAD=KEY": "x"},
+		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+	})
 	require.Error(t, err)
 	for _, invalid := range []*ProcessIsolation{
 		nil,
 		{UID: 1, GID: 1},
 		{UID: 0, GID: 1},
 		{UID: 1, GID: 0},
-		{UID: 1, GID: 1, BaseEnvironment: map[string]string{envIsolationUID: "1"}},
-		{UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_HERMES_PROCESS_SUPERVISOR_TARGET": "/tmp/x"}},
+		{
+			UID: 1, GID: 1, BaseEnvironment: map[string]string{envIsolationUID: "1"},
+			StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+		},
+		{
+			UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_HERMES_PROCESS_SUPERVISOR_TARGET": "/tmp/x"},
+			StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+		},
 	} {
 		require.Error(t, validateProcessIsolation(invalid))
 	}

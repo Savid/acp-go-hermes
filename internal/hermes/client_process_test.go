@@ -648,7 +648,10 @@ func TestExecutableVersionProbeUsesGenerationHome(t *testing.T) {
 	}
 	nativeReleases, scratchReleases := 0, 0
 	_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
-		Isolation: &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"HERMES_HOME": "/account-home"}},
+		Isolation: &ProcessIsolation{
+			UID: 1, GID: 1, BaseEnvironment: map[string]string{"HERMES_HOME": "/account-home"},
+			StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+		},
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -704,7 +707,10 @@ func TestExecutableVersionProbeHandoffFailure(t *testing.T) {
 			}
 			nativeReleases, scratchReleases := 0, 0
 			_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
-				Isolation: &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{}},
+				Isolation: &ProcessIsolation{
+					UID: 1, GID: 1, BaseEnvironment: map[string]string{},
+					StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+				},
 				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 					return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 				},

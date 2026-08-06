@@ -20,7 +20,10 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
-	policy := &ProcessIsolation{UID: 11, GID: 22, BaseEnvironment: map[string]string{}}
+	policy := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
+		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+	}
 	require.NoError(t, verifyProcessIsolation(policy))
 	cmd := exec.Command("/usr/bin/true")
 	require.NoError(t, applyProcessIsolation(cmd, policy))

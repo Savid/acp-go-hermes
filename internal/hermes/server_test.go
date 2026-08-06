@@ -2400,7 +2400,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 
 func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
-	root := t.TempDir()
+	root := testTraversableTempDir(t)
 	cwd := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2457,7 +2457,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 
 func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
 	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
-	root := t.TempDir()
+	root := testTraversableTempDir(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -2526,7 +2526,7 @@ func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
 
 func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
-	root := t.TempDir()
+	root := testTraversableTempDir(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -3228,9 +3228,27 @@ func restoreLeaseReapSeams(t *testing.T) {
 	})
 }
 
+// testTraversableTempDir is a scratch parent the isolated identity can enter.
+// t.TempDir cannot stand in: it nests its leaf under a 0700 directory, so every
+// generated tree beneath it is refused for an ancestry the target identity
+// cannot traverse.
+func testTraversableTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("", "acp-go-hermes-test-")
+	if err != nil {
+		t.Fatalf("create traversable test directory: %v", err)
+	}
+	if err = os.Chmod(directory, 0o711); err != nil {
+		t.Fatalf("make test directory traversable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+
+	return directory
+}
+
 func testXDGDirs(t *testing.T) XDGDirs {
 	t.Helper()
-	dirs, err := CreateGenerationXDGDirs(t.TempDir())
+	dirs, err := CreateGenerationXDGDirs(testTraversableTempDir(t))
 	if err != nil {
 		t.Fatalf("CreateGenerationXDGDirs: %v", err)
 	}

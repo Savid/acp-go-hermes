@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -18,11 +19,18 @@ func TestProcessContainmentValidationAndPortFailure(t *testing.T) {
 	}
 
 	restoreProcessSeams(t)
-	executable := "already-probed-port-failure"
+	// The isolation policy resolves the executable through its own PATH, so the
+	// fixture has to be a real file the policy can reach rather than a bare name.
+	executable := filepath.Join(t.TempDir(), "already-probed-port-failure")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write probed executable: %v", err)
+	}
 	markExecutableProbed(executable)
 	want := errors.New("listen failed")
 	listenTCP = func(string, string) (net.Listener, error) { return nil, want }
-	_, err := Start(context.Background(), ProcessOptions{ExecutablePath: executable, Home: t.TempDir()})
+	_, err := Start(context.Background(), ProcessOptions{
+		ExecutablePath: executable, Home: t.TempDir(), Isolation: testProcessIsolation(),
+	})
 	if !errors.Is(err, want) {
 		t.Fatalf("Start port failure = %v", err)
 	}
@@ -91,7 +99,8 @@ func TestExecutableVersionRetainsIncompleteGeneration(t *testing.T) {
 	}
 	retained := false
 	_, err := ensureExecutableVersion(context.Background(), t.Name(), ProcessOptions{
-		ScratchParent:             t.TempDir(),
+		ScratchParent:             testTraversableTempDir(t),
+		Isolation:                 testProcessIsolation(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return func() {}, func() {}, nil },
 		RetainDiscoveryRoot:       func(string, error) { retained = true },
 	})
