@@ -1653,7 +1653,7 @@ func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	authHome := filepath.Join(t.TempDir(), "native-auth")
+	authHome := testNativeOwnedDir(t, "native-auth")
 	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithProviderAuthRoot(t.TempDir()),

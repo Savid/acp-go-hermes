@@ -6,16 +6,35 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/coder/acp-go-sdk"
 )
 
+// testIsolationIdentity is the identity every adapter-level fixture isolates
+// to. The effective identity is unusable as-is: the policy forbids UID or GID
+// zero, so a root test runner would be rejected before reaching anything under
+// test. Zero is replaced rather than the whole identity so an unprivileged
+// runner keeps isolating to itself.
+func testIsolationIdentity() (uint32, uint32) {
+	uid, gid := os.Geteuid(), os.Getegid()
+	if uid == 0 {
+		uid = 1
+	}
+	if gid == 0 {
+		gid = 1
+	}
+
+	return uint32(uid), uint32(gid)
+}
+
 func newTestAgent(opts ...Option) *Agent {
 	base := make([]Option, 0, 2+len(opts))
+	uid, gid := testIsolationIdentity()
 	base = append(base, WithProcessIsolation(ProcessIsolation{
-		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+		UID: uid, GID: gid,
 		BaseEnvironment:   map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
 		StandaloneOwnerID: "acp-go-hermes-tests", StandaloneStateRoot: os.TempDir(),
 	}), func(options *Options) {
@@ -24,6 +43,40 @@ func newTestAgent(opts ...Option) *Agent {
 	})
 
 	return NewAgent(append(base, opts...)...)
+}
+
+// testNativeOwnedDir materializes a directory the native-owned predicate
+// admits: mode exactly 0700, owned by the isolated identity, under an ancestry
+// that identity can traverse. t.TempDir cannot stand in for it — its leaf is
+// created 0777&^umask and its parent is 0700, so under umask 022 the mode is
+// wrong and the ancestry is closed to any identity but the runner's.
+func testNativeOwnedDir(t *testing.T, name string) string {
+	t.Helper()
+	parent, err := os.MkdirTemp("", "acp-go-hermes-native-owned-")
+	if err != nil {
+		t.Fatalf("create native-owned parent: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	if err = os.Chmod(parent, 0o711); err != nil {
+		t.Fatalf("make native-owned parent traversable: %v", err)
+	}
+
+	home := filepath.Join(parent, name)
+	if err = os.Mkdir(home, 0o700); err != nil {
+		t.Fatalf("create native-owned directory: %v", err)
+	}
+	if err = os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("protect native-owned directory: %v", err)
+	}
+
+	uid, gid := testIsolationIdentity()
+	if uid != uint32(os.Geteuid()) || gid != uint32(os.Getegid()) {
+		if err = os.Chown(home, int(uid), int(gid)); err != nil {
+			t.Fatalf("hand native-owned directory to the isolated identity: %v", err)
+		}
+	}
+
+	return home
 }
 
 func testIdentityLockRoot() string {
