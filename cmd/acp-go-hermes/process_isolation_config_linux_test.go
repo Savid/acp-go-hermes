@@ -39,6 +39,7 @@ func TestValidateProcessIsolationConfigBuildsClosedEnvironment(t *testing.T) {
 		if name == "OPENAI_API_KEY" {
 			return "explicit-secret", true
 		}
+
 		return "", false
 	}
 	processIsolationValidateHome = func(string, uint32, uint32) error { return nil }

@@ -614,6 +614,7 @@ while :; do sleep 30; done
 		case <-time.After(2 * time.Second):
 		}
 	})
+
 	return fixture
 }
 
@@ -724,6 +725,7 @@ func assertSupervisorAuthorityLocks(t *testing.T, authorityRoot string, uid uint
 				if !errors.Is(lockErr, unix.EWOULDBLOCK) && !errors.Is(lockErr, unix.EAGAIN) {
 					t.Fatalf("authority lock %q was not retained by frozen survivor: %v", name, lockErr)
 				}
+
 				break
 			}
 			if lockErr == nil {
@@ -892,6 +894,7 @@ func TestLinuxSupervisorCoreExitShutdownAndSignal(t *testing.T) {
 			if attempts == 1 {
 				return errors.New("proof")
 			}
+
 			return nil
 		}
 		code, proof := runSupervisorCoreTest(t, []string{"sh", "-c", "exit 0"}, nil)
@@ -1434,11 +1437,13 @@ func TestHermesSupervisorCheckedCloseOnExec(t *testing.T) {
 			if command != unix.F_GETFD || argument != 0 {
 				t.Fatalf("get flags call = (%d,%d)", command, argument)
 			}
+
 			return 0, nil
 		}
 		if command != unix.F_SETFD || argument&unix.FD_CLOEXEC == 0 {
 			t.Fatalf("set flags call = (%d,%d)", command, argument)
 		}
+
 		return 0, nil
 	}
 	if err := setHermesSupervisorCloseOnExec(supervisorProofFD); err != nil || calls != 2 {
@@ -1456,6 +1461,7 @@ func TestHermesSupervisorCheckedCloseOnExec(t *testing.T) {
 		if calls == 1 {
 			return 0, nil
 		}
+
 		return 0, want
 	}
 	if err := setHermesSupervisorCloseOnExec(supervisorProofFD); !errors.Is(err, want) {

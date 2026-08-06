@@ -34,12 +34,15 @@ func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
 	if path == "" {
 		return processIsolationConfig{}, fmt.Errorf("-%s is required", processIsolationConfigFlag)
 	}
+
 	if !filepath.IsAbs(path) {
 		return processIsolationConfig{}, fmt.Errorf("-%s must be an absolute path", processIsolationConfigFlag)
 	}
+
 	if filepath.Clean(path) != path {
 		return processIsolationConfig{}, fmt.Errorf("-%s must be a canonical absolute path", processIsolationConfigFlag)
 	}
+
 	if processIsolationGeteuid() != 0 {
 		return processIsolationConfig{}, fmt.Errorf("standalone native mode requires a root supervisor")
 	}
@@ -55,6 +58,7 @@ func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 || stat.Uid != 0 || stat.Nlink != 1 {
 		return processIsolationConfig{}, fmt.Errorf("-%s must be a root-owned, single-link regular file with mode 0600", processIsolationConfigFlag)
 	}
+
 	if stat.Size > maxProcessIsolationConfigSize {
 		return processIsolationConfig{}, fmt.Errorf("-%s exceeds %d bytes", processIsolationConfigFlag, maxProcessIsolationConfigSize)
 	}
@@ -63,6 +67,7 @@ func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
 	if err != nil {
 		return processIsolationConfig{}, fmt.Errorf("read -%s: %w", processIsolationConfigFlag, err)
 	}
+
 	if len(data) > maxProcessIsolationConfigSize {
 		return processIsolationConfig{}, fmt.Errorf("-%s exceeds %d bytes", processIsolationConfigFlag, maxProcessIsolationConfigSize)
 	}
@@ -79,12 +84,15 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	if config.UID == 0 || config.GID == 0 {
 		return processIsolationConfig{}, fmt.Errorf("uid and gid must be nonzero")
 	}
+
 	if config.BaseEnvironment == nil {
 		return processIsolationConfig{}, fmt.Errorf("baseEnvironment must be a JSON object")
 	}
+
 	if !validProcessIsolationOwnerID(config.StandaloneOwnerID) {
 		return processIsolationConfig{}, fmt.Errorf("standaloneOwnerId is invalid")
 	}
+
 	if !validProcessIsolationStateRoot(config.StandaloneStateRoot) {
 		return processIsolationConfig{}, fmt.Errorf("standaloneStateRoot must be a clean absolute UTF-8 path of at most 4096 bytes without control characters")
 	}
@@ -93,26 +101,32 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	if err != nil {
 		return processIsolationConfig{}, fmt.Errorf("lookup uid %d: %w", config.UID, err)
 	}
+
 	accountGID, err := strconv.ParseUint(account.Gid, 10, 32)
 	if err != nil || uint32(accountGID) != config.GID {
 		return processIsolationConfig{}, fmt.Errorf("gid %d is not uid %d's primary group", config.GID, config.UID)
 	}
+
 	primaryGroup, err := processIsolationLookupGroupID(strconv.FormatUint(uint64(config.GID), 10))
 	if err != nil {
 		return processIsolationConfig{}, fmt.Errorf("lookup gid %d: %w", config.GID, err)
 	}
+
 	if primaryGroup.Name != account.Username {
 		return processIsolationConfig{}, fmt.Errorf("gid %d must be the same-name private group %q", config.GID, account.Username)
 	}
+
 	groupIDs, err := processIsolationGroupIDs(account)
 	if err != nil {
 		return processIsolationConfig{}, fmt.Errorf("lookup supplementary groups for uid %d: %w", config.UID, err)
 	}
+
 	for _, groupID := range groupIDs {
 		if groupID != account.Gid {
 			return processIsolationConfig{}, fmt.Errorf("uid %d must not belong to supplementary group %s", config.UID, groupID)
 		}
 	}
+
 	if err := processIsolationValidateAccountAuthority(account, config.UID, config.GID); err != nil {
 		return processIsolationConfig{}, err
 	}
@@ -122,9 +136,11 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 		if err := validateEnvironmentEntry(name, value); err != nil {
 			return processIsolationConfig{}, err
 		}
+
 		if prohibitedPolicyEnvironment(name) {
 			return processIsolationConfig{}, fmt.Errorf("baseEnvironment variable %q is reserved or unsafe", name)
 		}
+
 		finalEnvironment[name] = value
 	}
 
@@ -133,35 +149,44 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 		if err := validateEnvironmentName(name); err != nil {
 			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment: %w", err)
 		}
+
 		if prohibitedInheritedEnvironment(name) {
 			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is reserved or unsafe", name)
 		}
+
 		if _, exists := seenInherited[name]; exists {
 			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is duplicated", name)
 		}
+
 		seenInherited[name] = struct{}{}
 		if _, exists := finalEnvironment[name]; exists {
 			return processIsolationConfig{}, fmt.Errorf("environment variable %q appears in both baseEnvironment and inheritEnvironment", name)
 		}
+
 		value, exists := processIsolationLookupEnv(name)
 		if !exists {
 			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is unset", name)
 		}
+
 		if strings.IndexByte(value, 0) >= 0 {
 			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q contains NUL", name)
 		}
+
 		finalEnvironment[name] = value
 	}
 
 	if finalEnvironment["USER"] != account.Username || finalEnvironment["LOGNAME"] != account.Username {
 		return processIsolationConfig{}, fmt.Errorf("USER and LOGNAME must both equal account name %q", account.Username)
 	}
+
 	if finalEnvironment["HOME"] != filepath.Clean(account.HomeDir) || !filepath.IsAbs(finalEnvironment["HOME"]) {
 		return processIsolationConfig{}, fmt.Errorf("HOME must equal account home %q", filepath.Clean(account.HomeDir))
 	}
+
 	if err := processIsolationValidateHome(finalEnvironment["HOME"], config.UID, config.GID); err != nil {
 		return processIsolationConfig{}, err
 	}
+
 	if err := processIsolationValidatePath(finalEnvironment["PATH"]); err != nil {
 		return processIsolationConfig{}, err
 	}
@@ -176,18 +201,22 @@ func validProcessIsolationOwnerID(value string) bool {
 	if len(value) == 0 || len(value) > 256 {
 		return false
 	}
+
 	letterOrDigit := func(value byte) bool {
 		return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 	}
 	if !letterOrDigit(value[0]) {
 		return false
 	}
+
 	for _, character := range []byte(value[1:]) {
 		if letterOrDigit(character) || strings.ContainsRune("._:@/-", rune(character)) {
 			continue
 		}
+
 		return false
 	}
+
 	return true
 }
 
@@ -196,11 +225,13 @@ func validProcessIsolationStateRoot(value string) bool {
 		filepath.Clean(value) != value || strings.IndexByte(value, 0) >= 0 {
 		return false
 	}
+
 	for _, character := range value {
 		if unicode.IsControl(character) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -235,10 +266,12 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 	}
 
 	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+
 	parentFD, err := processIsolationOpen("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, nil, err
 	}
+
 	defer func() {
 		if parentFD >= 0 {
 			_ = unix.Close(parentFD)
@@ -264,6 +297,7 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 
 			return -1, nil, fmt.Errorf("stat component %q: %w", component, statErr)
 		}
+
 		if err := validateProtectedAncestorStat(&stat, component); err != nil {
 			_ = unix.Close(childFD)
 
@@ -314,14 +348,17 @@ func validatePath(value string) error {
 	if value == "" {
 		return fmt.Errorf("baseEnvironment PATH must be nonempty")
 	}
+
 	for _, component := range filepath.SplitList(value) {
 		if component == "" || !filepath.IsAbs(component) || filepath.Clean(component) != component {
 			return fmt.Errorf("baseEnvironment PATH components must be canonical absolute paths")
 		}
+
 		info, err := os.Stat(component)
 		if err != nil {
 			return fmt.Errorf("stat PATH component %q: %w", component, err)
 		}
+
 		if !info.IsDir() {
 			return fmt.Errorf("PATH component %q is not a directory", component)
 		}
@@ -334,6 +371,7 @@ func validateEnvironmentEntry(name string, value string) error {
 	if err := validateEnvironmentName(name); err != nil {
 		return fmt.Errorf("baseEnvironment: %w", err)
 	}
+
 	if strings.IndexByte(value, 0) >= 0 {
 		return fmt.Errorf("baseEnvironment variable %q contains NUL", name)
 	}
@@ -345,6 +383,7 @@ func validateEnvironmentName(name string) error {
 	if name == "" || strings.ContainsAny(name, "=\x00") {
 		return fmt.Errorf("invalid environment variable name %q", name)
 	}
+
 	for index, char := range name {
 		if (char < 'A' || char > 'Z') && (char < 'a' || char > 'z') && char != '_' && (index == 0 || char < '0' || char > '9') {
 			return fmt.Errorf("invalid environment variable name %q", name)
@@ -358,6 +397,7 @@ func prohibitedPolicyEnvironment(name string) bool {
 	if strings.HasPrefix(name, "ACP_GO_") || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") {
 		return true
 	}
+
 	switch name {
 	case "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
 		"NODE_OPTIONS", "NODE_PATH",
@@ -375,6 +415,7 @@ func prohibitedInheritedEnvironment(name string) bool {
 	if prohibitedPolicyEnvironment(name) {
 		return true
 	}
+
 	switch name {
 	case "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "CDPATH", "GLOBIGNORE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME":
 		return true

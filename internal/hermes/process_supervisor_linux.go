@@ -94,12 +94,15 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if err := validateProcessIsolation(spec.Isolation); err != nil {
 		return nil, fmt.Errorf("validate Hermes supervisor isolation: %w", err)
 	}
+
 	if err := validateHermesSupervisorIdentity(spec.Isolation); err != nil {
 		return nil, fmt.Errorf("validate Hermes supervisor identity: %w", err)
 	}
+
 	if (spec.Isolation.IdentityLock == nil) != (spec.Isolation.AuthorityDomain == nil) {
 		return nil, errors.New("Hermes supervisor identity lock and authority domain must be provided together")
 	}
+
 	if target == nil || target.Path == "" || len(target.Args) == 0 {
 		return nil, errors.New("hermes supervisor target is unavailable")
 	}
@@ -125,6 +128,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if targetEnvironment == nil {
 		targetEnvironment = os.Environ()
 	}
+
 	config := hermesSupervisorConfig{
 		Path:            target.Path,
 		Args:            append([]string(nil), target.Args...),
@@ -134,23 +138,29 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 		IdentityLock:    spec.Isolation.IdentityLock != nil,
 		AuthorityDomain: spec.Isolation.AuthorityDomain != nil,
 	}
+
 	configFD, err := supervisorMemfd(supervisorConfigName, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
 		return nil, fmt.Errorf("create Hermes supervisor config: %w", err)
 	}
+
 	configFile := os.NewFile(uintptr(configFD), supervisorConfigName)
 	if err := writeHermesSupervisorConfig(configFile, config); err != nil {
 		_ = configFile.Close()
+
 		return nil, err
 	}
+
 	if _, err := supervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
 		_ = configFile.Close()
+
 		return nil, fmt.Errorf("seal Hermes supervisor config: %w", err)
 	}
 
 	controlRead, controlWrite, err := supervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
+
 		return nil, fmt.Errorf("create Hermes supervisor control pipe: %w", err)
 	}
 
@@ -179,6 +189,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	supervisor.Stdout = target.Stdout
 	supervisor.Stderr = target.Stderr
 	supervisor.ExtraFiles = []*os.File{configFile, controlRead, proofWrite}
+
 	if spec.Isolation.IdentityLock != nil {
 		identityLock, duplicateErr := spec.Isolation.IdentityLock.Duplicate()
 		if duplicateErr != nil {
@@ -186,6 +197,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 
 			return nil, fmt.Errorf("duplicate Hermes agent identity lock: %w", duplicateErr)
 		}
+
 		supervisor.ExtraFiles = append(supervisor.ExtraFiles, identityLock)
 		defer identityLock.Close()
 
@@ -195,9 +207,11 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 
 			return nil, fmt.Errorf("duplicate Hermes agent authority domain: %w", duplicateErr)
 		}
+
 		supervisor.ExtraFiles = append(supervisor.ExtraFiles, authorityDomain)
 		defer authorityDomain.Close()
 	}
+
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Install the wrapper command before launch. exec.Cmd must not be copied
 	// after Start: its private waiter and pipe-copy state belong to the exact
@@ -271,9 +285,11 @@ func runHermesProcessSupervisor(mode string) int {
 	if supervisorEffectiveUID() != 0 {
 		return 125
 	}
+
 	if err := supervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return 125
 	}
+
 	if err := supervisorPrctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return 125
 	}
@@ -296,6 +312,7 @@ func runHermesProcessSupervisor(mode string) int {
 			return 125
 		}
 	}
+
 	if configInput == nil || control == nil || proof == nil {
 		return 125
 	}
@@ -305,12 +322,14 @@ func runHermesProcessSupervisor(mode string) int {
 	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
 		return 125
 	}
+
 	if validateHermesSupervisorConfig(config) != nil {
 		return 125
 	}
 
 	if mode == hermesSupervisorLiveness {
 		outerProof := supervisorNewFile(8, "hermes-supervisor-completion-proof")
+
 		peer := supervisorNewFile(9, "hermes-supervisor-guardian-peer")
 		if outerProof == nil || peer == nil || supervisorCloseOnExec(8) != nil || supervisorCloseOnExec(9) != nil {
 			return 125
@@ -328,26 +347,32 @@ func validateHermesSupervisorConfig(config hermesSupervisorConfig) error {
 	if config.Path == "" || len(config.Args) == 0 {
 		return errors.New("Hermes supervisor config is incomplete")
 	}
+
 	if config.IdentityLock != config.AuthorityDomain {
 		return errors.New("Hermes supervisor identity lock and authority domain must be provided together")
 	}
+
 	if config.StandaloneAuthority && !config.IdentityLock {
 		return errors.New("Hermes standalone authority requires inherited identity capabilities")
 	}
+
 	validation := config.Isolation
 	if config.IdentityLock {
 		placeholder := &agentIdentityLock{}
 		validation.IdentityLock = placeholder
 		validation.AuthorityDomain = placeholder
+
 		if config.StandaloneAuthority {
 			if !validStandaloneOwnerID(config.Isolation.StandaloneOwnerID) ||
 				!validStandaloneStateRootPath(config.Isolation.StandaloneStateRoot) {
 				return errors.New("Hermes inherited standalone authority tuple is invalid")
 			}
+
 			validation.StandaloneOwnerID = ""
 			validation.StandaloneStateRoot = ""
 		}
 	}
+
 	if err := validateProcessIsolation(&validation); err != nil {
 		return err
 	}
@@ -360,9 +385,11 @@ func setHermesSupervisorCloseOnExec(fd int) error {
 	if err != nil {
 		return fmt.Errorf("read inherited Hermes supervisor descriptor flags: %w", err)
 	}
+
 	if _, err = supervisorFcntl(uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC); err != nil {
 		return fmt.Errorf("protect inherited Hermes supervisor descriptor from exec: %w", err)
 	}
+
 	return nil
 }
 
@@ -375,6 +402,7 @@ func validateHermesSupervisorIdentity(isolation *ProcessIsolation) error {
 	if effectiveUID != 0 {
 		return fmt.Errorf("trusted root identity is required, effective uid is %d", effectiveUID)
 	}
+
 	if isolation.UID == uint32(effectiveUID) {
 		return errors.New("native target identity must differ from the trusted supervisor")
 	}
@@ -386,6 +414,7 @@ func writeHermesSupervisorConfig(file io.WriteSeeker, config hermesSupervisorCon
 	if err := json.NewEncoder(file).Encode(config); err != nil {
 		return fmt.Errorf("encode Hermes supervisor config: %w", err)
 	}
+
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind Hermes supervisor config: %w", err)
 	}
@@ -399,22 +428,26 @@ func startHermesSupervisorTarget(
 	beforeStart func() error,
 ) (<-chan error, error, error) {
 	var privilegeErr error
+
 	waitDone, startErr := startCommandOnCreatorThread(func() error {
 		if err := supervisorSetrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 			privilegeErr = fmt.Errorf("disable Hermes native core dumps: %w", err)
 
 			return privilegeErr
 		}
+
 		if err := supervisorPrctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 			privilegeErr = err
 
 			return err
 		}
+
 		if err := applyProcessIsolation(target, isolation); err != nil {
 			privilegeErr = fmt.Errorf("apply Hermes native process isolation: %w", err)
 
 			return privilegeErr
 		}
+
 		if beforeStart != nil {
 			if err := beforeStart(); err != nil {
 				privilegeErr = err
@@ -425,6 +458,7 @@ func startHermesSupervisorTarget(
 
 		return target.Start()
 	}, target.Wait)
+
 	if privilegeErr != nil {
 		return nil, privilegeErr, nil
 	}
@@ -442,6 +476,7 @@ func (authority *hermesSupervisorAuthority) Close() error {
 	if authority == nil {
 		return nil
 	}
+
 	if authority.standalone != nil {
 		return authority.standalone.Close()
 	}
@@ -462,8 +497,10 @@ func acquireHermesSupervisorAuthority(
 			identity: &agentIdentityLock{}, domain: &agentIdentityLock{},
 		}, nil
 	}
+
 	if config.IdentityLock {
 		testAuthority := config.Isolation.TestOnlyNoCredential || config.Isolation.TestOnlyIdentityLockRoot != ""
+
 		identity, err := adoptAgentIdentityLock(
 			supervisorNewFile(identityFD, "hermes-agent-identity-lock"), config.Isolation.UID,
 			testAuthority, config.Isolation.TestOnlyIdentityLockRoot,
@@ -471,6 +508,7 @@ func acquireHermesSupervisorAuthority(
 		if err != nil {
 			return nil, err
 		}
+
 		domain, err := adoptAgentAuthorityDomain(
 			supervisorNewFile(domainFD, "hermes-agent-authority-domain"),
 			testAuthority, config.Isolation.TestOnlyIdentityLockRoot,
@@ -478,6 +516,7 @@ func acquireHermesSupervisorAuthority(
 		if err != nil {
 			return nil, errors.Join(err, identity.Close())
 		}
+
 		if config.StandaloneAuthority {
 			err = validateInheritedStandaloneAgentIdentityDisposition(
 				config.Isolation.UID,
@@ -495,12 +534,14 @@ func acquireHermesSupervisorAuthority(
 				config.Isolation.TestOnlyIdentityLockRoot,
 			)
 		}
+
 		if err != nil {
 			return nil, errors.Join(err, identity.Close(), domain.Close())
 		}
 
 		return &hermesSupervisorAuthority{identity: identity, domain: domain}, nil
 	}
+
 	standalone, err := supervisorAcquireStandalone(
 		config.Isolation.UID, config.Isolation.GID, config.Isolation.StandaloneOwnerID,
 		config.Isolation.StandaloneStateRoot, config.Isolation.TestOnlyNoCredential,
@@ -518,14 +559,20 @@ func acquireHermesSupervisorAuthority(
 func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *os.File, proof *os.File) (exitCode int) {
 	defer control.Close()
 	defer proof.Close()
+
 	shutdown := make(chan struct{})
+
 	go func() {
 		_, _ = io.Copy(io.Discard, control)
+
 		close(shutdown)
 	}()
+
 	signals := make(chan os.Signal, 2)
+
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
+
 	authority, err := acquireHermesSupervisorAuthority(
 		config, supervisorIdentityLockFD, supervisorAuthorityFD, shutdown, signals,
 	)
@@ -535,6 +582,7 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 
 		return 125
 	}
+
 	liveness, status, peer, err := startHermesSupervisorLiveness(config, control, proof, authority)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: %v\n", err)
@@ -544,27 +592,36 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 	}
 	defer status.Close()
 	defer peer.Close()
+
 	wait := make(chan error, 1)
 	go func() { wait <- liveness.Wait() }()
+
 	reader := bufio.NewReader(status)
 	if err = status.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		_ = peer.Close()
+
 		<-wait
+
 		_ = completeHermesSupervisorAuthority(&authority, nil, nil, proof, false)
 
 		return 125
 	}
+
 	line, err := reader.ReadString('\n')
 	if err != nil || !validHermesLivenessReadiness(line) {
 		_ = peer.Close()
+
 		<-wait
+
 		_ = completeHermesSupervisorAuthority(&authority, nil, nil, proof, false)
 
 		return 125
 	}
+
 	_ = status.SetReadDeadline(time.Time{})
 
 	var waitErr error
+
 	for {
 		select {
 		case waitErr = <-wait:
@@ -572,6 +629,7 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 		case <-shutdown:
 			_ = peer.Close()
 			waitErr = <-wait
+
 			goto livenessExited
 		case received := <-signals:
 			if nativeSignal, ok := received.(syscall.Signal); ok {
@@ -582,6 +640,7 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 
 livenessExited:
 	done, doneErr := reader.ReadString('\n')
+
 	if doneErr == nil && done == "done\n" {
 		if completeHermesSupervisorAuthority(&authority, nil, nil, proof, false) != nil {
 			return 125
@@ -589,6 +648,7 @@ livenessExited:
 
 		return hermesSupervisorExitCode(waitErr)
 	}
+
 	_ = completeHermesSupervisorAuthority(&authority, nil, nil, proof, false)
 
 	return hermesSupervisorExitCode(waitErr)
@@ -605,21 +665,25 @@ func startHermesSupervisorLiveness(
 	config.AuthorityDomain = borrowed
 	config.StandaloneAuthority = authority.standalone != nil
 	config.Isolation.IdentityLock = nil
+
 	config.Isolation.AuthorityDomain = nil
 	if !config.StandaloneAuthority {
 		config.Isolation.StandaloneOwnerID = ""
 		config.Isolation.StandaloneStateRoot = ""
 	}
+
 	configFD, err := supervisorMemfd(supervisorConfigName+"-liveness", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	configFile := os.NewFile(uintptr(configFD), supervisorConfigName+"-liveness")
 	if err = writeHermesSupervisorConfig(configFile, config); err != nil {
 		_ = configFile.Close()
 
 		return nil, nil, nil, err
 	}
+
 	if _, err = supervisorSealConfig(
 		configFile.Fd(), unix.F_ADD_SEALS,
 		unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL,
@@ -628,12 +692,14 @@ func startHermesSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	statusRead, statusWrite, err := supervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
 
 		return nil, nil, nil, err
 	}
+
 	peerRead, peerWrite, err := supervisorPipe()
 	if err != nil {
 		_ = configFile.Close()
@@ -642,27 +708,33 @@ func startHermesSupervisorLiveness(
 
 		return nil, nil, nil, err
 	}
+
 	identity, err := duplicateHermesSupervisorAuthority(authority.identity, borrowed)
 	if err != nil {
 		closeHermesLivenessFiles(configFile, statusRead, statusWrite, peerRead, peerWrite)
 
 		return nil, nil, nil, err
 	}
+
 	domain, err := duplicateHermesSupervisorAuthority(authority.domain, borrowed)
 	if err != nil {
 		_ = identity.Close()
+
 		closeHermesLivenessFiles(configFile, statusRead, statusWrite, peerRead, peerWrite)
 
 		return nil, nil, nil, err
 	}
+
 	self, err := supervisorExecutable()
 	if err != nil {
 		_ = identity.Close()
 		_ = domain.Close()
+
 		closeHermesLivenessFiles(configFile, statusRead, statusWrite, peerRead, peerWrite)
 
 		return nil, nil, nil, err
 	}
+
 	liveness := supervisorCommand(self)
 	liveness.Dir = "/"
 	liveness.Env = []string{envHermesSupervisor + "=" + hermesSupervisorLiveness}
@@ -670,14 +742,17 @@ func startHermesSupervisorLiveness(
 	liveness.Stdout = os.Stdout
 	liveness.Stderr = os.Stderr
 	liveness.ExtraFiles = []*os.File{configFile, control, statusWrite, identity, domain, proof, peerRead}
+
 	liveness.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err = liveness.Start(); err != nil {
 		_ = identity.Close()
 		_ = domain.Close()
+
 		closeHermesLivenessFiles(configFile, statusRead, statusWrite, peerRead, peerWrite)
 
 		return nil, nil, nil, err
 	}
+
 	for _, file := range []*os.File{configFile, statusWrite, identity, domain, peerRead} {
 		_ = file.Close()
 	}
@@ -706,10 +781,12 @@ func validHermesLivenessReadiness(line string) bool {
 	if !ok {
 		return false
 	}
+
 	pidText, ok := strings.CutPrefix(text, "ready:")
 	if !ok {
 		return false
 	}
+
 	pid, err := strconv.Atoi(pidText)
 
 	return err == nil && pid > 0
@@ -719,6 +796,7 @@ func hermesSupervisorExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
 		return exitErr.ExitCode()
@@ -738,6 +816,7 @@ func awaitHermesSupervisorContainment() {
 		if err := proveSupervisorDescendants(5 * time.Second); err == nil {
 			return
 		}
+
 		time.Sleep(time.Second)
 	}
 }
@@ -760,12 +839,16 @@ func completeHermesSupervisorAuthority(
 	if authority == nil || *authority == nil {
 		return errors.New("Hermes supervisor authority is unavailable at completion")
 	}
+
 	awaitHermesSupervisorContainment()
+
 	closeErr := (*authority).Close()
 	*authority = nil
+
 	if closeErr != nil {
 		return closeErr
 	}
+
 	if livenessProtocol {
 		select {
 		case <-guardianDone:
@@ -791,24 +874,33 @@ func runHermesProcessSupervisorNative(
 	livenessProtocol bool,
 ) (exitCode int) {
 	shutdown := make(chan struct{})
+
 	var shutdownOnce sync.Once
+
 	for _, controlInput := range controlInputs {
 		go func(input io.Reader) {
 			_, _ = io.Copy(io.Discard, input)
+
 			shutdownOnce.Do(func() { close(shutdown) })
 		}(controlInput)
 	}
+
 	guardianDone := make(chan struct{})
+
 	if guardianPeer != nil {
 		go func() {
 			_, _ = io.Copy(io.Discard, guardianPeer)
+
 			close(guardianDone)
 			shutdownOnce.Do(func() { close(shutdown) })
 		}()
 	}
+
 	signals := make(chan os.Signal, 1)
+
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
+
 	authority, err := acquireHermesSupervisorAuthority(
 		config, supervisorIdentityLockFD, supervisorAuthorityFD, shutdown, signals,
 	)
@@ -817,28 +909,35 @@ func runHermesProcessSupervisorNative(
 
 		return 125
 	}
+
 	target := hermesSupervisorTarget(config)
 	nativeIsolation := config.Isolation
 	nativeIsolation.IdentityLock = authority.identity
 	nativeIsolation.AuthorityDomain = authority.domain
 	nativeIsolation.StandaloneOwnerID = ""
 	nativeIsolation.StandaloneStateRoot = ""
+
 	var guardianErr error
+
 	targetDone, privilegeErr, startErr := startHermesSupervisorTarget(target, &nativeIsolation, func() error {
 		guardianErr = validateHermesSupervisorGuardianPeer(guardianPeer, guardianDone)
 
 		return guardianErr
 	})
+
 	if guardianErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: guardian peer: %v\n", guardianErr)
+
 		if completeHermesSupervisorAuthority(&authority, guardianDone, status, proof, false) != nil {
 			return 126
 		}
 
 		return 125
 	}
+
 	if privilegeErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: prepare native target: %v\n", privilegeErr)
+
 		if completeHermesSupervisorAuthority(
 			&authority, guardianDone, status, proof, livenessProtocol,
 		) != nil {
@@ -847,8 +946,10 @@ func runHermesProcessSupervisorNative(
 
 		return 125
 	}
+
 	if startErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: start native target: %v\n", startErr)
+
 		if completeHermesSupervisorAuthority(
 			&authority, guardianDone, status, proof, livenessProtocol,
 		) != nil {
@@ -857,10 +958,12 @@ func runHermesProcessSupervisorNative(
 
 		return 125
 	}
+
 	if livenessProtocol {
 		if _, err = fmt.Fprintf(status, "ready:%d\n", target.Process.Pid); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: publish native readiness: %v\n", err)
 			_, _ = stopSupervisorDescendants(target.Process.Pid, targetDone)
+
 			if completeHermesSupervisorAuthority(
 				&authority, guardianDone, status, proof, livenessProtocol,
 			) != nil {
@@ -883,9 +986,11 @@ func runHermesProcessSupervisorNative(
 	case <-signals:
 		targetErr, targetSettled = stopSupervisorDescendants(target.Process.Pid, targetDone)
 	}
+
 	if !targetSettled {
 		for !targetSettled {
 			_ = signalSupervisorDescendants(syscall.SIGKILL)
+
 			select {
 			case targetErr = <-targetDone:
 				targetSettled = true
@@ -893,6 +998,7 @@ func runHermesProcessSupervisorNative(
 			}
 		}
 	}
+
 	if completeHermesSupervisorAuthority(
 		&authority, guardianDone, status, proof, livenessProtocol,
 	) != nil {
@@ -906,18 +1012,22 @@ func validateHermesSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) e
 	if peer == nil {
 		return nil
 	}
+
 	select {
 	case <-done:
 		return errors.New("Hermes guardian exited before native launch")
 	default:
 	}
+
 	poll := []unix.PollFd{{
 		Fd: int32(peer.Fd()), Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR,
 	}}
+
 	ready, err := supervisorPoll(poll, 0)
 	if err != nil {
 		return fmt.Errorf("poll Hermes guardian before native launch: %w", err)
 	}
+
 	if ready != 0 || poll[0].Revents != 0 {
 		return errors.New("Hermes guardian exited before native launch")
 	}
