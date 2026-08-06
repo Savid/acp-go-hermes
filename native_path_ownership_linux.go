@@ -12,6 +12,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// The native-owned directory check re-reads the descriptor it just walked to,
+// so each syscall it depends on is reached through a seam. Faulting a seam is
+// the only way to prove the check fails closed when the kernel stops answering
+// for a descriptor the traversal already accepted, and the only way to stage
+// the second read disagreeing with the first.
+var (
+	nativeOwnershipOpenFilesystemRoot = func() (int, error) {
+		return unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	}
+	nativeOwnershipFstat = unix.Fstat
+	nativeOwnershipClose = unix.Close
+)
+
 func validateNativeOwnedDirectoryPlatform(root string, uid uint32, gid uint32) error {
 	trustedUID := uint32(os.Geteuid())
 	trustedGID := uint32(os.Getegid())
@@ -24,7 +37,7 @@ func validateNativeOwnedDirectoryPlatform(root string, uid uint32, gid uint32) e
 	defer directory.Close()
 
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+	if err := nativeOwnershipFstat(int(directory.Fd()), &stat); err != nil {
 		return fmt.Errorf("inspect native-owned directory: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
@@ -46,14 +59,14 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 	}
 
 	clean := filepath.Clean(name)
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := nativeOwnershipOpenFilesystemRoot()
 	if err != nil {
 		return nil, err
 	}
 
 	components := strings.Split(strings.TrimPrefix(clean, "/"), "/")
 	var rootStat unix.Stat_t
-	if statErr := unix.Fstat(fd, &rootStat); statErr != nil {
+	if statErr := nativeOwnershipFstat(fd, &rootStat); statErr != nil {
 		_ = unix.Close(fd)
 
 		return nil, statErr
@@ -76,7 +89,7 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 			return nil, openErr
 		}
 		var stat unix.Stat_t
-		if statErr := unix.Fstat(next, &stat); statErr != nil {
+		if statErr := nativeOwnershipFstat(next, &stat); statErr != nil {
 			_ = unix.Close(next)
 			_ = unix.Close(fd)
 
@@ -88,7 +101,7 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 
 			return nil, validateErr
 		}
-		closeErr := unix.Close(fd)
+		closeErr := nativeOwnershipClose(fd)
 		if closeErr != nil {
 			_ = unix.Close(next)
 
