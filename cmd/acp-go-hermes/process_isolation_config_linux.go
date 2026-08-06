@@ -104,48 +104,75 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 		return processIsolationConfig{}, fmt.Errorf("standaloneStateRoot must be a clean absolute UTF-8 path of at most 4096 bytes without control characters")
 	}
 
-	account, err := processIsolationLookupUserID(strconv.FormatUint(uint64(config.UID), 10))
-	if err != nil {
-		return processIsolationConfig{}, fmt.Errorf("lookup uid %d: %w", config.UID, err)
+	account, accountErr := resolveProcessIsolationAccount(config)
+	if accountErr != nil {
+		return processIsolationConfig{}, accountErr
 	}
 
-	accountGID, err := strconv.ParseUint(account.Gid, 10, 32)
-	if err != nil || accountGID != uint64(config.GID) {
-		return processIsolationConfig{}, fmt.Errorf("gid %d is not uid %d's primary group", config.GID, config.UID)
+	finalEnvironment, environmentErr := buildProcessIsolationEnvironment(config, account)
+	if environmentErr != nil {
+		return processIsolationConfig{}, environmentErr
 	}
 
-	primaryGroup, err := processIsolationLookupGroupID(strconv.FormatUint(uint64(config.GID), 10))
-	if err != nil {
-		return processIsolationConfig{}, fmt.Errorf("lookup gid %d: %w", config.GID, err)
+	config.BaseEnvironment = finalEnvironment
+	config.InheritEnvironment = nil
+
+	return config, nil
+}
+
+// resolveProcessIsolationAccount proves the configured uid names a real account
+// whose only group is its own same-name private group, and that the account
+// carries the authority the isolation depends on.
+func resolveProcessIsolationAccount(config processIsolationConfig) (*user.User, error) {
+	account, lookupErr := processIsolationLookupUserID(strconv.FormatUint(uint64(config.UID), 10))
+	if lookupErr != nil {
+		return nil, fmt.Errorf("lookup uid %d: %w", config.UID, lookupErr)
+	}
+
+	accountGID, parseErr := strconv.ParseUint(account.Gid, 10, 32)
+	if parseErr != nil || accountGID != uint64(config.GID) {
+		return nil, fmt.Errorf("gid %d is not uid %d's primary group", config.GID, config.UID)
+	}
+
+	primaryGroup, groupErr := processIsolationLookupGroupID(strconv.FormatUint(uint64(config.GID), 10))
+	if groupErr != nil {
+		return nil, fmt.Errorf("lookup gid %d: %w", config.GID, groupErr)
 	}
 
 	if primaryGroup.Name != account.Username {
-		return processIsolationConfig{}, fmt.Errorf("gid %d must be the same-name private group %q", config.GID, account.Username)
+		return nil, fmt.Errorf("gid %d must be the same-name private group %q", config.GID, account.Username)
 	}
 
-	groupIDs, err := processIsolationGroupIDs(account)
-	if err != nil {
-		return processIsolationConfig{}, fmt.Errorf("lookup supplementary groups for uid %d: %w", config.UID, err)
+	groupIDs, groupIDsErr := processIsolationGroupIDs(account)
+	if groupIDsErr != nil {
+		return nil, fmt.Errorf("lookup supplementary groups for uid %d: %w", config.UID, groupIDsErr)
 	}
 
 	for _, groupID := range groupIDs {
 		if groupID != account.Gid {
-			return processIsolationConfig{}, fmt.Errorf("uid %d must not belong to supplementary group %s", config.UID, groupID)
+			return nil, fmt.Errorf("uid %d must not belong to supplementary group %s", config.UID, groupID)
 		}
 	}
 
-	if err := processIsolationValidateAccountAuthority(account, config.UID, config.GID); err != nil {
-		return processIsolationConfig{}, err
+	if authorityErr := processIsolationValidateAccountAuthority(account, config.UID, config.GID); authorityErr != nil {
+		return nil, authorityErr
 	}
 
+	return account, nil
+}
+
+// buildProcessIsolationEnvironment merges the declared and inherited variables
+// into the environment the isolated process will run with, refusing anything
+// reserved, duplicated or unset, and holds the result to the account it runs as.
+func buildProcessIsolationEnvironment(config processIsolationConfig, account *user.User) (map[string]string, error) {
 	finalEnvironment := make(map[string]string, len(config.BaseEnvironment)+len(config.InheritEnvironment))
 	for name, value := range config.BaseEnvironment {
-		if err := validateEnvironmentEntry(name, value); err != nil {
-			return processIsolationConfig{}, err
+		if entryErr := validateEnvironmentEntry(name, value); entryErr != nil {
+			return nil, entryErr
 		}
 
 		if prohibitedPolicyEnvironment(name) {
-			return processIsolationConfig{}, fmt.Errorf("baseEnvironment variable %q is reserved or unsafe", name)
+			return nil, fmt.Errorf("baseEnvironment variable %q is reserved or unsafe", name)
 		}
 
 		finalEnvironment[name] = value
@@ -153,55 +180,52 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 
 	seenInherited := make(map[string]struct{}, len(config.InheritEnvironment))
 	for _, name := range config.InheritEnvironment {
-		if err := validateEnvironmentName(name); err != nil {
-			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment: %w", err)
+		if nameErr := validateEnvironmentName(name); nameErr != nil {
+			return nil, fmt.Errorf("inheritEnvironment: %w", nameErr)
 		}
 
 		if prohibitedInheritedEnvironment(name) {
-			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is reserved or unsafe", name)
+			return nil, fmt.Errorf("inheritEnvironment variable %q is reserved or unsafe", name)
 		}
 
 		if _, exists := seenInherited[name]; exists {
-			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is duplicated", name)
+			return nil, fmt.Errorf("inheritEnvironment variable %q is duplicated", name)
 		}
 
 		seenInherited[name] = struct{}{}
 		if _, exists := finalEnvironment[name]; exists {
-			return processIsolationConfig{}, fmt.Errorf("environment variable %q appears in both baseEnvironment and inheritEnvironment", name)
+			return nil, fmt.Errorf("environment variable %q appears in both baseEnvironment and inheritEnvironment", name)
 		}
 
 		value, exists := processIsolationLookupEnv(name)
 		if !exists {
-			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q is unset", name)
+			return nil, fmt.Errorf("inheritEnvironment variable %q is unset", name)
 		}
 
 		if strings.IndexByte(value, 0) >= 0 {
-			return processIsolationConfig{}, fmt.Errorf("inheritEnvironment variable %q contains NUL", name)
+			return nil, fmt.Errorf("inheritEnvironment variable %q contains NUL", name)
 		}
 
 		finalEnvironment[name] = value
 	}
 
 	if finalEnvironment[processIsolationUserEnv] != account.Username || finalEnvironment[processIsolationLogNameEnv] != account.Username {
-		return processIsolationConfig{}, fmt.Errorf("USER and LOGNAME must both equal account name %q", account.Username)
+		return nil, fmt.Errorf("USER and LOGNAME must both equal account name %q", account.Username)
 	}
 
 	if finalEnvironment[processIsolationHomeEnv] != filepath.Clean(account.HomeDir) || !filepath.IsAbs(finalEnvironment[processIsolationHomeEnv]) {
-		return processIsolationConfig{}, fmt.Errorf("HOME must equal account home %q", filepath.Clean(account.HomeDir))
+		return nil, fmt.Errorf("HOME must equal account home %q", filepath.Clean(account.HomeDir))
 	}
 
-	if err := processIsolationValidateHome(finalEnvironment[processIsolationHomeEnv], config.UID, config.GID); err != nil {
-		return processIsolationConfig{}, err
+	if homeErr := processIsolationValidateHome(finalEnvironment[processIsolationHomeEnv], config.UID, config.GID); homeErr != nil {
+		return nil, homeErr
 	}
 
-	if err := processIsolationValidatePath(finalEnvironment[processIsolationPathEnv]); err != nil {
-		return processIsolationConfig{}, err
+	if pathErr := processIsolationValidatePath(finalEnvironment[processIsolationPathEnv]); pathErr != nil {
+		return nil, pathErr
 	}
 
-	config.BaseEnvironment = finalEnvironment
-	config.InheritEnvironment = nil
-
-	return config, nil
+	return finalEnvironment, nil
 }
 
 func validProcessIsolationOwnerID(value string) bool {

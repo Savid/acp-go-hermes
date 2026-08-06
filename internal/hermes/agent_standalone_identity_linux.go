@@ -351,104 +351,131 @@ func acquireAgentStandaloneOwnerIdentity(
 			return nil, err
 		}
 
-		ownersLock, err := acquireAgentStandaloneOwnersExclusive(
-			directory, ownerUID, ownerGID, deadline, canceled, signals,
+		identityFile, retry, claimErr := claimAgentStandaloneOwnerUnderLock(
+			directory, want, ownerUID, ownerGID, deadline, canceled, signals,
 		)
-		if err != nil {
-			return nil, err
+		if claimErr != nil {
+			return nil, claimErr
 		}
 
-		cleaned, busy, cleanupErr := drainAgentStandaloneOwnerTemporariesUnderLock(
-			directory, ownerUID, ownerGID, deadline, canceled, signals,
-		)
-		if cleanupErr != nil {
-			return nil, errors.Join(cleanupErr, ownersLock.Close())
-		}
-
-		if cleaned || busy {
-			if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
-				return nil, agentErr
-			}
-
-			if busy {
-				if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-					return nil, waitErr
-				}
-			}
-
+		if retry {
 			continue
-		}
-
-		existing, err = loadAgentStandaloneOwner(directory, want.UID, ownerUID, ownerGID)
-		if err == nil {
-			closeErr := agentStandaloneReleaseLock(ownersLock)
-			if existing != want {
-				return nil, errors.Join(
-					fmt.Errorf("agent identity uid %d is permanently bound to another standalone owner", want.UID), closeErr,
-				)
-			}
-
-			if closeErr != nil {
-				return nil, closeErr
-			}
-
-			continue
-		}
-
-		if !errors.Is(err, unix.ENOENT) {
-			return nil, errors.Join(err, ownersLock.Close())
-		}
-
-		if err = validateAgentStandaloneUIDLockMayBeCreated(directory, want.UID); err != nil {
-			return nil, errors.Join(err, ownersLock.Close())
-		}
-
-		identityFile, acquired, err := tryAgentStandaloneNamedLock(
-			directory, strconv.FormatUint(uint64(want.UID), 10)+".lock", true, ownerUID, ownerGID,
-		)
-		if err != nil {
-			return nil, errors.Join(err, ownersLock.Close())
-		}
-
-		if !acquired {
-			if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
-				return nil, agentErr
-			}
-
-			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-				return nil, waitErr
-			}
-
-			continue
-		}
-
-		fail := func(cause error) (*os.File, error) {
-			return nil, errors.Join(cause, identityFile.Close(), ownersLock.Close())
-		}
-		if err = cleanupAgentStandaloneTargetMarkerTemporaries(
-			directory, want.UID, identityFile, ownerUID, ownerGID, deadline, canceled, signals,
-		); err != nil {
-			return fail(err)
-		}
-
-		if err = auditAgentStandaloneAuthorityRoot(
-			directory, ownerUID, ownerGID, false, false, true, deadline, canceled, signals,
-		); err != nil {
-			return fail(err)
-		}
-
-		if err = completeAgentStandaloneOwnerClaim(
-			directory, want, ownerUID, ownerGID, false, deadline, canceled, signals,
-		); err != nil {
-			return fail(err)
-		}
-
-		if err = agentStandaloneReleaseLock(ownersLock); err != nil {
-			return nil, errors.Join(err, identityFile.Close())
 		}
 
 		return identityFile, nil
 	}
+}
+
+// claimAgentStandaloneOwnerUnderLock runs one pass of the owner claim while
+// holding the owners lock. It reports retry when the pass ended in a state the
+// caller has to re-observe from the top rather than a claim it can return: a
+// temporary was drained, another owner appeared, or the uid lock was taken.
+func claimAgentStandaloneOwnerUnderLock(
+	directory *os.File,
+	want agentStandaloneOwner,
+	ownerUID uint32,
+	ownerGID uint32,
+	deadline time.Time,
+	canceled <-chan struct{},
+	signals <-chan os.Signal,
+) (*os.File, bool, error) {
+	ownersLock, lockErr := acquireAgentStandaloneOwnersExclusive(
+		directory, ownerUID, ownerGID, deadline, canceled, signals,
+	)
+	if lockErr != nil {
+		return nil, false, lockErr
+	}
+
+	cleaned, busy, cleanupErr := drainAgentStandaloneOwnerTemporariesUnderLock(
+		directory, ownerUID, ownerGID, deadline, canceled, signals,
+	)
+	if cleanupErr != nil {
+		return nil, false, errors.Join(cleanupErr, ownersLock.Close())
+	}
+
+	if cleaned || busy {
+		if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
+			return nil, false, agentErr
+		}
+
+		if busy {
+			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+				return nil, false, waitErr
+			}
+		}
+
+		return nil, true, nil
+	}
+
+	existing, loadErr := loadAgentStandaloneOwner(directory, want.UID, ownerUID, ownerGID)
+	if loadErr == nil {
+		closeErr := agentStandaloneReleaseLock(ownersLock)
+		if existing != want {
+			return nil, false, errors.Join(
+				fmt.Errorf("agent identity uid %d is permanently bound to another standalone owner", want.UID), closeErr,
+			)
+		}
+
+		if closeErr != nil {
+			return nil, false, closeErr
+		}
+
+		return nil, true, nil
+	}
+
+	if !errors.Is(loadErr, unix.ENOENT) {
+		return nil, false, errors.Join(loadErr, ownersLock.Close())
+	}
+
+	if validateErr := validateAgentStandaloneUIDLockMayBeCreated(directory, want.UID); validateErr != nil {
+		return nil, false, errors.Join(validateErr, ownersLock.Close())
+	}
+
+	identityFile, acquired, tryErr := tryAgentStandaloneNamedLock(
+		directory, strconv.FormatUint(uint64(want.UID), 10)+".lock", true, ownerUID, ownerGID,
+	)
+	if tryErr != nil {
+		return nil, false, errors.Join(tryErr, ownersLock.Close())
+	}
+
+	if !acquired {
+		if agentErr := agentStandaloneReleaseLock(ownersLock); agentErr != nil {
+			return nil, false, agentErr
+		}
+
+		if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+			return nil, false, waitErr
+		}
+
+		return nil, true, nil
+	}
+
+	fail := func(cause error) (*os.File, bool, error) {
+		return nil, false, errors.Join(cause, identityFile.Close(), ownersLock.Close())
+	}
+	if markerErr := cleanupAgentStandaloneTargetMarkerTemporaries(
+		directory, want.UID, identityFile, ownerUID, ownerGID, deadline, canceled, signals,
+	); markerErr != nil {
+		return fail(markerErr)
+	}
+
+	if auditErr := auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, true, deadline, canceled, signals,
+	); auditErr != nil {
+		return fail(auditErr)
+	}
+
+	if claimErr := completeAgentStandaloneOwnerClaim(
+		directory, want, ownerUID, ownerGID, false, deadline, canceled, signals,
+	); claimErr != nil {
+		return fail(claimErr)
+	}
+
+	if closeErr := agentStandaloneReleaseLock(ownersLock); closeErr != nil {
+		return nil, false, errors.Join(closeErr, identityFile.Close())
+	}
+
+	return identityFile, false, nil
 }
 
 func acquireAgentStandaloneExistingOwner(
@@ -696,123 +723,18 @@ func acquireAgentStandaloneDomain(
 
 		record, loadErr = loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
 		if loadErr == nil {
-			current, currentErr := currentAgentAuthorityDomain(directory)
-			if currentErr != nil {
-				_ = exclusive.Close()
-
-				return nil, currentErr
-			}
-
-			if record.sameDomain(current) {
-				current.AuthorityID = record.AuthorityID
-
-				if err = agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
-					_ = exclusive.Close()
-
-					return nil, err
-				}
-
-				if err = revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); err != nil {
-					_ = exclusive.Close()
-
-					return nil, err
-				}
-
-				return exclusive, nil
-			}
-
-			if !testOnly {
-				if err = validateAgentStandaloneBinder(); err != nil {
-					_ = exclusive.Close()
-
-					return nil, err
-				}
-			}
-
-			ownerTempsBusy, drainErr := drainAgentStandaloneDomainOwnerTemporaries(
-				directory, ownerUID, ownerGID, deadline, canceled, signals,
+			lease, retry, rebindErr := rebindAgentStandaloneDomain(
+				directory, exclusive, wantOwner, ownerUID, ownerGID, testOnly, record, deadline, canceled, signals,
 			)
-			if drainErr != nil || ownerTempsBusy {
-				_ = exclusive.Close()
+			if rebindErr != nil {
+				return nil, rebindErr
+			}
 
-				if drainErr != nil {
-					return nil, drainErr
-				}
-
-				if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-					return nil, waitErr
-				}
-
+			if retry {
 				continue
 			}
 
-			if err = auditAgentStandaloneAuthorityRoot(
-				directory, ownerUID, ownerGID, false, true, false, deadline, canceled, signals,
-			); err != nil {
-				_ = exclusive.Close()
-
-				if errors.Is(err, errAgentStandaloneMarkerTempBusy) {
-					if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-						return nil, waitErr
-					}
-
-					continue
-				}
-
-				return nil, err
-			}
-
-			var rebindIdentity *os.File
-			if record.BootID == current.BootID {
-				rebindIdentity, err = validateAgentStandaloneSameBootRebind(
-					directory, wantOwner, ownerUID, ownerGID, deadline, canceled, signals,
-				)
-				if err != nil {
-					_ = exclusive.Close()
-
-					return nil, err
-				}
-			}
-
-			current.AuthorityID = record.AuthorityID
-
-			if err = agentStandaloneFilesystemProbe(directory, testOnly); err != nil {
-				if rebindIdentity != nil {
-					err = errors.Join(err, rebindIdentity.Close())
-				}
-
-				return nil, errors.Join(err, exclusive.Close())
-			}
-
-			if err = agentStandaloneReplaceDomain(directory, ownerUID, ownerGID, current); err != nil {
-				if rebindIdentity != nil {
-					err = errors.Join(err, rebindIdentity.Close())
-				}
-
-				return nil, errors.Join(err, exclusive.Close())
-			}
-
-			if rebindIdentity != nil {
-				if err = agentStandaloneReleaseLock(rebindIdentity); err != nil {
-					_ = exclusive.Close()
-
-					return nil, err
-				}
-			}
-
-			if err = agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
-				_ = exclusive.Close()
-
-				return nil, err
-			}
-
-			if err = revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); err != nil {
-				_ = exclusive.Close()
-
-				return nil, err
-			}
-
-			return exclusive, nil
+			return lease, nil
 		}
 
 		if !errors.Is(loadErr, unix.ENOENT) {
@@ -821,81 +743,248 @@ func acquireAgentStandaloneDomain(
 			return nil, loadErr
 		}
 
-		if !testOnly {
-			if err = validateAgentStandaloneBinder(); err != nil {
-				_ = exclusive.Close()
-
-				return nil, err
-			}
+		lease, retry, establishErr := establishAgentStandaloneDomain(
+			directory, exclusive, ownerUID, ownerGID, testOnly, deadline, canceled, signals,
+		)
+		if establishErr != nil {
+			return nil, establishErr
 		}
 
-		ownerTempsBusy, drainErr := drainAgentStandaloneDomainOwnerTemporaries(
-			directory, ownerUID, ownerGID, deadline, canceled, signals,
-		)
-		if drainErr != nil || ownerTempsBusy {
-			_ = exclusive.Close()
-
-			if drainErr != nil {
-				return nil, drainErr
-			}
-
-			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-				return nil, waitErr
-			}
-
+		if retry {
 			continue
 		}
 
-		if err = auditAgentStandaloneAuthorityRoot(
-			directory, ownerUID, ownerGID, true, true, false, deadline, canceled, signals,
-		); err != nil {
+		return lease, nil
+	}
+}
+
+// rebindAgentStandaloneDomain settles an existing record under an already-held
+// exclusive lock. The record either still describes this domain, in which case
+// the lock downgrades to a shared lease, or it describes a stale one that has to
+// be rebound and republished. It reports retry when a temporary or a busy marker
+// means the caller has to re-observe the domain from the top.
+func rebindAgentStandaloneDomain(
+	directory *os.File,
+	exclusive *os.File,
+	wantOwner agentStandaloneOwner,
+	ownerUID uint32,
+	ownerGID uint32,
+	testOnly bool,
+	record agentAuthorityDomainRecord,
+	deadline time.Time,
+	canceled <-chan struct{},
+	signals <-chan os.Signal,
+) (*os.File, bool, error) {
+	current, currentErr := currentAgentAuthorityDomain(directory)
+	if currentErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, currentErr
+	}
+
+	if record.sameDomain(current) {
+		current.AuthorityID = record.AuthorityID
+
+		if flockErr := agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); flockErr != nil {
 			_ = exclusive.Close()
 
-			if errors.Is(err, errAgentStandaloneMarkerTempBusy) {
-				if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
-					return nil, waitErr
-				}
+			return nil, false, flockErr
+		}
 
-				continue
+		if revalidateErr := revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); revalidateErr != nil {
+			_ = exclusive.Close()
+
+			return nil, false, revalidateErr
+		}
+
+		return exclusive, false, nil
+	}
+
+	if !testOnly {
+		if binderErr := validateAgentStandaloneBinder(); binderErr != nil {
+			_ = exclusive.Close()
+
+			return nil, false, binderErr
+		}
+	}
+
+	ownerTempsBusy, drainErr := drainAgentStandaloneDomainOwnerTemporaries(
+		directory, ownerUID, ownerGID, deadline, canceled, signals,
+	)
+	if drainErr != nil || ownerTempsBusy {
+		_ = exclusive.Close()
+
+		if drainErr != nil {
+			return nil, false, drainErr
+		}
+
+		if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+			return nil, false, waitErr
+		}
+
+		return nil, true, nil
+	}
+
+	if auditErr := auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, true, false, deadline, canceled, signals,
+	); auditErr != nil {
+		_ = exclusive.Close()
+
+		if errors.Is(auditErr, errAgentStandaloneMarkerTempBusy) {
+			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+				return nil, false, waitErr
 			}
 
-			return nil, err
+			return nil, true, nil
 		}
 
-		if err = agentStandaloneFilesystemProbe(directory, testOnly); err != nil {
-			_ = exclusive.Close()
-
-			return nil, err
-		}
-
-		current, err := currentAgentAuthorityDomain(directory)
-		if err != nil {
-			_ = exclusive.Close()
-
-			return nil, err
-		}
-
-		current.AuthorityID = agentStandaloneRandomHex(16)
-		if err = agentStandaloneReplaceDomain(directory, ownerUID, ownerGID, current); err != nil {
-			_ = exclusive.Close()
-
-			return nil, err
-		}
-
-		if err = agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); err != nil {
-			_ = exclusive.Close()
-
-			return nil, err
-		}
-
-		if err = revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); err != nil {
-			_ = exclusive.Close()
-
-			return nil, err
-		}
-
-		return exclusive, nil
+		return nil, false, auditErr
 	}
+
+	var rebindIdentity *os.File
+
+	if record.BootID == current.BootID {
+		identity, rebindErr := validateAgentStandaloneSameBootRebind(
+			directory, wantOwner, ownerUID, ownerGID, deadline, canceled, signals,
+		)
+		if rebindErr != nil {
+			_ = exclusive.Close()
+
+			return nil, false, rebindErr
+		}
+
+		rebindIdentity = identity
+	}
+
+	current.AuthorityID = record.AuthorityID
+
+	if probeErr := agentStandaloneFilesystemProbe(directory, testOnly); probeErr != nil {
+		if rebindIdentity != nil {
+			probeErr = errors.Join(probeErr, rebindIdentity.Close())
+		}
+
+		return nil, false, errors.Join(probeErr, exclusive.Close())
+	}
+
+	if replaceErr := agentStandaloneReplaceDomain(directory, ownerUID, ownerGID, current); replaceErr != nil {
+		if rebindIdentity != nil {
+			replaceErr = errors.Join(replaceErr, rebindIdentity.Close())
+		}
+
+		return nil, false, errors.Join(replaceErr, exclusive.Close())
+	}
+
+	if rebindIdentity != nil {
+		if closeErr := agentStandaloneReleaseLock(rebindIdentity); closeErr != nil {
+			_ = exclusive.Close()
+
+			return nil, false, closeErr
+		}
+	}
+
+	if flockErr := agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); flockErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, flockErr
+	}
+
+	if revalidateErr := revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); revalidateErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, revalidateErr
+	}
+
+	return exclusive, false, nil
+}
+
+// establishAgentStandaloneDomain publishes a fresh authority domain under an
+// already-held exclusive lock, for the case where no record exists yet. It
+// reports retry when a temporary or a busy marker means the caller has to
+// re-observe the domain from the top instead of publishing over it.
+func establishAgentStandaloneDomain(
+	directory *os.File,
+	exclusive *os.File,
+	ownerUID uint32,
+	ownerGID uint32,
+	testOnly bool,
+	deadline time.Time,
+	canceled <-chan struct{},
+	signals <-chan os.Signal,
+) (*os.File, bool, error) {
+	if !testOnly {
+		if binderErr := validateAgentStandaloneBinder(); binderErr != nil {
+			_ = exclusive.Close()
+
+			return nil, false, binderErr
+		}
+	}
+
+	ownerTempsBusy, drainErr := drainAgentStandaloneDomainOwnerTemporaries(
+		directory, ownerUID, ownerGID, deadline, canceled, signals,
+	)
+	if drainErr != nil || ownerTempsBusy {
+		_ = exclusive.Close()
+
+		if drainErr != nil {
+			return nil, false, drainErr
+		}
+
+		if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+			return nil, false, waitErr
+		}
+
+		return nil, true, nil
+	}
+
+	if auditErr := auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, true, true, false, deadline, canceled, signals,
+	); auditErr != nil {
+		_ = exclusive.Close()
+
+		if errors.Is(auditErr, errAgentStandaloneMarkerTempBusy) {
+			if waitErr := waitAgentStandaloneRetry(deadline, canceled, signals); waitErr != nil {
+				return nil, false, waitErr
+			}
+
+			return nil, true, nil
+		}
+
+		return nil, false, auditErr
+	}
+
+	if probeErr := agentStandaloneFilesystemProbe(directory, testOnly); probeErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, probeErr
+	}
+
+	current, currentErr := currentAgentAuthorityDomain(directory)
+	if currentErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, currentErr
+	}
+
+	current.AuthorityID = agentStandaloneRandomHex(16)
+	if replaceErr := agentStandaloneReplaceDomain(directory, ownerUID, ownerGID, current); replaceErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, replaceErr
+	}
+
+	if flockErr := agentStandaloneDurableFlock(int(exclusive.Fd()), unix.LOCK_SH); flockErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, flockErr
+	}
+
+	if revalidateErr := revalidateAgentStandaloneDomain(directory, ownerUID, ownerGID, current); revalidateErr != nil {
+		_ = exclusive.Close()
+
+		return nil, false, revalidateErr
+	}
+
+	return exclusive, false, nil
 }
 
 func revalidateAgentStandaloneDomain(
@@ -1568,42 +1657,112 @@ func auditAgentStandaloneAuthorityRoot(
 		return err
 	}
 
-	owners := make(map[uint32]agentStandaloneOwner)
-	markers := make(map[uint32]agentStandaloneMarker)
-	uidLocks := make(map[uint32]struct{})
-	affinityLocks := make(map[string]struct{})
-	ownersLockPresent := false
-	registryStatePresent := false
-
 	authorityPath, err := agentStandaloneAuthorityPath(directory)
 	if err != nil {
 		return err
 	}
 
+	owners, ownersErr := collectAgentStandaloneAuthorityOwners(
+		directory, entries, ownerUID, ownerGID, deadline, canceled, signals,
+	)
+	if ownersErr != nil {
+		return ownersErr
+	}
+
+	inventory, inventoryErr := classifyAgentStandaloneAuthorityEntries(
+		directory, entries, ownerUID, ownerGID,
+		requireEmpty, allowCleanup, allowOwnerlessActive, deadline, canceled, signals,
+	)
+	if inventoryErr != nil {
+		return inventoryErr
+	}
+
+	if inventory.registryStatePresent && !inventory.ownersLockPresent {
+		return errors.New("agent identity registry state exists without permanent owners.lock")
+	}
+
+	seenGIDs, uniquenessErr := validateAgentStandaloneRegistryUniqueness(owners, inventory, authorityPath)
+	if uniquenessErr != nil {
+		return uniquenessErr
+	}
+
+	return validateAgentStandaloneMarkerBindings(owners, inventory, seenGIDs, allowOwnerlessActive)
+}
+
+// agentStandaloneAuthorityInventory is what one classifying pass over the
+// authority root observed: the durable state it holds and the permanent locks
+// that state is only allowed to exist behind.
+type agentStandaloneAuthorityInventory struct {
+	markers              map[uint32]agentStandaloneMarker
+	uidLocks             map[uint32]struct{}
+	affinityLocks        map[string]struct{}
+	ownersLockPresent    bool
+	registryStatePresent bool
+}
+
+// collectAgentStandaloneAuthorityOwners loads every permanent owner binding
+// first, so the classifying pass can resolve a marker against its owner.
+func collectAgentStandaloneAuthorityOwners(
+	directory *os.File,
+	entries []os.DirEntry,
+	ownerUID uint32,
+	ownerGID uint32,
+	deadline time.Time,
+	canceled <-chan struct{},
+	signals <-chan os.Signal,
+) (map[uint32]agentStandaloneOwner, error) {
+	owners := make(map[uint32]agentStandaloneOwner)
+
 	for _, entry := range entries {
 		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
-			return checkErr
+			return nil, checkErr
 		}
 
 		name := entry.Name()
 		if uidText, ok := strings.CutSuffix(name, ".owner"); ok {
 			uid, parseErr := parseAgentStandaloneUID(uidText)
 			if parseErr != nil {
-				return fmt.Errorf("invalid standalone owner name %q", name)
+				return nil, fmt.Errorf("invalid standalone owner name %q", name)
 			}
 
 			owner, loadErr := loadAgentStandaloneOwner(directory, uid, ownerUID, ownerGID)
 			if loadErr != nil {
-				return loadErr
+				return nil, loadErr
 			}
 
 			owners[uid] = owner
 		}
 	}
 
+	return owners, nil
+}
+
+// classifyAgentStandaloneAuthorityEntries walks the authority root once and
+// accounts for every entry in it. Anything it cannot name is a refusal: the
+// root is only ever allowed to hold the domain record, the permanent locks, the
+// durable bindings and markers, and the temporaries this pass is authorised to
+// clean up.
+func classifyAgentStandaloneAuthorityEntries(
+	directory *os.File,
+	entries []os.DirEntry,
+	ownerUID uint32,
+	ownerGID uint32,
+	requireEmpty bool,
+	allowCleanup bool,
+	allowOwnerlessActive bool,
+	deadline time.Time,
+	canceled <-chan struct{},
+	signals <-chan os.Signal,
+) (agentStandaloneAuthorityInventory, error) {
+	inventory := agentStandaloneAuthorityInventory{
+		markers:       make(map[uint32]agentStandaloneMarker),
+		uidLocks:      make(map[uint32]struct{}),
+		affinityLocks: make(map[string]struct{}),
+	}
+
 	for _, entry := range entries {
 		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
-			return checkErr
+			return agentStandaloneAuthorityInventory{}, checkErr
 		}
 
 		name := entry.Name()
@@ -1613,83 +1772,42 @@ func auditAgentStandaloneAuthorityRoot(
 
 		if name == agentStandaloneOwnersLockName {
 			if requireEmpty {
-				return errors.New("agent authority record is missing but permanent owners.lock exists")
+				return agentStandaloneAuthorityInventory{}, errors.New("agent authority record is missing but permanent owners.lock exists")
 			}
 
 			lock, openErr := openAgentStandaloneNamedLock(directory, name, false, ownerUID, ownerGID)
 			if openErr != nil {
-				return openErr
+				return agentStandaloneAuthorityInventory{}, openErr
 			}
 
 			if closeErr := agentStandaloneReleaseLock(lock); closeErr != nil {
-				return closeErr
+				return agentStandaloneAuthorityInventory{}, closeErr
 			}
 
-			ownersLockPresent = true
+			inventory.ownersLockPresent = true
 
 			continue
 		}
 
-		if strings.Contains(name, ".owner.next-") {
-			return fmt.Errorf("%w: %q", errAgentStandaloneOwnerTemporary, name)
+		temporary, temporaryErr := adjudicateAgentStandaloneAuthorityTemporary(
+			directory, name, ownerUID, ownerGID, allowCleanup, allowOwnerlessActive,
+		)
+		if temporaryErr != nil {
+			return agentStandaloneAuthorityInventory{}, temporaryErr
 		}
 
-		if strings.HasPrefix(name, "domain.json.next-") {
-			if !allowCleanup {
-				return fmt.Errorf("domain record temporary %q requires domain-exclusive cleanup", name)
-			}
-
-			if cleanupErr := cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
-				return cleanupErr
-			}
-
+		if temporary {
 			continue
 		}
 
-		if strings.HasPrefix(name, ".authority-probe-") {
-			if !allowCleanup {
-				return fmt.Errorf("authority probe temporary %q requires domain-exclusive cleanup", name)
-			}
-
-			if cleanupErr := cleanupAgentStandaloneProbeTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
-				return cleanupErr
-			}
-
-			continue
-		}
-
-		if strings.Contains(name, ".quarantine.next-") {
-			uid, parseErr := parseAgentStandaloneMarkerTemporary(name)
-			if parseErr != nil {
-				return parseErr
-			}
-
-			if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
-				return validateErr
-			}
-
-			if !allowCleanup {
-				if allowOwnerlessActive {
-					continue
-				}
-
-				return fmt.Errorf("marker temporary %q requires domain-exclusive cleanup", name)
-			}
-
-			if cleanupErr := cleanupAgentStandaloneMarkerTemporary(directory, uid, name, ownerUID, ownerGID); cleanupErr != nil {
-				return cleanupErr
-			}
-
-			continue
-		}
-		// The first pass parsed and loaded every ".owner" entry, so any name
-		// that still carries that suffix here is already known-good.
+		// The owner pass parsed and loaded every ".owner" entry, so any name that
+		// still carries that suffix here is already known-good.
 		if strings.HasSuffix(name, ".owner") {
 			if requireEmpty {
-				return errors.New("agent authority record is missing but a permanent owner binding exists")
+				return agentStandaloneAuthorityInventory{}, errors.New("agent authority record is missing but a permanent owner binding exists")
 			}
 
-			registryStatePresent = true
+			inventory.registryStatePresent = true
 
 			continue
 		}
@@ -1697,27 +1815,27 @@ func auditAgentStandaloneAuthorityRoot(
 		if uidText, ok := strings.CutSuffix(name, ".quarantine"); ok {
 			uid, parseErr := parseAgentStandaloneUID(uidText)
 			if parseErr != nil {
-				return fmt.Errorf("invalid standalone marker name %q", name)
+				return agentStandaloneAuthorityInventory{}, fmt.Errorf("invalid standalone marker name %q", name)
 			}
 
 			marker, loadErr := loadAgentStandaloneMarker(directory, uid, ownerUID, ownerGID)
 			if loadErr != nil {
-				return loadErr
+				return agentStandaloneAuthorityInventory{}, loadErr
 			}
 
 			if requireEmpty {
-				return errors.New("agent authority record is missing but a durable marker exists")
+				return agentStandaloneAuthorityInventory{}, errors.New("agent authority record is missing but a durable marker exists")
 			}
 
-			markers[uid] = marker
-			registryStatePresent = true
+			inventory.markers[uid] = marker
+			inventory.registryStatePresent = true
 
 			continue
 		}
 
 		if uidText, ok := strings.CutSuffix(name, ".lock"); ok {
 			if requireEmpty {
-				return fmt.Errorf("agent authority record is missing but root contains prior lock %q", name)
+				return agentStandaloneAuthorityInventory{}, fmt.Errorf("agent authority record is missing but root contains prior lock %q", name)
 			}
 
 			if strings.HasPrefix(uidText, "affinity-") {
@@ -1725,40 +1843,112 @@ func auditAgentStandaloneAuthorityRoot(
 
 				shard, parseErr := strconv.ParseUint(shardText, 16, 16)
 				if parseErr != nil || len(shardText) != 4 || shardText != strings.ToLower(shardText) || shard >= 4096 {
-					return fmt.Errorf("agent authority root contains invalid affinity lock %q", name)
+					return agentStandaloneAuthorityInventory{}, fmt.Errorf("agent authority root contains invalid affinity lock %q", name)
 				}
 
-				affinityLocks[name] = struct{}{}
+				inventory.affinityLocks[name] = struct{}{}
 			} else {
 				uid, parseErr := parseAgentStandaloneUID(uidText)
 				if parseErr != nil {
-					return fmt.Errorf("agent authority root contains unknown lock %q", name)
+					return agentStandaloneAuthorityInventory{}, fmt.Errorf("agent authority root contains unknown lock %q", name)
 				}
 
-				uidLocks[uid] = struct{}{}
+				inventory.uidLocks[uid] = struct{}{}
 			}
 
 			lock, openErr := openAgentStandaloneNamedLock(directory, name, false, ownerUID, ownerGID)
 			if openErr != nil {
-				return openErr
+				return agentStandaloneAuthorityInventory{}, openErr
 			}
 
 			if closeErr := agentStandaloneReleaseLock(lock); closeErr != nil {
-				return closeErr
+				return agentStandaloneAuthorityInventory{}, closeErr
 			}
 
-			registryStatePresent = true
+			inventory.registryStatePresent = true
 
 			continue
 		}
 
-		return fmt.Errorf("agent authority root contains unknown entry %q", name)
+		return agentStandaloneAuthorityInventory{}, fmt.Errorf("agent authority root contains unknown entry %q", name)
 	}
 
-	if registryStatePresent && !ownersLockPresent {
-		return errors.New("agent identity registry state exists without permanent owners.lock")
+	return inventory, nil
+}
+
+// adjudicateAgentStandaloneAuthorityTemporary decides what to do with one entry
+// that names a temporary. It reports whether the entry was a temporary at all,
+// so the classifying pass can fall through to the durable names when it was not.
+// A temporary is only ever cleaned up by a caller holding the domain-exclusive
+// lock; anyone else refuses rather than racing the holder.
+func adjudicateAgentStandaloneAuthorityTemporary(
+	directory *os.File,
+	name string,
+	ownerUID uint32,
+	ownerGID uint32,
+	allowCleanup bool,
+	allowOwnerlessActive bool,
+) (bool, error) {
+	switch {
+	case strings.Contains(name, ".owner.next-"):
+		return false, fmt.Errorf("%w: %q", errAgentStandaloneOwnerTemporary, name)
+	case strings.HasPrefix(name, "domain.json.next-"):
+		if !allowCleanup {
+			return false, fmt.Errorf("domain record temporary %q requires domain-exclusive cleanup", name)
+		}
+
+		if cleanupErr := cleanupAgentStandaloneDomainTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
+			return false, cleanupErr
+		}
+
+		return true, nil
+	case strings.HasPrefix(name, ".authority-probe-"):
+		if !allowCleanup {
+			return false, fmt.Errorf("authority probe temporary %q requires domain-exclusive cleanup", name)
+		}
+
+		if cleanupErr := cleanupAgentStandaloneProbeTemporary(directory, name, ownerUID, ownerGID); cleanupErr != nil {
+			return false, cleanupErr
+		}
+
+		return true, nil
+	case strings.Contains(name, ".quarantine.next-"):
+		uid, parseErr := parseAgentStandaloneMarkerTemporary(name)
+		if parseErr != nil {
+			return false, parseErr
+		}
+
+		if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
+			return false, validateErr
+		}
+
+		if !allowCleanup {
+			if allowOwnerlessActive {
+				return true, nil
+			}
+
+			return false, fmt.Errorf("marker temporary %q requires domain-exclusive cleanup", name)
+		}
+
+		if cleanupErr := cleanupAgentStandaloneMarkerTemporary(directory, uid, name, ownerUID, ownerGID); cleanupErr != nil {
+			return false, cleanupErr
+		}
+
+		return true, nil
 	}
 
+	return false, nil
+}
+
+// validateAgentStandaloneRegistryUniqueness proves no two owner bindings claim
+// the same gid, provider identity or state root, and that each sits behind its
+// own permanent UID lock and outside the registry it is recorded in. It returns
+// the gid ownership it established so the marker pass can extend it.
+func validateAgentStandaloneRegistryUniqueness(
+	owners map[uint32]agentStandaloneOwner,
+	inventory agentStandaloneAuthorityInventory,
+	authorityPath string,
+) (map[uint32]uint32, error) {
 	seenGIDs := make(map[uint32]uint32, len(owners))
 	seenOwners := make(map[string]uint32, len(owners))
 	seenStatePaths := make(map[string]uint32, len(owners))
@@ -1766,41 +1956,53 @@ func auditAgentStandaloneAuthorityRoot(
 	seenStateInodes := make(map[[2]uint64]uint32, len(owners))
 	for uid, owner := range owners {
 		if agentStandalonePathWithin(owner.StateRoot.Path, authorityPath) {
-			return fmt.Errorf("standalone owner uid %d uses the authority registry as its state root", uid)
+			return nil, fmt.Errorf("standalone owner uid %d uses the authority registry as its state root", uid)
 		}
 
-		if _, present := uidLocks[uid]; !present {
-			return fmt.Errorf("standalone owner uid %d exists without its permanent UID lock", uid)
+		if _, present := inventory.uidLocks[uid]; !present {
+			return nil, fmt.Errorf("standalone owner uid %d exists without its permanent UID lock", uid)
 		}
 
 		if prior, duplicate := seenGIDs[owner.GID]; duplicate {
-			return fmt.Errorf("standalone gid %d is duplicated by uids %d and %d", owner.GID, prior, uid)
+			return nil, fmt.Errorf("standalone gid %d is duplicated by uids %d and %d", owner.GID, prior, uid)
 		}
 
 		seenGIDs[owner.GID] = uid
 
 		ownerKey := owner.Provider + "\x00" + owner.OwnerID
 		if prior, duplicate := seenOwners[ownerKey]; duplicate {
-			return fmt.Errorf("standalone provider owner %q is duplicated by uids %d and %d", owner.OwnerID, prior, uid)
+			return nil, fmt.Errorf("standalone provider owner %q is duplicated by uids %d and %d", owner.OwnerID, prior, uid)
 		}
 
 		seenOwners[ownerKey] = uid
 		if prior, duplicate := seenStatePaths[owner.StateRoot.Path]; duplicate {
-			return fmt.Errorf("standalone state root path %q is duplicated by uids %d and %d", owner.StateRoot.Path, prior, uid)
+			return nil, fmt.Errorf("standalone state root path %q is duplicated by uids %d and %d", owner.StateRoot.Path, prior, uid)
 		}
 
 		seenStatePaths[owner.StateRoot.Path] = uid
 
 		inodeKey := [2]uint64{owner.StateRoot.Dev, owner.StateRoot.Ino}
 		if prior, duplicate := seenStateInodes[inodeKey]; duplicate {
-			return fmt.Errorf("standalone state root inode is duplicated by uids %d and %d", prior, uid)
+			return nil, fmt.Errorf("standalone state root inode is duplicated by uids %d and %d", prior, uid)
 		}
 
 		seenStateInodes[inodeKey] = uid
 	}
 
-	for uid, marker := range markers {
-		if _, present := uidLocks[uid]; !present {
+	return seenGIDs, nil
+}
+
+// validateAgentStandaloneMarkerBindings holds every durable marker to the owner
+// it belongs to, or — when it has no owner — to the affinity lock that is the
+// only thing entitling it to survive without one.
+func validateAgentStandaloneMarkerBindings(
+	owners map[uint32]agentStandaloneOwner,
+	inventory agentStandaloneAuthorityInventory,
+	seenGIDs map[uint32]uint32,
+	allowOwnerlessActive bool,
+) error {
+	for uid, marker := range inventory.markers {
+		if _, present := inventory.uidLocks[uid]; !present {
 			return fmt.Errorf("durable marker uid %d exists without its permanent UID lock", uid)
 		}
 
@@ -1819,7 +2021,7 @@ func auditAgentStandaloneAuthorityRoot(
 		}
 
 		affinityName := agentStandaloneAffinityLockName(marker.OwnerDigest)
-		if _, present := affinityLocks[affinityName]; !present {
+		if _, present := inventory.affinityLocks[affinityName]; !present {
 			return fmt.Errorf("ownerless durable marker uid %d exists without permanent affinity lock %q", uid, affinityName)
 		}
 
@@ -2636,6 +2838,25 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 		return agentStandaloneMarker{}, unmarshalErr
 	}
 
+	marker, decodeErr := decodeAgentStandaloneMarker(payload, uid)
+	if decodeErr != nil {
+		return agentStandaloneMarker{}, decodeErr
+	}
+
+	if stateErr := validateAgentStandaloneMarkerState(marker, raw); stateErr != nil {
+		return agentStandaloneMarker{}, stateErr
+	}
+
+	if pathsErr := validateAgentStandaloneMarkerPaths(marker, raw); pathsErr != nil {
+		return agentStandaloneMarker{}, pathsErr
+	}
+
+	return marker, nil
+}
+
+// decodeAgentStandaloneMarker decodes the marker bytes and holds the result to
+// the identity the caller asked for.
+func decodeAgentStandaloneMarker(payload []byte, uid uint32) (agentStandaloneMarker, error) {
 	var marker agentStandaloneMarker
 
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -2650,26 +2871,39 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 		return agentStandaloneMarker{}, errors.New("agent identity marker is incomplete")
 	}
 
+	return marker, nil
+}
+
+// validateAgentStandaloneMarkerState holds each marker state to the exact field
+// set that state is allowed to carry.
+func validateAgentStandaloneMarkerState(marker agentStandaloneMarker, raw map[string]json.RawMessage) error {
 	switch marker.State {
 	case agentStandaloneActive:
 		if len(raw) != 7 || raw["leaseId"] == nil || raw["paths"] == nil || len(marker.LeaseID) != 32 || marker.Paths == nil {
-			return agentStandaloneMarker{}, errors.New("ACTIVE marker lacks exact v2 fields")
+			return errors.New("ACTIVE marker lacks exact v2 fields")
 		}
 
-		if _, err = hex.DecodeString(marker.LeaseID); err != nil || marker.LeaseID != strings.ToLower(marker.LeaseID) {
-			return agentStandaloneMarker{}, errors.New("ACTIVE marker lease id is invalid")
+		if _, hexErr := hex.DecodeString(marker.LeaseID); hexErr != nil || marker.LeaseID != strings.ToLower(marker.LeaseID) {
+			return errors.New("ACTIVE marker lease id is invalid")
 		}
 	case "clean-ready":
 		if len(raw) != 5 || raw["leaseId"] != nil || raw["paths"] != nil {
-			return agentStandaloneMarker{}, errors.New("CLEAN marker has forbidden fields")
+			return errors.New("CLEAN marker has forbidden fields")
 		}
 	default:
-		return agentStandaloneMarker{}, errors.New("agent identity marker state is invalid")
+		return errors.New("agent identity marker state is invalid")
 	}
 
 	if len(marker.Paths) > 128 {
-		return agentStandaloneMarker{}, errors.New("agent identity marker has too many paths")
+		return errors.New("agent identity marker has too many paths")
 	}
+
+	return nil
+}
+
+// validateAgentStandaloneMarkerPaths proves every manifest path carries its
+// exact schema and that no two of them collide or straddle a removal.
+func validateAgentStandaloneMarkerPaths(marker agentStandaloneMarker, raw map[string]json.RawMessage) error {
 	// raw["paths"] is the very array marker.Paths was decoded from, so this
 	// re-decode agrees element for element by construction. A CLEAN marker is
 	// already proven to carry no "paths" member at all.
@@ -2682,30 +2916,30 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 		if _, fieldsErr := exactAgentAuthorityFields(
 			rawPaths[index], "base", "segments", "action", "rootDev", "rootIno",
 		); fieldsErr != nil {
-			return agentStandaloneMarker{}, fmt.Errorf("invalid marker path %d schema: %w", index, fieldsErr)
+			return fmt.Errorf("invalid marker path %d schema: %w", index, fieldsErr)
 		}
 
-		if err = validateAgentStandaloneManifestPath(path); err != nil {
-			return agentStandaloneMarker{}, fmt.Errorf("invalid marker path %d: %w", index, err)
+		if manifestErr := validateAgentStandaloneManifestPath(path); manifestErr != nil {
+			return fmt.Errorf("invalid marker path %d: %w", index, manifestErr)
 		}
 
 		identity := filepath.Join(append([]string{path.Base}, path.Segments...)...)
 		if prior, duplicate := seenPaths[identity]; duplicate {
-			return agentStandaloneMarker{}, fmt.Errorf("marker path %q is duplicated with actions %q and %q", identity, prior, path.Action)
+			return fmt.Errorf("marker path %q is duplicated with actions %q and %q", identity, prior, path.Action)
 		}
 
 		for priorPath, priorAction := range seenPaths {
 			overlaps := strings.HasPrefix(identity, priorPath+string(filepath.Separator)) ||
 				strings.HasPrefix(priorPath, identity+string(filepath.Separator))
 			if overlaps && (path.Action == agentStandaloneRemovePath || priorAction == agentStandaloneRemovePath) {
-				return agentStandaloneMarker{}, fmt.Errorf("marker removal path %q conflicts with %q", identity, priorPath)
+				return fmt.Errorf("marker removal path %q conflicts with %q", identity, priorPath)
 			}
 		}
 
 		seenPaths[identity] = path.Action
 	}
 
-	return marker, nil
+	return nil
 }
 
 func validAgentStandaloneSessionKey(key string) bool {

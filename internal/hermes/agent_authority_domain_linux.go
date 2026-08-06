@@ -87,81 +87,124 @@ func validateAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID u
 }
 
 func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint32) (agentAuthorityDomainRecord, error) {
-	fd, err := unix.Openat(int(directory.Fd()), agentAuthorityDomainRecordName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("open agent authority domain record: %w", err)
+	payload, payloadErr := readAgentAuthorityDomainPayload(directory, ownerUID, ownerGID)
+	if payloadErr != nil {
+		return agentAuthorityDomainRecord{}, payloadErr
+	}
+
+	fields, shapeErr := validateAgentAuthorityRecordShape(payload)
+	if shapeErr != nil {
+		return agentAuthorityDomainRecord{}, shapeErr
+	}
+
+	record, decodeErr := decodeAgentAuthorityDomainRecord(payload)
+	if decodeErr != nil {
+		return agentAuthorityDomainRecord{}, decodeErr
+	}
+
+	if uidMapErr := validateAgentAuthorityExtentFields(fields["uidMap"], record.UIDMap); uidMapErr != nil {
+		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority uid map: %w", uidMapErr)
+	}
+
+	if gidMapErr := validateAgentAuthorityExtentFields(fields["gidMap"], record.GIDMap); gidMapErr != nil {
+		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority gid map: %w", gidMapErr)
+	}
+
+	return record, nil
+}
+
+// readAgentAuthorityDomainPayload returns the record bytes only once the opened
+// descriptor and the name it was opened through agree on one trusted, bounded,
+// owner-held regular inode.
+func readAgentAuthorityDomainPayload(directory *os.File, ownerUID, ownerGID uint32) ([]byte, error) {
+	fd, openErr := unix.Openat(int(directory.Fd()), agentAuthorityDomainRecordName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if openErr != nil {
+		return nil, fmt.Errorf("open agent authority domain record: %w", openErr)
 	}
 
 	file := os.NewFile(uintptr(fd), agentAuthorityDomainRecordName)
 	defer file.Close()
 
 	var descriptor, named unix.Stat_t
-	if agentErr := agentAuthorityDomainFstat(fd, &descriptor); agentErr != nil {
-		return agentAuthorityDomainRecord{}, agentErr
+	if fstatErr := agentAuthorityDomainFstat(fd, &descriptor); fstatErr != nil {
+		return nil, fstatErr
 	}
 
-	if agentErr := agentAuthorityDomainFstatat(
+	if fstatatErr := agentAuthorityDomainFstatat(
 		int(directory.Fd()), agentAuthorityDomainRecordName, &named, unix.AT_SYMLINK_NOFOLLOW,
-	); agentErr != nil {
-		return agentAuthorityDomainRecord{}, agentErr
+	); fstatatErr != nil {
+		return nil, fstatatErr
 	}
 
 	if descriptor.Dev != named.Dev || descriptor.Ino != named.Ino ||
 		descriptor.Mode&unix.S_IFMT != unix.S_IFREG || descriptor.Uid != ownerUID || descriptor.Gid != ownerGID ||
 		descriptor.Nlink != 1 || descriptor.Mode&0o777 != 0o600 || descriptor.Size <= 0 || descriptor.Size > agentAuthorityDomainMaxSize {
-		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record is not its trusted bounded named inode")
+		return nil, errors.New("agent authority domain record is not its trusted bounded named inode")
 	}
 
-	payload, err := io.ReadAll(io.LimitReader(file, agentAuthorityDomainMaxSize+1))
-	if err != nil {
-		return agentAuthorityDomainRecord{}, err
+	payload, readErr := io.ReadAll(io.LimitReader(file, agentAuthorityDomainMaxSize+1))
+	if readErr != nil {
+		return nil, readErr
 	}
 
 	if !utf8.Valid(payload) {
-		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record is not valid UTF-8")
+		return nil, errors.New("agent authority domain record is not valid UTF-8")
 	}
 
+	return payload, nil
+}
+
+// validateAgentAuthorityRecordShape proves the record carries exactly the
+// fields it must, with exactly the sub-objects each one must hold, before any
+// of it is decoded into the record type.
+func validateAgentAuthorityRecordShape(payload []byte) (map[string]json.RawMessage, error) {
 	if rejectErr := rejectAgentAuthorityDuplicateJSONKeys(payload); rejectErr != nil {
-		return agentAuthorityDomainRecord{}, rejectErr
+		return nil, rejectErr
 	}
 
-	fields, err := exactAgentAuthorityFields(payload,
+	fields, fieldsErr := exactAgentAuthorityFields(payload,
 		"version", "authorityId", "authorityRoot", "filesystem", "bootId",
 		"pidNamespace", "userNamespace", "uidMap", "gidMap",
 	)
-	if err != nil {
-		return agentAuthorityDomainRecord{}, err
+	if fieldsErr != nil {
+		return nil, fieldsErr
 	}
 
-	if _, err = exactAgentAuthorityFields(fields["authorityRoot"], "dev", "ino"); err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority root: %w", err)
+	if _, rootErr := exactAgentAuthorityFields(fields["authorityRoot"], "dev", "ino"); rootErr != nil {
+		return nil, fmt.Errorf("invalid agent authority root: %w", rootErr)
 	}
 
-	filesystemFields, err := exactAgentAuthorityFields(fields["filesystem"], "type", "id")
-	if err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority filesystem: %w", err)
+	filesystemFields, filesystemErr := exactAgentAuthorityFields(fields["filesystem"], "type", "id")
+	if filesystemErr != nil {
+		return nil, fmt.Errorf("invalid agent authority filesystem: %w", filesystemErr)
 	}
 
 	var filesystemID []json.RawMessage
-	if err = json.Unmarshal(filesystemFields["id"], &filesystemID); err != nil || len(filesystemID) != 2 {
-		return agentAuthorityDomainRecord{}, errors.New("agent authority filesystem id must contain exactly two integers")
+	if idErr := json.Unmarshal(filesystemFields["id"], &filesystemID); idErr != nil || len(filesystemID) != 2 {
+		return nil, errors.New("agent authority filesystem id must contain exactly two integers")
 	}
 
 	for _, component := range filesystemID {
 		var value int32
-		if err = json.Unmarshal(component, &value); err != nil {
-			return agentAuthorityDomainRecord{}, errors.New("agent authority filesystem id contains an invalid signed 32-bit integer")
+		if componentErr := json.Unmarshal(component, &value); componentErr != nil {
+			return nil, errors.New("agent authority filesystem id contains an invalid signed 32-bit integer")
 		}
 	}
 
-	if _, err = exactAgentAuthorityFields(fields["pidNamespace"], "dev", "ino"); err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority PID namespace: %w", err)
+	if _, pidErr := exactAgentAuthorityFields(fields["pidNamespace"], "dev", "ino"); pidErr != nil {
+		return nil, fmt.Errorf("invalid agent authority PID namespace: %w", pidErr)
 	}
 
-	if _, err = exactAgentAuthorityFields(fields["userNamespace"], "dev", "ino"); err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority user namespace: %w", err)
+	if _, userErr := exactAgentAuthorityFields(fields["userNamespace"], "dev", "ino"); userErr != nil {
+		return nil, fmt.Errorf("invalid agent authority user namespace: %w", userErr)
 	}
 
+	return fields, nil
+}
+
+// decodeAgentAuthorityDomainRecord decodes the validated payload and holds the
+// result to the invariants every field of a usable domain record satisfies.
+func decodeAgentAuthorityDomainRecord(payload []byte) (agentAuthorityDomainRecord, error) {
 	var record agentAuthorityDomainRecord
 
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -178,20 +221,12 @@ func loadAgentAuthorityDomainRecord(directory *os.File, ownerUID, ownerGID uint3
 		return agentAuthorityDomainRecord{}, errors.New("agent authority domain record is incomplete")
 	}
 
-	if _, err = hex.DecodeString(record.AuthorityID); err != nil || record.AuthorityID != strings.ToLower(record.AuthorityID) {
+	if _, hexErr := hex.DecodeString(record.AuthorityID); hexErr != nil || record.AuthorityID != strings.ToLower(record.AuthorityID) {
 		return agentAuthorityDomainRecord{}, errors.New("agent authority domain id is invalid")
 	}
 
 	if !canonicalAgentAuthorityBootID(record.BootID) {
 		return agentAuthorityDomainRecord{}, errors.New("agent authority domain boot id is invalid")
-	}
-
-	if err = validateAgentAuthorityExtentFields(fields["uidMap"], record.UIDMap); err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority uid map: %w", err)
-	}
-
-	if err = validateAgentAuthorityExtentFields(fields["gidMap"], record.GIDMap); err != nil {
-		return agentAuthorityDomainRecord{}, fmt.Errorf("invalid agent authority gid map: %w", err)
 	}
 
 	return record, nil
