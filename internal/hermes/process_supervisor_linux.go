@@ -535,11 +535,6 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 
 		return 125
 	}
-	defer func() {
-		if authority != nil && authority.Close() != nil {
-			exitCode = 125
-		}
-	}()
 	liveness, status, peer, err := startHermesSupervisorLiveness(config, control, proof, authority)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: %v\n", err)
@@ -822,11 +817,6 @@ func runHermesProcessSupervisorNative(
 
 		return 125
 	}
-	defer func() {
-		if authority != nil && authority.Close() != nil {
-			exitCode = 125
-		}
-	}()
 	target := hermesSupervisorTarget(config)
 	nativeIsolation := config.Isolation
 	nativeIsolation.IdentityLock = authority.identity
