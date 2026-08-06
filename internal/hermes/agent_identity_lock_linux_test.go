@@ -14,6 +14,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// borrowedDispositionSessionKey is the owner digest the host-published ACTIVE
+// marker carries, and the one the refusal cases have to reproduce exactly.
+const borrowedDispositionSessionKey = "host-owned-session"
+
 func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T) {
 	restoreAgentIdentityLockTestSeams(t)
 	root := configureAgentIdentityLockTestRoot(t)
@@ -41,6 +45,45 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 		t.Fatal(err)
 	}
 	defer domainFile.Close()
+	identityFile := publishBorrowedDispositionHostMarker(t, directory, uid, gid, deadline)
+
+	authorityPath := filepath.Join(root, "acp-go", "agent-identities")
+	markerPath := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".quarantine")
+	before, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err != nil {
+		t.Fatalf("validate ownerless ACTIVE: %v", err)
+	}
+	after, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("borrowed validation rewrote the host disposition")
+	}
+	if err = validateBorrowedAgentIdentityDisposition(uid, gid+1, true, root); err == nil {
+		t.Fatal("borrowed validation accepted the wrong gid")
+	}
+
+	adoptBorrowedDispositionSupervisorAuthority(t, root, uid, gid, identityFile, domainFile)
+	refuseBorrowedDispositionsThatAreNotOwnerlessActive(t, root, uid, gid, authorityPath, markerPath, before)
+}
+
+// publishBorrowedDispositionHostMarker builds the host-owned side of the
+// fixture: the permanent owners, uid and affinity locks, and the ACTIVE marker
+// the borrowed validation is then held to. It returns the held uid lock, which
+// the caller owns for the rest of the test.
+func publishBorrowedDispositionHostMarker(
+	t *testing.T,
+	directory *os.File,
+	uid uint32,
+	gid uint32,
+	deadline time.Time,
+) *os.File {
+	t.Helper()
+
 	owners, err := openAgentStandaloneNamedLock(
 		directory,
 		"owners.lock",
@@ -64,11 +107,11 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer identityFile.Close()
+	t.Cleanup(func() { _ = identityFile.Close() })
 	if err = unix.Flock(int(identityFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	const sessionKey = "host-owned-session"
+	const sessionKey = borrowedDispositionSessionKey
 	affinity, err := openAgentStandaloneNamedLock(
 		directory,
 		agentStandaloneAffinityLockName(sessionKey),
@@ -96,25 +139,23 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 		t.Fatal(err)
 	}
 
-	authorityPath := filepath.Join(root, "acp-go", "agent-identities")
-	markerPath := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".quarantine")
-	before, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err != nil {
-		t.Fatalf("validate ownerless ACTIVE: %v", err)
-	}
-	after, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Fatal("borrowed validation rewrote the host disposition")
-	}
-	if err = validateBorrowedAgentIdentityDisposition(uid, gid+1, true, root); err == nil {
-		t.Fatal("borrowed validation accepted the wrong gid")
-	}
+	return identityFile
+}
+
+// adoptBorrowedDispositionSupervisorAuthority proves the borrowed identity and
+// authority survive the supervisor config transport: the descriptors are never
+// serialized, only their presence is, and the production adopter reconstructs
+// the authority from the descriptors it inherits.
+func adoptBorrowedDispositionSupervisorAuthority(
+	t *testing.T,
+	root string,
+	uid uint32,
+	gid uint32,
+	identityFile *os.File,
+	domainFile *os.File,
+) {
+	t.Helper()
+
 	configFile, err := os.CreateTemp(t.TempDir(), "borrowed-supervisor-config-")
 	if err != nil {
 		t.Fatal(err)
@@ -162,20 +203,36 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	if err = authority.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// refuseBorrowedDispositionsThatAreNotOwnerlessActive walks the dispositions a
+// borrowed identity must not accept: a permanent owner binding, a CLEAN_READY
+// marker, an unreadable or ambiguous marker, an unresolved temporary, and a
+// missing marker.
+func refuseBorrowedDispositionsThatAreNotOwnerlessActive(
+	t *testing.T,
+	root string,
+	uid uint32,
+	gid uint32,
+	authorityPath string,
+	markerPath string,
+	before []byte,
+) {
+	t.Helper()
 
 	ownerPath := filepath.Join(authorityPath, strconv.FormatUint(uint64(uid), 10)+".owner")
-	if err = os.WriteFile(ownerPath, []byte("bound\n"), 0o600); err != nil {
+	if err := os.WriteFile(ownerPath, []byte("bound\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err = validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
+	if err := validateBorrowedAgentIdentityDisposition(uid, gid, true, root); err == nil {
 		t.Fatal("borrowed validation accepted a permanent owner binding")
 	}
-	if err = os.Remove(ownerPath); err != nil {
+	if err := os.Remove(ownerPath); err != nil {
 		t.Fatal(err)
 	}
 
 	clean, err := json.Marshal(agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, OwnerDigest: sessionKey, State: "clean-ready",
+		Version: 2, UID: uid, GID: gid, OwnerDigest: borrowedDispositionSessionKey, State: "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)
