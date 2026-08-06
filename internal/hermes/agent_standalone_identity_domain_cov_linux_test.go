@@ -783,3 +783,80 @@ func TestAgentStandaloneCovAuthorityBinderAdmitsOnlyTheInitialPIDNamespace(t *te
 		"non-initial PID namespace may establish agent authority only from namespace PID 1",
 	)
 }
+
+// TestAgentStandaloneCovDomainRebindRefusesABusyMarkerItCannotWaitOut proves
+// the one rebind arm that finds a busy marker temporary and then cannot wait to
+// re-observe the domain: it surfaces the wait refusal, reports no retry,
+// releases the exclusive lease it was handed and leaves the busy temporary for
+// its live holder. Reporting retry there would send the caller back around the
+// claim loop with a budget it has already spent, and unlinking the temporary
+// would delete a file another claim is still working on.
+//
+// The concurrent "marker temporary with a live uid holder" case only reaches
+// this arm when its budget happens to expire on the same pass that finds the
+// marker busy — the claim loop's own budget check wins otherwise — so this case
+// drives the arm directly.
+//
+// A zero deadline is the only refusal signal that cannot race here. Everything
+// between the rebind entry and the audit's busy verdict (the owner-temporary
+// drain, the owner collection pass and the classifying pass) calls
+// checkAgentStandaloneAcquisition once per registry entry, and that reads a
+// closed cancel channel or an expired deadline as a refusal — either would stop
+// the audit before the marker is ever adjudicated. It reads a zero deadline as
+// no budget at all and passes. waitAgentStandaloneRetry reads that same zero
+// deadline as remaining <= 0 and refuses immediately, before it builds a timer
+// or evaluates any select, so the refusal is a straight-line consequence of the
+// input rather than a scheduling outcome.
+func TestAgentStandaloneCovDomainRebindRefusesABusyMarkerItCannotWaitOut(t *testing.T) {
+	// The published record names another PID namespace, so the rebind cannot
+	// downgrade to a shared lease and has to settle the registry first.
+	foreign := func(record *agentAuthorityDomainRecord) { record.PIDNamespace.Ino++ }
+	directory, ownerUID, ownerGID := agentStandaloneCovDomainRegistry(t, foreign)
+	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	held := createAgentStandaloneTestLock(t, directory, "62771.lock", ownerUID, ownerGID)
+	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+	temporary := agentStandaloneCovWriteRegistryFile(
+		t, directory, "62771.quarantine.next-"+agentStandaloneCovSuffix, "partial",
+	)
+
+	// The registry carries no owner temporaries, so the drain that precedes the
+	// audit stays clean and the busy verdict the rebind acts on can only be the
+	// marker temporary's.
+	ownerTempsBusy, drainErr := drainAgentStandaloneDomainOwnerTemporaries(
+		directory, ownerUID, ownerGID, time.Time{}, nil, nil,
+	)
+	require.NoError(t, drainErr)
+	require.False(t, ownerTempsBusy, "the busy arm under test must be the audit's, not the drain's")
+	require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, true, false, time.Time{}, nil, nil,
+	), errAgentStandaloneMarkerTempBusy)
+
+	record, err := currentAgentAuthorityDomain(directory)
+	require.NoError(t, err)
+	record.AuthorityID = "0123456789abcdef0123456789abcdef"
+	foreign(&record)
+
+	exclusive, err := openAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if exclusive.Fd() != ^uintptr(0) {
+			require.NoError(t, exclusive.Close())
+		}
+	})
+	require.NoError(t, unix.Flock(int(exclusive.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+
+	want := agentStandaloneCovOwner(62771, 62772, "rebind-busy", "/srv/hermes/rebind-busy", 1, 2)
+
+	authority, retry, err := rebindAgentStandaloneDomain(
+		directory, exclusive, want, ownerUID, ownerGID, true, record, time.Time{}, nil, nil,
+	)
+	require.Nil(t, authority)
+	require.False(t, retry, "a rebind that cannot wait must refuse, never ask for another pass")
+	require.EqualError(t, err, "standalone agent identity acquisition exceeded 30 seconds")
+	require.NotErrorIs(t, err, errAgentStandaloneMarkerTempBusy,
+		"the wait refusal replaces the audit verdict it was reached through")
+	require.ErrorIs(t, exclusive.Close(), os.ErrClosed,
+		"the refused rebind releases the exclusive lease it was handed")
+	require.FileExists(t, temporary, "a busy marker temporary is never unlinked")
+	agentStandaloneCovDomainLockIsFree(t, directory, ownerUID, ownerGID)
+}
