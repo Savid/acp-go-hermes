@@ -33,6 +33,9 @@ var agentIdentityDirectoryFstatat = unix.Fstatat
 var agentIdentityDirectoryClose = func(file *os.File) error { return file.Close() }
 var agentIdentityLockReadFile = os.ReadFile
 var agentIdentityLockClose = func(file *os.File) error { return file.Close() }
+var agentIdentityLockFstat = unix.Fstat
+var agentIdentityLockOpenat = unix.Openat
+var agentIdentityLockCloseFD = unix.Close
 
 func bootstrapAgentIdentityLockDirectory(runRoot string, trustedUID, trustedGID uint32) (*os.File, error) {
 	run, err := openAgentIdentityRuntimeRoot(runRoot, trustedUID, trustedGID)
@@ -43,14 +46,14 @@ func bootstrapAgentIdentityLockDirectory(runRoot string, trustedUID, trustedGID 
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("bootstrap agent identity owner directory: %w", err), run.Close())
 	}
-	if err = run.Close(); err != nil {
+	if err = agentIdentityDirectoryClose(run); err != nil {
 		return nil, errors.Join(err, acpGo.Close())
 	}
 	directory, err := bootstrapAgentIdentityDirectory(acpGo, "agent-identities", trustedUID, trustedGID)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("bootstrap agent identity lock directory: %w", err), acpGo.Close())
 	}
-	if err = acpGo.Close(); err != nil {
+	if err = agentIdentityDirectoryClose(acpGo); err != nil {
 		return nil, errors.Join(err, directory.Close())
 	}
 
@@ -66,14 +69,14 @@ func openAgentIdentityLockDirectory(runRoot string, trustedUID, trustedGID uint3
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open existing agent identity owner directory: %w", err), run.Close())
 	}
-	if err = run.Close(); err != nil {
+	if err = agentIdentityDirectoryClose(run); err != nil {
 		return nil, errors.Join(err, acpGo.Close())
 	}
 	directory, err := openExistingAgentIdentityDirectory(acpGo, "agent-identities", trustedUID, trustedGID)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open existing agent identity lock directory: %w", err), acpGo.Close())
 	}
-	if err = acpGo.Close(); err != nil {
+	if err = agentIdentityDirectoryClose(acpGo); err != nil {
 		return nil, errors.Join(err, directory.Close())
 	}
 
@@ -157,7 +160,7 @@ func openExistingAgentIdentityDirectory(
 		return fail(err)
 	}
 	var descriptor, named unix.Stat_t
-	if err = unix.Fstat(fd, &descriptor); err != nil {
+	if err = agentIdentityLockFstat(fd, &descriptor); err != nil {
 		return fail(err)
 	}
 	if err = agentIdentityDirectoryFstatat(
@@ -171,7 +174,7 @@ func openExistingAgentIdentityDirectory(
 
 func validateAgentIdentityDirectory(file *os.File, trustedUID, trustedGID uint32, exactMode bool) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+	if err := agentIdentityLockFstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != trustedUID || stat.Gid != trustedGID {
@@ -190,7 +193,7 @@ func validateAgentIdentityDirectory(file *os.File, trustedUID, trustedGID uint32
 
 func validateAgentIdentityLockFile(file *os.File, trustedUID, trustedGID uint32) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+	if err := agentIdentityLockFstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != trustedUID || stat.Gid != trustedGID || stat.Nlink != 1 {
@@ -244,11 +247,11 @@ func adoptAgentIdentityLock(file *os.File, uid uint32, testOnly bool, testRoot s
 		return fail(err)
 	}
 	var descriptor, named unix.Stat_t
-	if err = unix.Fstat(int(file.Fd()), &descriptor); err != nil {
+	if err = agentIdentityLockFstat(int(file.Fd()), &descriptor); err != nil {
 		return fail(err)
 	}
 	name := strconv.FormatUint(uint64(uid), 10) + ".lock"
-	if err = unix.Fstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err = agentIdentityDirectoryFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fail(fmt.Errorf("inspect named agent identity lock %s: %w", name, err))
 	}
 	if descriptor.Dev != named.Dev || descriptor.Ino != named.Ino {
@@ -296,11 +299,11 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		return fail(err)
 	}
 	var descriptor, named unix.Stat_t
-	if err = unix.Fstat(int(file.Fd()), &descriptor); err != nil {
+	if err = agentIdentityLockFstat(int(file.Fd()), &descriptor); err != nil {
 		return fail(err)
 	}
 	const name = "domain.lock"
-	if err = unix.Fstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err = agentIdentityDirectoryFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fail(fmt.Errorf("inspect named agent authority domain %s: %w", name, err))
 	}
 	if descriptor.Dev != named.Dev || descriptor.Ino != named.Ino {
@@ -309,12 +312,12 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 	if err = validateInheritedAgentIdentityFlock(file, descriptor, "READ"); err != nil {
 		return fail(err)
 	}
-	contenderFD, err := unix.Openat(int(directory.Fd()), name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	contenderFD, err := agentIdentityLockOpenat(int(directory.Fd()), name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return fail(err)
 	}
 	contenderErr := unix.Flock(contenderFD, unix.LOCK_EX|unix.LOCK_NB)
-	closeErr := unix.Close(contenderFD)
+	closeErr := agentIdentityLockCloseFD(contenderFD)
 	if contenderErr == nil {
 		return fail(errors.Join(errors.New("inherited agent authority domain was not locked before handoff"), closeErr))
 	}
@@ -374,7 +377,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 
 	ownerName := strconv.FormatUint(uint64(uid), 10) + ".owner"
 	var owner unix.Stat_t
-	ownerErr := unix.Fstatat(int(directory.Fd()), ownerName, &owner, unix.AT_SYMLINK_NOFOLLOW)
+	ownerErr := agentIdentityDirectoryFstatat(int(directory.Fd()), ownerName, &owner, unix.AT_SYMLINK_NOFOLLOW)
 	if ownerErr == nil {
 		return fmt.Errorf("borrowed agent identity uid %d has a permanent owner binding", uid)
 	}
@@ -500,7 +503,7 @@ func proveInheritedAgentIdentityLock(
 	trustedUID uint32,
 	trustedGID uint32,
 ) (proofErr error) {
-	contenderFD, err := unix.Openat(
+	contenderFD, err := agentIdentityLockOpenat(
 		int(directory.Fd()), name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0,
 	)
 	if err != nil {
@@ -516,7 +519,7 @@ func proveInheritedAgentIdentityLock(
 		return err
 	}
 	var contenderStat unix.Stat_t
-	if err = unix.Fstat(contenderFD, &contenderStat); err != nil {
+	if err = agentIdentityLockFstat(contenderFD, &contenderStat); err != nil {
 		return err
 	}
 	if contenderStat.Dev != descriptor.Dev || contenderStat.Ino != descriptor.Ino {
