@@ -3,6 +3,7 @@
 package hermes
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -419,3 +420,32 @@ func supervisorCovInode(t *testing.T, file *os.File) uint64 {
 }
 
 var _ io.WriteSeeker = (*supervisorCovConfigImage)(nil)
+
+// TestSupervisorCompletionReportsALostStatusChannel proves the liveness
+// supervisor releases its authority before it publishes completion, and reports
+// a publication it could not make instead of falling back to the containment
+// proof byte. That byte is the guardian's to write while the guardian is alive;
+// writing it here would tell the parent the whole tree is accounted for on the
+// word of a supervisor whose completion nobody received.
+func TestSupervisorCompletionReportsALostStatusChannel(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+	proveSupervisorDescendants = func(time.Duration) error { return nil }
+
+	identity := &agentIdentityLock{file: supervisorCovTempFile(t)}
+	domain := &agentIdentityLock{file: supervisorCovTempFile(t)}
+	authority := &hermesSupervisorAuthority{identity: identity, domain: domain}
+
+	var proof bytes.Buffer
+	err := completeHermesSupervisorAuthority(
+		&authority, make(chan struct{}), supervisorCovBrokenWriter{}, &proof, true,
+	)
+	require.ErrorContains(t, err, "publish Hermes liveness completion")
+	require.Nil(t, authority)
+	require.Nil(t, identity.file)
+	require.Nil(t, domain.file)
+	require.Zero(t, proof.Len())
+}
+
+type supervisorCovBrokenWriter struct{}
+
+func (supervisorCovBrokenWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }

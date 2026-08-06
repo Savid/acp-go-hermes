@@ -371,6 +371,9 @@ func supervisorCovLenientLeaseRelease(t *testing.T) {
 
 func supervisorCovStandaloneConfig() hermesSupervisorConfig {
 	config := supervisorTestConfig([]string{"/bin/true"})
+	// A native launch must not depend on the ambient environment of the test
+	// process, which other cases in this package mutate.
+	config.Env = []string{"PATH=/usr/bin:/bin"}
 	config.Isolation.StandaloneOwnerID = "supervisor-cov"
 	config.Isolation.StandaloneStateRoot = "/var/lib/acp-go-hermes-supervisor-cov"
 
