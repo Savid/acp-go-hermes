@@ -488,7 +488,17 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 }
 
 func TestProcessStartCloseAndHelpers(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// This case starts three separately-pathed executables, and every contained
+	// start re-executes this very test binary as its supervisor. Under -race that
+	// binary costs about a second of race-runtime startup per exec — measured at
+	// 1011ms against 2ms for the same binary built without -race — so the three
+	// starts and their version probes spend the better part of ten seconds doing
+	// nothing but bringing supervisors up. The coverage gate runs -race in the
+	// initial PID namespace, where the descendant and vacancy sweeps also walk the
+	// host's full process table, and the old ten-second budget expired mid-probe.
+	// The work behind it is bounded by the fixed number of launches this case
+	// makes, so the budget is what has to give.
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	usedConfigure := false
 	proc, startErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
