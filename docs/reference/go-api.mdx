@@ -96,7 +96,7 @@ consults them.
 
 `WithInputHandoffRoot(dir string)` names the absolute directory under which a
 co-located host has written handoff image files, enabling the
-[local handoff form](/core/prompt-streaming#local-handoff-image-input) and the
+[local handoff form](/docs/core/prompt-streaming#local-handoff-image-input) and the
 `acp-go.dev/handoff` advertisement. It is a read root, not a scratch root: the
 adapter resolves, reads, and digest-verifies files there and never writes, moves,
 or removes anything, so it does not compete with `WithScratchDir` for ephemeral

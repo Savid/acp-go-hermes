@@ -46,7 +46,7 @@ naming the cause.
 The bounds the adapter enforces are advertised at initialize under
 `_meta["acp-go.dev/mediaEnvelope"]`, so a host can pre-check a send instead of
 discovering a limit through a rejection. See
-[Metadata](/reference/meta#media-envelope).
+[Metadata](/docs/reference/meta#media-envelope).
 
 Hermes' 25 MiB `image.attach_bytes` cap is above the ACP ingress envelope and
 the adapter's default limits, so there is no smaller observable native image
