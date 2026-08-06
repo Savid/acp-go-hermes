@@ -993,8 +993,15 @@ func TestAgentStandaloneSameBootRebindRetainsUIDLockThroughDomainPublication(t *
 	require.NoError(t, contender.Close())
 }
 
+// TestAgentStandaloneStateRootRejectsUnprotectedAncestry builds the unprotected
+// ancestor instead of inheriting one from the temp root. A runner whose temp
+// root is already mode 0755 root-owned storage satisfies the predicate, so the
+// bind succeeds and the case proves nothing about the refusal it names.
 func TestAgentStandaloneStateRootRejectsUnprotectedAncestry(t *testing.T) {
-	stateRoot := filepath.Join(t.TempDir(), "state")
+	unprotected := filepath.Join(t.TempDir(), "unprotected")
+	require.NoError(t, os.Mkdir(unprotected, 0o700))
+	require.NoError(t, os.Chmod(unprotected, 0o777))
+	stateRoot := filepath.Join(unprotected, "state")
 	require.NoError(t, os.Mkdir(stateRoot, 0o700))
 	_, err := bindAgentStandaloneStateRoot(stateRoot, uint32(os.Geteuid()), uint32(os.Getegid()))
 	require.ErrorContains(t, err, "not protected root-owned storage")
