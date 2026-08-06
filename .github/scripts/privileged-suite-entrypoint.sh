@@ -30,7 +30,27 @@ printf 'temp root:           %s fstype=%s mode=%s owner=%s:%s\n' \
 echo "authority root:      mode=$(stat -c '%a' /var/lib/acp-go/agent-identities) owner=$(stat -c '%u:%g' /var/lib/acp-go/agent-identities)"
 echo "setsid:              $(command -v setsid || echo missing)"
 echo "go:                  $(go version)"
+echo "go build cache:      $(go env GOCACHE)"
+echo "go module cache:     $(go env GOMODCACHE)"
+echo "GOFLAGS:             ${GOFLAGS:-unset}"
 echo "::endgroup::"
+
+# The workspace is writable — the suites leave coverage.out and fixtures in it —
+# so run-privileged-suite.sh pins go.mod and go.sum read-only one file at a
+# time. A stray -mod=mod once rewrote a pushed module file in place from in
+# here, and GOFLAGS alone cannot stop that: an explicit command-line -mod= beats
+# it. Prove the read-only mounts are actually armed before running the target,
+# rather than diffing the damage after it. `true` rather than `:` on purpose: a
+# redirection failure on a special builtin exits the shell outright and would
+# report this refusal as an unexplained crash. The append opens for writing
+# without writing a byte, so an armed guard leaves the file untouched.
+for module_file in /src/go.mod /src/go.sum; do
+	if true 2>/dev/null >>"$module_file"; then
+		echo "$module_file is writable inside the privileged suite container" >&2
+		echo "run-privileged-suite.sh must bind-mount it read-only: the suite may never rewrite a pushed module file" >&2
+		exit 1
+	fi
+done
 
 # The initial PID namespace is the whole reason this container exists. Without
 # it the supervised-native cases skip rather than fail, and a skipped case still

@@ -19,6 +19,16 @@
 # canary already reaches the host PID namespace. Use the same door: run the
 # suite in a container started with --pid=host, root, a tmpfs temp root, and a
 # fresh volume for the authority tree.
+#
+# What the container must NOT be able to do is change the checkout it is
+# testing. /src stays writable because the suites write into it — coverage-check
+# leaves coverage.out there — so the module files are pinned individually
+# instead: go.mod and go.sum are bind-mounted read-only over the workspace, and
+# GOFLAGS carries -mod=readonly. Both, because they fail at different layers. A
+# stray -mod=mod on a command line beats GOFLAGS, and it once rewrote a pushed
+# go.mod/go.sum in place from inside this container; the read-only mounts make
+# that a kernel refusal rather than a silent edit, and the entrypoint proves the
+# refusal is armed before it runs anything.
 set -eu
 
 target=${1:?usage: run-privileged-suite.sh <make-target>}
@@ -31,7 +41,23 @@ if [ -z "${ACP_GO_PRIVILEGED_LOCK:-}" ]; then
 fi
 
 GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:1.26.5-bookworm}
-GO_CACHE_VOLUME=acp-go-privileged-gocache
+
+# The Go caches persist between runs for speed, but they are keyed per module
+# path and never shared across siblings. Every sibling bind-mounts its own
+# checkout at the same /src, so one cache namespace for all six gives colliding
+# path-derived build- and module-cache keys to six different modules. That has
+# already resolved a sibling's import inside another sibling's build
+# ("no required module provides package github.com/savid/acp-go-<sibling>") in a
+# tree that builds cleanly against a private cache. One volume per module path
+# keeps the warm cache and removes the collision domain.
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+module_path=$(sed -n 's/^module[[:space:]]\{1,\}//p' "$repo_root/go.mod" | head -n 1)
+[ -n "$module_path" ] || {
+	echo "cannot read the module path from $repo_root/go.mod" >&2
+	echo "the privileged Go caches are keyed per module and must not fall back to a shared name" >&2
+	exit 1
+}
+GO_CACHE_VOLUME=acp-go-privileged-gocache-$(printf '%s' "$module_path" | tr -c 'A-Za-z0-9_.-' '-')
 
 authority_volume=$(docker volume create)
 cleanup() { docker volume rm "$authority_volume" >/dev/null 2>&1 || true; }
@@ -50,12 +76,15 @@ docker run --rm \
 	--mount "type=volume,source=$authority_volume,target=/var/lib/acp-go/agent-identities" \
 	--mount "type=volume,source=$GO_CACHE_VOLUME,target=/gocache" \
 	--volume "$ACP_GO_WORKSPACE_HOST:/src" \
+	--volume "$ACP_GO_WORKSPACE_HOST/go.mod:/src/go.mod:ro" \
+	--volume "$ACP_GO_WORKSPACE_HOST/go.sum:/src/go.sum:ro" \
 	--workdir /src \
 	--env TMPDIR=/acp-go-tmp \
 	--env TMP=/acp-go-tmp \
 	--env TEMP=/acp-go-tmp \
 	--env GOCACHE=/gocache/build \
 	--env GOMODCACHE=/gocache/mod \
+	--env GOFLAGS=-mod=readonly \
 	--env GOTOOLCHAIN=local \
 	--env HOME=/root \
 	"$GO_IMAGE" \
