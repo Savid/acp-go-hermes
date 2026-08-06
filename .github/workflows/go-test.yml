@@ -48,7 +48,7 @@ jobs:
             coverage-summary.txt
 
   trusted-supervisor:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -60,7 +60,7 @@ jobs:
         run: sudo env "PATH=$PATH" HOME=/root make test-trusted-supervisor
 
   native-browser:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
