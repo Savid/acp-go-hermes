@@ -4,6 +4,7 @@ package hermesacp
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -399,4 +400,35 @@ func TestNativeOwnedDirectoryRecheckDisagreeingWithTheWalkIsRefused(t *testing.T
 		err := validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation())
 		require.ErrorContains(t, err, "native-owned directory mode 0702 is unsafe")
 	})
+}
+
+// TestEffectiveIdentityFailsClosedOnAnUnrepresentableKernelAnswer proves the
+// effective-id helpers refuse rather than narrow. Every caller compares their
+// result against an inode's 32-bit owner, so an answer outside that width must
+// not be truncated into an id a real inode could carry — the truncation of an
+// answer one past the 32-bit range is 0, which is root. Linux stores its ids in
+// 32 bits and cannot produce such an answer, so it is staged through the seams
+// the helpers read.
+func TestEffectiveIdentityFailsClosedOnAnUnrepresentableKernelAnswer(t *testing.T) {
+	realUID, realGID := effectiveUIDSource, effectiveGIDSource
+	t.Cleanup(func() { effectiveUIDSource, effectiveGIDSource = realUID, realGID })
+
+	effectiveUIDSource = func() int { return -1 }
+	effectiveGIDSource = func() int { return -1 }
+	require.Equal(t, uint32(math.MaxUint32), effectiveUID())
+	require.Equal(t, uint32(math.MaxUint32), effectiveGID())
+
+	effectiveUIDSource = func() int { return math.MaxUint32 + 1 }
+	effectiveGIDSource = func() int { return math.MaxUint32 + 1 }
+
+	uid, gid := effectiveUID(), effectiveGID()
+	require.Equal(t, uint32(math.MaxUint32), uid)
+	require.Equal(t, uint32(math.MaxUint32), gid)
+	require.NotZero(t, uid, "narrowing this answer would have claimed root")
+	require.NotZero(t, gid, "narrowing this answer would have claimed the root group")
+
+	effectiveUIDSource = func() int { return 65534 }
+	effectiveGIDSource = func() int { return 65533 }
+	require.Equal(t, uint32(65534), effectiveUID())
+	require.Equal(t, uint32(65533), effectiveGID())
 }

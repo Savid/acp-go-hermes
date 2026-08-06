@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"syscall"
@@ -470,3 +471,31 @@ func TestSupervisorCompletionReportsALostStatusChannel(t *testing.T) {
 type supervisorCovBrokenWriter struct{}
 
 func (supervisorCovBrokenWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
+
+// TestHermesGuardianPollDescriptorFailsClosed proves the guardian's peer poll
+// narrows a descriptor it cannot represent to -1 rather than to a number that
+// could name a live descriptor: poll never reports a negative entry ready, so
+// the check cannot conclude the guardian is alive off a truncated value. Linux
+// hands out small descriptors, so the value is staged through the seam pollFD
+// reads.
+func TestHermesGuardianPollDescriptorFailsClosed(t *testing.T) {
+	production := pollFDSource
+	t.Cleanup(func() { pollFDSource = production })
+
+	pollFDSource = func(*os.File) uintptr { return uintptr(math.MaxInt32) + 1 }
+
+	narrowed := pollFD(nil)
+	require.Equal(t, int32(-1), narrowed)
+	require.Negative(t, narrowed, "an unrepresentable descriptor must not name one")
+
+	ready, err := unix.Poll([]unix.PollFd{{Fd: narrowed, Events: unix.POLLIN | unix.POLLHUP}}, 0)
+	require.NoError(t, err)
+	require.Zero(t, ready, "poll must never report a refused descriptor ready")
+
+	pollFDSource = production
+
+	file, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	require.Equal(t, int32(file.Fd()), pollFD(file))
+}
