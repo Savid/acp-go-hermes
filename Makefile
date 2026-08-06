@@ -26,9 +26,15 @@ fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
 	$(GOLANGCI_LINT) fmt ./...
 
+# Every isolated native launch claims the standalone agent identity, and that
+# claim proves the identity vacant across every task in the PID namespace. In
+# the initial namespace the suite requires, that is the whole host, so the
+# adapter package runs far past the ten-minute default.
+GO_TEST_TIMEOUT ?= 40m
+
 ## test: run unit tests with race detector and shuffled order
 test:
-	go test -race -shuffle=on ./...
+	go test -race -shuffle=on -timeout=$(GO_TEST_TIMEOUT) ./...
 
 ## test-trusted-supervisor: run Linux root-only native authority tests
 test-trusted-supervisor:
@@ -67,7 +73,7 @@ test-cross-compile:
 
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
-	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	go test -race -coverprofile=coverage.out -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) ./...
 	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
