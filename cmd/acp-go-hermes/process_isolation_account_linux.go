@@ -14,21 +14,23 @@ import (
 
 var processIsolationValidateAccountAuthority = validateTargetAccountAuthority
 
+var processIsolationAccountAuthorityCommand = runAccountAuthorityCommand
+
 func validateTargetAccountAuthority(account *user.User, uid uint32, gid uint32) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	passwd, err := runAccountAuthorityCommand(ctx, "/usr/bin/getent", "passwd")
+	passwd, err := processIsolationAccountAuthorityCommand(ctx, "/usr/bin/getent", "passwd")
 	if err != nil {
 		return fmt.Errorf("enumerate operating-system accounts: %w", err)
 	}
-	groups, err := runAccountAuthorityCommand(ctx, "/usr/bin/getent", "group")
+	groups, err := processIsolationAccountAuthorityCommand(ctx, "/usr/bin/getent", "group")
 	if err != nil {
 		return fmt.Errorf("enumerate operating-system groups: %w", err)
 	}
 	if err = validatePrivateTargetAccount(passwd, groups, account, uid, gid); err != nil {
 		return err
 	}
-	status, err := runAccountAuthorityCommand(ctx, "/usr/bin/passwd", "-S", account.Username)
+	status, err := processIsolationAccountAuthorityCommand(ctx, "/usr/bin/passwd", "-S", account.Username)
 	if err != nil {
 		return fmt.Errorf("read target account password status: %w", err)
 	}

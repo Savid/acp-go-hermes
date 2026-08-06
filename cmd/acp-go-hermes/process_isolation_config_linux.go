@@ -26,6 +26,8 @@ var (
 	processIsolationGroupIDs      = func(account *user.User) ([]string, error) { return account.GroupIds() }
 	processIsolationValidateHome  = validateTargetHome
 	processIsolationValidatePath  = validatePath
+	processIsolationOpen          = unix.Open
+	processIsolationFstat         = unix.Fstat
 )
 
 func loadProcessIsolationConfig(path string) (processIsolationConfig, error) {
@@ -238,7 +240,7 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 	}
 
 	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	parentFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	parentFD, err := processIsolationOpen("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, nil, err
 	}
@@ -267,7 +269,7 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 		}
 
 		var stat unix.Stat_t
-		if statErr := unix.Fstat(childFD, &stat); statErr != nil {
+		if statErr := processIsolationFstat(childFD, &stat); statErr != nil {
 			_ = unix.Close(childFD)
 
 			return -1, nil, fmt.Errorf("stat component %q: %w", component, statErr)
@@ -290,7 +292,7 @@ func openProtectedAbsolutePath(path string, finalFlags int) (int, *unix.Stat_t, 
 
 func validateProtectedAncestor(fd int, component string) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := processIsolationFstat(fd, &stat); err != nil {
 		return fmt.Errorf("stat ancestor %q: %w", component, err)
 	}
 
