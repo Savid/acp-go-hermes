@@ -103,7 +103,7 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 	}
 
 	accountGID, err := strconv.ParseUint(account.Gid, 10, 32)
-	if err != nil || uint32(accountGID) != config.GID {
+	if err != nil || accountGID != uint64(config.GID) {
 		return processIsolationConfig{}, fmt.Errorf("gid %d is not uid %d's primary group", config.GID, config.UID)
 	}
 
@@ -198,7 +198,7 @@ func validateProcessIsolationConfig(config processIsolationConfig) (processIsola
 }
 
 func validProcessIsolationOwnerID(value string) bool {
-	if len(value) == 0 || len(value) > 256 {
+	if value == "" || len(value) > 256 {
 		return false
 	}
 
@@ -221,7 +221,7 @@ func validProcessIsolationOwnerID(value string) bool {
 }
 
 func validProcessIsolationStateRoot(value string) bool {
-	if len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
 		filepath.Clean(value) != value || strings.IndexByte(value, 0) >= 0 {
 		return false
 	}

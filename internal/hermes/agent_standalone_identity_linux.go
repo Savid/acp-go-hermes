@@ -69,11 +69,11 @@ func bindAgentStandaloneStateRoot(path string, uid, gid uint32) (agentStandalone
 		return agentStandaloneStateRoot{}, errors.New("standalone state root must be the claimed UID:GID-owned mode-0700 directory")
 	}
 
-	return agentStandaloneStateRoot{Path: path, Dev: uint64(final.Dev), Ino: final.Ino}, nil
+	return agentStandaloneStateRoot{Path: path, Dev: final.Dev, Ino: final.Ino}, nil
 }
 
 func validAgentStandaloneStateRootPath(path string) bool {
-	if len(path) == 0 || len(path) > 4096 || !utf8.ValidString(path) || !filepath.IsAbs(path) ||
+	if path == "" || len(path) > 4096 || !utf8.ValidString(path) || !filepath.IsAbs(path) ||
 		filepath.Clean(path) != path || path == "/" || strings.IndexByte(path, 0) >= 0 {
 		return false
 	}
@@ -1338,7 +1338,7 @@ func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr
 	}
 
 	if !testOnly {
-		switch int64(filesystem.Type) {
+		switch filesystem.Type {
 		case 0xef53, 0x58465342, 0x9123683e, 0xf2f52010, 0x2fc12fc1, 0xca451a4e:
 		default:
 			return fmt.Errorf("agent authority filesystem type %#x is not in the local durable allowlist", filesystem.Type)
@@ -1371,7 +1371,7 @@ func probeAgentStandaloneFilesystem(directory *os.File, testOnly bool) (probeErr
 		return err
 	}
 
-	if err = agentStandaloneDurableFchown(fd, int(os.Geteuid()), int(os.Getegid())); err != nil {
+	if err = agentStandaloneDurableFchown(fd, os.Geteuid(), os.Getegid()); err != nil {
 		return err
 	}
 
@@ -2748,7 +2748,7 @@ func validateAgentStandaloneManifestPath(path agentStandaloneManifestPath) error
 	}
 }
 
-func readAgentStandaloneFile(directory *os.File, name string, ownerUID, ownerGID uint32, max int64) ([]byte, error) {
+func readAgentStandaloneFile(directory *os.File, name string, ownerUID, ownerGID uint32, limit int64) ([]byte, error) {
 	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -2765,11 +2765,11 @@ func readAgentStandaloneFile(directory *os.File, name string, ownerUID, ownerGID
 	if err = agentStandaloneDurableFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
 		descriptor.Dev != named.Dev || descriptor.Ino != named.Ino || descriptor.Mode&unix.S_IFMT != unix.S_IFREG ||
 		descriptor.Uid != ownerUID || descriptor.Gid != ownerGID || descriptor.Nlink != 1 ||
-		descriptor.Mode&0o777 != 0o600 || descriptor.Size <= 0 || descriptor.Size > max {
+		descriptor.Mode&0o777 != 0o600 || descriptor.Size <= 0 || descriptor.Size > limit {
 		return nil, errors.Join(fmt.Errorf("%s is not its trusted bounded named inode", name), err)
 	}
 
-	payload, err := io.ReadAll(io.LimitReader(file, max+1))
+	payload, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, err
 	}

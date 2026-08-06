@@ -242,8 +242,8 @@ func currentAgentAuthorityDomain(directory *os.File) (agentAuthorityDomainRecord
 
 	return agentAuthorityDomainRecord{
 		Version:       agentAuthorityDomainVersion,
-		AuthorityRoot: agentAuthorityDomainInode{Dev: uint64(root.Dev), Ino: root.Ino},
-		Filesystem:    agentAuthorityDomainFS{Type: int64(filesystem.Type), ID: [2]int32{filesystem.Fsid.Val[0], filesystem.Fsid.Val[1]}},
+		AuthorityRoot: agentAuthorityDomainInode{Dev: root.Dev, Ino: root.Ino},
+		Filesystem:    agentAuthorityDomainFS{Type: filesystem.Type, ID: [2]int32{filesystem.Fsid.Val[0], filesystem.Fsid.Val[1]}},
 		BootID:        boot, PIDNamespace: pidNamespace, UserNamespace: userNamespace, UIDMap: uidMap, GIDMap: gidMap,
 	}, nil
 }
@@ -264,7 +264,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 	}
 
 	var procfs unix.Statfs_t
-	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || int64(procfs.Type) != 0x9fa0 {
+	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || procfs.Type != 0x9fa0 {
 		return agentAuthorityDomainInode{}, errors.New("agent authority requires /proc to be procfs")
 	}
 
@@ -303,7 +303,7 @@ func agentAuthorityNamespaceIdentity(path string) (agentAuthorityDomainInode, er
 		return agentAuthorityDomainInode{}, err
 	}
 
-	return agentAuthorityDomainInode{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil
+	return agentAuthorityDomainInode{Dev: stat.Dev, Ino: stat.Ino}, nil
 }
 
 func canonicalAgentAuthorityIDMap(path string) ([]agentAuthorityDomainExtent, error) {
@@ -377,7 +377,7 @@ func canonicalAgentAuthorityBootID(value string) bool {
 				return false
 			}
 		default:
-			if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
 				return false
 			}
 		}
