@@ -42,8 +42,7 @@ func agentStandaloneCovWriteOwner(t *testing.T, directory *os.File, owner agentS
 // matches an owner exactly.
 func agentStandaloneCovWriteActiveMarker(t *testing.T, directory *os.File, owner agentStandaloneOwner) {
 	t.Helper()
-	key, err := agentStandaloneSessionKey(owner)
-	require.NoError(t, err)
+	key := agentStandaloneSessionKey(owner)
 	agentStandaloneCovWriteRegistryFile(
 		t, directory, strconv.FormatUint(uint64(owner.UID), 10)+".quarantine",
 		agentStandaloneCovActiveMarker(owner.UID, owner.GID, key, "0123456789abcdef0123456789abcdef", "[]")+"\n",

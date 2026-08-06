@@ -990,10 +990,7 @@ func TestInheritedStandaloneDispositionRefusesEveryDrift(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sessionKey, err := agentStandaloneSessionKey(owner)
-		if err != nil {
-			t.Fatal(err)
-		}
+		sessionKey := agentStandaloneSessionKey(owner)
 		affinity, err := openAgentStandaloneNamedLock(
 			directory, agentStandaloneAffinityLockName(sessionKey), true,
 			agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
