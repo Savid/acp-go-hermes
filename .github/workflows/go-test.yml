@@ -23,7 +23,7 @@ jobs:
         run: go build ./...
 
       - name: Test and coverage gate
-        run: make coverage-check
+        run: .github/scripts/run-privileged-suite.sh coverage-check
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
@@ -57,7 +57,7 @@ jobs:
         uses: ./.github/workflows/go-setup
 
       - name: Trusted supervisor security suite
-        run: sudo env "PATH=$PATH" HOME=/root make test-trusted-supervisor
+        run: .github/scripts/run-privileged-suite.sh test-trusted-supervisor
 
   native-browser:
     runs-on: [self-hosted]
