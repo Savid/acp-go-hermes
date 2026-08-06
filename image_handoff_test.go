@@ -209,12 +209,12 @@ func TestHandoffFormSelection(t *testing.T) {
 
 	t.Run("empty data without handoff intent stays missing_data", func(t *testing.T) {
 		remote := "https://example.test/pixels.png"
-		unparseable := "file://%zz"
+		unparsable := "file://%zz"
 
 		for name, uri := range map[string]*string{
 			"no uri":            nil,
 			"remote uri":        &remote,
-			"unparseable uri":   &unparseable,
+			"unparsable uri":    &unparsable,
 			"empty string uri":  acp.Ptr(""),
 			"data uri":          acp.Ptr("data:image/png;base64,AAAA"),
 			"relative file uri": acp.Ptr("File-Not-A-Scheme/x.png"),
@@ -394,7 +394,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 			message: handoffSizeFormatMessage,
 		},
 		{
-			name: "uri unparseable",
+			name: "uri unparsable",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
 				Type: "image", MimeType: mimePNG, Uri: acp.Ptr("file://%zz"),
 				Meta: map[string]any{handoffMetaKey: handoffEnvelopeFor(png)},

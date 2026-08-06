@@ -449,7 +449,7 @@ func checkJPEGFrameHeader(data []byte, offset int) error {
 
 // inspectGIF requires a logical screen descriptor with non-zero dimensions,
 // then counts image descriptors through the block stream: more than one is
-// animation. A stream that ends or turns unparseable after a valid header is
+// animation. A stream that ends or turns unparsable after a valid header is
 // left for the native provider to judge.
 func inspectGIF(data []byte) (bool, error) {
 	if len(data) < 13 {
