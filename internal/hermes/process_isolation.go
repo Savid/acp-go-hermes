@@ -37,6 +37,7 @@ const (
 	envIsolationUID            = privateSupervisorEnvPrefix + "ISOLATION_UID"
 	envIsolationGID            = privateSupervisorEnvPrefix + "ISOLATION_GID"
 	envIsolationTest           = privateSupervisorEnvPrefix + "ISOLATION_TEST_ONLY"
+	processPlatformLinux       = "linux"
 )
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
@@ -52,7 +53,7 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return errors.New("process isolation base environment is required")
 	}
 
-	if processIsolationPlatform == "linux" &&
+	if processIsolationPlatform == processPlatformLinux &&
 		(!isolation.TestOnlyNoCredential || isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "") {
 		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
 			return err

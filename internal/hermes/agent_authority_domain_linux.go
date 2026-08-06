@@ -21,6 +21,8 @@ import (
 const (
 	agentAuthorityDomainVersion    = 1
 	agentAuthorityDomainRecordName = "domain.json"
+	agentAuthorityDomainLockName   = "domain.lock"
+	agentAuthorityProcRoot         = "/proc"
 	agentAuthorityDomainMaxSize    = 64 << 10
 	agentAuthorityDomainMaxExtents = 340
 )
@@ -264,7 +266,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 	}
 
 	var procfs unix.Statfs_t
-	if err = agentAuthorityDomainStatfs("/proc", &procfs); err != nil || procfs.Type != 0x9fa0 {
+	if err = agentAuthorityDomainStatfs(agentAuthorityProcRoot, &procfs); err != nil || procfs.Type != 0x9fa0 {
 		return agentAuthorityDomainInode{}, errors.New("agent authority requires /proc to be procfs")
 	}
 
@@ -277,7 +279,7 @@ func validateAgentAuthorityPIDVisibility() (agentAuthorityDomainInode, error) {
 
 	for _, line := range strings.Split(string(mounts), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[1] != "/proc" || fields[2] != "proc" {
+		if len(fields) < 4 || fields[1] != agentAuthorityProcRoot || fields[2] != "proc" {
 			continue
 		}
 

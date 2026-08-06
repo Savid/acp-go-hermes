@@ -347,7 +347,7 @@ func adoptAgentAuthorityDomain(file *os.File, testOnly bool, testRoot string) (*
 		return fail(err)
 	}
 
-	const name = "domain.lock"
+	name := agentAuthorityDomainLockName
 	if err = agentIdentityDirectoryFstatat(int(directory.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fail(fmt.Errorf("inspect named agent authority domain %s: %w", name, err))
 	}
@@ -451,7 +451,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		return fmt.Errorf("load borrowed agent identity disposition: %w", err)
 	}
 
-	if marker.State != "active" || marker.GID != gid {
+	if marker.State != agentStandaloneActive || marker.GID != gid {
 		return fmt.Errorf("borrowed agent identity uid %d does not have its matching ownerless ACTIVE disposition", uid)
 	}
 
