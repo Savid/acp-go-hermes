@@ -101,7 +101,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	}
 
 	if (spec.Isolation.IdentityLock == nil) != (spec.Isolation.AuthorityDomain == nil) {
-		return nil, errors.New("Hermes supervisor identity lock and authority domain must be provided together")
+		return nil, errors.New("hermes supervisor identity lock and authority domain must be provided together")
 	}
 
 	if target == nil || target.Path == "" || len(target.Args) == 0 {
@@ -346,15 +346,15 @@ func runHermesProcessSupervisor(mode string) int {
 
 func validateHermesSupervisorConfig(config hermesSupervisorConfig) error {
 	if config.Path == "" || len(config.Args) == 0 {
-		return errors.New("Hermes supervisor config is incomplete")
+		return errors.New("hermes supervisor config is incomplete")
 	}
 
 	if config.IdentityLock != config.AuthorityDomain {
-		return errors.New("Hermes supervisor identity lock and authority domain must be provided together")
+		return errors.New("hermes supervisor identity lock and authority domain must be provided together")
 	}
 
 	if config.StandaloneAuthority && !config.IdentityLock {
-		return errors.New("Hermes standalone authority requires inherited identity capabilities")
+		return errors.New("hermes standalone authority requires inherited identity capabilities")
 	}
 
 	validation := config.Isolation
@@ -366,7 +366,7 @@ func validateHermesSupervisorConfig(config hermesSupervisorConfig) error {
 		if config.StandaloneAuthority {
 			if !validStandaloneOwnerID(config.Isolation.StandaloneOwnerID) ||
 				!validStandaloneStateRootPath(config.Isolation.StandaloneStateRoot) {
-				return errors.New("Hermes inherited standalone authority tuple is invalid")
+				return errors.New("hermes inherited standalone authority tuple is invalid")
 			}
 
 			validation.StandaloneOwnerID = ""
@@ -838,7 +838,7 @@ func completeHermesSupervisorAuthority(
 	livenessProtocol bool,
 ) error {
 	if authority == nil || *authority == nil {
-		return errors.New("Hermes supervisor authority is unavailable at completion")
+		return errors.New("hermes supervisor authority is unavailable at completion")
 	}
 
 	awaitHermesSupervisorContainment()
@@ -1016,7 +1016,7 @@ func validateHermesSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) e
 
 	select {
 	case <-done:
-		return errors.New("Hermes guardian exited before native launch")
+		return errors.New("hermes guardian exited before native launch")
 	default:
 	}
 
@@ -1030,7 +1030,7 @@ func validateHermesSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) e
 	}
 
 	if ready != 0 || poll[0].Revents != 0 {
-		return errors.New("Hermes guardian exited before native launch")
+		return errors.New("hermes guardian exited before native launch")
 	}
 
 	return nil

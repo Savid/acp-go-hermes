@@ -373,7 +373,7 @@ func TestSupervisorGuardianPeerIsProvenLiveBeforeTheNativeLaunch(t *testing.T) {
 	require.NoError(t, deadWrite.Close())
 
 	hangup := validateHermesSupervisorGuardianPeer(deadRead, make(chan struct{}))
-	require.ErrorContains(t, hangup, "Hermes guardian exited before native launch")
+	require.ErrorContains(t, hangup, "hermes guardian exited before native launch")
 	require.NotErrorIs(t, hangup, unix.EINVAL)
 	require.NotContains(t, hangup.Error(), "poll Hermes guardian before native launch")
 

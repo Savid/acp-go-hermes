@@ -218,7 +218,7 @@ func TestSupervisorNativeReportsAnUnreleasedAuthority(t *testing.T) {
 				return peerRead, nil
 			},
 			wantProof: "\x01",
-			want:      "guardian peer: Hermes guardian exited before native launch",
+			want:      "guardian peer: hermes guardian exited before native launch",
 		},
 		{
 			name: "native privileges could not be prepared",
