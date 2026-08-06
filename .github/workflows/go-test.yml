@@ -69,4 +69,4 @@ jobs:
         uses: ./.github/workflows/go-setup
 
       - name: Native browser containment canary
-        run: make test-integration-native-browser
+        run: .github/scripts/with-privileged-lock.sh make test-integration-native-browser
