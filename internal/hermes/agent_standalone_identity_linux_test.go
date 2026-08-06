@@ -1259,6 +1259,100 @@ func TestAgentStandaloneVacancyAllowsProcessExitDuringTaskEnumeration(t *testing
 	))
 }
 
+// TestAgentStandaloneVacancyReenumeratesTaskExitingWithESRCH pins the kernel's
+// other way of saying "that task is gone". Reading a task's status after the
+// thread exits yields ENOENT on some kernels and ESRCH on others; only ENOENT
+// used to re-enumerate, so a thread exiting mid-scan refused the claim outright
+// with "no such process" — a vacancy proof failed by the one observation that
+// says nothing about vacancy.
+func TestAgentStandaloneVacancyReenumeratesTaskExitingWithESRCH(t *testing.T) {
+	processes := agentStandaloneTestDirEntries(t, "401")
+	churning := agentStandaloneTestDirEntries(t, "401", "402")
+	settled := agentStandaloneTestDirEntries(t, "401")
+	previousReadDir, previousReadFile := agentStandaloneReadDir, agentStandaloneReadFile
+	taskReads := 0
+	agentStandaloneReadDir = func(path string) ([]os.DirEntry, error) {
+		switch path {
+		case "/proc":
+			return processes, nil
+		case "/proc/401/task":
+			taskReads++
+			if taskReads == 1 {
+				return churning, nil
+			}
+
+			return settled, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	agentStandaloneReadFile = func(path string) ([]byte, error) {
+		if path == "/proc/401/task/402/status" {
+			return nil, unix.ESRCH
+		}
+
+		return agentStandaloneTestStatus(1, 1, nil), nil
+	}
+	t.Cleanup(func() {
+		agentStandaloneReadDir, agentStandaloneReadFile = previousReadDir, previousReadFile
+	})
+
+	require.NoError(t, proveAgentStandaloneIdentityVacant(
+		62099, 62100, time.Now().Add(time.Second), nil, nil,
+	))
+	require.GreaterOrEqual(t, taskReads, 2)
+}
+
+// TestAgentStandaloneVacancyAllowsProcessExitWithESRCH is the whole-process
+// half of the same class: /proc/<pid>/task disappears mid-scan because the
+// process exited, and the kernel reports that as ENOENT down some paths and
+// ESRCH down others. Both enumerations have to accept it — the first, which
+// opens the task set, and the second, which rechecks that it stayed still — or
+// a process exiting during the walk refuses a claim it cannot possibly be
+// occupying.
+func TestAgentStandaloneVacancyAllowsProcessExitWithESRCH(t *testing.T) {
+	for _, enumeration := range []struct {
+		name  string
+		reads int
+	}{
+		{name: "opening", reads: 1},
+		{name: "recheck", reads: 2},
+	} {
+		t.Run(enumeration.name, func(t *testing.T) {
+			processes := agentStandaloneTestDirEntries(t, "501")
+			tasks := agentStandaloneTestDirEntries(t, "501")
+			previousReadDir, previousReadFile := agentStandaloneReadDir, agentStandaloneReadFile
+			taskReads := 0
+			agentStandaloneReadDir = func(path string) ([]os.DirEntry, error) {
+				switch path {
+				case "/proc":
+					return processes, nil
+				case "/proc/501/task":
+					taskReads++
+					if taskReads == enumeration.reads {
+						return nil, unix.ESRCH
+					}
+
+					return tasks, nil
+				default:
+					return nil, os.ErrNotExist
+				}
+			}
+			agentStandaloneReadFile = func(string) ([]byte, error) {
+				return agentStandaloneTestStatus(1, 1, nil), nil
+			}
+			t.Cleanup(func() {
+				agentStandaloneReadDir, agentStandaloneReadFile = previousReadDir, previousReadFile
+			})
+
+			require.NoError(t, proveAgentStandaloneIdentityVacant(
+				62101, 62102, time.Now().Add(time.Second), nil, nil,
+			))
+			require.Equal(t, enumeration.reads, taskReads)
+		})
+	}
+}
+
 func TestAgentStandaloneVacancyRejectsMissingGroupsFieldThroughProductionSeam(t *testing.T) {
 	processes := agentStandaloneTestDirEntries(t, "101")
 	tasks := agentStandaloneTestDirEntries(t, "101")

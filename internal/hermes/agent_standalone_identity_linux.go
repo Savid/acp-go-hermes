@@ -3162,9 +3162,11 @@ func proveAgentStandaloneProcessTasksVacant(
 		if err := checkAgentStandaloneAcquisition(deadline, canceled, signals); err != nil {
 			return err
 		}
-
+		// The whole process exiting mid-scan reaches this the same two ways a
+		// single task does: ENOENT or ESRCH. Either way there is no process left
+		// to hold the identity, so the scan is satisfied rather than refused.
 		before, err := agentStandaloneReadDir(taskRoot)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 			return nil
 		}
 
@@ -3184,9 +3186,13 @@ func proveAgentStandaloneProcessTasksVacant(
 			}
 
 			statusPath := filepath.Join(taskRoot, task.Name(), "status")
-
+			// A task that exits between the task-directory read and this status
+			// read is reported as ENOENT by some kernels and ESRCH by others. Both
+			// say the same thing — the task set moved underneath the scan — so both
+			// re-enumerate. Refusing the claim on ESRCH would fail a vacancy proof
+			// for the one observation that proves nothing about vacancy.
 			payload, statusErr := agentStandaloneReadFile(statusPath)
-			if errors.Is(statusErr, os.ErrNotExist) {
+			if errors.Is(statusErr, os.ErrNotExist) || errors.Is(statusErr, unix.ESRCH) {
 				unstable = true
 
 				break
@@ -3211,7 +3217,7 @@ func proveAgentStandaloneProcessTasksVacant(
 		}
 
 		after, err := agentStandaloneReadDir(taskRoot)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 			return nil
 		}
 
