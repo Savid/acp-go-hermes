@@ -742,7 +742,7 @@ func TestAgentStandaloneCovNonTestClaimRequiresTheAuthorityBinder(t *testing.T) 
 		)
 		require.Nil(t, authority)
 		require.ErrorIs(t, err, wantErr)
-		require.ErrorContains(t, err, "resolve procfs self anchor")
+		require.ErrorContains(t, err, "resolve procfs self PID anchor")
 		agentStandaloneCovDomainLockIsFree(t, directory, ownerUID, ownerGID)
 	})
 

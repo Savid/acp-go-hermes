@@ -40,7 +40,7 @@ func agentStandaloneResPIDNamespace(t *testing.T, ino uint64) {
 }
 
 // agentStandaloneResProcessIdentity makes the process report a chosen PID
-// together with the matching procfs self anchor, so a case can state which PID
+// together with the matching procfs self PID anchor, so a case can state which PID
 // the binder sees without the test having to be that PID.
 func agentStandaloneResProcessIdentity(t *testing.T, pid int) {
 	t.Helper()
@@ -76,7 +76,7 @@ func TestAgentStandaloneResBinderRefusesWhenItCannotIdentifyItsPIDNamespace(t *t
 
 	err := validateAgentStandaloneBinder()
 	require.ErrorIs(t, err, wantErr)
-	require.NotContains(t, err.Error(), "procfs self anchor")
+	require.NotContains(t, err.Error(), "procfs self PID anchor")
 }
 
 // TestAgentStandaloneResBinderRequiresUnrestrictedRootProcfs proves the binder

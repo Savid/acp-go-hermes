@@ -196,15 +196,15 @@ func identityLockCovBorrowed(t *testing.T, uid uint32, gid uint32) string {
 	}
 	identityLockCovLocked(t, directory, strconv.FormatUint(uint64(uid), 10)+".lock", unix.LOCK_EX)
 
-	const sessionKey = "identity-lock-cov-session"
-	affinity := identityLockCovNamedLock(t, directory, agentStandaloneAffinityLockName(sessionKey))
+	const ownerDigest = "identity-lock-cov-session"
+	affinity := identityLockCovNamedLock(t, directory, agentStandaloneAffinityLockName(ownerDigest))
 	if err = affinity.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err = publishAgentStandaloneActive(
 		directory, uid, gid,
 		agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
-		sessionKey, deadline, nil, nil,
+		ownerDigest, deadline, nil, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -990,9 +990,9 @@ func TestInheritedStandaloneDispositionRefusesEveryDrift(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sessionKey := agentStandaloneSessionKey(owner)
+		ownerDigest := agentStandaloneOwnerDigest(owner)
 		affinity, err := openAgentStandaloneNamedLock(
-			directory, agentStandaloneAffinityLockName(sessionKey), true,
+			directory, agentStandaloneAffinityLockName(ownerDigest), true,
 			agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
 		)
 		if err != nil {

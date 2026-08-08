@@ -14,9 +14,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// borrowedDispositionSessionKey is the owner digest the host-published ACTIVE
+// borrowedDispositionOwnerDigest is the owner digest the host-published ACTIVE
 // marker carries, and the one the refusal cases have to reproduce exactly.
-const borrowedDispositionSessionKey = "host-owned-session"
+const borrowedDispositionOwnerDigest = "host-owned-session"
 
 func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T) {
 	restoreAgentIdentityLockTestSeams(t)
@@ -111,10 +111,10 @@ func publishBorrowedDispositionHostMarker(
 	if err = unix.Flock(int(identityFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	const sessionKey = borrowedDispositionSessionKey
+	const ownerDigest = borrowedDispositionOwnerDigest
 	affinity, err := openAgentStandaloneNamedLock(
 		directory,
-		agentStandaloneAffinityLockName(sessionKey),
+		agentStandaloneAffinityLockName(ownerDigest),
 		true,
 		uint32(os.Geteuid()),
 		uint32(os.Getegid()),
@@ -131,7 +131,7 @@ func publishBorrowedDispositionHostMarker(
 		gid,
 		uint32(os.Geteuid()),
 		uint32(os.Getegid()),
-		sessionKey,
+		ownerDigest,
 		deadline,
 		nil,
 		nil,
@@ -232,7 +232,7 @@ func refuseBorrowedDispositionsThatAreNotOwnerlessActive(
 	}
 
 	clean, err := json.Marshal(agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, OwnerDigest: borrowedDispositionSessionKey, State: "clean-ready",
+		Version: 2, UID: uid, GID: gid, OwnerDigest: borrowedDispositionOwnerDigest, State: "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)

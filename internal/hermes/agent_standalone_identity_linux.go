@@ -100,10 +100,10 @@ func revalidateAgentStandaloneStateRoot(want agentStandaloneStateRoot, uid, gid 
 	return nil
 }
 
-// agentStandaloneSessionKey derives the durable session key for a standalone
+// agentStandaloneOwnerDigest derives the durable owner digest for a standalone
 // owner. The owner record carries only integers and strings, so encoding it
 // cannot fail and there is no error to propagate.
-func agentStandaloneSessionKey(owner agentStandaloneOwner) string {
+func agentStandaloneOwnerDigest(owner agentStandaloneOwner) string {
 	payload, _ := json.Marshal(owner)
 	digest := sha256.Sum256(payload)
 
@@ -549,7 +549,7 @@ func completeAgentStandaloneOwnerClaim(
 		return err
 	}
 
-	sessionKey := agentStandaloneSessionKey(want)
+	ownerDigest := agentStandaloneOwnerDigest(want)
 	if wasPresent {
 		if err := proveAgentStandaloneIdentityVacantTwice(want.UID, want.GID, deadline, canceled, signals); err != nil {
 			return err
@@ -571,7 +571,7 @@ func completeAgentStandaloneOwnerClaim(
 	}
 
 	return publishAgentStandaloneActive(
-		directory, want.UID, want.GID, ownerUID, ownerGID, sessionKey, deadline, canceled, signals,
+		directory, want.UID, want.GID, ownerUID, ownerGID, ownerDigest, deadline, canceled, signals,
 	)
 }
 
@@ -1400,12 +1400,12 @@ func validateAgentStandalonePIDNamespaceAnchor(self agentAuthorityDomainInode) e
 
 	anchor, err := agentStandaloneReadlink("/proc/self")
 	if err != nil {
-		return fmt.Errorf("resolve procfs self anchor: %w", err)
+		return fmt.Errorf("resolve procfs self PID anchor: %w", err)
 	}
 
 	wantAnchor := strconv.Itoa(processID)
 	if anchor != wantAnchor {
-		return fmt.Errorf("procfs self anchor = %q, want %q", anchor, wantAnchor)
+		return fmt.Errorf("procfs self PID anchor is %q, want %q", anchor, wantAnchor)
 	}
 
 	anchorNamespace, err := agentStandaloneNamespaceIdentity(filepath.Join(agentAuthorityProcRoot, anchor, "ns", "pid"))
@@ -1623,8 +1623,8 @@ func validateAgentStandaloneSameBootRebind(
 		))
 	}
 
-	sessionKey := agentStandaloneSessionKey(owner)
-	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != sessionKey || len(marker.Paths) != 0 {
+	ownerDigest := agentStandaloneOwnerDigest(owner)
+	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
 		return failIdentity(errors.New("same-boot authority rebind requires the exact retained standalone ACTIVE marker"))
 	}
 
@@ -2012,8 +2012,8 @@ func validateAgentStandaloneMarkerBindings(
 
 		seenGIDs[marker.GID] = uid
 		if owner, bound := owners[uid]; bound {
-			sessionKey := agentStandaloneSessionKey(owner)
-			if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != sessionKey || len(marker.Paths) != 0 {
+			ownerDigest := agentStandaloneOwnerDigest(owner)
+			if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
 				return fmt.Errorf("standalone owner uid %d has an incompatible retained marker", uid)
 			}
 
@@ -2675,8 +2675,8 @@ func validateAgentStandaloneRetainedActiveDisposition(
 		return err
 	}
 
-	sessionKey := agentStandaloneSessionKey(owner)
-	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != sessionKey || len(marker.Paths) != 0 {
+	ownerDigest := agentStandaloneOwnerDigest(owner)
+	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
 		return errors.New("standalone owner has an incompatible retained ACTIVE marker")
 	}
 
@@ -2867,7 +2867,7 @@ func decodeAgentStandaloneMarker(payload []byte, uid uint32) (agentStandaloneMar
 	}
 
 	if marker.Version != 2 || marker.UID != uid || marker.UID == 0 || marker.GID == 0 ||
-		!validAgentStandaloneSessionKey(marker.OwnerDigest) {
+		!validAgentStandaloneOwnerDigest(marker.OwnerDigest) {
 		return agentStandaloneMarker{}, errors.New("agent identity marker is incomplete")
 	}
 
@@ -2942,7 +2942,7 @@ func validateAgentStandaloneMarkerPaths(marker agentStandaloneMarker, raw map[st
 	return nil
 }
 
-func validAgentStandaloneSessionKey(key string) bool {
+func validAgentStandaloneOwnerDigest(key string) bool {
 	if key == "" || len(key) > 1024 || !utf8.ValidString(key) || strings.TrimSpace(key) != key {
 		return false
 	}

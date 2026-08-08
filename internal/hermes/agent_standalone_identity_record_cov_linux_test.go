@@ -26,12 +26,12 @@ func agentStandaloneCovWriteRegistryFile(t *testing.T, directory *os.File, name,
 }
 
 // agentStandaloneCovActiveMarker renders a v2 ACTIVE marker with caller-chosen
-// session key, lease id and paths array so each case can corrupt exactly one
+// owner digest, lease id and paths array so each case can corrupt exactly one
 // field.
-func agentStandaloneCovActiveMarker(uid, gid uint32, sessionKey, leaseID, paths string) string {
+func agentStandaloneCovActiveMarker(uid, gid uint32, ownerDigest, leaseID, paths string) string {
 	return `{"version":2,"uid":` + strconv.FormatUint(uint64(uid), 10) +
 		`,"gid":` + strconv.FormatUint(uint64(gid), 10) +
-		`,"ownerDigest":"` + sessionKey + `","state":"active","leaseId":"` + leaseID +
+		`,"ownerDigest":"` + ownerDigest + `","state":"active","leaseId":"` + leaseID +
 		`","paths":` + paths + `}`
 }
 
@@ -71,12 +71,12 @@ func TestAgentStandaloneCovMarkerRefusesEveryMalformedPayload(t *testing.T) {
 			want:    `unknown field "surprise"`,
 		},
 		{
-			name:    "empty session key",
+			name:    "empty owner digest",
 			payload: agentStandaloneCovActiveMarker(uid, gid, "", lease, "[]"),
 			want:    "marker is incomplete",
 		},
 		{
-			name:    "control character session key",
+			name:    "control character owner digest",
 			payload: agentStandaloneCovActiveMarker(uid, gid, "a\\u0001b", lease, "[]"),
 			want:    "marker is incomplete",
 		},
