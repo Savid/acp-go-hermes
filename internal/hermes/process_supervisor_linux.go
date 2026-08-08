@@ -32,6 +32,15 @@ const (
 	supervisorIdentityLockFD = 6
 	supervisorAuthorityFD    = 7
 	supervisorConfigName     = "acp-go-hermes-process-supervisor"
+
+	// hermesSupervisorRefusal prefixes the terminal readiness frame the liveness
+	// supervisor publishes in place of the readiness it never reached. Its
+	// refusal reason otherwise only ever reaches a stderr line nobody
+	// correlates, and the guardian sees the status pipe close with nothing on
+	// it — the same wordless EOF whatever the cause. The frame changes nothing
+	// about the verdict: a refusal is still a refusal, and a supervisor that
+	// dies without writing the frame still closes the pipe wordless.
+	hermesSupervisorRefusal = "error:"
 )
 
 type hermesSupervisorConfig struct {
@@ -610,6 +619,8 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 
 	line, err := reader.ReadString('\n')
 	if err != nil || !validHermesLivenessReadiness(line) {
+		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: %s\n", hermesLivenessRefusal(line, err))
+
 		_ = peer.Close()
 
 		<-wait
@@ -777,6 +788,38 @@ func closeHermesLivenessFiles(files ...*os.File) {
 	}
 }
 
+// hermesLivenessRefusal renders the guardian's diagnostic for a liveness
+// supervisor that published no readiness. A terminal refusal frame names its
+// own reason and is reported as such; a status pipe that simply closed is a
+// wordless death and reports the read failure it was; anything else reports the
+// line it could not accept. Keeping the three distinguishable is the whole
+// point — collapsing them onto one bare EOF is what cost the triage time.
+func hermesLivenessRefusal(line string, readErr error) string {
+	if reason, refused := strings.CutPrefix(strings.TrimSpace(line), hermesSupervisorRefusal); refused {
+		return "liveness refused to start: " + reason
+	}
+
+	if readErr != nil {
+		return fmt.Sprintf("await liveness readiness: %v", readErr)
+	}
+
+	return fmt.Sprintf("invalid liveness readiness %q", strings.TrimSpace(line))
+}
+
+// refuseHermesSupervisorReadiness reports a refusal on both channels the
+// supervisor owns: the stderr line an operator reads, and — under the liveness
+// protocol — the terminal readiness frame the guardian is already blocked on.
+// Without the frame the guardian only ever observes the status pipe closing,
+// and a refusal that had a reason is indistinguishable from a child that died
+// with nothing to say.
+func refuseHermesSupervisorReadiness(status io.Writer, livenessProtocol bool, stage string, err error) {
+	_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: %s: %v\n", stage, err)
+
+	if livenessProtocol {
+		_, _ = fmt.Fprintf(status, "%s%s: %v\n", hermesSupervisorRefusal, stage, err)
+	}
+}
+
 func validHermesLivenessReadiness(line string) bool {
 	text, ok := strings.CutSuffix(line, "\n")
 	if !ok {
@@ -906,7 +949,7 @@ func runHermesProcessSupervisorNative(
 		config, supervisorIdentityLockFD, supervisorAuthorityFD, shutdown, signals,
 	)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: acquire native authority: %v\n", err)
+		refuseHermesSupervisorReadiness(status, livenessProtocol, "acquire native authority", err)
 
 		return 125
 	}
@@ -927,6 +970,10 @@ func runHermesProcessSupervisorNative(
 	})
 
 	if guardianErr != nil {
+		// No refusal frame here on purpose. This refusal exists precisely
+		// because the guardian is gone, so the status channel has no reader
+		// left to name the reason to; the frame belongs to refusals a live
+		// guardian is still blocked on.
 		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: guardian peer: %v\n", guardianErr)
 
 		if completeHermesSupervisorAuthority(&authority, guardianDone, status, proof, false) != nil {
@@ -937,7 +984,7 @@ func runHermesProcessSupervisorNative(
 	}
 
 	if privilegeErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: prepare native target: %v\n", privilegeErr)
+		refuseHermesSupervisorReadiness(status, livenessProtocol, "prepare native target", privilegeErr)
 
 		if completeHermesSupervisorAuthority(
 			&authority, guardianDone, status, proof, livenessProtocol,
@@ -949,7 +996,7 @@ func runHermesProcessSupervisorNative(
 	}
 
 	if startErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: start native target: %v\n", startErr)
+		refuseHermesSupervisorReadiness(status, livenessProtocol, "start native target", startErr)
 
 		if completeHermesSupervisorAuthority(
 			&authority, guardianDone, status, proof, livenessProtocol,

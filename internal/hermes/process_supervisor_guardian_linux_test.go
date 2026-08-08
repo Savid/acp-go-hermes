@@ -108,7 +108,11 @@ func TestSupervisorGuardianRefusesAnUnprovenLiveness(t *testing.T) {
 		)
 		require.Equal(t, 125, code)
 		require.Equal(t, []byte{1}, proof)
-		require.Empty(t, diagnostic)
+		// The refusal names the line it would not accept. A guardian that
+		// refused in silence here is what left every caller with nothing but
+		// the exit code to go on.
+		require.Contains(t, diagnostic, "acp-go-hermes trusted supervisor: invalid liveness readiness")
+		require.NotContains(t, diagnostic, "refused to start")
 	})
 
 	t.Run("status channel cannot carry a read deadline", func(t *testing.T) {
