@@ -819,8 +819,119 @@ func TestBorrowedAgentIdentityDispositionRefusesUnprovenModes(t *testing.T) {
 		if err = directory.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if err = rejectBorrowedAgentIdentityTemporaries(directory); !errors.Is(err, unix.EBADF) {
+		if err = rejectBorrowedAgentIdentityTemporaries(directory, uid); !errors.Is(err, unix.EBADF) {
 			t.Fatalf("unenumerable authority error = %v, want EBADF", err)
+		}
+	})
+}
+
+// TestRejectBorrowedAgentIdentityTemporariesScopesByUID proves the borrowed
+// disposition scan refuses only the temporaries that are the borrower's own
+// fault. A uid-scoped temporary named for another participant is that
+// participant's in-flight atomic write and must be tolerated; the borrower's
+// own unresolved temporary of each class still refuses; a malformed name is
+// fatal; and a domain-global temporary is transient by construction, so it is
+// absorbed by a bounded re-read and refused only once it persists.
+func TestRejectBorrowedAgentIdentityTemporariesScopesByUID(t *testing.T) {
+	const (
+		borrower  = uint32(63700)
+		bystander = uint32(995)
+		suffix    = "0123456789abcdef01234567"
+	)
+	identityLockCovSeams(t)
+	root := configureAgentIdentityLockTestRoot(t)
+	directory, err := bootstrapAgentIdentityLockDirectory(
+		root, agentIdentityLockTrustedUID, agentIdentityLockTrustedGID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if closeErr := directory.Close(); closeErr != nil {
+			t.Errorf("close borrowed authority directory: %v", closeErr)
+		}
+	})
+	authority := filepath.Join(root, "acp-go", "agent-identities")
+
+	stage := func(t *testing.T, name string) string {
+		t.Helper()
+		path := filepath.Join(authority, name)
+		if writeErr := os.WriteFile(path, []byte("{}\n"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		t.Cleanup(func() {
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, unix.ENOENT) {
+				t.Errorf("remove staged temporary %q: %v", name, removeErr)
+			}
+		})
+
+		return name
+	}
+
+	for _, name := range []string{
+		strconv.FormatUint(uint64(bystander), 10) + ".quarantine.next-" + suffix,
+		strconv.FormatUint(uint64(bystander), 10) + ".owner.next-" + suffix,
+	} {
+		t.Run("tolerates bystander "+name, func(t *testing.T) {
+			staged := stage(t, name)
+			if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, borrower); rejectErr != nil {
+				t.Fatalf("bystander temporary %q refused = %v, want tolerated", staged, rejectErr)
+			}
+		})
+	}
+
+	for _, name := range []string{
+		strconv.FormatUint(uint64(borrower), 10) + ".quarantine.next-" + suffix,
+		strconv.FormatUint(uint64(borrower), 10) + ".owner.next-" + suffix,
+	} {
+		t.Run("refuses own "+name, func(t *testing.T) {
+			staged := stage(t, name)
+			rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, borrower)
+			if rejectErr == nil || !strings.Contains(rejectErr.Error(), "unresolved temporary") ||
+				!strings.Contains(rejectErr.Error(), staged) {
+				t.Fatalf("own temporary %q refusal = %v", staged, rejectErr)
+			}
+		})
+	}
+
+	for _, name := range []string{
+		"bad.quarantine.next-" + suffix,
+		"bad.owner.next-" + suffix,
+	} {
+		t.Run("refuses malformed "+name, func(t *testing.T) {
+			staged := stage(t, name)
+			if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, borrower); rejectErr == nil {
+				t.Fatalf("malformed temporary %q was tolerated", staged)
+			}
+		})
+	}
+
+	for _, name := range []string{
+		"domain.json.next-" + suffix,
+		".authority-probe-" + suffix,
+	} {
+		t.Run("refuses persistent domain-global "+name, func(t *testing.T) {
+			staged := stage(t, name)
+			started := time.Now()
+			rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, borrower)
+			if rejectErr == nil || !strings.Contains(rejectErr.Error(), "unresolved temporary") ||
+				!strings.Contains(rejectErr.Error(), staged) {
+				t.Fatalf("persistent domain-global %q refusal = %v", staged, rejectErr)
+			}
+			if elapsed := time.Since(started); elapsed < borrowedAgentIdentityTemporaryReadDelay {
+				t.Fatalf("domain-global refusal skipped the bounded re-read: elapsed %s", elapsed)
+			}
+		})
+	}
+
+	t.Run("absorbs a domain-global rename in flight", func(t *testing.T) {
+		staged := stage(t, "domain.json.next-"+suffix)
+		go func() {
+			time.Sleep(borrowedAgentIdentityTemporaryReadDelay)
+			_ = os.Remove(filepath.Join(authority, staged))
+		}()
+		if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, borrower); rejectErr != nil {
+			t.Fatalf("in-flight domain rename refused = %v, want tolerated after re-read", rejectErr)
 		}
 	})
 }

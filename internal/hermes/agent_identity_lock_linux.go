@@ -414,7 +414,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 	}
 	defer directory.Close()
 
-	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, uid); rejectErr != nil {
 		return rejectErr
 	}
 
@@ -493,7 +493,7 @@ func validateInheritedStandaloneAgentIdentityDisposition(
 	}
 	defer directory.Close()
 
-	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory, uid); rejectErr != nil {
 		return rejectErr
 	}
 
@@ -538,21 +538,66 @@ func validateInheritedStandaloneAgentIdentityDisposition(
 	return nil
 }
 
-func rejectBorrowedAgentIdentityTemporaries(directory *os.File) error {
-	entries, err := agentStandaloneAuthorityEntries(directory)
-	if err != nil {
-		return err
-	}
+// borrowedAgentIdentityTemporaryReads bounds how many times the disposition
+// scan re-reads the host-wide authority root while a domain-global temporary is
+// in flight. A domain record or authority probe is published by rename, so its
+// presence is transient by construction; a few tens of milliseconds of re-read
+// absorb a rename in progress before a persistent one is refused as torn.
+const (
+	borrowedAgentIdentityTemporaryReads     = 4
+	borrowedAgentIdentityTemporaryReadDelay = 15 * time.Millisecond
+)
 
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, "domain.json.next-") || strings.HasPrefix(name, ".authority-probe-") ||
-			strings.Contains(name, ".owner.next-") || strings.Contains(name, ".quarantine.next-") {
-			return fmt.Errorf("borrowed agent identity authority contains unresolved temporary %q", name)
+func rejectBorrowedAgentIdentityTemporaries(directory *os.File, uid uint32) error {
+	for attempt := 0; ; attempt++ {
+		entries, err := agentStandaloneAuthorityEntries(directory)
+		if err != nil {
+			return err
 		}
-	}
 
-	return nil
+		domainGlobal := ""
+
+		for _, entry := range entries {
+			name := entry.Name()
+			switch {
+			case strings.Contains(name, ".owner.next-"):
+				// An owner temporary embeds the uid it publishes. Another uid's
+				// atomic write carries nothing about this borrower's disposition,
+				// so only the borrower's own unresolved owner temporary is a fault.
+				owner, parseErr := parseAgentStandaloneOwnerTemporary(name)
+				if parseErr != nil {
+					return parseErr
+				}
+
+				if owner == uid {
+					return fmt.Errorf("borrowed agent identity authority contains unresolved temporary %q", name)
+				}
+			case strings.HasPrefix(name, "domain.json.next-"), strings.HasPrefix(name, ".authority-probe-"):
+				domainGlobal = name
+			case strings.Contains(name, ".quarantine.next-"):
+				// A marker temporary embeds the uid it publishes; the same
+				// uid-scoped invariant holds as for owner temporaries.
+				marker, parseErr := parseAgentStandaloneMarkerTemporary(name)
+				if parseErr != nil {
+					return parseErr
+				}
+
+				if marker == uid {
+					return fmt.Errorf("borrowed agent identity authority contains unresolved temporary %q", name)
+				}
+			}
+		}
+
+		if domainGlobal == "" {
+			return nil
+		}
+
+		if attempt >= borrowedAgentIdentityTemporaryReads-1 {
+			return fmt.Errorf("borrowed agent identity authority contains unresolved temporary %q", domainGlobal)
+		}
+
+		time.Sleep(borrowedAgentIdentityTemporaryReadDelay)
+	}
 }
 
 func setAgentIdentityLockCloseOnExec(file *os.File) error {
