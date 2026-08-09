@@ -125,6 +125,25 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 	return os.NewFile(uintptr(fd), clean), nil
 }
 
+// nativeSharedIdentityAncestryRemedy states what an operator can change when
+// the wrapper's own identity is the native identity and an ancestor still fails
+// the walk. There is no privilege boundary left to lean on in that shape, so the
+// remaining answers are to give the wrapper one, or to anchor the directory on a
+// path the identity already owns.
+const nativeSharedIdentityAncestryRemedy = "run the supervisor as root to isolate the agent identity, " +
+	"or place the native directory under a path the agent identity owns"
+
+// nativeAncestorIsSharedIdentityRoot reports whether a non-final ancestor is
+// acceptable purely because root owns it. It is, only when the trusted identity
+// and the target identity are the same one: owning both ends of the check leaves
+// no privilege boundary for the ancestry rule to defend, while every path to a
+// directory that identity owns still crosses root-owned components such as "/"
+// and "/home". An ancestor owned by any other identity stays refused, so a
+// second local identity still cannot interpose one.
+func nativeAncestorIsSharedIdentityRoot(stat unix.Stat_t, final bool, trustedUID uint32, targetUID uint32) bool {
+	return !final && trustedUID == targetUID && stat.Uid == 0 && stat.Gid == 0
+}
+
 func validateDurableNativeAncestor(
 	stat unix.Stat_t,
 	final bool,
@@ -139,13 +158,22 @@ func validateDurableNativeAncestor(
 
 	trusted := stat.Uid == trustedUID && stat.Gid == trustedGID
 
+	rootOwned := nativeAncestorIsSharedIdentityRoot(stat, final, trustedUID, targetUID)
+
 	target := stat.Uid == targetUID && stat.Gid == targetGID
-	if !trusted && !target {
+	if !trusted && !target && !rootOwned {
+		if !final && trustedUID == targetUID {
+			return fmt.Errorf(
+				"native-owned path ancestor is uid=%d gid=%d; %s",
+				stat.Uid, stat.Gid, nativeSharedIdentityAncestryRemedy,
+			)
+		}
+
 		return fmt.Errorf("native-owned path ancestor is uid=%d gid=%d", stat.Uid, stat.Gid)
 	}
 
 	mode := stat.Mode & 0o7777
-	if mode&0o022 != 0 && (!trusted || mode&unix.S_ISVTX == 0) {
+	if mode&0o022 != 0 && ((!trusted && !rootOwned) || mode&unix.S_ISVTX == 0) {
 		return fmt.Errorf("native-owned path ancestor mode %#o is writable", mode)
 	}
 
