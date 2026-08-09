@@ -33,11 +33,18 @@ func testIsolationIdentity() (uint32, uint32) {
 func newTestAgent(opts ...Option) *Agent {
 	base := make([]Option, 0, 2+len(opts))
 	uid, gid := testIsolationIdentity()
-	base = append(base, WithProcessIsolation(ProcessIsolation{
+	isolation := ProcessIsolation{
 		UID: uid, GID: gid,
-		BaseEnvironment:   map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
-		StandaloneOwnerID: "acp-go-hermes-tests", StandaloneStateRoot: os.TempDir(),
-	}), func(options *Options) {
+		BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+	}
+	// Standalone owner fields describe an identity no live task holds. A runner
+	// that isolates to itself holds this one, so the canonical shape there is
+	// the shared one and the fields belong only to the isolated fixture.
+	if !sharedProcessIdentity(&isolation) {
+		isolation.StandaloneOwnerID = "acp-go-hermes-tests"
+		isolation.StandaloneStateRoot = os.TempDir()
+	}
+	base = append(base, WithProcessIsolation(isolation), func(options *Options) {
 		options.testOnlyNoCredential = true
 		options.testOnlyIdentityLockRoot = testIdentityLockRoot()
 	})

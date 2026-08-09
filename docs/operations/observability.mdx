@@ -29,7 +29,11 @@ context is extracted for adapter spans and injected into each launched
 `hermes serve` process as `TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
 
 `acp_go_hermes.runtime.containment` records the selected `containment` mode as
-`authoritative`, `best_effort`, or `unavailable`. Darwin best-effort startup
+`authoritative`, `shared_identity`, `best_effort`, or `unavailable`.
+`shared_identity` is the Linux boundary reported when the configured native
+identity is the identity the adapter already runs as: whole-tree lifecycle is
+still proven, so provider-process snapshots keep publishing, but the agent runs
+under the adapter's own credentials rather than its own. Darwin best-effort startup
 also emits a structured warning with `containment=best_effort`. Because that
 mode cannot authoritatively enumerate escaped descendants, provider-process
 snapshots are suppressed rather than publishing a misleading count, even when

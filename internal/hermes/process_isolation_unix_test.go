@@ -13,10 +13,17 @@ import (
 
 func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	originalUID, originalGID, originalGroups := processIsolationGeteuid, processIsolationGetegid, processIsolationGetgroups
+	originalPlatform := processIsolationPlatform
 	t.Cleanup(func() {
 		processIsolationGeteuid, processIsolationGetegid, processIsolationGetgroups = originalUID, originalGID, originalGroups
+		processIsolationPlatform = originalPlatform
 	})
 
+	// Re-entering an identity the process already holds is the non-Linux arm:
+	// the Linux backend recognises that shape as a shared identity and requests
+	// no credential change at all. Hold the platform there so this test keeps
+	// exercising the verification branches whichever host runs it.
+	processIsolationPlatform = "darwin"
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }

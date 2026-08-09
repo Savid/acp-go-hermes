@@ -77,6 +77,7 @@ func TestValidateStandaloneIdentityOption(t *testing.T) {
 		authorityDomain bool
 		ownerID         string
 		stateRoot       string
+		shared          bool
 		valid           bool
 	}{
 		{name: "borrowed", identityLock: true, authorityDomain: true, valid: true},
@@ -85,11 +86,15 @@ func TestValidateStandaloneIdentityOption(t *testing.T) {
 		{name: "mixed", identityLock: true, authorityDomain: true, ownerID: "deployment-1"},
 		{name: "invalid owner", ownerID: "-deployment", stateRoot: validStateRoot},
 		{name: "invalid state root", ownerID: "deployment-1", stateRoot: "relative"},
+		{name: "shared", shared: true, valid: true},
+		{name: "shared owner", shared: true, ownerID: "deployment-1"},
+		{name: "shared state root", shared: true, stateRoot: validStateRoot},
+		{name: "shared borrowed", identityLock: true, authorityDomain: true, shared: true, valid: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateStandaloneIdentityOption(
-				test.identityLock, test.authorityDomain, test.ownerID, test.stateRoot,
+				test.identityLock, test.authorityDomain, test.ownerID, test.stateRoot, test.shared,
 			)
 			if (err == nil) != test.valid {
 				t.Fatalf("validation error = %v, valid = %v", err, test.valid)

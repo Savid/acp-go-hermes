@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,8 +12,12 @@ import (
 )
 
 func TestAgentContainmentModeAndObservation(t *testing.T) {
-	oldPlatform := agentRuntimePlatform
-	t.Cleanup(func() { agentRuntimePlatform = oldPlatform })
+	oldPlatform, oldEffectiveUID := agentRuntimePlatform, containmentEffectiveUID
+	t.Cleanup(func() { agentRuntimePlatform, containmentEffectiveUID = oldPlatform, oldEffectiveUID })
+	// This test selects the boundary from the platform, so it holds the identity
+	// fixed at the trusted supervisor's; the shared-identity selection has its
+	// own matrix below.
+	containmentEffectiveUID = func() int { return 0 }
 	if got := (*Agent)(nil).ContainmentMode(); got != RuntimeContainmentUnavailable {
 		t.Fatalf("nil agent mode = %q", got)
 	}
@@ -73,5 +78,70 @@ func TestAgentContainmentModeAndObservation(t *testing.T) {
 	}
 	if _, err := opted.Initialize(t.Context(), acp.InitializeRequest{}); err == nil || !strings.Contains(err.Error(), "supported only on darwin") {
 		t.Fatalf("off-Darwin opt-in initialization error = %v", err)
+	}
+}
+
+func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
+	oldPlatform, oldEffectiveUID := agentRuntimePlatform, containmentEffectiveUID
+	t.Cleanup(func() { agentRuntimePlatform, containmentEffectiveUID = oldPlatform, oldEffectiveUID })
+
+	isolation := &ProcessIsolation{UID: 1000, GID: 1000}
+	tests := []struct {
+		name      string
+		platform  string
+		effective int
+		isolation *ProcessIsolation
+		want      RuntimeContainmentMode
+	}{
+		{name: "own identity", platform: agentRuntimeLinux, effective: 1000, isolation: isolation, want: RuntimeContainmentSharedIdentity},
+		{name: "distinct identity", platform: agentRuntimeLinux, effective: 1001, isolation: isolation, want: RuntimeContainmentAuthoritative},
+		{name: "trusted root", platform: agentRuntimeLinux, effective: 0, isolation: isolation, want: RuntimeContainmentAuthoritative},
+		{name: "unconfigured", platform: agentRuntimeLinux, effective: 1000, want: RuntimeContainmentAuthoritative},
+		{name: "darwin", platform: agentRuntimeDarwin, effective: 1000, isolation: isolation, want: RuntimeContainmentUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agentRuntimePlatform = test.platform
+			containmentEffectiveUID = func() int { return test.effective }
+			if got := containmentMode(Options{ProcessIsolation: test.isolation}); got != test.want {
+				t.Fatalf("containment mode = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
+	oldPlatform, oldEffectiveUID := agentRuntimePlatform, containmentEffectiveUID
+	t.Cleanup(func() { agentRuntimePlatform, containmentEffectiveUID = oldPlatform, oldEffectiveUID })
+	agentRuntimePlatform = agentRuntimeLinux
+	containmentEffectiveUID = os.Geteuid
+	if os.Geteuid() == 0 {
+		t.Skip("the shared arm is unreachable from a root process")
+	}
+
+	var (
+		observed  []RuntimeContainmentMode
+		snapshots int
+	)
+	agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+		ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
+			observed = append(observed, mode)
+		},
+		ObserveProcessSnapshot: func(context.Context, RuntimeProcessKind, int) { snapshots++ },
+	}))
+	if got := agent.ContainmentMode(); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("shared identity mode = %q", got)
+	}
+	if len(observed) != 1 || observed[0] != RuntimeContainmentSharedIdentity {
+		t.Fatalf("containment observations = %v", observed)
+	}
+
+	// Whole-tree lifecycle is still proven, so the descendant inventory the
+	// authoritative boundary publishes stays on.
+	root := agent.processes.register()
+	root.observe(t.Context(), testProviderInventory{count: 7, available: true})
+	root.retire(t.Context(), true)
+	if snapshots == 0 {
+		t.Fatal("shared identity retired the provider descendant inventory")
 	}
 }

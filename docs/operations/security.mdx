@@ -184,6 +184,24 @@ same-directory atomic rename,
 and directory sync. Each newly created directory level is parent-synced before
 any lock becomes authoritative.
 
+A deployment that never held privilege can still run the Linux supervisor when
+`WithProcessIsolation` names the identity the adapter already runs as. That
+launch keeps the guardian and liveness pair, both subreaper claims,
+no-new-privs, core-dump suppression, descendant reaping to kernel `ECHILD`, the
+process-group teardown, the sealed config, and the readiness handshake, and it
+skips only the steps that exist to cross a privilege boundary: the trusted-root
+assertion, the standalone owner fields, the `/var/lib/acp-go` identity
+authority, and the credential drop. Standalone owner fields are refused there,
+because the vacancy such a record proves cannot hold while the adapter itself
+occupies the identity. What is lost is real and reported as `shared_identity`
+rather than `authoritative`: concurrent sessions share one uid and can read each
+other's home, XDG directories, credentials and journals; no host-global lock
+excludes a second adapter under the same account; no durable registry survives a
+crash; and the subreaper boundary is a lifecycle boundary, not a security one, so
+a compromised agent can signal and inspect the adapter. The parent stamps the
+decision into the sealed config and each child re-derives it from its own
+identity, refusing a config that disagrees in either direction.
+
 Native session startup fails with `ErrProcessContainmentIncomplete` where the
 adapter cannot establish its selected boundary. Embedded Darwin hosts default
 to rejecting startup. `WithDarwinBestEffortContainment` explicitly accepts a

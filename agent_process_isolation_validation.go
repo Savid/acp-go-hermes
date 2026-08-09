@@ -21,6 +21,7 @@ func validateProcessIsolationOption(isolation *ProcessIsolation) error {
 		if err := validateStandaloneIdentityOption(
 			isolation.IdentityLock != nil, isolation.AuthorityDomain != nil,
 			isolation.StandaloneOwnerID, isolation.StandaloneStateRoot,
+			sharedProcessIdentity(isolation),
 		); err != nil {
 			return err
 		}
@@ -33,7 +34,15 @@ func validateProcessIsolationOption(isolation *ProcessIsolation) error {
 	return nil
 }
 
-func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerID, stateRoot string) error {
+// sharedIdentitySupervisorRemedy states what an operator can change when the
+// agent was configured to run under the very identity the adapter already runs
+// as and the shape it was handed describes something else. There is no
+// privilege boundary to cross in that deployment, so the two answers are to
+// give the adapter one, or to describe the launch as what it is.
+const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
+	"or launch the agent under the identity the supervisor already holds"
+
+func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerID, stateRoot string, shared bool) error {
 	if identityLock != authorityDomain {
 		return errors.New("process identity lock and authority domain must be provided together")
 	}
@@ -41,6 +50,19 @@ func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerI
 	if identityLock {
 		if ownerID != "" || stateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
+		}
+
+		return nil
+	}
+
+	// A native identity that is already the adapter's own identity cannot be
+	// recorded as a standalone one: the durable record proves an identity no
+	// live task holds, and the adapter asking for it is such a task. The
+	// canonical shape is therefore no capabilities and no standalone fields.
+	if shared {
+		if ownerID != "" || stateRoot != "" {
+			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
+				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil

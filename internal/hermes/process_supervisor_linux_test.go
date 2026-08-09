@@ -1036,7 +1036,27 @@ func TestHermesSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
 		t.Fatalf("distinct trusted identity validation = %v", err)
 	}
 
+	// The bootstrap decides against the sealed config rather than against the
+	// bare effective uid: a shared identity is the one shape a supervisor that
+	// never held privilege may serve, and only the config names the identity it
+	// was asked to reach. A distinct native identity is still refused.
 	supervisorEffectiveUID = func() int { return 1000 }
+	configRead, configWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encodeErr := json.NewEncoder(configWrite).Encode(supervisorTestConfig([]string{"/bin/true"})); encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	_ = configWrite.Close()
+	files := []*os.File{configRead, os.Stdin, os.Stdout}
+	supervisorNewFile = func(uintptr, string) *os.File {
+		file := files[0]
+		files = files[1:]
+
+		return file
+	}
+	supervisorCloseOnExec = func(int) error { return nil }
 	if code := runHermesProcessSupervisor(hermesSupervisorGuardian); code != 125 {
 		t.Fatalf("non-root bootstrap code = %d, want 125", code)
 	}
@@ -1050,6 +1070,10 @@ func TestHermesSupervisorProductionIdentityRejectsNonRoot(t *testing.T) {
 	_, err := startUnixContainedProcess(nil, ContainmentSpec{Isolation: testProcessIsolation()})
 	if err == nil || !strings.Contains(err.Error(), "trusted root") {
 		t.Fatalf("non-root production preparation = %v", err)
+	}
+
+	if err = validateHermesSupervisorIdentity(sharedSupervisorIdentity()); err != nil {
+		t.Fatalf("non-root production preparation of its own identity: %v", err)
 	}
 }
 

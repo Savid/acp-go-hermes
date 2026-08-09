@@ -114,7 +114,7 @@ func NewAgent(opts ...Option) *Agent {
 		clientCalls:     make(chan struct{}, limits.MaxConcurrentClientCalls),
 		containmentMode: mode,
 	}
-	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative)
+	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	agent.providerAuth = newProviderAuth(agent)
 
 	return agent

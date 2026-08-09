@@ -52,6 +52,13 @@ type hermesSupervisorConfig struct {
 	IdentityLock        bool             `json:"identityLock"`
 	AuthorityDomain     bool             `json:"authorityDomain"`
 	StandaloneAuthority bool             `json:"standaloneAuthority"`
+	// SharedIdentity is the third authority disposition, alongside the borrowed
+	// and standalone ones the two flags above spell out between them. It travels
+	// in the sealed config so the guardian and the liveness child inherit the one
+	// decision the parent made, and each of them re-derives it from its own
+	// identity and refuses a config that disagrees, so the stamp can direct the
+	// launch without being trusted on its own.
+	SharedIdentity bool `json:"sharedIdentity"`
 }
 
 var (
@@ -147,6 +154,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 		Isolation:       *spec.Isolation,
 		IdentityLock:    spec.Isolation.IdentityLock != nil,
 		AuthorityDomain: spec.Isolation.AuthorityDomain != nil,
+		SharedIdentity:  sharedProcessIdentity(spec.Isolation),
 	}
 
 	configFD, err := supervisorMemfd(supervisorConfigName, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
@@ -291,11 +299,13 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	return containment, nil
 }
 
+// runHermesProcessSupervisor enters the private subreaper mode. The identity
+// this supervisor may run under is decided against the sealed config below
+// rather than up here: a shared-identity launch is the one shape a supervisor
+// that never held privilege can legitimately serve, and only the config names
+// the identity it was asked to reach. The refusal that used to sit here as a
+// bare exit code now carries the reason it always had.
 func runHermesProcessSupervisor(mode string) int {
-	if supervisorEffectiveUID() != 0 {
-		return 125
-	}
-
 	if err := supervisorPrctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return 125
 	}
@@ -333,7 +343,9 @@ func runHermesProcessSupervisor(mode string) int {
 		return 125
 	}
 
-	if validateHermesSupervisorConfig(config) != nil {
+	if err := validateHermesSupervisorConfig(config); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "acp-go-hermes trusted supervisor: validate supervisor config: %v\n", err)
+
 		return 125
 	}
 
@@ -364,6 +376,20 @@ func validateHermesSupervisorConfig(config hermesSupervisorConfig) error {
 
 	if config.StandaloneAuthority && !config.IdentityLock {
 		return errors.New("hermes standalone authority requires inherited identity capabilities")
+	}
+
+	// Every process in the tree derives the disposition from its own identity,
+	// and a child that disagrees with the config it was handed refuses rather
+	// than following it: the stamp decides which steps run, so a stamp that does
+	// not describe the process running them can only be wrong.
+	if sharedProcessIdentity(&config.Isolation) != config.SharedIdentity {
+		return errors.New("hermes supervisor authority disposition does not match the identity it runs as")
+	}
+
+	if config.SharedIdentity &&
+		(config.IdentityLock || config.AuthorityDomain || config.StandaloneAuthority ||
+			config.Isolation.StandaloneOwnerID != "" || config.Isolation.StandaloneStateRoot != "") {
+		return errors.New("hermes shared supervisor authority disposition is invalid")
 	}
 
 	validation := config.Isolation
@@ -406,6 +432,14 @@ func setHermesSupervisorCloseOnExec(fd int) error {
 func validateHermesSupervisorIdentity(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation is required")
+	}
+
+	// The supervisor drops privilege to reach the native identity, so it has to
+	// hold a higher one first. When the native identity is the one it already
+	// runs as there is no descent to make, and demanding root would refuse the
+	// only launch such a deployment can perform.
+	if sharedProcessIdentity(isolation) {
+		return nil
 	}
 
 	effectiveUID := supervisorEffectiveUID()
@@ -501,6 +535,15 @@ func acquireHermesSupervisorAuthority(
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
 ) (*hermesSupervisorAuthority, error) {
+	// A shared identity carries no authority. The durable registry records who
+	// may enter an identity nobody is in, and the supervisor is already in this
+	// one, so there is nothing to claim, adopt, publish or release.
+	if config.SharedIdentity {
+		return &hermesSupervisorAuthority{
+			identity: &agentIdentityLock{}, domain: &agentIdentityLock{},
+		}, nil
+	}
+
 	if !config.IdentityLock && config.Isolation.TestOnlyNoCredential &&
 		config.Isolation.StandaloneOwnerID == "" && config.Isolation.StandaloneStateRoot == "" {
 		return &hermesSupervisorAuthority{
