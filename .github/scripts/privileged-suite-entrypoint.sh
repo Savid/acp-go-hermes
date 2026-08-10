@@ -7,7 +7,28 @@
 # suite that never executed as a pass.
 set -eu
 
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$script_dir/initial-pid-namespace.sh"
+
 target=${1:?usage: privileged-suite-entrypoint.sh <make-target>}
+: "${ACP_GO_PRIVILEGED_SHARD:?privileged shard identity is required}"
+: "${ACP_GO_PRIVILEGED_MODULE:?privileged module identity is required}"
+: "${ACP_GO_PRIVILEGED_PACKAGES:?privileged shard package selector is required}"
+: "${ACP_GO_PRIVILEGED_COVERAGE_OUT:?privileged shard coverage output is required}"
+: "${ACP_GO_PRIVILEGED_REQUIRED_CLASSES:?trusted-supervisor required classes are required}"
+
+case "$target" in
+coverage-check)
+	private_target=_privileged-shard-coverage
+	;;
+test-trusted-supervisor)
+	private_target=_privileged-shard-trusted-supervisor
+	;;
+*)
+	echo "unsupported privileged suite target $target" >&2
+	exit 1
+	;;
+esac
 
 # Pinned because the suite asserts on exact directory modes. A umask of 0077
 # turns a 0755 fixture into 0700 and breaks the traversal cases; a slacker one
@@ -22,12 +43,16 @@ chmod 0700 /var/lib/acp-go /var/lib/acp-go/agent-identities
 echo "::group::privileged suite environment"
 id
 echo "pid namespace inode: $(stat -Lc '%i' /proc/self/ns/pid) (initial is 4026531836)"
+echo "entrypoint pid:       $$"
 echo "pid 1:               $(cat /proc/1/comm 2>/dev/null || echo unknown)"
 echo "umask:               $(umask)"
 printf 'temp root:           %s fstype=%s mode=%s owner=%s:%s\n' \
 	"$TMPDIR" "$(stat -f -c '%T' "$TMPDIR")" \
 	"$(stat -c '%a' "$TMPDIR")" "$(stat -c '%u' "$TMPDIR")" "$(stat -c '%g' "$TMPDIR")"
 echo "authority root:      mode=$(stat -c '%a' /var/lib/acp-go/agent-identities) owner=$(stat -c '%u:%g' /var/lib/acp-go/agent-identities)"
+echo "package shard:       $ACP_GO_PRIVILEGED_SHARD"
+echo "module:              $ACP_GO_PRIVILEGED_MODULE"
+echo "packages:            $ACP_GO_PRIVILEGED_PACKAGES"
 echo "setsid:              $(command -v setsid || echo missing)"
 echo "go:                  $(go version)"
 echo "go build cache:      $(go env GOCACHE)"
@@ -57,10 +82,17 @@ done
 # starves the 100% coverage gate, so refuse up front instead of reporting a
 # confusing coverage shortfall later.
 namespace=$(stat -Lc '%i' /proc/self/ns/pid)
-if [ "$namespace" != 4026531836 ] && [ "$$" != 1 ]; then
+if ! is_initial_pid_namespace_inode "$namespace"; then
 	echo "privileged suite is not in the initial PID namespace (inode $namespace)" >&2
 	echo "the host daemon must support --pid=host for this suite to establish agent authority" >&2
 	exit 1
 fi
 
-exec make "$target"
+exec make \
+	ACP_GO_PRIVILEGED_INTERNAL=1 \
+	"ACP_GO_PRIVILEGED_SHARD=$ACP_GO_PRIVILEGED_SHARD" \
+	"ACP_GO_PRIVILEGED_MODULE=$ACP_GO_PRIVILEGED_MODULE" \
+	"ACP_GO_PRIVILEGED_PACKAGES=$ACP_GO_PRIVILEGED_PACKAGES" \
+	"ACP_GO_PRIVILEGED_COVERAGE_OUT=$ACP_GO_PRIVILEGED_COVERAGE_OUT" \
+	"ACP_GO_PRIVILEGED_REQUIRED_CLASSES=$ACP_GO_PRIVILEGED_REQUIRED_CLASSES" \
+	"$private_target"

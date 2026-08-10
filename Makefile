@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: test-trusted-supervisor
+.PHONY: test-trusted-supervisor _privileged-shard-guard _privileged-shard-coverage _privileged-shard-trusted-supervisor _privileged-coverage-gate
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -41,7 +41,7 @@ test-trusted-supervisor:
 	@test "$$(uname -s)" = Linux
 	@test "$$(id -u)" -eq 0
 	@for directory in /var/lib/acp-go /var/lib/acp-go/agent-identities; do if [ ! -e "$$directory" ] && [ ! -L "$$directory" ]; then install -d -o root -g root -m 0700 "$$directory"; fi; [ "$$(stat -c '%F %u %g %a' -- "$$directory")" = 'directory 0 0 700' ] || { echo "unsafe trusted-supervisor authority directory $$directory" >&2; exit 1; }; done
-	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); module=$$(go list -m); status=$$?; \
+	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|NativeOwnedDirectory|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); module=$$(go list -mod=readonly -m); status=$$?; \
 	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
 	go test -list "$$selector" ./... >"$$listing"; status=$$?; \
 	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
@@ -74,6 +74,43 @@ test-cross-compile:
 ## coverage-check: require 100% statement coverage with race instrumentation
 coverage-check:
 	go test -race -coverprofile=coverage.out -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) ./...
+	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
+	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
+
+# Private container-only shard verbs. Public release targets above always cover
+# ./... and enforce their complete gates; only the privileged coordinator calls
+# these explicitly partial targets after validating a six-module package map.
+_privileged-shard-guard:
+	@test '$(ACP_GO_PRIVILEGED_INTERNAL)' = 1
+	@case '$(ACP_GO_PRIVILEGED_SHARD)' in root|provider) ;; *) echo 'invalid privileged shard $(ACP_GO_PRIVILEGED_SHARD)' >&2; exit 1 ;; esac
+	@test -n '$(ACP_GO_PRIVILEGED_MODULE)'
+	@test -n '$(ACP_GO_PRIVILEGED_PACKAGES)'
+	@test -n '$(ACP_GO_PRIVILEGED_REQUIRED_CLASSES)'
+	@test "$$(go list -mod=readonly -m)" = '$(ACP_GO_PRIVILEGED_MODULE)'
+
+_privileged-shard-coverage: _privileged-shard-guard
+	@case '$(ACP_GO_PRIVILEGED_COVERAGE_OUT)' in .tmp/coverage-*.out) ;; *) echo 'invalid privileged coverage output $(ACP_GO_PRIVILEGED_COVERAGE_OUT)' >&2; exit 1 ;; esac
+	go test -race -coverprofile='$(ACP_GO_PRIVILEGED_COVERAGE_OUT)' -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) $(ACP_GO_PRIVILEGED_PACKAGES)
+
+_privileged-shard-trusted-supervisor: _privileged-shard-guard
+	@test "$$(uname -s)" = Linux
+	@test "$$(id -u)" -eq 0
+	@for directory in /var/lib/acp-go /var/lib/acp-go/agent-identities; do if [ ! -e "$$directory" ] && [ ! -L "$$directory" ]; then install -d -o root -g root -m 0700 "$$directory"; fi; [ "$$(stat -c '%F %u %g %a' -- "$$directory")" = 'directory 0 0 700' ] || { echo "unsafe trusted-supervisor authority directory $$directory" >&2; exit 1; }; done
+	@selector='^(Test.*(ProcessIsolationActual|TrustedSupervisor|SupervisorGuardianSIGKILL|SupervisorLivenessSIGKILL|GeneratedNative|NativeOwnedDirectory|BorrowedIdentityAdoption|BorrowedDomainAdoption|BorrowedDisposition|AgentIdentityLock|AgentStandalone|AuthorityDomain|IdentityDisposition|PersistentProof|SupervisorConfigIsSealed|CommandCreatorThread|ProviderCreator|SecurityLimits).*)$$'; listing=$$(mktemp); log=$$(mktemp); rc=$$(mktemp); \
+	go test -list "$$selector" $(ACP_GO_PRIVILEGED_PACKAGES) >"$$listing"; status=$$?; \
+	[ "$$status" -eq 0 ] || { rm -f "$$listing" "$$log" "$$rc"; exit "$$status"; }; \
+	required='$(ACP_GO_PRIVILEGED_REQUIRED_CLASSES)'; \
+	for class in $$required; do grep -Eq "^Test.*$${class}" "$$listing" || { rm -f "$$listing" "$$log" "$$rc"; echo "trusted-supervisor selector discovered no $${class} tests in $(ACP_GO_PRIVILEGED_SHARD) shard"; exit 1; }; done; \
+	expected=$$(grep -Ec '^Test' "$$listing" || true); rm -f "$$listing"; \
+	[ "$$expected" -gt 0 ] || { rm -f "$$log" "$$rc"; echo 'trusted-supervisor shard selector discovered no tests'; exit 1; }; \
+	{ go test -race -count=1 -json -run "$$selector" $(ACP_GO_PRIVILEGED_PACKAGES); echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); passed=$$(grep -Ec '"Action":"pass","Package":"[^"]+","Test":"Test[^/"]+"' "$$log" || true); skipped=$$(grep -Ec '"Action":"skip","Package":"[^"]+","Test":"Test[^"]+"' "$$log" || true); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$passed" -eq "$$expected" ] || { echo "trusted-supervisor pass count $$passed, want $$expected"; exit 1; }; \
+	[ "$$skipped" -eq 0 ] || { echo "trusted-supervisor skip count $$skipped, want 0"; exit 1; }
+
+_privileged-coverage-gate:
 	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
 	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
