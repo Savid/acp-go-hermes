@@ -211,17 +211,6 @@ func (a *Agent) close() error {
 	}
 
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
-
-	// The broker is completed after the sessions, because closing a session
-	// cancels the logins it published and those cancels are native calls the
-	// broker still has to carry.
-	if a.providerAuth != nil {
-		brokerCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, a.providerAuth.closeBroker(brokerCtx))
-
-		cancel()
-	}
-
 	a.mu.Lock()
 	err = errors.Join(err, a.containmentErr)
 	a.mu.Unlock()

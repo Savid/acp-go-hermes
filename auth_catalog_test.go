@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -77,7 +78,14 @@ func TestMethodsFailurePaths(t *testing.T) {
 
 	client.authProvidersErr = nil
 
-	stopAuthBroker(t, agent)
+	session, err := agent.providerAuth.authSession(string(testSessionID))
+	if err != nil {
+		t.Fatalf("authSession: %v", err)
+	}
+
+	session.mu.Lock()
+	session.client = nil
+	session.mu.Unlock()
 
 	_, err = callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseTransport)
@@ -235,4 +243,69 @@ func TestMethodsRejectsAnUnknownParamField(t *testing.T) {
 
 	_, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID), "extra": 1})
 	requireInvalidField(t, err, "extra")
+}
+
+// TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn pins where a leg's
+// gateway comes from. An explicit process-isolation policy admits exactly one
+// live native process per standalone agent identity — the claim proves the
+// identity vacant across every task in the PID namespace — so a leg that starts
+// a second harness beside the session it is fenced by cannot claim that
+// identity at all while the session holds it. It waits out the whole claim
+// budget and then answers with the closed transport cause, which is a login
+// surface that never works under the very policy it exists to protect. Every
+// leg therefore answers on the runtime its addressed session already owns.
+func TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn(t *testing.T) {
+	t.Parallel()
+
+	agent, client := newAuthAgent(t)
+
+	launches := 0
+	agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+		launches++
+
+		return nil, errors.New("a provider-auth leg launched a native process")
+	}
+
+	client.authProviders = []nativehermes.AuthProvider{
+		{ID: testProviderID, Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode},
+	}
+	client.authStart = nativehermes.AuthStart{SessionID: "native-flow", Flow: nativehermes.AuthFlowDeviceCode, URL: "https://example.test/device"}
+
+	catalog, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
+	if err != nil {
+		t.Fatalf("methods: %v", err)
+	}
+
+	methods := mustType[authMethodsResult](t, catalog)
+
+	authorized, err := callLeg(t, agent, AuthAuthorizeMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID,
+		"connectionId": testConnectionID, "methodsGeneration": methods.Generation,
+		"method": nativehermes.AuthFlowDeviceCode, "authorizeRequestId": "leg-runtime",
+	})
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	flow := mustType[authAuthorizeResult](t, authorized)
+
+	if _, err = callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": flow.FlowID,
+	}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	if _, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)}); err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	if _, err = callLeg(t, agent, AuthCancelMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": testProviderID, "flowId": flow.FlowID,
+	}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	if launches != 0 {
+		t.Fatalf("provider-auth legs performed %d native launches, want none", launches)
+	}
 }

@@ -82,6 +82,17 @@ var (
 	supervisorPoll              = unix.Poll
 )
 
+// hermesSupervisorSignals is the set a trusted supervisor answers instead of
+// dying on. SIGHUP belongs in it because the kernel sends one — followed by
+// SIGCONT — to a process group that its own exit notification has just
+// orphaned while a member of it is stopped (POSIX 3.2.2.2). Killing a
+// supervisor whose peer is stopped is exactly that shape, so the surviving
+// supervisor is handed a hangup it never asked for; unhandled, Go's default
+// action ends it where it stands, abandoning the native descendants it is the
+// only subreaper for and closing the proof pipe with no proof on it. Answered,
+// a hangup runs the same containment ladder SIGTERM and SIGINT run.
+var hermesSupervisorSignals = []os.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP}
+
 func init() { //nolint:gochecknoinits // A private self-exec mode is required before the embedding host's main runs.
 	runHermesSupervisorInit()
 }
@@ -589,7 +600,7 @@ func runHermesProcessSupervisorGuardian(config hermesSupervisorConfig, control *
 
 	signals := make(chan os.Signal, 2)
 
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(signals, hermesSupervisorSignals...)
 	defer signal.Stop(signals)
 
 	authority, err := acquireHermesSupervisorAuthority(
@@ -907,11 +918,26 @@ func completeHermesSupervisorAuthority(
 		case <-guardianDone:
 			return writeHermesSupervisorProof(proof)
 		default:
-			if _, err := io.WriteString(status, "done\n"); err != nil {
-				return fmt.Errorf("publish Hermes liveness completion: %w", err)
+			_, err := io.WriteString(status, "done\n")
+			if err == nil {
+				return nil
 			}
 
-			return nil
+			// A guardian that has already died is indistinguishable from one
+			// still waiting up in the select above: the peer close may not have
+			// been observed yet. EPIPE settles it. The guardian holds the only
+			// read end of this pipe until it exits, so a write refused for want
+			// of a reader is proof it is gone and will never publish the proof
+			// byte, and this supervisor — which has just proved containment and
+			// released its authority — is the only one left that can. Every
+			// other publication failure says nothing about the peer and is
+			// still reported rather than answered with a proof nobody received
+			// the completion behind.
+			if errors.Is(err, syscall.EPIPE) {
+				return writeHermesSupervisorProof(proof)
+			}
+
+			return fmt.Errorf("publish Hermes liveness completion: %w", err)
 		}
 	}
 
@@ -951,7 +977,7 @@ func runHermesProcessSupervisorNative(
 
 	signals := make(chan os.Signal, 1)
 
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(signals, hermesSupervisorSignals...)
 	defer signal.Stop(signals)
 
 	authority, err := acquireHermesSupervisorAuthority(

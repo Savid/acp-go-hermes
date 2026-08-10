@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,9 +107,31 @@ func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnec
 		t.Fatalf("provider auth capability absent with a configured root: %#v", hermesMeta)
 	}
 
-	names, _ := capability["methods"].([]any)
-	if len(names) != 7 {
-		t.Fatalf("advertised %d legs, want seven: %#v", len(names), names)
+	rawNames, ok := capability["methods"].([]any)
+	if !ok {
+		t.Fatalf("provider auth methods are not an array: %#v", capability["methods"])
+	}
+
+	names := make([]string, len(rawNames))
+	for index, rawName := range rawNames {
+		name, stringOK := rawName.(string)
+		if !stringOK {
+			t.Fatalf("provider auth method %d is not a string: %#v", index, rawName)
+		}
+
+		names[index] = name
+	}
+
+	wantNames := []string{
+		hermesacp.AuthMethodsMethod,
+		hermesacp.AuthAuthorizeMethod,
+		hermesacp.AuthCallbackMethod,
+		hermesacp.AuthStatusMethod,
+		hermesacp.AuthCancelMethod,
+		hermesacp.AuthInventoryMethod,
+	}
+	if !slices.Equal(names, wantNames) {
+		t.Fatalf("advertised provider auth methods = %#v, want %#v", names, wantNames)
 	}
 
 	return conn, agent, authHome

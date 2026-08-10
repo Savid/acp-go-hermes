@@ -173,6 +173,10 @@ func (p *providerAuth) publishFlow(ctx context.Context, session *session, key au
 		superseded.stopCompleter()
 	}
 
+	// Bind the flow to this concrete session lifetime before it becomes visible.
+	// The durable session ID may later be reused by session/load, but native
+	// cleanup for this flow must remain on the runtime that minted it.
+	flow.session = session
 	p.flows[key] = flow
 	p.byID[flow.id] = flow
 	p.retained[key] = flow
@@ -180,7 +184,7 @@ func (p *providerAuth) publishFlow(ctx context.Context, session *session, key au
 	p.mu.Unlock()
 
 	if superseded != nil {
-		p.cancelNative(ctx, superseded)
+		p.cancelNativeFlow(ctx, superseded.session, superseded)
 	}
 
 	return nil

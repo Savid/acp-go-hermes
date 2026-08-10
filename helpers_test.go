@@ -253,17 +253,6 @@ type fakeQuestionReject struct {
 	route     nativehermes.QuestionRoute
 }
 
-// withTestClientFactory makes every native launch this agent performs — a
-// session's and the provider-auth broker's alike — resolve to the supplied fake
-// gateway instead of a hermes process.
-func withTestClientFactory(client nativehermes.Server) Option {
-	return func(options *Options) {
-		options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
-			return client, nil
-		}
-	}
-}
-
 func newFakeHermesClient() *fakeHermesClient {
 	return &fakeHermesClient{
 		events: make(chan nativehermes.TurnEvent, 16),

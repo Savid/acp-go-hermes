@@ -70,7 +70,7 @@ func (p *providerAuth) failSettled(ctx context.Context, flow *authFlow, cause st
 func (p *providerAuth) fail(ctx context.Context, flow *authFlow, cause string, materialInFlight bool) error {
 	if state, reason := authFlowTransition(cause, materialInFlight); state != "" {
 		p.terminalize(flow, state, reason)
-		p.cancelNative(ctx, flow)
+		p.cancelNativeFlow(ctx, flow.session, flow)
 	}
 
 	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)

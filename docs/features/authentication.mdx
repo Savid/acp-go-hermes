@@ -42,18 +42,6 @@ receives the same canonical path, and native Hermes performs all credential
 reads and writes there. The adapter never parses, copies, returns, injects, or
 snapshots credential material.
 
-The provider-auth legs are answered by a broker process bound to that durable
-home rather than by any session's harness. It starts lazily on the first leg
-that needs it, is shared by every later leg, and is completed when the agent
-closes. A session id still fences each leg, names the lifetime a flow is
-addressed within, and is what close sweeps — it just no longer decides which
-process answers. So the catalog does not cost a harness start per request, and
-the broker survives deletion of the session that started it. Flows do not: a
-flow stays addressable only within the session that opened it, and closing or
-deleting that session cancels the flow — including natively at Hermes — and
-makes it invalid from then on. Drive a login from a single session held open
-across `authorize`, `callback`/`status`, and `cancel`.
-
 The launch environment also sets a random
 `HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser
 shim as defense in depth. Hermes v0.19.0 does not invoke that shim on this API

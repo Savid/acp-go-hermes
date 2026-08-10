@@ -248,36 +248,6 @@ func TestStatusCachesPendingPollsBehindTheFloor(t *testing.T) {
 	}
 }
 
-// TestStatusServesTheCachedStateWhenTheBrokerIsGone keeps a poll that cannot
-// reach a gateway from being an answer. Status reports the flow as the adapter
-// last knew it and leaves the state untouched, because "the harness is not
-// reachable" is not evidence about what the provider did.
-func TestStatusServesTheCachedStateWhenTheBrokerIsGone(t *testing.T) {
-	agent, client := newAuthAgent(t)
-	presentation := startDeviceFlow(t, agent, client)
-
-	client.authPollFunc = func(context.Context, string, string) (nativehermes.AuthPoll, error) {
-		t.Error("status polled the provider without a native gateway")
-
-		return nativehermes.AuthPoll{}, nil
-	}
-
-	stopAuthBroker(t, agent)
-
-	result, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
-		"sessionId":  string(testSessionID),
-		"providerId": testProviderID,
-		"flowId":     presentation.FlowID,
-	})
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-
-	if got := mustType[authStatusResult](t, result); got.State != authStatePending {
-		t.Fatalf("status = %#v, want the cached pending state", got)
-	}
-}
-
 func TestAuthorizeReplayAndCancellationAreIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -317,6 +287,85 @@ func TestAuthorizeReplayAndCancellationAreIdempotent(t *testing.T) {
 
 	if len(client.authCancelled) != 1 || client.authCancelled[0] != "native-device" {
 		t.Fatalf("native cancellations = %#v", client.authCancelled)
+	}
+}
+
+func TestCancelKeepsAddressedSessionLifetimeAcrossCloseAndReopen(t *testing.T) {
+	t.Parallel()
+
+	agent, oldClient := newAuthAgent(t)
+	presentation := startDeviceFlow(t, agent, oldClient)
+	params := authRawParams(t, map[string]any{
+		"sessionId":  string(testSessionID),
+		"providerId": testProviderID,
+		"flowId":     presentation.FlowID,
+	})
+
+	oldSession, flow, err := agent.providerAuth.addressedFlowLeg(params)
+	if err != nil {
+		t.Fatalf("address cancel: %v", err)
+	}
+	if flow.session != oldSession {
+		t.Fatal("flow was not bound to the addressed session lifetime")
+	}
+
+	ledgerBefore, present, err := agent.providerAuth.ledger.read(testProviderID)
+	if err != nil || !present {
+		t.Fatalf("read lineage before cancel: %#v/%v/%v", ledgerBefore, present, err)
+	}
+
+	// This is the exact dispatch ordering that used to redirect cleanup: the
+	// cancel leg has retained the addressed objects and terminalized the flow;
+	// close therefore sees no pending flow, removes the old runtime, and load
+	// publishes a replacement with the same durable session ID before native
+	// cleanup resumes.
+	if !agent.providerAuth.markOwnerCancelled(flow) {
+		t.Fatal("pending flow did not accept owner cancellation")
+	}
+	if closeErr := oldSession.Close(context.Background()); closeErr != nil {
+		t.Fatalf("close old session: %v", closeErr)
+	}
+	if !agent.removeSessionIf(testSessionID, oldSession) {
+		t.Fatal("old session was not current at removal")
+	}
+
+	replacementClient := newFakeHermesClient()
+	replacement := newSession(
+		agent,
+		testSessionID,
+		"/cwd",
+		nil,
+		nil,
+		nativehermes.Session{ID: "native-replacement"},
+		replacementClient,
+		sessionMeta{},
+		idmapRecord{},
+	)
+	if storeErr := agent.storeStartedSession(replacement); storeErr != nil {
+		t.Fatalf("reopen replacement session: %v", storeErr)
+	}
+
+	agent.providerAuth.cancelNativeFlow(context.Background(), oldSession, flow)
+
+	if len(oldClient.authCancelled) != 1 || oldClient.authCancelled[0] != "native-device" {
+		t.Fatalf("old runtime cancellations = %#v", oldClient.authCancelled)
+	}
+	if len(replacementClient.authCancelled) != 0 {
+		t.Fatalf("replacement runtime received old cancellation: %#v", replacementClient.authCancelled)
+	}
+	if flow.state != authStateCancelled || flow.reason != authReasonOwnerCancel {
+		t.Fatalf("flow terminal = %s/%s", flow.state, flow.reason)
+	}
+	if agent.providerAuth.byID[flow.id] != nil || agent.providerAuth.flows[authFlowKey{
+		sessionID:  testSessionID,
+		providerID: testProviderID,
+	}] != nil {
+		t.Fatal("closed flow remained addressable")
+	}
+
+	ledgerAfter, present, err := agent.providerAuth.ledger.read(testProviderID)
+	if err != nil || !present || ledgerAfter != ledgerBefore {
+		t.Fatalf("owner cancel mutated lineage: before=%#v after=%#v present=%v err=%v", ledgerBefore, ledgerAfter, present, err)
 	}
 }
 

@@ -539,6 +539,28 @@ func TestHermesSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
 		}
 	})
 
+	// A guardian can die between this supervisor's last look at the peer and
+	// the handoff, which leaves the handoff writing into a pipe whose only
+	// reader is gone. That EPIPE is not a completion failure: it names this
+	// supervisor as the only one left that can publish the proof, and the proof
+	// is what the parent fails closed without. Every other publication failure
+	// stays a reported failure — see
+	// TestSupervisorCompletionReportsALostStatusChannel.
+	t.Run("guardian read end is gone", func(t *testing.T) {
+		authority, _ := newAuthority(t)
+		agentIdentityLockClose = func(file *os.File) error { return file.Close() }
+
+		var proof bytes.Buffer
+		if err := completeHermesSupervisorAuthority(
+			&authority, make(chan struct{}), hermesSupervisorBrokenPipe{}, &proof, true,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if authority != nil || !bytes.Equal(proof.Bytes(), []byte{1}) {
+			t.Fatalf("readerless handoff authority=%v proof=%v", authority, proof.Bytes())
+		}
+	})
+
 	t.Run("unavailable", func(t *testing.T) {
 		var proof bytes.Buffer
 		if err := completeHermesSupervisorAuthority(nil, nil, nil, &proof, false); err == nil {
@@ -579,6 +601,15 @@ func TestHermesSupervisorConfigRequiresExplicitAuthorityOrigin(t *testing.T) {
 	}
 }
 
+// hermesSupervisorBrokenPipe is the status channel of a guardian that is
+// already gone: every write is refused the way a pipe with no reader left
+// refuses one.
+type hermesSupervisorBrokenPipe struct{}
+
+func (hermesSupervisorBrokenPipe) Write([]byte) (int, error) {
+	return 0, syscall.EPIPE
+}
+
 type hermesSupervisorOrderWriter struct {
 	order *[]string
 }
@@ -600,14 +631,26 @@ type supervisorPeerDeathFixture struct {
 	uid            uint32
 }
 
+// TestProcessIsolationSupervisorGuardianSIGKILLRetainsAuthorityThroughECHILD
+// kills the stopped survivor's own parent, which orphans the survivor's process
+// group while it still holds a stopped member. The kernel answers that with a
+// SIGHUP and a SIGCONT to the whole newly orphaned group (POSIX 3.2.2.2), and
+// whether it observes the survivor still stopped is a race with this test's own
+// resume. The hangup is delivered here rather than waited for, so the case
+// asserts the behavior every time instead of on the fraction of runs the kernel
+// happened to lose that race on.
 func TestProcessIsolationSupervisorGuardianSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
 	fixture := startSupervisorPeerDeathFixture(t, 64331, 64332, "guardian-death")
-	exerciseSupervisorPeerDeath(t, fixture, fixture.livenessPID, fixture.guardianPID)
+	exerciseSupervisorPeerDeath(t, fixture, fixture.livenessPID, fixture.guardianPID, true)
 }
 
+// TestProcessIsolationSupervisorLivenessSIGKILLRetainsAuthorityThroughECHILD is
+// the mirrored case. Killing the liveness supervisor orphans no group — the
+// guardian's parent is the host process, which outlives it — so no hangup is
+// part of this shape and none is delivered.
 func TestProcessIsolationSupervisorLivenessSIGKILLRetainsAuthorityThroughECHILD(t *testing.T) {
 	fixture := startSupervisorPeerDeathFixture(t, 64341, 64342, "liveness-death")
-	exerciseSupervisorPeerDeath(t, fixture, fixture.guardianPID, fixture.livenessPID)
+	exerciseSupervisorPeerDeath(t, fixture, fixture.guardianPID, fixture.livenessPID, false)
 }
 
 func startSupervisorPeerDeathFixture(t *testing.T, uid, gid uint32, ownerID string) *supervisorPeerDeathFixture {
@@ -716,7 +759,7 @@ func readSupervisorProcessIdentity(pid int) (supervisorTestProcessIdentity, erro
 	return supervisorTestProcessIdentity{parentPID: parentPID, state: state}, nil
 }
 
-func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixture, survivorPID, victimPID int) {
+func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixture, survivorPID, victimPID int, orphaned bool) {
 	t.Helper()
 	if err := syscall.Kill(survivorPID, syscall.SIGSTOP); err != nil {
 		t.Fatalf("stop surviving trusted supervisor %d: %v", survivorPID, err)
@@ -726,6 +769,12 @@ func exerciseSupervisorPeerDeath(t *testing.T, fixture *supervisorPeerDeathFixtu
 		t.Fatalf("kill trusted supervisor peer %d: %v", victimPID, err)
 	}
 	assertSupervisorAuthorityLocks(t, fixture.authorityRoot, fixture.uid, false)
+
+	if orphaned {
+		if err := syscall.Kill(survivorPID, syscall.SIGHUP); err != nil {
+			t.Fatalf("hang up orphaned trusted supervisor %d: %v", survivorPID, err)
+		}
+	}
 
 	if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
 		t.Fatalf("resume surviving trusted supervisor %d: %v", survivorPID, err)
