@@ -151,6 +151,86 @@ func TestLinuxSupervisorPreservesCommandEnvironmentSemantics(t *testing.T) {
 	}
 }
 
+// TestLinuxSupervisorControlCallbacksRequestProvedShutdown drives each control
+// callback installed by the strict launch boundary first on its own live
+// containment. Both callbacks close the private control pipe: the trusted
+// supervisor, rather than the embedding process, owns target escalation,
+// descendant reaping, and the terminal proof.
+func TestLinuxSupervisorControlCallbacksRequestProvedShutdown(t *testing.T) {
+	for _, control := range []struct {
+		name string
+		run  func(*processContainment) error
+	}{
+		{name: "terminate", run: func(containment *processContainment) error { return containment.terminate(nil) }},
+		{name: "kill", run: func(containment *processContainment) error { return containment.kill(nil) }},
+	} {
+		t.Run(control.name, func(t *testing.T) {
+			restoreLinuxSupervisorSeams(t)
+
+			inputRead, inputWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = inputRead.Close()
+				_ = inputWrite.Close()
+			})
+			outputRead, outputWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = outputRead.Close()
+				_ = outputWrite.Close()
+			})
+
+			command := exec.Command("/bin/cat")
+			command.Stdin = inputRead
+			command.Stdout = outputWrite
+			configureHermesProcess(command)
+
+			containment, err := startUnixContainedProcess(
+				command, ContainmentSpec{Isolation: testProcessIsolation()},
+			)
+			if err != nil {
+				t.Fatalf("start strict supervisor: %v", err)
+			}
+			_ = inputRead.Close()
+			_ = outputWrite.Close()
+			wait := containment.directChild(command)
+			t.Cleanup(func() { _ = containment.close() })
+
+			// The round trip is what proves the native child is already running
+			// when the callback fires, without a sleep or a polling loop.
+			if _, err = inputWrite.Write([]byte{1}); err != nil {
+				t.Fatalf("write native readiness byte: %v", err)
+			}
+			if err = outputRead.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatalf("set native readiness deadline: %v", err)
+			}
+			var ready [1]byte
+			if _, err = io.ReadFull(outputRead, ready[:]); err != nil || ready[0] != 1 {
+				t.Fatalf("read native readiness byte = %v, %v", ready, err)
+			}
+
+			if err = control.run(containment); err != nil {
+				t.Fatalf("request strict supervisor shutdown: %v", err)
+			}
+			select {
+			case <-wait.done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("strict supervisor did not exit after the control pipe closed")
+			}
+			if err = containment.complete(5 * time.Second); err != nil {
+				t.Fatalf("complete strict supervisor containment: %v", err)
+			}
+			if err = containment.close(); err != nil {
+				t.Fatalf("close strict supervisor containment: %v", err)
+			}
+		})
+	}
+}
+
 func TestLinuxSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	const (
 		phaseEnv  = "ACP_GO_HERMES_TEST_NO_NEW_PRIVS_PHASE"

@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +46,17 @@ func TestSupervisorStartRefusesAnUnusableTarget(t *testing.T) {
 				return exec.Command("/bin/true")
 			},
 			want: "containment is not configured",
+		},
+		{
+			name: "target executable is unavailable",
+			target: func(t *testing.T) *exec.Cmd {
+				t.Helper()
+				target := exec.Command(filepath.Join(t.TempDir(), "missing"))
+				configureHermesProcess(target)
+
+				return target
+			},
+			want: "no such file or directory",
 		},
 		{
 			name: "target carrying its own descriptors",

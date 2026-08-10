@@ -41,6 +41,7 @@ func TestProcessIsolationOmissionResolvesAndRunsOnWindows(t *testing.T) {
 	status := filepath.Join(t.TempDir(), "ordinary-identity.txt")
 	output, err := os.Create(status)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = output.Close() })
 
 	command := exec.Command(resolved, "/c", "echo", "ordinary-windows-child")
 	command.Stdout = output

@@ -50,15 +50,7 @@ func newOrdinaryContainment(process ordinaryChild, direct *directChildWait) *pro
 	containment := &processContainment{direct: direct}
 
 	containment.completeFn = func(timeout time.Duration) error {
-		if timeout <= 0 {
-			timeout = ordinaryContainmentDeadline
-		}
-
-		if err := process.kill(); err != nil {
-			return err
-		}
-
-		return direct.awaitReaped(timeout)
+		return completeOrdinaryDirectChild(process, direct, timeout)
 	}
 	containment.terminateFn = func() error { return process.terminate() }
 	containment.killFn = func() error { return process.kill() }

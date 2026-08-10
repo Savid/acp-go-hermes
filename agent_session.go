@@ -324,9 +324,10 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	mcpServers := cloneMCPServers(s.mcpServers)
 	wantIDMap := s.idmap
 	meta := sessionMeta{
-		Model:       joinModelValue(s.providerID, s.modelID),
-		Env:         cloneStringMap(s.env),
-		RawMessages: s.rawMessages,
+		Model:         joinModelValue(s.providerID, s.modelID),
+		Env:           cloneStringMap(s.env),
+		ExtraPathDirs: slices.Clone(s.extraPathDirs),
+		RawMessages:   s.rawMessages,
 	}
 	s.mu.Unlock()
 
@@ -478,7 +479,11 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 	}
 
 	if !stringMapsEqual(snapshot.env, meta.Env) {
-		return lifecycleMismatch("_meta.hermes.options.env")
+		return lifecycleMismatch(hermesEnvOptionPath)
+	}
+
+	if !slices.Equal(snapshot.extraPathDirs, meta.ExtraPathDirs) {
+		return lifecycleMismatch(hermesExtraPathDirsOptionPath)
 	}
 
 	if meta.Model != "" && meta.Model != joinModelValue(snapshot.providerID, snapshot.modelID) {
@@ -907,15 +912,12 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		factory = nativehermes.StartServer
 	}
 
-	env := cloneStringMap(a.options.Env)
-	if env == nil && len(meta.Env) > 0 {
-		env = map[string]string{}
-	}
+	baseEnv := cloneStringMap(a.options.Env)
+	delete(baseEnv, "HERMES_AUTH_HOME")
 
-	for key, value := range meta.Env {
-		env[key] = value
-	}
-	delete(env, "HERMES_AUTH_HOME")
+	sessionEnv := cloneStringMap(meta.Env)
+	delete(sessionEnv, "HERMES_AUTH_HOME")
+	sessionEnv = a.observe.InjectTraceEnv(ctx, sessionEnv)
 
 	var servers []acp.McpServer
 	if len(mcpServers) > 0 {
@@ -943,7 +945,9 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		ExecutablePath:   a.options.ExecutablePath,
 		DefaultModel:     firstNonEmpty(meta.Model, a.options.DefaultModel),
 		ProviderAuthHome: a.options.ProviderAuthHome,
-		Env:              a.observe.InjectTraceEnv(ctx, env),
+		Env:              baseEnv,
+		SessionEnv:       sessionEnv,
+		ExtraPathDirs:    slices.Clone(meta.ExtraPathDirs),
 		Isolation:        nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential, a.options.testOnlyIdentityLockRoot),
 		// The ambient snapshot travels alongside the policy rather than inside
 		// it, so an omitted policy stays nil the whole way to the launch

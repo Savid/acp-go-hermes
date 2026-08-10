@@ -1,14 +1,29 @@
 package hermesacp
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+
 	"github.com/coder/acp-go-sdk"
 )
 
+const (
+	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
+	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
+	sessionPathEnvironmentKey     = "PATH"
+	runtimePlatformWindows        = "windows"
+)
+
 type sessionMeta struct {
-	Model        string
-	Env          map[string]string
-	OutputSchema any
-	RawMessages  rawMessageConfig
+	Model         string
+	Env           map[string]string
+	ExtraPathDirs []string
+	OutputSchema  any
+	RawMessages   rawMessageConfig
 }
 
 func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
@@ -22,15 +37,17 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 	}
 
 	return sessionMeta{
-		Model:       options.Model,
-		Env:         options.Env,
-		RawMessages: rawMessageConfigFromMeta(meta),
+		Model:         options.Model,
+		Env:           cloneStringMap(options.Env),
+		ExtraPathDirs: slices.Clone(options.ExtraPathDirs),
+		RawMessages:   rawMessageConfigFromMeta(meta),
 	}, nil
 }
 
 type hermesMetaOptions struct {
-	Model string
-	Env   map[string]string
+	Model         string
+	Env           map[string]string
+	ExtraPathDirs []string
 }
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
@@ -53,6 +70,15 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 
 		options.Env = env
+	}
+
+	if rawDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
+		dirs, err := extraPathDirsFromMeta(rawDirs)
+		if err != nil {
+			return hermesMetaOptions{}, err
+		}
+
+		options.ExtraPathDirs = dirs
 	}
 
 	return options, nil
@@ -86,7 +112,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 					if _, ok := optionValue.(string); !ok {
 						return unsupportedField("_meta.hermes.options.model")
 					}
-				case metaEnvKey:
+				case metaEnvKey, metaExtraPathDirsKey:
 				case metaOutputSchemaKey:
 					return unsupportedField("_meta.hermes.options.outputSchema")
 				default:
@@ -127,13 +153,23 @@ func unsupportedField(path string) error {
 func stringMapFromMeta(value any) (map[string]string, error) {
 	switch typed := value.(type) {
 	case map[string]string:
+		for key := range typed {
+			if sessionEnvironmentOwnsPath(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
+			}
+		}
+
 		return cloneStringMap(typed), nil
 	case map[string]any:
 		out := make(map[string]string, len(typed))
 		for key, raw := range typed {
+			if sessionEnvironmentOwnsPath(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
+			}
+
 			str, ok := raw.(string)
 			if !ok {
-				return nil, unsupportedField("_meta.hermes.options.env")
+				return nil, unsupportedField(hermesEnvOptionPath)
 			}
 
 			out[key] = str
@@ -141,8 +177,72 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 
 		return out, nil
 	default:
-		return nil, unsupportedField("_meta.hermes.options.env")
+		return nil, unsupportedField(hermesEnvOptionPath)
 	}
+}
+
+func sessionEnvironmentOwnsPath(key string) bool {
+	return sessionEnvironmentOwnsPathForPlatform(key, runtime.GOOS)
+}
+
+func sessionEnvironmentOwnsPathForPlatform(key string, platform string) bool {
+	if platform == runtimePlatformWindows {
+		return strings.EqualFold(key, sessionPathEnvironmentKey)
+	}
+
+	return key == sessionPathEnvironmentKey
+}
+
+// extraPathDirsFromMeta accepts both the direct Go builder slice and the
+// []any shape produced by JSON decoding. Every error names the exact element
+// whose value could not be installed as one PATH component.
+func extraPathDirsFromMeta(value any) ([]string, error) {
+	var raw []any
+
+	switch typed := value.(type) {
+	case []string:
+		raw = make([]any, len(typed))
+		for index, dir := range typed {
+			raw[index] = dir
+		}
+	case []any:
+		raw = slices.Clone(typed)
+	default:
+		return nil, unsupportedField(hermesExtraPathDirsOptionPath)
+	}
+
+	dirs := make([]string, 0, len(raw))
+	for index, entry := range raw {
+		field := fmt.Sprintf("%s[%d]", hermesExtraPathDirsOptionPath, index)
+
+		dir, ok := entry.(string)
+		if !ok {
+			return nil, unsupportedField(field)
+		}
+
+		if dir == "" {
+			return nil, invalidExtraPathDir(field, "must not be empty")
+		}
+
+		if !filepath.IsAbs(dir) {
+			return nil, invalidExtraPathDir(field, "must be an absolute path")
+		}
+
+		if strings.ContainsRune(dir, os.PathListSeparator) {
+			return nil, invalidExtraPathDir(field, "must not contain the path list separator")
+		}
+
+		dirs = append(dirs, dir)
+	}
+
+	return dirs, nil
+}
+
+func invalidExtraPathDir(field string, reason string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: "session extra path dir " + reason,
+		keyField:       field,
+	})
 }
 
 func cloneAnyMap(values map[string]any) map[string]any {
@@ -179,6 +279,8 @@ func cloneAny(value any) any {
 		return cloneStringMap(typed)
 	case []any:
 		return cloneAnySlice(typed)
+	case []string:
+		return slices.Clone(typed)
 	default:
 		return value
 	}

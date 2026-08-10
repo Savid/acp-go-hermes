@@ -129,8 +129,11 @@ func TestWindowsOrdinaryRulesResolveQualifiedPaths(t *testing.T) {
 	_, err = lookOrdinaryPathWithRules(binDir+"/missing", nil, rules)
 	require.ErrorContains(t, err, "no executable extension")
 
-	// A directory is not a launch target under either rule set.
-	_, err = lookOrdinaryPathWithRules(binDir, nil, unixExecutableRules())
+	// A directory is not a launch target under Unix rules. Use Unix path syntax
+	// for this simulated rule set even when the test itself runs on Windows;
+	// otherwise a native backslash-only path is correctly treated as a bare
+	// name by rules whose sole separator is a forward slash.
+	_, err = lookOrdinaryPathWithRules(filepath.ToSlash(binDir), nil, unixExecutableRules())
 	require.ErrorContains(t, err, "is not executable")
 }
 

@@ -23,6 +23,9 @@ const (
 	envHermesHome         = "HERMES_HOME"
 	envHermesAuthHome     = "HERMES_AUTH_HOME"
 	envHermesSessionToken = "HERMES_DASHBOARD_SESSION_TOKEN"
+	// envHermesWebDist is operator-supplied rather than adapter-managed, so it
+	// is read out of a phase map rather than scrubbed out of one.
+	envHermesWebDist = "HERMES_WEB_DIST"
 )
 
 // ordinaryManagedEnvironmentKeys names the adapter-managed Hermes state an
@@ -55,19 +58,24 @@ func scrubOrdinaryEnvironmentKey(key string) bool {
 // adapter's own ambient environment minus its private and managed state, with
 // the caller overlay applied on top. The overlay is scrubbed on the same terms
 // as the base, so a caller cannot reintroduce through WithEnv what the ambient
-// scrub just removed.
+// scrub just removed. Each overlay is a later phase, so where names fold it
+// replaces the spelling an earlier phase installed rather than joining it.
 func ordinaryEnvironment(ambient map[string]string, overlays ...map[string]string) ([]string, error) {
-	env := make(map[string]string, len(ambient))
+	phases := make([]map[string]string, 0, len(overlays)+1)
 
+	base := make(map[string]string, len(ambient))
 	for key, value := range ambient {
 		if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 || scrubOrdinaryEnvironmentKey(key) {
 			continue
 		}
 
-		env[key] = value
+		base[key] = value
 	}
 
+	phases = append(phases, base)
+
 	for _, overlay := range overlays {
+		phase := make(map[string]string, len(overlay))
 		for key, value := range overlay {
 			if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 {
 				return nil, fmt.Errorf("process environment contains invalid key %q", key)
@@ -77,23 +85,18 @@ func ordinaryEnvironment(ambient map[string]string, overlays ...map[string]strin
 				continue
 			}
 
-			env[key] = value
+			phase[key] = value
 		}
+
+		phases = append(phases, phase)
 	}
 
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
+	env, err := mergeProcessEnvironmentPhases(phases...)
+	if err != nil {
+		return nil, err
 	}
 
-	slices.Sort(keys)
-
-	out := make([]string, 0, len(keys))
-	for _, key := range keys {
-		out = append(out, key+"="+env[key])
-	}
-
-	return out, nil
+	return sortedProcessEnvironment(env), nil
 }
 
 // executableSearchRules carries the platform facts ordinary executable

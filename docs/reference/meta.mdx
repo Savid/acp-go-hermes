@@ -97,7 +97,10 @@ Lifecycle requests accept:
     "hermes": {
       "options": {
         "model": "provider/model",
-        "env": {}
+        "env": {
+          "WAGIE_API_TOKEN": "session bearer"
+        },
+        "extraPathDirs": ["/absolute/operation/bin"]
       },
       "rawEvent": {
         "enabled": false
@@ -110,11 +113,21 @@ Lifecycle requests accept:
 | Field | Meaning |
 |---|---|
 | `options.model` | Selects the `provider/model` pair for the session. |
-| `options.env` | Per-session environment variables injected into Hermes. |
+| `options.env` | Per-session environment variables injected into only that session's Hermes process. A raw `PATH` key is rejected. |
+| `options.extraPathDirs` | Ordered absolute directories placed ahead of that process's browser shim and captured native base `PATH`. |
 | `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
 
 No other option keys are accepted; any unsupported field fails with an
 invalid-params `{"error":"unsupported"}` response.
+
+`options.extraPathDirs` accepts both the direct Go `[]string` form and the
+`[]any` form produced by JSON decoding. It preserves order and duplicates and
+deep-clones the list. A non-string, empty, relative, or path-list-separator
+entry fails closed naming the exact
+`_meta.hermes.options.extraPathDirs[i]` field. The same strict decoding applies
+to new, load, resume, and fork lifecycle requests. A raw session `env.PATH`
+fails naming `_meta.hermes.options.env.PATH`; top-level `WithEnv` remains the
+separate static native-base environment surface.
 
 ## Response metadata
 

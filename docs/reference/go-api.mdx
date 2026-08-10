@@ -33,7 +33,7 @@ still reach.
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported because each session runtime root is isolated. Use `WithScratchDir` for ephemeral state and `WithProviderAuthHome` for durable provider credentials. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Environment overlaid on `ProcessIsolation.BaseEnvironment`, or on the sanitized ambient environment in ordinary mode, for each `hermes serve` process. |
+| `WithEnv` | Static Agent-scoped environment overlaid on `ProcessIsolation.BaseEnvironment`, or on the captured sanitized ambient environment in ordinary mode, for Hermes executable lookup, version probing, and each `hermes serve` process. This is the only API that may set the native base `PATH`. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
@@ -171,8 +171,21 @@ identity.
 
 ## Session Hermes options
 
-`HermesOptions` carries the `Model`, `Env`, and `OutputSchema` fields;
-`NewHermesOptions` builds one from the `WithHermesModel`, `WithHermesEnv`, and
-`WithHermesOutputSchema` constructor options. Setting a schema — through the
-field or `WithHermesOutputSchema` — is accepted for API symmetry but fails
-session start with the uniform unsupported-field error.
+`HermesOptions` carries the `Model`, `Env`, `ExtraPathDirs`, and `OutputSchema`
+fields. `NewHermesOptions` builds one from `WithHermesModel`, `WithHermesEnv`,
+`WithHermesExtraPathDirs`, and `WithHermesOutputSchema`.
+
+`ExtraPathDirs` is an ordered, cloned list of absolute directories placed ahead
+of the native base `PATH` for that session's own `hermes serve` process. Order
+and duplicates are semantic. Empty, relative, or path-list-separator-bearing
+entries are rejected with the exact indexed metadata field. Session `Env`
+cannot contain `PATH` (case-insensitively on Windows); the dedicated ordered
+field is the sole session-scoped PATH authority. Hermes executable resolution
+and version probing see only the static base environment, then the launched
+session sees operation directories first, the browser-launcher shim second when
+present, and the captured native base `PATH` last, with empty components
+removed.
+
+Setting a schema — through the field or `WithHermesOutputSchema` — is accepted
+for API symmetry but fails session start with the uniform unsupported-field
+error.

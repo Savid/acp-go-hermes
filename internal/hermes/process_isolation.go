@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -43,6 +42,7 @@ const (
 	processSupervisorEnvPrefix = "ACP_" + "GO_HERMES_PROCESS_SUPERVISOR"
 	processPlatformLinux       = "linux"
 	processPlatformDarwin      = "darwin"
+	processPlatformWindows     = "windows"
 )
 
 // validateProcessIsolation validates an explicit hardened policy. Ordinary
@@ -169,6 +169,9 @@ func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]st
 		return nil, err
 	}
 
+	// No phase folding here: a closed policy is Linux-only, and Linux names
+	// environment variables exactly. The folding rule belongs to ordinary
+	// execution, which is the only mode a Windows host ever reaches.
 	env := make(map[string]string, len(isolation.BaseEnvironment))
 	for key, value := range isolation.BaseEnvironment {
 		env[key] = value
@@ -184,19 +187,7 @@ func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]st
 		}
 	}
 
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-
-	slices.Sort(keys)
-
-	out := make([]string, 0, len(keys))
-	for _, key := range keys {
-		out = append(out, key+"="+env[key])
-	}
-
-	return out, nil
+	return sortedProcessEnvironment(env), nil
 }
 
 // envValue reads a name out of a closed policy environment, where the policy
@@ -209,7 +200,15 @@ func envValue(env []string, name string) string {
 // written by this adapter. Folding is what an inherited Windows environment
 // requires: it spells the search path "Path", and an exact compare against
 // "PATH" would report an empty one rather than the operator's real search path.
+//
+// The last match wins, because that is the value the child actually receives:
+// os/exec deduplicates a launch environment before spawning it and keeps the
+// final value for each name, case-insensitively on Windows. Reading the first
+// match instead would let this adapter resolve an executable against a search
+// path, or a PATHEXT, that the harness process never sees.
 func envValueFold(env []string, name string, fold bool) string {
+	matched := ""
+
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
@@ -217,11 +216,11 @@ func envValueFold(env []string, name string, fold bool) string {
 		}
 
 		if key == name || (fold && strings.EqualFold(key, name)) {
-			return value
+			matched = value
 		}
 	}
 
-	return ""
+	return matched
 }
 
 func lookPathInEnvironment(file string, environment []string) (string, error) {

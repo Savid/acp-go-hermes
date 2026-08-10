@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -113,6 +115,40 @@ func TestRequestBuilderCloneEdgeBranches(t *testing.T) {
 	storedMeta, _ := meta[hermesMetaKey].(map[string]any)
 	if storedMeta["a"] != "changed" {
 		t.Fatalf("ensureMetaMap did not store clone: %#v", meta)
+	}
+}
+
+func TestHermesOptionsExtraPathDirsCloneAndMeta(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	caller := []string{first, second, first}
+
+	options := NewHermesOptions(WithHermesExtraPathDirs(caller...))
+	caller[0] = filepath.Join(t.TempDir(), "caller-mutated")
+	if !reflect.DeepEqual(options.ExtraPathDirs, []string{first, second, first}) {
+		t.Fatalf("options extra path dirs = %#v", options.ExtraPathDirs)
+	}
+
+	meta := options.Meta()
+	hermesMeta, _ := meta[hermesMetaKey].(map[string]any)
+	values, _ := hermesMeta[metaOptionsKey].(map[string]any)
+	dirs, _ := values[metaExtraPathDirsKey].([]string)
+	if !reflect.DeepEqual(dirs, []string{first, second, first}) {
+		t.Fatalf("meta extra path dirs = %#v", dirs)
+	}
+
+	dirs[0] = filepath.Join(t.TempDir(), "meta-mutated")
+	if options.ExtraPathDirs[0] != first {
+		t.Fatalf("meta mutation reached options: %#v", options.ExtraPathDirs)
+	}
+
+	request := NewSessionRequest(t.TempDir(), WithSessionHermesOptions(options))
+	options.ExtraPathDirs[0] = filepath.Join(t.TempDir(), "options-mutated")
+	requestMeta, _ := request.Meta[hermesMetaKey].(map[string]any)
+	requestValues, _ := requestMeta[metaOptionsKey].(map[string]any)
+	requestDirs, _ := requestValues[metaExtraPathDirsKey].([]string)
+	if requestDirs[0] != first {
+		t.Fatalf("options mutation reached request: %#v", requestDirs)
 	}
 }
 

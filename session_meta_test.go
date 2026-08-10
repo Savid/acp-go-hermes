@@ -2,6 +2,9 @@ package hermesacp
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -42,5 +45,123 @@ func TestOutputSchemaUnsupported(t *testing.T) {
 	}
 	if reqErr.Data == nil {
 		t.Fatalf("missing error data: %#v", reqErr)
+	}
+}
+
+func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	want := []string{first, second, first}
+
+	for _, value := range []any{
+		[]string{first, second, first},
+		[]any{first, second, first},
+	} {
+		parsed, err := sessionMetaFromLifecycle(map[string]any{
+			hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: value}},
+		})
+		if err != nil {
+			t.Fatalf("decode %#v: %v", value, err)
+		}
+		if !reflect.DeepEqual(parsed.ExtraPathDirs, want) {
+			t.Fatalf("decoded dirs = %#v, want %#v", parsed.ExtraPathDirs, want)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		value any
+		field string
+	}{
+		{name: "wrong list type", value: "bad", field: hermesExtraPathDirsOptionPath},
+		{name: "wrong element type", value: []any{first, 1}, field: hermesExtraPathDirsOptionPath + "[1]"},
+		{name: "empty", value: []string{first, ""}, field: hermesExtraPathDirsOptionPath + "[1]"},
+		{name: "relative", value: []string{"relative"}, field: hermesExtraPathDirsOptionPath + "[0]"},
+		{name: "separator", value: []string{first + string(os.PathListSeparator) + second}, field: hermesExtraPathDirsOptionPath + "[0]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := sessionMetaFromLifecycle(map[string]any{
+				hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: test.value}},
+			})
+			requireLifecycleMetaField(t, err, test.field)
+		})
+	}
+
+	input := []string{first, second}
+	parsed, err := sessionMetaFromLifecycle(HermesOptions{ExtraPathDirs: input}.Meta())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input[0] = filepath.Join(t.TempDir(), "mutated")
+	if parsed.ExtraPathDirs[0] != first {
+		t.Fatalf("caller mutation reached session meta: %#v", parsed.ExtraPathDirs)
+	}
+}
+
+func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
+	_, err := sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{"PATH": "/operation/bin"}}.Meta())
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".PATH")
+	_, err = sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+		metaEnvKey: map[string]any{"PATH": 42},
+	}}})
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".PATH")
+
+	if !sessionEnvironmentOwnsPathForPlatform("Path", "windows") {
+		t.Fatal("Windows PATH comparison was case-sensitive")
+	}
+	if sessionEnvironmentOwnsPathForPlatform("Path", "linux") {
+		t.Fatal("Unix PATH comparison was case-insensitive")
+	}
+}
+
+func TestLifecycleEntryPointsApplyExtraPathDirValidation(t *testing.T) {
+	cwd := t.TempDir()
+	badMeta := map[string]any{
+		hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+			metaExtraPathDirsKey: []any{cwd, 42},
+		}},
+	}
+	agent := newTestAgent()
+
+	checks := map[string]func() error{
+		"new": func() error {
+			_, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionMeta(badMeta)))
+
+			return err
+		},
+		"load": func() error {
+			_, err := agent.LoadSession(t.Context(), LoadSessionRequest("missing", cwd, WithSessionMeta(badMeta)))
+
+			return err
+		},
+		"resume": func() error {
+			_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest("missing", cwd, WithSessionMeta(badMeta)))
+
+			return err
+		},
+		"fork": func() error {
+			_, err := agent.forkSession(t.Context(), ForkSessionRequest("missing", cwd, WithSessionMeta(badMeta)))
+
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			requireLifecycleMetaField(t, check(), hermesExtraPathDirsOptionPath+"[1]")
+		})
+	}
+}
+
+func requireLifecycleMetaField(t *testing.T, err error, field string) {
+	t.Helper()
+
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error type = %T, want *acp.RequestError", err)
+	}
+	data, ok := requestErr.Data.(map[string]any)
+	if !ok || data[keyField] != field {
+		t.Fatalf("error data = %#v, want field %q", requestErr.Data, field)
 	}
 }

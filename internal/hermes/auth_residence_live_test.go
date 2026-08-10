@@ -60,13 +60,16 @@ func TestLiveProviderAuthResidenceSurvivesSequentialRestarts(t *testing.T) {
 		}
 		runtimeHomes = append(runtimeHomes, runtimeHome)
 		options := ProcessOptions{
-			ExecutablePath:            executable,
-			Home:                      runtimeHome,
-			Cwd:                       t.TempDir(),
-			ScratchParent:             scratch,
-			ProviderAuthHome:          authHome,
-			Timeout:                   2 * time.Minute,
-			Env:                       map[string]string{"NO_COLOR": "1"},
+			ExecutablePath:   executable,
+			Home:             runtimeHome,
+			Cwd:              t.TempDir(),
+			ScratchParent:    scratch,
+			ProviderAuthHome: authHome,
+			Timeout:          2 * time.Minute,
+			Env: map[string]string{
+				"NO_COLOR": "1",
+				"PATH":     os.Getenv("PATH"),
+			},
 			AcquireDiscoveryResources: testDiscoveryResourceAdmission,
 			RetainDiscoveryRoot:       func(string, error) {},
 		}

@@ -150,6 +150,8 @@ type StartOptions struct {
 	DefaultModel                string
 	ProviderAuthHome            string
 	Env                         map[string]string
+	SessionEnv                  map[string]string
+	ExtraPathDirs               []string
 	Isolation                   *ProcessIsolation
 	AmbientEnvironment          map[string]string
 	HealthTimeout               time.Duration
@@ -510,6 +512,15 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		return nil, errors.New("ACP session id contains NUL")
 	}
 
+	extraPathDirs, carrierErr := cloneAndValidateExtraPathDirs(options.ExtraPathDirs)
+	if carrierErr != nil {
+		return nil, carrierErr
+	}
+
+	if sessionEnvErr := validateSessionEnvironmentNoPath(options.SessionEnv); sessionEnvErr != nil {
+		return nil, sessionEnvErr
+	}
+
 	root := options.Root
 	if root == "" {
 		root = filepath.Join(options.ScratchParent, valACPGoHermes)
@@ -558,7 +569,12 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 
 	configurationStarted := time.Now()
 
-	servers, mcpSecretEnv, err := mcpServersWithSecretEnv(options.MCPServers, options.Env)
+	configurationEnv := cloneEnvironmentMap(options.Env)
+	for key, value := range options.SessionEnv {
+		configurationEnv[key] = value
+	}
+
+	servers, mcpSecretEnv, err := mcpServersWithSecretEnv(options.MCPServers, configurationEnv)
 	if err != nil {
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, err)
 
@@ -579,8 +595,8 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 
 	observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, nil)
 
-	processEnv := make(map[string]string, len(options.Env)+len(mcpSecretEnv))
-	for key, value := range options.Env {
+	processEnv := make(map[string]string, len(options.SessionEnv)+len(mcpSecretEnv)+1)
+	for key, value := range options.SessionEnv {
 		processEnv[key] = value
 	}
 
@@ -600,7 +616,9 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		ScratchParent:               options.ScratchParent,
 		Cwd:                         options.Cwd,
 		ProviderAuthHome:            options.ProviderAuthHome,
-		Env:                         processEnv,
+		Env:                         cloneEnvironmentMap(options.Env),
+		SessionEnv:                  processEnv,
+		ExtraPathDirs:               extraPathDirs,
 		Isolation:                   options.Isolation,
 		AmbientEnvironment:          options.AmbientEnvironment,
 		Timeout:                     options.HealthTimeout,
@@ -2569,6 +2587,15 @@ func mcpServersWithSecretEnv(servers []acp.McpServer, baseEnv map[string]string)
 	}
 
 	return cloned, secrets, nil
+}
+
+func cloneEnvironmentMap(source map[string]string) map[string]string {
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 // buildHermesSeedWrites resolves each seeded file into a planned write under

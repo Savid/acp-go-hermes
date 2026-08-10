@@ -26,11 +26,30 @@ const (
 	envFakeHermesHelper        = "ACP_GO_HERMES_FAKE_HELPER"
 	envFakeHermesMode          = "ACP_GO_HERMES_FAKE_MODE"
 	envFakeHermesDescendantPID = "ACP_GO_HERMES_FAKE_DESCENDANT_PID_FILE"
+	envFakeHermesCLICapture    = "ACP_GO_HERMES_FAKE_SESSION_CLI_CAPTURE"
 	fakeModeOK                 = "ok"
 	fakeModeStatusOnly         = "status-only"
 	fakeModeDetachedDescendant = "detached-descendant"
+	fakeModeSessionCLI         = "session-cli"
 	fakeStoredSessionKey       = "stored-fake"
 )
+
+type fakeSessionCLICapture struct {
+	Path        string `json:"path"`
+	Resolved    string `json:"resolved"`
+	Token       string `json:"token"`
+	OperationID string `json:"operationId"`
+	Output      string `json:"output"`
+}
+
+type integrationSessionCLICarrier struct {
+	name      string
+	cwd       string
+	token     string
+	operation string
+	dirs      []string
+	capture   string
+}
 
 func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	requireRunIntegration(t)
@@ -192,6 +211,128 @@ func TestHermesACPAgentFakeExecutableGatewayFailClosed(t *testing.T) {
 	}
 }
 
+func TestHermesACPAgentFakeSessionCLICarrier(t *testing.T) {
+	requireRunIntegration(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the process-backed integration fixture uses POSIX executable shims")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeSessionCLI), t.TempDir())
+	defer agent.close()
+	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+
+	carriers := []integrationSessionCLICarrier{
+		{name: "a", cwd: t.TempDir(), token: "bearer-a", operation: "operation-a", dirs: []string{t.TempDir(), t.TempDir()}, capture: filepath.Join(t.TempDir(), "a.json")},
+		{name: "b", cwd: t.TempDir(), token: "bearer-b", operation: "operation-b", dirs: []string{t.TempDir(), t.TempDir()}, capture: filepath.Join(t.TempDir(), "b.json")},
+	}
+	for _, carrier := range carriers {
+		writeIntegrationWagie(t, carrier.dirs[0])
+	}
+
+	type result struct {
+		name    string
+		session acp.NewSessionResponse
+		err     error
+	}
+	results := make(chan result, len(carriers))
+	for _, carrier := range carriers {
+		carrier := carrier
+		go func() {
+			session, err := conn.NewSession(ctx, sessionCLICarrierRequest(carrier))
+			results <- result{name: carrier.name, session: session, err: err}
+		}()
+	}
+	sessions := map[string]acp.NewSessionResponse{}
+	for range carriers {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("new session %s: %v\nstderr:\n%s", result.name, result.err, agent.stderrString())
+		}
+		sessions[result.name] = result.session
+	}
+	for _, carrier := range carriers {
+		assertIntegrationSessionCLICapture(t, carrier)
+	}
+
+	rotated := integrationSessionCLICarrier{
+		name:      "a-rotated",
+		cwd:       carriers[0].cwd,
+		token:     "bearer-a-rotated",
+		operation: "operation-a-rotated",
+		dirs:      []string{t.TempDir(), t.TempDir()},
+		capture:   filepath.Join(t.TempDir(), "a-rotated.json"),
+	}
+	writeIntegrationWagie(t, rotated.dirs[0])
+	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessions["a"].SessionId}); err != nil {
+		t.Fatalf("close session a: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	if _, err := conn.ResumeSession(ctx, hermesacp.ResumeSessionRequest(
+		sessions["a"].SessionId,
+		rotated.cwd,
+		hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{
+			Env: map[string]string{
+				envFakeHermesCLICapture: rotated.capture,
+				"WAGIE_API_TOKEN":       rotated.token,
+				"WAGIE_OPERATION_ID":    rotated.operation,
+			},
+			ExtraPathDirs: rotated.dirs,
+		}),
+	)); err != nil {
+		t.Fatalf("resume rotated carrier: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	assertIntegrationSessionCLICapture(t, rotated)
+	assertIntegrationSessionCLICapture(t, carriers[1])
+}
+
+func sessionCLICarrierRequest(carrier integrationSessionCLICarrier) acp.NewSessionRequest {
+	return hermesacp.NewSessionRequest(carrier.cwd, hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{
+		Env: map[string]string{
+			envFakeHermesCLICapture: carrier.capture,
+			"WAGIE_API_TOKEN":       carrier.token,
+			"WAGIE_OPERATION_ID":    carrier.operation,
+		},
+		ExtraPathDirs: carrier.dirs,
+	}))
+}
+
+func writeIntegrationWagie(t *testing.T, dir string) {
+	t.Helper()
+	body := []byte("#!/bin/sh\nprintf '%s:%s' \"$WAGIE_OPERATION_ID\" \"$WAGIE_API_TOKEN\"\n")
+	if err := os.WriteFile(filepath.Join(dir, "wagie"), body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertIntegrationSessionCLICapture(t *testing.T, carrier integrationSessionCLICarrier) {
+	t.Helper()
+	data, err := os.ReadFile(carrier.capture)
+	if err != nil {
+		t.Fatalf("read capture %s: %v", carrier.name, err)
+	}
+	var capture fakeSessionCLICapture
+	if err := json.Unmarshal(data, &capture); err != nil {
+		t.Fatalf("decode capture %s: %v", carrier.name, err)
+	}
+	wagie := filepath.Join(carrier.dirs[0], "wagie")
+	if capture.Resolved != wagie || capture.Token != carrier.token || capture.OperationID != carrier.operation || capture.Output != carrier.operation+":"+carrier.token {
+		t.Fatalf("capture %s = %#v", carrier.name, capture)
+	}
+	parts := strings.Split(capture.Path, string(os.PathListSeparator))
+	if len(parts) < len(carrier.dirs)+1 || parts[0] != carrier.dirs[0] || parts[1] != carrier.dirs[1] || !strings.HasPrefix(filepath.Base(parts[2]), "acp-go-hermes-browser-shim-") {
+		t.Fatalf("capture %s PATH = %#v", carrier.name, parts)
+	}
+	for _, part := range parts {
+		if part == "" {
+			t.Fatalf("capture %s PATH contains an empty component: %#v", carrier.name, parts)
+		}
+	}
+}
+
 func TestFakeHermesExecutable(t *testing.T) {
 	if os.Getenv(envFakeHermesHelper) != "1" {
 		return
@@ -263,6 +404,11 @@ func runFakeHermesServer(args []string, mode string) error {
 	if mode == "" {
 		mode = fakeModeOK
 	}
+	if mode == fakeModeSessionCLI {
+		if err := captureIntegrationSessionCLI(); err != nil {
+			return err
+		}
+	}
 
 	_, _ = fmt.Fprintln(os.Stdout, "native stdout noise before websocket readiness")
 	state := &fakeGatewayState{}
@@ -278,6 +424,33 @@ func runFakeHermesServer(args []string, mode string) error {
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	return server.ListenAndServe()
+}
+
+func captureIntegrationSessionCLI() error {
+	capturePath := os.Getenv(envFakeHermesCLICapture)
+	if capturePath == "" {
+		return errors.New("fake session CLI capture path is empty")
+	}
+	resolved, err := exec.LookPath("wagie")
+	if err != nil {
+		return fmt.Errorf("resolve wagie: %w", err)
+	}
+	output, err := exec.Command(resolved).Output()
+	if err != nil {
+		return fmt.Errorf("execute wagie: %w", err)
+	}
+	data, err := json.Marshal(fakeSessionCLICapture{
+		Path:        os.Getenv("PATH"),
+		Resolved:    resolved,
+		Token:       os.Getenv("WAGIE_API_TOKEN"),
+		OperationID: os.Getenv("WAGIE_OPERATION_ID"),
+		Output:      string(output),
+	})
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(capturePath, data, 0o600)
 }
 
 type fakeGatewayState struct {

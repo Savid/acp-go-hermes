@@ -54,3 +54,38 @@ runtime uses a fresh physical generation root; durable continuity comes only
 from the committed snapshot. The logical ACP session remains active; its next prompt recreates the home from the last committed snapshot and resumes
 the same native durable session key. A stale cancel nonce cannot target that
 replacement runtime.
+
+## Session CLI environment and PATH
+
+Session `Env` and ordered `ExtraPathDirs` belong to the logical ACP session,
+not the Agent. They are cloned through new, load, resume, fork, snapshot,
+lazy runtime recovery, and close-then-resume rebind. Two concurrent sessions
+therefore carry independent bearers and directories; no mutable Agent field
+pins either value.
+
+The ordered directory list is lifecycle identity. An active load or resume
+whose list differs — including a pure reorder — fails with a mismatch naming
+`_meta.hermes.options.extraPathDirs`. A host rotating a bearer or operation
+directory closes the active session and resumes it with the new configuration;
+the replacement `hermes serve` process contains the new values and no old
+carrier values. A lazily reconstructed runtime uses the values already owned by
+that session.
+
+Hermes executable lookup and the `--version` probe run first against the
+captured static native environment. Only the session process then receives its
+environment and effective PATH: operation directories in caller order, the
+browser-launcher containment directory when supported, and the captured base
+PATH. Empty PATH components are omitted and ambient PATH is never reread during
+session launch.
+
+On Windows, environment names are case-insensitive, so the launch environment
+is built that way rather than left to the child. The captured ambient
+environment is an ordered block, so a name an inherited block spells twice is
+resolved by that order: the last write wins, in spelling as well as value,
+exactly as the platform itself resolves it. Each later phase — `WithEnv`, then
+the session `env` — replaces the previous phase's spelling of a name instead of
+adding a second one, so a `WithEnv` `PATH` supersedes an inherited `Path` and a
+`PathExt` supersedes an inherited `PATHEXT`. Two spellings of one name inside a
+single caller-supplied map have no order to read and are rejected. Executable
+lookup reads exactly the value the launched process receives, and the effective
+PATH reaches the process as a single entry.

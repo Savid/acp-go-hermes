@@ -66,6 +66,175 @@ func TestOrdinaryEnvironmentOverlayCannotReintroduceScrubbedState(t *testing.T) 
 	require.ErrorContains(t, err, "invalid key")
 }
 
+func TestProcessPATHOrdersOperationBeforeBrowserShimAndNativePATH(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	operationOne := filepath.Join(t.TempDir(), "operation-one")
+	operationTwo := filepath.Join(t.TempDir(), "operation-two")
+	shimDir := filepath.Join(t.TempDir(), "browser-shim")
+	nativeOne := filepath.Join(t.TempDir(), "native-one")
+	nativeTwo := filepath.Join(t.TempDir(), "native-two")
+
+	base := []string{
+		"STATIC=1",
+		"PATH=" + separator + nativeOne + separator + separator + nativeTwo + separator,
+	}
+	withShim := browserShimEnviron(base, shimDir)
+	actual := prependPathDirs(withShim, []string{operationOne, operationTwo, operationOne})
+	require.Equal(t,
+		strings.Join([]string{operationOne, operationTwo, operationOne, shimDir, nativeOne, nativeTwo}, separator),
+		envValue(actual, "PATH"),
+	)
+	require.NotContains(t, strings.Split(envValue(actual, "PATH"), separator), "")
+
+	absent := prependPathDirs([]string{"STATIC=1"}, []string{operationOne, operationTwo})
+	require.Equal(t, strings.Join([]string{operationOne, operationTwo}, separator), envValue(absent, "PATH"))
+
+	noPath := prependPathDirs([]string{"STATIC=1", "PATH=" + separator + separator}, nil)
+	require.Empty(t, envValue(noPath, "PATH"))
+	require.Equal(t, []string{"STATIC=1"}, noPath)
+}
+
+func TestProcessCarrierValidation(t *testing.T) {
+	absolute := t.TempDir()
+	separator := string(os.PathListSeparator)
+
+	for name, dirs := range map[string][]string{
+		"empty":     {absolute, ""},
+		"relative":  {"relative"},
+		"separator": {absolute + separator + t.TempDir()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := cloneAndValidateExtraPathDirs(dirs)
+			require.Error(t, err)
+		})
+	}
+
+	input := []string{absolute, absolute}
+	cloned, err := cloneAndValidateExtraPathDirs(input)
+	require.NoError(t, err)
+	input[0] = t.TempDir()
+	require.Equal(t, []string{absolute, absolute}, cloned)
+
+	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
+	require.NoError(t, validateSessionEnvironmentNoPath(map[string]string{"TOKEN": "good"}))
+	require.True(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "windows"))
+	require.False(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "linux"))
+
+	_, err = validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{"relative"}})
+	require.Error(t, err)
+	_, err = validatedProcessCarrier(ProcessOptions{SessionEnv: map[string]string{"PATH": "/bad"}})
+	require.Error(t, err)
+	carrier, err := validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{absolute}})
+	require.NoError(t, err)
+	require.Equal(t, []string{absolute}, carrier)
+
+	_, err = Start(t.Context(), ProcessOptions{ExtraPathDirs: []string{"relative"}})
+	require.Error(t, err)
+	invalidSessionEnvironment := darwinTestProcessOptions(t, ProcessOptions{
+		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
+		Home:           t.TempDir(),
+		SessionEnv:     map[string]string{"BAD=KEY": "value"},
+	})
+	_, err = Start(t.Context(), invalidSessionEnvironment)
+	require.ErrorContains(t, err, "invalid key")
+}
+
+// TestProcessEnvironmentPhasesFoldWindowsNames is the portable half of the
+// conflicting-case evidence, run with the platform seam pinned so every host
+// exercises it. Windows names environment variables case-insensitively, so an
+// inherited "Path" and a "PATH" written by a later phase are one variable. The
+// rule has to be decided here rather than left to the child, because this
+// adapter resolves the harness executable out of the same block it is about to
+// hand over: a first-match read against a block the child deduplicates to the
+// last value would search a PATH the harness never sees.
+func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	processRuntimePlatform = processPlatformWindows
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+
+	decoyDir := t.TempDir()
+	harnessDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "hermes.exe"), []byte("MZ"), 0o600))
+	harness := filepath.Join(harnessDir, "hermes.bat")
+	require.NoError(t, os.WriteFile(harness, []byte("@echo fixture\n"), 0o600))
+
+	// The ambient block spells both names the way an inherited Windows block
+	// does; the Agent-scoped overlay is a later phase and spells them
+	// differently. Only one spelling of each may survive, carrying the later
+	// phase's value.
+	environment, err := ordinaryEnvironment(
+		map[string]string{"Path": decoyDir, "PATHEXT": ".COM;.EXE", "KEPT": "yes"},
+		map[string]string{"PATH": harnessDir, "PathExt": ".BAT"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"KEPT=yes", "PATH=" + harnessDir, "PathExt=.BAT"}, environment)
+
+	// Resolution reads the surviving values, so the decoy image the ambient
+	// phase pointed at is unreachable under both the search path and the
+	// extension list the last phase installed. The Windows rules are driven
+	// directly because the selector that reaches them, ordinaryExecutableRules,
+	// is build-tagged even though windowsExecutableRules itself compiles
+	// everywhere; the native lane proves the same block against a real Windows
+	// child.
+	resolved, err := lookOrdinaryPathWithRules("hermes", environment, windowsExecutableRules(environment))
+	require.NoError(t, err)
+	require.Equal(t, harness, resolved)
+
+	// Two spellings inside one phase have no order at all, so they are refused
+	// rather than settled by map iteration.
+	_, err = ordinaryEnvironment(nil, map[string]string{"Path": decoyDir, "PATH": harnessDir})
+	require.ErrorContains(t, err, `process environment names PATH twice, as "PATH" and "Path"`)
+
+	// A folded read reports the value the child keeps, which is the last one.
+	block := []string{"Path=" + decoyDir, "PATH=" + harnessDir}
+	require.Equal(t, harnessDir, envValueFold(block, "PATH", true))
+
+	// The carrier rewrite collapses every spelling into the single entry it
+	// emits, so no second owner of the search path reaches the child.
+	separator := string(os.PathListSeparator)
+	operationDir := t.TempDir()
+	rewritten := prependPathDirs(append([]string{"KEPT=yes"}, block...), []string{operationDir})
+	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + separator + harnessDir}, rewritten)
+
+	// A Hermes variable an operator wrote in another case is the same variable
+	// to Hermes itself, so the serve arguments derived from one are too.
+	require.Contains(t,
+		processServeArgs(ProcessOptions{SessionEnv: map[string]string{"Hermes_Web_Dist": "/opt/web"}}, 1),
+		"--skip-build",
+	)
+	require.Empty(t, processEnvironmentValue(map[string]string{"OTHER": "x"}, envHermesWebDist))
+
+	// Off Windows the two spellings are genuinely different variables and both
+	// survive untouched, and only the exact name is read.
+	processRuntimePlatform = processPlatformLinux
+	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir}, map[string]string{"PATH": harnessDir})
+	require.NoError(t, err)
+	require.Equal(t, []string{"PATH=" + harnessDir, "Path=" + decoyDir}, unfolded)
+	require.Empty(t, processEnvironmentValue(map[string]string{"Hermes_Web_Dist": "/opt/web"}, envHermesWebDist))
+	require.Equal(t, "/opt/web", processEnvironmentValue(map[string]string{envHermesWebDist: "/opt/web"}, envHermesWebDist))
+}
+
+func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
+	staticDir := t.TempDir()
+	operationDir := t.TempDir()
+	want := writeTestHarness(t, staticDir)
+	_ = writeTestHarness(t, operationDir)
+
+	options := ProcessOptions{
+		ExecutablePath:     "hermes",
+		AmbientEnvironment: map[string]string{"PATH": staticDir},
+		SessionEnv:         map[string]string{"WAGIE_API_TOKEN": "session"},
+		ExtraPathDirs:      []string{operationDir},
+	}
+	base, err := processLaunchEnvironment(options)
+	require.NoError(t, err)
+	resolved, err := resolveHarnessExecutable(nil, options.ExecutablePath, base)
+	require.NoError(t, err)
+	require.Equal(t, want, resolved)
+	require.NotContains(t, base, "WAGIE_API_TOKEN=session")
+	require.Equal(t, staticDir, envValue(base, "PATH"))
+}
+
 // writeTestHarness writes a harness image under dir under the name this
 // platform's ordinary resolution of a bare "hermes" will actually find, and
 // returns it. Windows resolves a bare name through PATHEXT, so the fixture has

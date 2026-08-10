@@ -3521,6 +3521,8 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 	agent := newTestAgent(WithScratchDir(scratch))
 	session := testSession(agent, oldClient)
 	session.env = map[string]string{"HERMES_REBIND_TEST": "preserved"}
+	rebindPathDir := t.TempDir()
+	session.extraPathDirs = []string{rebindPathDir}
 	session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", map[string]string{"Authorization": "Bearer test"})}
 	if err := session.snapshotToStore(t.Context()); err != nil {
 		t.Fatalf("snapshot checkpoint: %v", err)
@@ -3545,8 +3547,11 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 		if opts.ACPSessionID != nativehermes.ACPSessionIDString(session.id) {
 			t.Fatalf("replacement ACP session id = %q", opts.ACPSessionID)
 		}
-		if opts.Env["HERMES_REBIND_TEST"] != "preserved" {
-			t.Fatalf("replacement env = %#v", opts.Env)
+		if opts.SessionEnv["HERMES_REBIND_TEST"] != "preserved" {
+			t.Fatalf("replacement session env = %#v", opts.SessionEnv)
+		}
+		if !slices.Equal(opts.ExtraPathDirs, []string{rebindPathDir}) {
+			t.Fatalf("replacement extra path dirs = %#v", opts.ExtraPathDirs)
 		}
 		if len(opts.MCPServers) != 1 {
 			t.Fatalf("replacement MCP servers = %#v", opts.MCPServers)

@@ -2412,6 +2412,8 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 		ExecutablePath: helper,
 		DefaultModel:   "openai/gpt-test",
 		Env:            map[string]string{"BASE_ENV": "base"},
+		SessionEnv:     map[string]string{"SESSION_ENV": "carrier"},
+		ExtraPathDirs:  []string{t.TempDir()},
 		HealthTimeout:  5 * time.Second,
 		Logger:         slog.New(slog.DiscardHandler),
 		MCPServers: []acp.McpServer{
@@ -2630,6 +2632,12 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
 		t.Fatal("invalid session path unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExtraPathDirs: []string{"relative"}})); err == nil {
+		t.Fatal("relative extra path directory unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{SessionEnv: map[string]string{"PATH": "/bad"}})); err == nil {
+		t.Fatal("session PATH unexpectedly succeeded")
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}})); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")

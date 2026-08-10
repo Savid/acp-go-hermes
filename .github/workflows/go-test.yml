@@ -72,13 +72,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          selector='^Test(ProcessIsolationOmissionResolvesAndRunsOnWindows|ExecutableExtensionListFollowsPathext|WindowsOrdinaryRules.*|EnvValueFoldReadsAnInheritedEnvironmentBlock|OrdinaryExecutableRulesMatchThisPlatform|OrdinaryEnvironment.*|OrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment|ScrubOrdinaryEnvironmentKeyIsCaseInsensitive|NonUnixContainmentRefusesEveryStrongerBoundary|ContainmentOperationsAreDarwinOnly|ValidateProcessContainmentGatesOnlyTheDarwinBackend)$'
+          selector='^Test(ProcessIsolationOmissionResolvesAndRunsOnWindows|WindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt|WindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins|ExecutableExtensionListFollowsPathext|WindowsOrdinaryRules.*|EnvValueFoldReadsAnInheritedEnvironmentBlock|OrdinaryExecutableRulesMatchThisPlatform|OrdinaryEnvironment.*|AmbientEnvironmentSnapshotFoldsWindowsSpellings|ProcessEnvironmentPhasesFoldWindowsNames|OrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment|OrdinaryDirectChildCompletion.*|ScrubOrdinaryEnvironmentKeyIsCaseInsensitive|NonUnixContainmentRefusesEveryStrongerBoundary|ContainmentOperationsAreDarwinOnly|ValidateProcessContainmentGatesOnlyTheDarwinBackend)$'
           expected=$(go test -list "$selector" ./internal/hermes | grep -Ec '^Test' || true)
           [ "$expected" -gt 0 ] || { echo 'windows ordinary selector discovered no tests'; exit 1; }
           go test -v -count=1 -run "$selector" ./internal/hermes | tee windows-ordinary.log
           # go test exits 0 for a selector that matched nothing and for a run
           # that only skipped, so the launch proof is asserted by name.
           grep -q -- '--- PASS: TestProcessIsolationOmissionResolvesAndRunsOnWindows' windows-ordinary.log
+          grep -q -- '--- PASS: TestWindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt' windows-ordinary.log
+          grep -q -- '--- PASS: TestWindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins' windows-ordinary.log
           passed=$(grep -Ec '^--- PASS: Test' windows-ordinary.log || true)
           [ "$passed" -eq "$expected" ] || { echo "windows ordinary pass count $passed, want $expected"; exit 1; }
 

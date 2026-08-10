@@ -3,23 +3,26 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/coder/acp-go-sdk"
 )
 
 const (
-	metaOptionsKey      = "options"
-	metaModelKey        = "model"
-	metaEnvKey          = "env"
-	metaOutputSchemaKey = "outputSchema"
+	metaOptionsKey       = "options"
+	metaModelKey         = "model"
+	metaEnvKey           = "env"
+	metaExtraPathDirsKey = "extraPathDirs"
+	metaOutputSchemaKey  = "outputSchema"
 )
 
 // HermesOptions is the stable Hermes-specific subset accepted at
 // _meta.hermes.options.
 type HermesOptions struct {
-	Model        string            `json:"model,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	OutputSchema map[string]any    `json:"outputSchema,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	ExtraPathDirs []string          `json:"extraPathDirs,omitempty"`
+	OutputSchema  map[string]any    `json:"outputSchema,omitempty"`
 }
 
 // Meta returns an ACP _meta object for the supported Hermes-specific options.
@@ -31,6 +34,10 @@ func (options HermesOptions) Meta() map[string]any {
 
 	if len(options.Env) > 0 {
 		values[metaEnvKey] = cloneStringMap(options.Env)
+	}
+
+	if len(options.ExtraPathDirs) > 0 {
+		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
 	}
 
 	if options.OutputSchema != nil {
@@ -285,6 +292,17 @@ func WithHermesEnv(env map[string]string) HermesOption {
 	}
 }
 
+// WithHermesExtraPathDirs configures absolute directories placed, in order,
+// ahead of the native base PATH for this session's Hermes process. Session Env
+// cannot carry PATH; this ordered option is the sole session PATH authority.
+func WithHermesExtraPathDirs(dirs ...string) HermesOption {
+	cloned := slices.Clone(dirs)
+
+	return func(options *HermesOptions) {
+		options.ExtraPathDirs = slices.Clone(cloned)
+	}
+}
+
 func WithHermesOutputSchema(schema map[string]any) HermesOption {
 	cloned := cloneAnyMap(schema)
 
@@ -316,9 +334,10 @@ func (config sessionRequestConfig) additionalDirectoriesClone() []string {
 
 func cloneHermesOptions(options HermesOptions) HermesOptions {
 	return HermesOptions{
-		Model:        options.Model,
-		Env:          cloneStringMap(options.Env),
-		OutputSchema: cloneAnyMap(options.OutputSchema),
+		Model:         options.Model,
+		Env:           cloneStringMap(options.Env),
+		ExtraPathDirs: slices.Clone(options.ExtraPathDirs),
+		OutputSchema:  cloneAnyMap(options.OutputSchema),
 	}
 }
 

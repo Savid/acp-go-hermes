@@ -1,6 +1,10 @@
 package hermesacp
 
-import "os"
+import (
+	"os"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+)
 
 // captureAmbientEnvironment is the seam the adapter's own environment is read
 // through. Tests select a fixed environment rather than mutating the process's.
@@ -13,38 +17,14 @@ var captureAmbientEnvironment = os.Environ
 // call would let a mutation between two sessions change what the second one
 // inherits.
 //
+// The ordered block is folded into a keyed phase by the same package that
+// assembles a launch environment out of it, so a name an inherited block spells
+// twice is resolved by that block's own order rather than carried forward as
+// two live variables.
+//
 // This snapshot is not a ProcessIsolation and never becomes one. An explicit
 // policy supplies its own complete replacement environment and ignores this
 // value entirely.
 func ambientEnvironment() map[string]string {
-	entries := captureAmbientEnvironment()
-
-	environment := make(map[string]string, len(entries))
-
-	for _, entry := range entries {
-		key, value, ok := splitEnvironmentEntry(entry)
-		if !ok {
-			continue
-		}
-
-		environment[key] = value
-	}
-
-	return environment
-}
-
-func splitEnvironmentEntry(entry string) (string, string, bool) {
-	for index := 0; index < len(entry); index++ {
-		if entry[index] == '=' {
-			// A leading '=' names no variable; Windows uses that spelling for
-			// per-drive working directories, which the harness never reads.
-			if index == 0 {
-				return "", "", false
-			}
-
-			return entry[:index], entry[index+1:], true
-		}
-	}
-
-	return "", "", false
+	return nativehermes.AmbientEnvironmentSnapshot(captureAmbientEnvironment())
 }

@@ -33,7 +33,6 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	processRuntimePlatform = processPlatformLinux
 	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
 
-	t.Setenv("AMBIENT_ISOLATION_CANARY", "must-not-leak")
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "hermes")
 	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700))
@@ -41,11 +40,26 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"},
 		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
 	}
-	environment, err := isolationEnvironment(isolation, map[string]string{"BASE": "two", "EXPLICIT": "yes"})
+	// Entering through the mode selector is what proves the explicit arm: an
+	// ambient snapshot is supplied alongside the policy and must be ignored
+	// entirely, because a closed policy carries its own replacement environment.
+	environment, err := processLaunchEnvironment(ProcessOptions{
+		Isolation:          isolation,
+		AmbientEnvironment: map[string]string{"AMBIENT_ISOLATION_CANARY": "must-not-leak"},
+		Env:                map[string]string{"BASE": "two", "EXPLICIT": "yes"},
+	})
 	require.NoError(t, err)
 	require.Contains(t, environment, "BASE=two")
 	require.Contains(t, environment, "EXPLICIT=yes")
 	require.NotContains(t, environment, "AMBIENT_ISOLATION_CANARY=must-not-leak")
+	sessionEnvironment, err := processSessionLaunchEnvironment(ProcessOptions{
+		Isolation:  isolation,
+		Env:        map[string]string{"STATIC": "base"},
+		SessionEnv: map[string]string{"SESSION": "carrier"},
+	})
+	require.NoError(t, err)
+	require.Contains(t, sessionEnvironment, "STATIC=base")
+	require.Contains(t, sessionEnvironment, "SESSION=carrier")
 	resolved, err := lookPathInEnvironment("hermes", environment)
 	require.NoError(t, err)
 	require.Equal(t, executable, resolved)

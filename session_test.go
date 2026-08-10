@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -93,6 +94,39 @@ func TestSessionMarkPartAcceptsFirstEmptyRawPayload(t *testing.T) {
 	}
 	if session.markPart(part) {
 		t.Fatal("duplicate completion-only part was accepted")
+	}
+}
+
+func TestSessionClonesExtraPathDirsAcrossConstructionAndSnapshot(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	input := []string{first, second, first}
+	env := map[string]string{"WAGIE_API_TOKEN": "one"}
+	client := newFakeHermesClient()
+	session := newSession(
+		newTestAgent(),
+		"session-carrier",
+		t.TempDir(),
+		nil,
+		nil,
+		testNativeSession("native-carrier"),
+		client,
+		sessionMeta{Env: env, ExtraPathDirs: input},
+		idmapRecord{},
+	)
+
+	input[0] = t.TempDir()
+	env["WAGIE_API_TOKEN"] = "mutated"
+	snapshot := session.snapshot()
+	if !reflect.DeepEqual(snapshot.extraPathDirs, []string{first, second, first}) || snapshot.env["WAGIE_API_TOKEN"] != "one" {
+		t.Fatalf("constructed carrier = dirs %#v env %#v", snapshot.extraPathDirs, snapshot.env)
+	}
+
+	snapshot.extraPathDirs[0] = t.TempDir()
+	snapshot.env["WAGIE_API_TOKEN"] = "snapshot-mutated"
+	again := session.snapshot()
+	if again.extraPathDirs[0] != first || again.env["WAGIE_API_TOKEN"] != "one" {
+		t.Fatalf("snapshot mutation reached session = dirs %#v env %#v", again.extraPathDirs, again.env)
 	}
 }
 

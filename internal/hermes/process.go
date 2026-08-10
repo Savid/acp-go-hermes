@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,8 +69,13 @@ type ProcessOptions struct {
 	ScratchParent    string
 	Cwd              string
 	ProviderAuthHome string
-	Env              map[string]string
-	Isolation        *ProcessIsolation
+	// Env is the static Agent-scoped overlay used for executable lookup,
+	// version probing, and as the native base environment.
+	Env map[string]string
+	// SessionEnv is applied only after executable lookup and version probing.
+	SessionEnv    map[string]string
+	ExtraPathDirs []string
+	Isolation     *ProcessIsolation
 	// AmbientEnvironment is the adapter's own environment, captured once by the
 	// host-facing Agent. Ordinary same-identity execution sanitizes it into the
 	// native environment; an explicit policy ignores it entirely, because that
@@ -166,6 +172,10 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 			return nil, fmt.Errorf("validate Hermes process isolation: %w", err)
 		}
 	}
+	extraPathDirs, err := validatedProcessCarrier(opts)
+	if err != nil {
+		return nil, err
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = defaultProcessTimeout
@@ -207,6 +217,11 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		return nil, err
 	}
 
+	env, err := processSessionLaunchEnvironment(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	port, err := freePort()
 	if err != nil {
 		return nil, err
@@ -219,17 +234,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	processCtx, cancel := context.WithCancel(context.Background())
 
-	args := []string{valServe, "--host", "127.0.0.1", argPort, strconv.Itoa(port)}
-	if opts.Env["HERMES_WEB_DIST"] != "" || defaultWebDistExists() {
-		args = append(args, "--skip-build")
-	}
+	args := processServeArgs(opts, port)
 
 	cmd := commandContext(processCtx, executable, args...)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}
-
-	env := append([]string(nil), baseEnvironment...)
 
 	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
 	// TTY hermes block-buffers stdout and emits nothing while working normally.
@@ -260,7 +270,11 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		}
 	}
 
-	cmd.Env = shim.environ(env)
+	// The operation-owned directories are installed last so they lead the final
+	// PATH, followed by the browser containment shim and then the exact static
+	// native base PATH. prependPathDirs also removes empty components; none may
+	// accidentally mean the current working directory.
+	cmd.Env = prependPathDirs(shim.environ(env), extraPathDirs)
 	if opts.LogWriter != nil {
 		cmd.Stdout = opts.LogWriter
 		cmd.Stderr = opts.LogWriter
@@ -352,6 +366,211 @@ func processLaunchEnvironment(opts ProcessOptions) ([]string, error) {
 	}
 
 	return ordinaryEnvironment(opts.AmbientEnvironment, opts.Env)
+}
+
+// processSessionLaunchEnvironment applies the session-owned overlay only after
+// executable resolution and version probing have consumed the static base
+// environment. Both paths rebuild from the captured maps and never consult the
+// ambient process environment.
+func processSessionLaunchEnvironment(opts ProcessOptions) ([]string, error) {
+	if opts.Isolation != nil {
+		return isolationEnvironment(opts.Isolation, opts.Env, opts.SessionEnv)
+	}
+
+	return ordinaryEnvironment(opts.AmbientEnvironment, opts.Env, opts.SessionEnv)
+}
+
+func validatedProcessCarrier(opts ProcessOptions) ([]string, error) {
+	dirs, err := cloneAndValidateExtraPathDirs(opts.ExtraPathDirs)
+	if err != nil {
+		return nil, err
+	}
+	if sessionEnvErr := validateSessionEnvironmentNoPath(opts.SessionEnv); sessionEnvErr != nil {
+		return nil, sessionEnvErr
+	}
+
+	return dirs, nil
+}
+
+func processServeArgs(opts ProcessOptions, port int) []string {
+	args := []string{valServe, "--host", "127.0.0.1", argPort, strconv.Itoa(port)}
+	if processEnvironmentValue(opts.Env, envHermesWebDist) != "" ||
+		processEnvironmentValue(opts.SessionEnv, envHermesWebDist) != "" ||
+		defaultWebDistExists() {
+		args = append(args, "--skip-build")
+	}
+
+	return args
+}
+
+// processEnvironmentValue reads an adapter-recognized Hermes variable out of one
+// phase map on the platform's own terms. Hermes itself reads its environment the
+// way the platform spells it, so an exact-only read here would answer differently
+// from the harness for a Windows operator who wrote a different case. Only one
+// spelling can be present: mergeProcessEnvironmentPhases has already refused a
+// phase carrying two.
+func processEnvironmentValue(env map[string]string, name string) string {
+	if value, ok := env[name]; ok {
+		return value
+	}
+
+	if !processEnvironmentKeysFold() {
+		return ""
+	}
+
+	for key, value := range env {
+		if processEnvironmentKeyMatches(key, name) {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func cloneAndValidateExtraPathDirs(dirs []string) ([]string, error) {
+	cloned := append([]string(nil), dirs...)
+	for index, dir := range cloned {
+		switch {
+		case dir == "":
+			return nil, fmt.Errorf("extra path directory %d is empty", index)
+		case !filepath.IsAbs(dir):
+			return nil, fmt.Errorf("extra path directory %d is not absolute: %q", index, dir)
+		case strings.ContainsRune(dir, os.PathListSeparator):
+			return nil, fmt.Errorf("extra path directory %d contains path-list separator %q", index, string(os.PathListSeparator))
+		}
+	}
+
+	return cloned, nil
+}
+
+func validateSessionEnvironmentNoPath(env map[string]string) error {
+	for key := range env {
+		if processEnvironmentKeyMatches(key, "PATH") {
+			return errors.New("session environment must not contain PATH")
+		}
+	}
+
+	return nil
+}
+
+// prependPathDirs rewrites env with dirs ahead of its existing PATH. Caller
+// order and duplicates are preserved, inherited empty components are dropped,
+// and an absent base PATH stays absent unless at least one directory is added.
+//
+// Where names fold, the last spelling in the block supplies the base and every
+// spelling is replaced by the single rewritten entry. Splicing the spellings
+// together would invent a search order no phase asked for, and keeping one
+// alongside the rewrite would leave the child's own deduplication to decide.
+func prependPathDirs(env []string, dirs []string) []string {
+	kept := make([]string, 0, len(env)+1)
+	base := ""
+
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !processEnvironmentKeyMatches(key, "PATH") {
+			kept = append(kept, entry)
+
+			continue
+		}
+
+		base = value
+	}
+
+	parts := append([]string(nil), dirs...)
+	for component := range strings.SplitSeq(base, string(os.PathListSeparator)) {
+		if component != "" {
+			parts = append(parts, component)
+		}
+	}
+
+	if len(parts) == 0 {
+		return kept
+	}
+
+	return append(kept, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
+}
+
+func processEnvironmentKeyMatches(left string, right string) bool {
+	return processEnvironmentKeyMatchesForPlatform(left, right, processRuntimePlatform)
+}
+
+func processEnvironmentKeyMatchesForPlatform(left string, right string, platform string) bool {
+	if platform == processPlatformWindows {
+		return strings.EqualFold(left, right)
+	}
+
+	return left == right
+}
+
+// processEnvironmentKeysFold reports whether this platform's environment block
+// names variables case-insensitively. Windows does, which is why an inherited
+// block spells the search path "Path" and a "PATH" written beside it is the
+// same variable rather than a second one.
+func processEnvironmentKeysFold() bool {
+	return processEnvironmentKeyMatchesForPlatform("path", "PATH", processRuntimePlatform)
+}
+
+// mergeProcessEnvironmentPhases folds the ordered phases a launch environment is
+// assembled from — the ambient base, then each overlay — into one block.
+//
+// Where names fold, a later phase's "PATH" replaces an earlier phase's "Path"
+// instead of joining it, so the phase order the caller wrote is the order that
+// decides. Leaving both spellings live would hand the decision to whichever one
+// the child's environment block happened to keep, and this adapter's own
+// executable resolution reads the block before that happens. Two spellings
+// inside one phase have no order at all, so they are refused rather than
+// resolved by map iteration.
+func mergeProcessEnvironmentPhases(phases ...map[string]string) (map[string]string, error) {
+	folds := processEnvironmentKeysFold()
+	env := make(map[string]string)
+
+	for _, phase := range phases {
+		if folds {
+			spellings := make(map[string]string, len(phase))
+			for key := range phase {
+				canonical := strings.ToUpper(key)
+				if other, duplicated := spellings[canonical]; duplicated {
+					return nil, fmt.Errorf("process environment names %s twice, as %q and %q",
+						canonical, min(key, other), max(key, other))
+				}
+
+				spellings[canonical] = key
+			}
+		}
+
+		for key, value := range phase {
+			if folds {
+				for existing := range env {
+					if existing != key && processEnvironmentKeyMatches(existing, key) {
+						delete(env, existing)
+					}
+				}
+			}
+
+			env[key] = value
+		}
+	}
+
+	return env, nil
+}
+
+// sortedProcessEnvironment renders an accumulated block as the sorted KEY=VALUE
+// slice a launch environment is. Sorting is what makes one built environment
+// byte-identical to the next, which several process assertions depend on.
+func sortedProcessEnvironment(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+env[key])
+	}
+
+	return out
 }
 
 // resolveHarnessExecutable resolves the harness executable against the launch

@@ -43,6 +43,7 @@ type session struct {
 	modelID               string
 	mode                  string
 	env                   map[string]string
+	extraPathDirs         []string
 	rawMessages           rawMessageConfig
 
 	client nativehermes.Server
@@ -133,6 +134,7 @@ type sessionSnapshot struct {
 	modelID               string
 	mode                  string
 	env                   map[string]string
+	extraPathDirs         []string
 	rawMessages           rawMessageConfig
 	client                nativehermes.Server
 }
@@ -187,6 +189,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		modelID:               modelID,
 		mode:                  firstNonEmpty(native.Agent, "default"),
 		env:                   cloneStringMap(meta.Env),
+		extraPathDirs:         append([]string(nil), meta.ExtraPathDirs...),
 		rawMessages:           meta.RawMessages,
 		client:                client,
 		seenParts:             map[string]string{},
@@ -736,6 +739,7 @@ func (s *session) snapshot() sessionSnapshot {
 		modelID:               s.modelID,
 		mode:                  s.mode,
 		env:                   cloneStringMap(s.env),
+		extraPathDirs:         append([]string(nil), s.extraPathDirs...),
 		rawMessages:           s.rawMessages,
 		client:                s.client,
 	}
