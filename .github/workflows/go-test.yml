@@ -65,9 +65,6 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Build
-        run: go build ./...
-
       - name: Ordinary launch runtime suite
         shell: bash
         run: |
