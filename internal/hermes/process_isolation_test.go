@@ -29,9 +29,9 @@ func (processIsolationTestCapability) Duplicate() (*os.File, error) {
 func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	// An explicit policy is Linux-only, so the platform is pinned here to keep
 	// these strict-policy branches reachable whichever host runs the suite.
-	originalPlatform := processIsolationPlatform
-	processIsolationPlatform = processPlatformLinux
-	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+	originalPlatform := processRuntimePlatform
+	processRuntimePlatform = processPlatformLinux
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
 
 	t.Setenv("AMBIENT_ISOLATION_CANARY", "must-not-leak")
 	dir := t.TempDir()
@@ -96,9 +96,9 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 }
 
 func TestProcessIsolationStandaloneDisposition(t *testing.T) {
-	originalPlatform := processIsolationPlatform
-	processIsolationPlatform = "linux"
-	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+	originalPlatform := processRuntimePlatform
+	processRuntimePlatform = "linux"
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
 
 	borrowed := &ProcessIsolation{
 		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
@@ -127,7 +127,7 @@ func TestProcessIsolationStandaloneDisposition(t *testing.T) {
 
 	// Off Linux the standalone disposition is never even consulted: the
 	// platform gate refuses the explicit policy first.
-	processIsolationPlatform = "darwin"
+	processRuntimePlatform = "darwin"
 	require.ErrorContains(t, validateProcessIsolation(&ProcessIsolation{
 		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
 	}), "only on linux")

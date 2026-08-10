@@ -99,15 +99,23 @@ func TestGeneratedNativeWalkRefusesUnsafeAncestry(t *testing.T) {
 	}
 }
 
-// TestGeneratedNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors
-// proves how far the ancestry rule relaxes when the wrapper never dropped
-// privilege, so its own identity is the native identity. Nothing separates the
-// two ends of the handoff in that shape, and every path to a directory that
-// identity owns still crosses root-owned components such as "/" and "/home", so
-// those are acceptable ancestors — and nothing else is: a third identity's
-// ancestor, an ancestor root left writable without sticky protection, and a
-// generation root still owns are all refused.
-func TestGeneratedNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *testing.T) {
+// TestGeneratedNativeAncestorRequiresATrustedAncestry pins the whole ancestry
+// rule. A policy launch is honoured only when the identity performing the
+// handoff is a distinct trusted root, so every component of the ancestry must be
+// owned by that identity outright: root ownership is not a separate licence, it
+// counts exactly when root is the trusted identity. An ancestor owned by the
+// target identity, by a third identity, or by root with a foreign group is
+// refused, as is a trusted ancestor left writable without sticky protection or
+// one the target identity cannot enter.
+func TestGeneratedNativeAncestorRequiresATrustedAncestry(t *testing.T) {
+	// The trusted identity is root here because that is the only supervisor
+	// shape a policy launch reaches; the target is the unprivileged identity the
+	// generation is being handed to.
+	const (
+		trustedUID = uint32(0)
+		trustedGID = uint32(0)
+	)
+
 	directory := func(mode uint32, uid, gid uint32) unix.Stat_t {
 		return unix.Stat_t{Mode: unix.S_IFDIR | mode, Uid: uid, Gid: gid}
 	}
@@ -126,36 +134,45 @@ func TestGeneratedNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *
 		{
 			name: "ancestor owned by a third identity",
 			stat: directory(0o755, 4242, 4242),
-			want: "generated native path ancestor is uid=4242 gid=4242; " +
-				"run the supervisor as root to isolate the agent identity, " +
-				"or place the native directory under a path the agent identity owns",
+			want: "generated native path ancestry is not a trusted directory",
 		},
 		{
-			name: "ancestor owned by root with a foreign group",
-			stat: directory(0o755, 0, 4242),
-			want: "generated native path ancestor is uid=0 gid=4242",
+			name: "ancestor owned by the target identity",
+			stat: directory(0o755, nativeOwnershipCovUID, nativeOwnershipCovGID),
+			want: "generated native path ancestry is not a trusted directory",
 		},
 		{
-			name: "world-writable root-owned ancestor without sticky protection",
-			stat: directory(0o777, 0, 0),
+			name: "ancestor owned by the trusted uid with a foreign group",
+			stat: directory(0o755, trustedUID, 4242),
+			want: "generated native path ancestry is not a trusted directory",
+		},
+		{
+			name: "world-writable trusted ancestor without sticky protection",
+			stat: directory(0o777, trustedUID, trustedGID),
 			want: "generated native ancestor mode 0777 is writable without sticky protection",
 		},
 		{
-			name: "root-owned ancestor the native identity cannot traverse",
-			stat: directory(0o700, 0, 0),
+			name: "trusted ancestor the target identity cannot traverse",
+			stat: directory(0o700, trustedUID, trustedGID),
 			want: "not traversable by the target identity",
 		},
 		{
-			name:  "generation still owned by root",
-			stat:  directory(0o700, 0, 0),
+			name:  "generation owned by the target identity already",
+			stat:  directory(0o700, nativeOwnershipCovUID, nativeOwnershipCovGID),
 			final: true,
 			want:  "generated native path ancestry is not a trusted directory",
+		},
+		{
+			name:  "generation is not exactly private",
+			stat:  directory(0o755, trustedUID, trustedGID),
+			final: true,
+			want:  "generated native root mode 0755 is unsafe",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := validateGeneratedNativeAncestor(
 				testCase.stat, testCase.final,
-				nativeOwnershipCovUID, nativeOwnershipCovGID,
+				trustedUID, trustedGID,
 				nativeOwnershipCovUID, nativeOwnershipCovGID,
 			)
 			require.ErrorContains(t, err, testCase.want)
@@ -166,54 +183,23 @@ func TestGeneratedNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *
 		name  string
 		stat  unix.Stat_t
 		final bool
-		why   string
 	}{
+		{name: "trusted ancestor the target identity can traverse", stat: directory(0o711, trustedUID, trustedGID)},
+		{name: "sticky writable trusted ancestor", stat: directory(0o1777, trustedUID, trustedGID)},
 		{
-			name: "root-owned ancestor every home directory is reached through",
-			stat: directory(0o755, 0, 0),
-			why:  "the root-owned ancestry a shared identity cannot avoid was refused",
-		},
-		{name: "sticky writable root-owned ancestor", stat: directory(0o1777, 0, 0)},
-		{name: "traversable ancestor owned by the native identity", stat: directory(0o711, nativeOwnershipCovUID, nativeOwnershipCovGID)},
-		{
-			name:  "generation owned outright by the native identity",
-			stat:  directory(0o700, nativeOwnershipCovUID, nativeOwnershipCovGID),
+			name:  "generation held privately by the trusted identity",
+			stat:  directory(0o700, trustedUID, trustedGID),
 			final: true,
 		},
 	} {
 		t.Run(accepted.name, func(t *testing.T) {
 			require.NoError(t, validateGeneratedNativeAncestor(
 				accepted.stat, accepted.final,
+				trustedUID, trustedGID,
 				nativeOwnershipCovUID, nativeOwnershipCovGID,
-				nativeOwnershipCovUID, nativeOwnershipCovGID,
-			), accepted.why)
+			))
 		})
 	}
-}
-
-// TestGeneratedNativeHandoffWalksARootOwnedAncestryUnderASharedIdentity proves
-// the whole handoff accepts the shape a wrapper that never dropped privilege
-// presents: its own identity is the native identity, and the generation hangs
-// from root-owned directories it will never own. The effective identity is
-// staged through its seams so the proof does not depend on which identity runs
-// the tests; the chowns behind the handoff still need the root the rest of this
-// file requires.
-func TestGeneratedNativeHandoffWalksARootOwnedAncestryUnderASharedIdentity(t *testing.T) {
-	root := nativeOwnershipCovTree(t)
-	entry := filepath.Join(root, "entry")
-	require.NoError(t, os.Chown(entry, int(nativeOwnershipCovUID), int(nativeOwnershipCovGID)))
-	require.NoError(t, os.Chown(root, int(nativeOwnershipCovUID), int(nativeOwnershipCovGID)))
-
-	nativeOwnershipCovSharedIdentity(t)
-
-	require.NoError(t, handoffGeneratedNativeTree(root, nativeOwnershipCovIsolation()))
-	nativeOwnershipCovRequireNativeOwned(t, root, entry)
-
-	require.NoError(t, os.Chown(filepath.Dir(root), 4242, 4242))
-
-	err := handoffGeneratedNativeTree(root, nativeOwnershipCovIsolation())
-	require.ErrorContains(t, err, "generated native path ancestor is uid=4242 gid=4242")
-	require.ErrorContains(t, err, "run the supervisor as root to isolate the agent identity")
 }
 
 // TestGeneratedNativeWalkValidatesTheFilesystemRootAsTheWholePath proves "/"
@@ -551,18 +537,6 @@ func nativeOwnershipCovSeams(t *testing.T) {
 		generatedNativeFchown = fchown
 		generatedNativeReadDir = readDir
 	})
-}
-
-// nativeOwnershipCovSharedIdentity stages the effective identity the wrapper
-// reads so the walk sees the native identity as its own, which is the shape a
-// wrapper that never dropped privilege presents. The process stays root, so the
-// fixture's chowns keep working.
-func nativeOwnershipCovSharedIdentity(t *testing.T) {
-	t.Helper()
-	uid, gid := effectiveUIDSource, effectiveGIDSource
-	t.Cleanup(func() { effectiveUIDSource, effectiveGIDSource = uid, gid })
-	effectiveUIDSource = func() int { return int(nativeOwnershipCovUID) }
-	effectiveGIDSource = func() int { return int(nativeOwnershipCovGID) }
 }
 
 func nativeOwnershipCovInode(t *testing.T, path string) uint64 {

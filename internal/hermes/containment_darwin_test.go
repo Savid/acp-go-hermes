@@ -831,12 +831,9 @@ func TestDarwinVanishedLeaderAndBoundaryBranches(t *testing.T) {
 
 func TestDarwinStartContainmentFailureBranches(t *testing.T) {
 	restoreDarwinLaunchSeams(t)
-	_, err := startUnixContainedProcess(exec.Command("/usr/bin/true"), ContainmentSpec{})
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-
 	originalRandom := containmentRandomRead
 	containmentRandomRead = func([]byte) (int, error) { return 0, errors.New("entropy") }
-	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), darwinTestContainmentSpec(t))
+	_, err := startUnixContainedProcess(exec.Command("/usr/bin/true"), darwinTestContainmentSpec(t))
 	require.ErrorContains(t, err, "identity")
 	containmentRandomRead = originalRandom
 

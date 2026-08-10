@@ -57,12 +57,12 @@ echo ppid=$PPID >> "$1"`
 		t.Fatal("ordinary child did not exit")
 	}
 
-	if err := tree.complete(10 * time.Second); err != nil {
-		t.Fatalf("ordinary completion: %v", err)
+	if completeErr := tree.complete(10 * time.Second); completeErr != nil {
+		t.Fatalf("ordinary completion: %v", completeErr)
 	}
 
-	if err := tree.close(); err != nil {
-		t.Fatalf("ordinary close: %v", err)
+	if closeErr := tree.close(); closeErr != nil {
+		t.Fatalf("ordinary close: %v", closeErr)
 	}
 
 	contents, err := os.ReadFile(status)

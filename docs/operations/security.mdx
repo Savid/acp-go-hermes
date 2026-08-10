@@ -51,8 +51,12 @@ reports `ECHILD`; pidfd-bound signals and an explicit proof pipe make
 fork/reparent races fail closed. Windows rejects an explicit isolation policy before spawning Hermes, because
 its process API cannot apply the Unix UID/GID identity boundary with empty
 supplementary groups. Ordinary same-identity execution is still available there.
-A Windows cross-compile proves only that these paths build; it does not
-establish runtime support.
+That ordinary Windows launch is proved at runtime by an executed Windows CI
+job: it resolves the harness out of a real Windows environment block — `Path`
+casing, `PATHEXT` extension search, and a regular file that carries no execute
+bit — and then starts, observes, and tears down a real child through the same
+ordinary boundary a session uses. A cross-compile on its own proves only that a
+path builds.
 
 The Linux guardian and liveness supervisor stay root and run from `/` with
 closed private environments. Sealed launch configuration carries the target

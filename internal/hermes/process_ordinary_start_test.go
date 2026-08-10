@@ -83,6 +83,38 @@ func TestOrdinaryBoundaryCompletionRequiresAStartedChild(t *testing.T) {
 	)
 }
 
+// TestStartOrdinaryProcessControlCallbacksUseSeparateChildren executes the
+// terminate and kill closures installed by the real launch path. Each signal
+// gets its own process group and the direct child is reaped before the next
+// case, avoiding a second signal against an identity the kernel may already
+// have recycled.
+func TestStartOrdinaryProcessControlCallbacksUseSeparateChildren(t *testing.T) {
+	for _, control := range []struct {
+		name string
+		run  func(*processContainment) error
+	}{
+		{name: "terminate", run: func(containment *processContainment) error { return containment.terminate(nil) }},
+		{name: "kill", run: func(containment *processContainment) error { return containment.kill(nil) }},
+	} {
+		t.Run(control.name, func(t *testing.T) {
+			command := exec.Command("/bin/sh", "-c", "sleep 30")
+			configureHermesProcess(command)
+
+			containment, err := startOrdinaryProcess(command)
+			require.NoError(t, err)
+			wait := containment.directChild(command)
+
+			require.NoError(t, control.run(containment))
+			select {
+			case <-wait.done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("ordinary child was not reaped after control signal")
+			}
+			require.NoError(t, containment.close())
+		})
+	}
+}
+
 // TestOrdinaryBoundaryCompletionRunsTheFullLadder drives a real child through
 // the default deadline and the group teardown, then proves a group that never
 // becomes unobservable is reported as a completion failure.
@@ -93,11 +125,10 @@ func TestOrdinaryBoundaryCompletionRunsTheFullLadder(t *testing.T) {
 	containment, err := startOrdinaryProcess(command)
 	require.NoError(t, err)
 
-	// The control surfaces the launch itself installed act on the started child.
-	require.NoError(t, containment.terminate(nil))
-	require.NoError(t, containment.kill(nil))
-
-	// A zero timeout selects the default ordinary deadline.
+	// A zero timeout selects the default ordinary deadline and drives the real
+	// child through the boundary's kill-and-reap ladder. The terminate and kill
+	// callbacks are exercised independently above; signalling this real group
+	// twice would introduce a PID/PGID-reuse race into the test itself.
 	require.NoError(t, containment.complete(0))
 
 	// A group that stays observable exhausts the ladder and fails closed.

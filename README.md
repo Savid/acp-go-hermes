@@ -113,8 +113,9 @@ directories are configured.
   non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
   authoritative Linux OS containment; it is Linux-only and fails closed rather
   than degrading, and Windows refuses it because its process API cannot apply the
-  Unix UID/GID identity boundary with empty supplementary groups.
-  Cross-compilation proves only that these paths build, not runtime support.
+  Unix UID/GID identity boundary with empty supplementary groups. Ordinary
+  Windows launch is proved by an executed Windows CI job rather than by a
+  cross-compile, which on its own establishes only that a path builds.
   Darwin additionally offers an explicitly risky best-effort process-group mode.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.

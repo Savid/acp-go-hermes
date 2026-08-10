@@ -37,13 +37,10 @@ func containmentMode(options Options) RuntimeContainmentMode {
 	}
 
 	// A supplied policy is the strict Linux boundary or nothing. It never
-	// degrades to shared_identity or best effort.
+	// degrades to shared_identity or best effort. Validation above has already
+	// proved both the Linux platform and the complete authority disposition.
 	if options.ProcessIsolation != nil {
-		if agentRuntimePlatform == agentRuntimeLinux {
-			return RuntimeContainmentAuthoritative
-		}
-
-		return RuntimeContainmentUnavailable
+		return RuntimeContainmentAuthoritative
 	}
 
 	if options.DarwinBestEffortContainment {
@@ -54,16 +51,24 @@ func containmentMode(options Options) RuntimeContainmentMode {
 }
 
 func validateContainmentOptions(options Options) error {
-	if options.DarwinBestEffortContainment && agentRuntimePlatform != agentRuntimeDarwin {
-		return errors.New("darwin best-effort containment is supported only on darwin")
-	}
-
 	// The two explicit options name incompatible boundaries: an explicit
 	// hardened identity policy cannot be downgraded to a process-group
 	// approximation, so asking for both is a configuration error rather than a
 	// precedence question.
 	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
 		return errors.New("darwin best-effort containment cannot be combined with explicit process isolation")
+	}
+
+	if options.DarwinBestEffortContainment && agentRuntimePlatform != agentRuntimeDarwin {
+		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	// ContainmentMode is an operational claim, not merely an option-presence
+	// report. A policy whose platform or authority disposition is invalid can
+	// never launch, so it reports unavailable instead of arming authoritative
+	// lifecycle accounting for a boundary no session can establish.
+	if options.ProcessIsolation != nil {
+		return validateProcessIsolationOption(options.ProcessIsolation)
 	}
 
 	return nil

@@ -32,7 +32,11 @@ type ProcessIsolation struct {
 	StandaloneStateRoot      string                        `json:"standaloneStateRoot"`
 }
 
-var processIsolationPlatform = runtime.GOOS
+// processRuntimePlatform is the package's single platform seam. Containment
+// selection and explicit-policy validation must observe the same simulated
+// platform in tests; separate copies can otherwise produce an impossible
+// half-Darwin, half-Linux launch verdict.
+var processRuntimePlatform = runtime.GOOS
 
 const (
 	privateSupervisorEnvPrefix = "ACP_" + "GO_HERMES_INTERNAL_"
@@ -65,8 +69,7 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return errors.New("process isolation base environment is required")
 	}
 
-	if processIsolationPlatform == processPlatformLinux &&
-		(!isolation.TestOnlyNoCredential || isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "") {
+	if !isolation.TestOnlyNoCredential || isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
 		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
 			return err
 		}
@@ -196,10 +199,24 @@ func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]st
 	return out, nil
 }
 
+// envValue reads a name out of a closed policy environment, where the policy
+// author wrote every key and an exact match is the whole rule.
 func envValue(env []string, name string) string {
+	return envValueFold(env, name, false)
+}
+
+// envValueFold reads a name out of an environment block that may not have been
+// written by this adapter. Folding is what an inherited Windows environment
+// requires: it spells the search path "Path", and an exact compare against
+// "PATH" would report an empty one rather than the operator's real search path.
+func envValueFold(env []string, name string, fold bool) string {
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
-		if ok && key == name {
+		if !ok {
+			continue
+		}
+
+		if key == name || (fold && strings.EqualFold(key, name)) {
 			return value
 		}
 	}
@@ -238,15 +255,9 @@ func lookPathInEnvironment(file string, environment []string) (string, error) {
 	return "", fmt.Errorf("executable %q not found in policy PATH", file)
 }
 
+// executableFile is the closed-policy candidate check. A policy launch is
+// Linux-only, so the execute bit is always the rule here regardless of which
+// platform this file happens to be compiled for.
 func executableFile(path string) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", err
-	}
-
-	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("%q is not executable", path)
-	}
-
-	return path, nil
+	return matchExecutableFile(path, unixExecutableRules())
 }

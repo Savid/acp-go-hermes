@@ -194,9 +194,6 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if spec.Isolation != nil {
 		return nil, errors.New("explicit process isolation is supported only on linux, not darwin")
 	}
-	if !spec.DarwinBestEffort {
-		return nil, fmt.Errorf("%w: Darwin containment is unavailable without explicit best-effort opt-in", ErrProcessContainmentIncomplete)
-	}
 	runtimeID, err := newContainmentRuntimeID()
 	if err != nil {
 		return nil, fmt.Errorf("create Darwin containment identity: %w", err)

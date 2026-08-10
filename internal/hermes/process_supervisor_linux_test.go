@@ -1036,10 +1036,9 @@ func TestHermesSupervisorRequiresDistinctTrustedRoot(t *testing.T) {
 		t.Fatalf("distinct trusted identity validation = %v", err)
 	}
 
-	// The bootstrap decides against the sealed config rather than against the
-	// bare effective uid: a shared identity is the one shape a supervisor that
-	// never held privilege may serve, and only the config names the identity it
-	// was asked to reach. A distinct native identity is still refused.
+	// The bootstrap revalidates the sealed config after reading it, including the
+	// trusted-root precondition. A non-root bootstrap is refused regardless of
+	// which target identity the config names; there is no same-identity path.
 	supervisorEffectiveUID = func() int { return 1000 }
 	configRead, configWrite, err := os.Pipe()
 	if err != nil {

@@ -52,13 +52,34 @@ func TestProcessStartRefusesAnUnavailableContainmentBackend(t *testing.T) {
 	restoreProcessSeams(t)
 	processCovRefuseLaunch(t)
 
-	original := processRuntimeGOOS
-	t.Cleanup(func() { processRuntimeGOOS = original })
+	original := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = original })
 
-	processRuntimeGOOS = "linux"
+	processRuntimePlatform = "linux"
 
 	_, err := Start(t.Context(), ProcessOptions{DarwinBestEffortContainment: true})
 	require.ErrorContains(t, err, "supported only on darwin")
+}
+
+// TestProcessStartRejectsAnUnusableEnvironmentForACachedExecutable proves the
+// launch environment is a Start precondition, not an incidental version-probe
+// check. A cached executable skips discovery entirely; swallowing this error
+// would otherwise launch Hermes without the ambient PATH and HOME.
+func TestProcessStartRejectsAnUnusableEnvironmentForACachedExecutable(t *testing.T) {
+	restoreProcessSeams(t)
+	processCovRefuseLaunch(t)
+
+	executable := fakeHermesExecutable(t, fakeProcessModeOK)
+	markExecutableProbed(executable)
+
+	options := darwinTestProcessOptions(t, ProcessOptions{
+		ExecutablePath: executable,
+		Home:           t.TempDir(),
+		Env:            map[string]string{"HERMES=INVALID": "1"},
+	})
+
+	_, err := Start(t.Context(), options)
+	require.ErrorContains(t, err, `process environment contains invalid key "HERMES=INVALID"`)
 }
 
 // TestProcessStartReportsContainmentRefusalAndRemovesTheShim proves a native
@@ -137,7 +158,7 @@ func TestProcessVersionProbeReleasesEverythingItTookForAnUnusableEnvironment(t *
 		RetainDiscoveryRoot: func(string, error) { retained++ },
 	})
 
-	_, err := Start(t.Context(), options)
+	_, err := ensureExecutableVersion(t.Context(), options.ExecutablePath, options)
 	require.ErrorContains(t, err, `process environment contains invalid key "HERMES=INVALID"`)
 	require.Equal(t, []int{1, 1, 0}, []int{native, scratch, retained})
 	require.Len(t, probeRoots, 1)

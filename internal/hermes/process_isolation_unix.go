@@ -22,8 +22,8 @@ var (
 // Ordinary same-identity execution stays available on all of them; it never
 // reaches this function.
 func validateProcessIsolationPlatform() error {
-	if processIsolationPlatform != processPlatformLinux {
-		return fmt.Errorf("explicit process isolation is supported only on linux, not %s", processIsolationPlatform)
+	if processRuntimePlatform != processPlatformLinux {
+		return fmt.Errorf("explicit process isolation is supported only on linux, not %s", processRuntimePlatform)
 	}
 
 	return nil

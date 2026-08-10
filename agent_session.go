@@ -1146,14 +1146,6 @@ func (a *Agent) rejectInvalidConfiguration() error {
 		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
-	// An omitted policy is the ordinary default rather than a misconfiguration,
-	// so only a supplied one is validated — and a supplied one fails closed.
-	if a.options.ProcessIsolation != nil {
-		if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 

@@ -234,7 +234,20 @@ func TestHermesProductionProcessSnapshotLifecycle(t *testing.T) {
 				options = append(options, WithDarwinBestEffortContainment())
 				test.wantSnapshots = nil
 			}
-			agent := newTestAgent(options...)
+			var agent *Agent
+			switch runtime.GOOS {
+			case "linux":
+				// Provider-descendant snapshots are an authoritative-policy
+				// surface. Drive the production lifecycle under the strict
+				// fixture so this test does not accidentally assert them for
+				// ordinary same-identity execution.
+				agent = newIsolatedTestAgent(options...)
+			case "darwin":
+				agent = newTestAgent(options...)
+			default:
+				agent = newTestAgent(options...)
+				test.wantSnapshots = nil
+			}
 
 			server, err := agent.newHermesClient(
 				t.Context(), "snapshot-session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{Root: root},

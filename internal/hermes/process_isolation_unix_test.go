@@ -13,17 +13,17 @@ import (
 
 func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	originalUID, originalGID, originalGroups := processIsolationGeteuid, processIsolationGetegid, processIsolationGetgroups
-	originalPlatform := processIsolationPlatform
+	originalPlatform := processRuntimePlatform
 	t.Cleanup(func() {
 		processIsolationGeteuid, processIsolationGetegid, processIsolationGetgroups = originalUID, originalGID, originalGroups
-		processIsolationPlatform = originalPlatform
+		processRuntimePlatform = originalPlatform
 	})
 
 	// A process that already holds the target identity is the post-drop end of
 	// the supervisor's own descent, so it verifies rather than re-requesting a
 	// credential. The platform is pinned to Linux because an explicit policy is
 	// refused everywhere else, whichever host runs this test.
-	processIsolationPlatform = processPlatformLinux
+	processRuntimePlatform = processPlatformLinux
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
@@ -67,8 +67,8 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 // an embedder calling the Go API directly cannot obtain the hardened boundary
 // on a platform that cannot host it.
 func TestExplicitProcessIsolationIsRefusedOffLinux(t *testing.T) {
-	originalPlatform := processIsolationPlatform
-	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+	originalPlatform := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
 
 	policy := &ProcessIsolation{
 		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
@@ -77,7 +77,7 @@ func TestExplicitProcessIsolationIsRefusedOffLinux(t *testing.T) {
 
 	for _, platform := range []string{"darwin", "freebsd", "openbsd", "windows"} {
 		t.Run(platform, func(t *testing.T) {
-			processIsolationPlatform = platform
+			processRuntimePlatform = platform
 			require.ErrorContains(t, validateProcessIsolation(policy), "only on linux")
 			require.ErrorContains(t, applyProcessIsolation(exec.Command("/usr/bin/true"), policy), "only on linux")
 			require.ErrorContains(t, verifyProcessIsolation(policy), "only on linux")

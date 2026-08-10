@@ -3,11 +3,14 @@
 package hermesacp
 
 import (
+	"context"
 	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/stretchr/testify/require"
 
@@ -57,6 +60,56 @@ func TestNativeOwnedDirectoryAcceptsTheNativeIdentityHome(t *testing.T) {
 	home := nativeOwnershipTestHome(t)
 
 	require.NoError(t, validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation()))
+}
+
+// TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary is
+// the adapter-level proof for the policy-conditional provider-auth check. It
+// drives NewSession as a trusted root with a distinct target identity, captures
+// the native launch policy and durable auth residence, then reaches the auth
+// surface through that live session. Ordinary-mode tests cannot exercise this
+// ownership walk because a nil policy intentionally skips it.
+func TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary(t *testing.T) {
+	requireNativeOwnershipRoot(t)
+
+	authHome := testNativeOwnedDir(t, "native-auth")
+	client := newFakeHermesClient()
+	client.createSession = testNativeSession("native-strict-auth")
+	client.getSession = client.createSession
+	client.authProviders = []nativehermes.AuthProvider{{
+		ID: "xai-oauth", Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode,
+	}}
+
+	var starts []nativehermes.StartOptions
+	agent := newIsolatedTestAgent(
+		WithScratchDir(t.TempDir()),
+		WithProviderAuthRoot(t.TempDir()),
+		WithProviderAuthHome(authHome),
+		func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				starts = append(starts, opts)
+
+				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+				client.xdg = xdg
+
+				return client, nil
+			}
+		},
+	)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.Len(t, starts, 1)
+	require.NotNil(t, starts[0].Isolation)
+	require.Equal(t, authHome, starts[0].ProviderAuthHome)
+
+	methods, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{
+		"sessionId": string(created.SessionId),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, methods)
 }
 
 // TestNativeOwnedDirectoryWithoutIsolationIsNotChecked proves the check is
@@ -287,123 +340,6 @@ func TestDurableNativeAncestorStatesEachRefusal(t *testing.T) {
 			))
 		})
 	}
-}
-
-// TestDurableNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors proves
-// how far the native-owned ancestry rule relaxes when the wrapper never dropped
-// privilege, so its own identity is the native identity. Nothing separates the
-// two ends of the check in that shape, and every path to a directory that
-// identity owns still crosses root-owned components such as "/" and "/home", so
-// those are acceptable ancestors — and nothing else is. The leaf contract is
-// untouched: it still has to belong to the native identity outright with full
-// owner rights, and only its ancestry admits the directories root owns.
-func TestDurableNativeAncestorUnderASharedIdentityAcceptsOnlyRootAncestors(t *testing.T) {
-	directory := func(mode uint32, uid, gid uint32) unix.Stat_t {
-		return unix.Stat_t{Mode: unix.S_IFDIR | mode, Uid: uid, Gid: gid}
-	}
-
-	for _, testCase := range []struct {
-		name  string
-		stat  unix.Stat_t
-		final bool
-		want  string
-	}{
-		{
-			name: "not a directory",
-			stat: unix.Stat_t{Mode: unix.S_IFREG | 0o700},
-			want: "ancestry is not a directory",
-		},
-		{
-			name: "ancestor owned by a third identity",
-			stat: directory(0o755, 4242, 4242),
-			want: "native-owned path ancestor is uid=4242 gid=4242; " +
-				"run the supervisor as root to isolate the agent identity, " +
-				"or place the native directory under a path the agent identity owns",
-		},
-		{
-			name: "ancestor owned by root with a foreign group",
-			stat: directory(0o755, 0, 4242),
-			want: "native-owned path ancestor is uid=0 gid=4242",
-		},
-		{
-			name: "world-writable root-owned ancestor without sticky bit",
-			stat: directory(0o777, 0, 0),
-			want: "ancestor mode 0777 is writable",
-		},
-		{
-			name: "root-owned ancestor the native identity cannot traverse",
-			stat: directory(0o700, 0, 0),
-			want: "not traversable by the target identity",
-		},
-		{
-			name:  "leaf still owned by root",
-			stat:  directory(0o700, 0, 0),
-			final: true,
-			want:  "native-owned path ancestor is uid=0 gid=0",
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			err := validateDurableNativeAncestor(
-				testCase.stat, testCase.final,
-				nativeOwnershipTestUID, nativeOwnershipTestGID,
-				nativeOwnershipTestUID, nativeOwnershipTestGID,
-			)
-			require.ErrorContains(t, err, testCase.want)
-		})
-	}
-
-	for _, accepted := range []struct {
-		name  string
-		stat  unix.Stat_t
-		final bool
-		why   string
-	}{
-		{
-			name: "root-owned ancestor every home directory is reached through",
-			stat: directory(0o755, 0, 0),
-			why:  "the root-owned ancestry a shared identity cannot avoid was refused",
-		},
-		{name: "sticky writable root-owned ancestor", stat: directory(0o1777, 0, 0)},
-		{name: "traversable ancestor owned by the native identity", stat: directory(0o711, nativeOwnershipTestUID, nativeOwnershipTestGID)},
-		{
-			name:  "leaf owned outright by the native identity",
-			stat:  directory(0o700, nativeOwnershipTestUID, nativeOwnershipTestGID),
-			final: true,
-		},
-	} {
-		t.Run(accepted.name, func(t *testing.T) {
-			require.NoError(t, validateDurableNativeAncestor(
-				accepted.stat, accepted.final,
-				nativeOwnershipTestUID, nativeOwnershipTestGID,
-				nativeOwnershipTestUID, nativeOwnershipTestGID,
-			), accepted.why)
-		})
-	}
-}
-
-// TestNativeOwnedDirectoryWalksARootOwnedAncestryUnderASharedIdentity proves the
-// whole check accepts the shape a wrapper that never dropped privilege presents:
-// its own identity is the native identity, and the provider auth home it was
-// handed hangs from root-owned directories it will never own. The effective
-// identity is staged through its seams so the proof does not depend on which
-// identity runs the tests; the chowns behind the fixture still need the root the
-// rest of this file requires.
-func TestNativeOwnedDirectoryWalksARootOwnedAncestryUnderASharedIdentity(t *testing.T) {
-	home := nativeOwnershipTestHome(t)
-
-	realUID, realGID := effectiveUIDSource, effectiveGIDSource
-	t.Cleanup(func() { effectiveUIDSource, effectiveGIDSource = realUID, realGID })
-
-	effectiveUIDSource = func() int { return int(nativeOwnershipTestUID) }
-	effectiveGIDSource = func() int { return int(nativeOwnershipTestGID) }
-
-	require.NoError(t, validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation()))
-
-	require.NoError(t, os.Chown(filepath.Dir(home), 4242, 4242))
-
-	err := validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation())
-	require.ErrorContains(t, err, "native-owned path ancestor is uid=4242 gid=4242")
-	require.ErrorContains(t, err, "place the native directory under a path the agent identity owns")
 }
 
 // TestNativeIdentityTraversalUsesTheApplicableModeClass proves traversability

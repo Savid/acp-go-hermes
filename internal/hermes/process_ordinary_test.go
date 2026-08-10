@@ -66,6 +66,24 @@ func TestOrdinaryEnvironmentOverlayCannotReintroduceScrubbedState(t *testing.T) 
 	require.ErrorContains(t, err, "invalid key")
 }
 
+// writeTestHarness writes a harness image under dir under the name this
+// platform's ordinary resolution of a bare "hermes" will actually find, and
+// returns it. Windows resolves a bare name through PATHEXT, so the fixture has
+// to carry an extension those rules list.
+func writeTestHarness(t *testing.T, dir string) string {
+	t.Helper()
+
+	name := "hermes"
+	if extensions := ordinaryExecutableRules(nil).extensions; len(extensions) > 0 {
+		name += extensions[0]
+	}
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700))
+
+	return path
+}
+
 // TestOrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment pins the
 // split from strict policy resolution: a relative PATH entry and a relative
 // configured executable are ordinary, and refusing them would turn policy
@@ -75,24 +93,25 @@ func TestOrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment(t *testin
 	binDir := filepath.Join(root, "bin")
 	require.NoError(t, os.MkdirAll(binDir, 0o700))
 
-	harness := filepath.Join(binDir, "hermes")
-	require.NoError(t, os.WriteFile(harness, []byte("#!/bin/sh\n"), 0o700))
+	harness := writeTestHarness(t, binDir)
 
-	previous, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.Chdir(previous) })
-	require.NoError(t, os.Chdir(root))
+	// t.Chdir rather than a manual save-and-restore: it restores the directory
+	// itself and panics if this test or any parent is parallel, which is the
+	// guard a process-wide mutation in a package full of parallel tests needs.
+	t.Chdir(root)
+
+	separator := string(os.PathListSeparator)
 
 	for name, search := range map[string]string{
-		"relative entry": "bin:/usr/bin",
+		"relative entry": "bin" + separator + binDir,
 		"absolute entry": binDir,
-		"empty entry":    ":bin",
+		"empty entry":    separator + "bin",
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolved, lookErr := lookOrdinaryPathInEnvironment("hermes", []string{"PATH=" + search})
 			require.NoError(t, lookErr)
 			require.True(t, filepath.IsAbs(resolved), "resolved path %q must be absolute", resolved)
-			require.Equal(t, "hermes", filepath.Base(resolved))
+			require.Equal(t, filepath.Base(harness), filepath.Base(resolved))
 		})
 	}
 
@@ -106,7 +125,7 @@ func TestOrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment(t *testin
 	_, err = lookOrdinaryPathInEnvironment("", nil)
 	require.ErrorContains(t, err, "empty")
 
-	_, err = lookOrdinaryPathInEnvironment("hermes", []string{"PATH=/nonexistent"})
+	_, err = lookOrdinaryPathInEnvironment("hermes", []string{"PATH=" + filepath.Join(root, "nonexistent")})
 	require.ErrorContains(t, err, "not found in PATH")
 
 	_, err = lookOrdinaryPathInEnvironment(filepath.Join("bin", "missing"), nil)
@@ -135,10 +154,7 @@ func TestResolveHarnessExecutableSplitsByMode(t *testing.T) {
 	require.ErrorContains(t, err, "resolve Hermes executable")
 	require.ErrorContains(t, err, "not absolute")
 
-	previous, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.Chdir(previous) })
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 
 	resolved, err = resolveHarnessExecutable(nil, "hermes", []string{"PATH=bin"})
 	require.NoError(t, err)

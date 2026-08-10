@@ -39,10 +39,11 @@ func newTestAgent(opts ...Option) *Agent {
 }
 
 // newIsolatedTestAgent builds an agent with an explicit hardened policy, for
-// the tests whose subject is that policy. The identity is deliberately distinct
-// from the runner's: an explicit policy that named the runner's own identity
-// would be refused, because there is no same-identity disposition for it to
-// fall back to.
+// the tests whose subject is that policy. An unprivileged test runner names its
+// own identity; a root runner substitutes a nonzero target. The test-only
+// no-credential seam lets adapter tests exercise strict-policy threading without
+// pretending that this fixture satisfies the production trusted-root launch
+// preconditions.
 func newIsolatedTestAgent(opts ...Option) *Agent {
 	uid, gid := testIsolationIdentity()
 	base := make([]Option, 0, 2+len(opts))
@@ -51,7 +52,7 @@ func newIsolatedTestAgent(opts ...Option) *Agent {
 			UID: uid, GID: gid,
 			BaseEnvironment:     map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
 			StandaloneOwnerID:   "acp-go-hermes-tests",
-			StandaloneStateRoot: os.TempDir(),
+			StandaloneStateRoot: filepath.Clean(os.TempDir()),
 		}),
 		func(options *Options) {
 			options.testOnlyNoCredential = true

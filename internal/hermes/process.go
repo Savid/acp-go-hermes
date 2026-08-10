@@ -176,13 +176,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		executable = valHermes
 	}
 
-	// The version probe below rebuilds this environment authoritatively and
-	// reports an unusable one after it has taken, and can release, the
-	// admissions it needs. Resolution here only needs a PATH to find the
-	// executable with, so an environment failure is deliberately not fatal yet.
-	baseEnvironment, _ := processLaunchEnvironment(opts)
+	baseEnvironment, err := processLaunchEnvironment(opts)
+	if err != nil {
+		return nil, err
+	}
 
-	executable, err := resolveHarnessExecutable(opts.Isolation, executable, baseEnvironment)
+	executable, err = resolveHarnessExecutable(opts.Isolation, executable, baseEnvironment)
 	if err != nil {
 		return nil, err
 	}

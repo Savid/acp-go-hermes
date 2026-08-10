@@ -2,10 +2,7 @@ package hermes
 
 import (
 	"errors"
-	"runtime"
 )
-
-var processRuntimeGOOS = runtime.GOOS
 
 // validateProcessContainment answers only the containment-backend question:
 // whether the requested backend can exist on this platform. The Darwin
@@ -17,7 +14,7 @@ var processRuntimeGOOS = runtime.GOOS
 // omitted policy asks for neither: ordinary same-identity execution needs no
 // containment backend and is supported on every platform.
 func validateProcessContainment(bestEffort bool) error {
-	if bestEffort && processRuntimeGOOS != processPlatformDarwin {
+	if bestEffort && processRuntimePlatform != processPlatformDarwin {
 		return errors.New("darwin best-effort containment is supported only on darwin")
 	}
 

@@ -24,9 +24,11 @@ type processContainment struct {
 	closeFn           func() error
 }
 
-// startContainedProcess refuses only the hardened boundary here. An omitted
-// policy is served by the ordinary launch path, which this platform supports on
-// the same terms as every other.
+// startContainedProcess refuses every boundary this platform cannot build. An
+// omitted policy is served by the ordinary launch path, which this platform
+// supports on the same terms as every other; a spec that asked for anything
+// stronger is refused here rather than quietly downgraded to it, so this
+// backend and the unix one answer a requested boundary the same way.
 func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processContainment, error) {
 	var spec ContainmentSpec
 	if len(specs) > 0 {
@@ -35,6 +37,10 @@ func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processCon
 
 	if spec.Isolation != nil {
 		return nil, fmt.Errorf("explicit process isolation is supported only on linux, not %s", runtime.GOOS)
+	}
+
+	if spec.DarwinBestEffort {
+		return nil, fmt.Errorf("darwin best-effort containment is supported only on darwin, not %s", runtime.GOOS)
 	}
 
 	return startOrdinaryProcess(cmd)

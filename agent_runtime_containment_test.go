@@ -3,9 +3,12 @@ package hermesacp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -88,7 +91,10 @@ func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 	oldPlatform := agentRuntimePlatform
 	t.Cleanup(func() { agentRuntimePlatform = oldPlatform })
 
-	explicit := &ProcessIsolation{UID: 1000, GID: 1000}
+	explicit := &ProcessIsolation{
+		UID: 1000, GID: 1000, BaseEnvironment: map[string]string{"PATH": "/usr/bin"},
+		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/hermes",
+	}
 
 	tests := []struct {
 		name       string
@@ -145,6 +151,50 @@ func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 	}
 }
 
+// TestDarwinBestEffortWithExplicitIsolationRefusesWithoutSpawning pins the
+// option-level mutual exclusion at both public entry points. The client factory
+// is the adapter's native spawn seam; it must remain untouched rather than
+// receiving either a downgraded ordinary launch or a best-effort one.
+func TestDarwinBestEffortWithExplicitIsolationRefusesWithoutSpawning(t *testing.T) {
+	oldPlatform := agentRuntimePlatform
+	t.Cleanup(func() { agentRuntimePlatform = oldPlatform })
+	agentRuntimePlatform = agentRuntimeDarwin
+
+	spawns := 0
+	agent := NewAgent(
+		WithDarwinBestEffortContainment(),
+		WithProcessIsolation(ProcessIsolation{
+			UID: 4242, GID: 4242, BaseEnvironment: map[string]string{"PATH": "/usr/bin"},
+			StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/hermes",
+		}),
+		func(options *Options) {
+			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+				spawns++
+
+				return nil, errors.New("unexpected spawn")
+			}
+		},
+	)
+
+	if got := agent.ContainmentMode(); got != RuntimeContainmentUnavailable {
+		t.Fatalf("combined containment mode = %q", got)
+	}
+
+	if _, err := agent.Initialize(t.Context(), acp.InitializeRequest{}); err == nil ||
+		!strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("combined initialization error = %v", err)
+	}
+
+	if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil ||
+		!strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("combined session error = %v", err)
+	}
+
+	if spawns != 0 {
+		t.Fatalf("combined options attempted %d native spawns", spawns)
+	}
+}
+
 // TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves ordinary mode keeps
 // every reporting surface an Agent has, while publishing none of the evidence
 // it cannot produce: the mode is observed once, and the provider-descendant
@@ -192,12 +242,60 @@ func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
 }
 
 // TestAgentSessionDefaultsToOrdinaryExecution is the canonical default-mode
-// class: an Agent built with no process options manufactures no
-// ProcessIsolation value, keeps the public option nil all the way to the launch
-// boundary, treats the omission as valid configuration, and reports the
-// non-authoritative shared posture.
+// class. It drives a real NewSession through the launch seam rather than
+// inspecting options: an Agent built with no process options must manufacture
+// no ProcessIsolation value, hand the launch boundary a nil policy and a
+// populated ambient environment instead, report the non-authoritative shared
+// posture exactly once, and publish no provider-descendant inventory.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
-	agent := newTestAgent()
+	oldCapture := captureAmbientEnvironment
+	t.Cleanup(func() { captureAmbientEnvironment = oldCapture })
+
+	// A fixed adapter environment, including the managed state an inherited
+	// environment must never carry into a native launch.
+	captureAmbientEnvironment = func() []string {
+		return []string{
+			"PATH=/usr/bin:/bin",
+			"HOME=/home/operator",
+			"HERMES_HOME=/operator/real/home",
+			"HERMES_AUTH_HOME=/operator/real/credentials",
+		}
+	}
+
+	var (
+		observed  []RuntimeContainmentMode
+		snapshots []int
+		launched  []nativehermes.StartOptions
+	)
+
+	client := newFakeHermesClient()
+	client.createSession = testNativeSession("native-ordinary")
+	client.getSession = client.createSession
+
+	agent := newTestAgent(
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) {
+				observed = append(observed, mode)
+			},
+			ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+				snapshots = append(snapshots, count)
+			},
+		}),
+		func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				launched = append(launched, opts)
+
+				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+				client.xdg = xdg
+
+				return client, nil
+			}
+		},
+	)
 
 	if agent.options.ProcessIsolation != nil {
 		t.Fatalf("omission manufactured a policy %+v", agent.options.ProcessIsolation)
@@ -211,15 +309,54 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 		t.Fatalf("default containment mode = %q", got)
 	}
 
-	// The internal launch option is nil too, so no supervisor, authority, or
-	// credential machinery is selected on the way to the native process.
-	if native := nativeProcessIsolation(agent.options.ProcessIsolation, false, ""); native != nil {
-		t.Fatalf("omission produced a native policy %+v", native)
+	if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err != nil {
+		t.Fatalf("NewSession: %v", err)
 	}
 
-	// The ambient snapshot travels beside the policy rather than inside it.
-	if agent.ambientEnv == nil {
-		t.Fatal("ordinary execution captured no ambient environment")
+	if len(launched) != 1 {
+		t.Fatalf("native launches = %d, want 1", len(launched))
+	}
+
+	start := launched[0]
+
+	// The launch boundary receives no policy, so no supervisor, authority, or
+	// credential machinery was selected on the way to the native process.
+	if start.Isolation != nil {
+		t.Fatalf("ordinary launch carried a policy %+v", start.Isolation)
+	}
+
+	// The ambient snapshot travels beside the policy rather than inside it. A
+	// regression that dropped it would launch Hermes with no PATH and no HOME.
+	if start.AmbientEnvironment["PATH"] != "/usr/bin:/bin" ||
+		start.AmbientEnvironment["HOME"] != "/home/operator" {
+		t.Fatalf("ordinary launch ambient environment = %v", start.AmbientEnvironment)
+	}
+
+	// It is the adapter's own environment, not a laundered one: the managed
+	// Hermes state is scrubbed at the launch boundary itself, which the
+	// internal ordinary environment tests pin, so what arrives here is the
+	// unedited snapshot the Agent captured once at construction.
+	if start.AmbientEnvironment["HERMES_HOME"] != "/operator/real/home" {
+		t.Fatalf("ambient snapshot was edited before the boundary: %v", start.AmbientEnvironment)
+	}
+
+	// The clone is defensive: mutating what the launch received must not reach
+	// the Agent's own snapshot, which every later session and provider-auth leg
+	// still launches against.
+	start.AmbientEnvironment["PATH"] = "/mutated"
+
+	if agent.ambientEnv["PATH"] != "/usr/bin:/bin" {
+		t.Fatalf("launch options aliased the Agent ambient snapshot: %v", agent.ambientEnv)
+	}
+
+	if len(observed) != 1 || observed[0] != RuntimeContainmentSharedIdentity {
+		t.Fatalf("containment observations = %v", observed)
+	}
+
+	// Ordinary mode enumerates no descendants, so a real session publishes no
+	// provider-descendant sample — not even a terminal zero.
+	if len(snapshots) != 0 {
+		t.Fatalf("ordinary session published provider snapshots %v", snapshots)
 	}
 }
 
@@ -249,6 +386,45 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 		t.Fatalf("valid explicit Linux policy mode = %q", got)
 	}
 
+	// Drive a real adapter session through the strict-policy launch seam. This
+	// keeps explicit mode covered as an operational session path rather than
+	// only as option validation.
+	client := newFakeHermesClient()
+	client.createSession = testNativeSession("native-explicit")
+	client.getSession = client.createSession
+
+	var starts []nativehermes.StartOptions
+	sessionAgent := newIsolatedTestAgent(
+		WithScratchDir(t.TempDir()),
+		func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				starts = append(starts, opts)
+
+				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+				client.xdg = xdg
+
+				return client, nil
+			}
+		},
+	)
+
+	if _, err := sessionAgent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err != nil {
+		t.Fatalf("explicit NewSession: %v", err)
+	}
+	if len(starts) != 1 || starts[0].Isolation == nil {
+		t.Fatalf("explicit session launch options = %+v", starts)
+	}
+	if starts[0].Isolation.UID != sessionAgent.options.ProcessIsolation.UID ||
+		starts[0].Isolation.GID != sessionAgent.options.ProcessIsolation.GID {
+		t.Fatalf("explicit session identity = %d:%d, want %d:%d",
+			starts[0].Isolation.UID, starts[0].Isolation.GID,
+			sessionAgent.options.ProcessIsolation.UID, sessionAgent.options.ProcessIsolation.GID,
+		)
+	}
+
 	// A structurally valid policy on a platform that cannot host the boundary
 	// refuses, and the reported mode never becomes shared or best effort.
 	for _, platform := range []string{agentRuntimeDarwin, "windows", "freebsd"} {
@@ -276,6 +452,9 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	incomplete := NewAgent(WithProcessIsolation(ProcessIsolation{
 		UID: 4242, GID: 4242, BaseEnvironment: map[string]string{"PATH": "/usr/bin"},
 	}))
+	if got := incomplete.ContainmentMode(); got != RuntimeContainmentUnavailable {
+		t.Fatalf("incomplete explicit policy mode = %q", got)
+	}
 	if err := incomplete.rejectInvalidConfiguration(); err == nil {
 		t.Fatal("explicit policy without an authority disposition was accepted")
 	}

@@ -11,12 +11,12 @@ import (
 // omitted policy — which needs no backend at all — is accepted on every
 // platform rather than being reported as unavailable there.
 func TestValidateProcessContainmentGatesOnlyTheDarwinBackend(t *testing.T) {
-	original := processRuntimeGOOS
-	t.Cleanup(func() { processRuntimeGOOS = original })
+	original := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = original })
 
 	for _, goos := range []string{processPlatformDarwin, processPlatformLinux, "windows", "freebsd", "openbsd", "plan9"} {
 		t.Run(goos, func(t *testing.T) {
-			processRuntimeGOOS = goos
+			processRuntimePlatform = goos
 
 			require.NoError(t, validateProcessContainment(false))
 
