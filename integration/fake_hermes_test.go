@@ -26,7 +26,7 @@ const (
 	envFakeHermesHelper        = "ACP_GO_HERMES_FAKE_HELPER"
 	envFakeHermesMode          = "ACP_GO_HERMES_FAKE_MODE"
 	envFakeHermesDescendantPID = "ACP_GO_HERMES_FAKE_DESCENDANT_PID_FILE"
-	envFakeHermesCLICapture    = "ACP_GO_HERMES_FAKE_SESSION_CLI_CAPTURE"
+	envFakeHermesCLICapture    = "ACP_GO_HERMES_TEST_ROOT"
 	fakeModeOK                 = "ok"
 	fakeModeStatusOnly         = "status-only"
 	fakeModeDetachedDescendant = "detached-descendant"

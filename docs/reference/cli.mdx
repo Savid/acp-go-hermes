@@ -81,7 +81,7 @@ home for native tools.
 | Flag | Meaning |
 |---|---|
 | `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
-| `-process-isolation-config` | Optional absolute path to the Linux isolation policy described above. Omitting it runs Hermes as this process's own identity. |
+| `-process-isolation-config` | An optional absolute path to the Linux isolation policy described above. Omitting it runs Hermes as this process's own identity. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-home` | Unsupported because each session runtime root is isolated. Use `-scratch-dir` for ephemeral state and `-hermes-provider-auth-home` for durable provider credentials. |
 | `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-hermes-provider-auth-home`. |

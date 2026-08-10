@@ -16,7 +16,7 @@ command itself runs as, and the adapter reports the non-authoritative
 
 The hardened boundary is opt-in and Linux-only. Supplying the root-owned
 mode-`0600` `-process-isolation-config` policy selects it, and a supplied policy
-fails closed rather than degrading. Resolution walks
+fails closed without fallback. Resolution walks
 from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
 must be root-owned and not writable by group or other, and the final single-link
 policy inode is read through the descriptor that was validated. The configured

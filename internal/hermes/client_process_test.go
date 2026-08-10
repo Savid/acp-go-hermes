@@ -610,9 +610,9 @@ func TestProcessBackedSessionCLICarrierAtNativeBoundary(t *testing.T) {
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeSessionCLI),
 		Home:           t.TempDir(),
 		SessionEnv: map[string]string{
-			"ACP_GO_HERMES_SESSION_CLI_CAPTURE": capturePath,
-			"WAGIE_API_TOKEN":                   "bearer-one",
-			"WAGIE_OPERATION_ID":                "operation-one",
+			"ACP_GO_HERMES_TEST_ROOT": capturePath,
+			"WAGIE_API_TOKEN":         "bearer-one",
+			"WAGIE_OPERATION_ID":      "operation-one",
 		},
 		ExtraPathDirs: []string{operationOne, operationTwo},
 		Timeout:       10 * time.Second,
@@ -1263,7 +1263,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 }
 
 func captureFakeSessionCLI() error {
-	capturePath := os.Getenv("ACP_GO_HERMES_SESSION_CLI_CAPTURE")
+	capturePath := os.Getenv("ACP_GO_HERMES_TEST_ROOT")
 	if capturePath == "" {
 		return errors.New("session CLI capture path is empty")
 	}
