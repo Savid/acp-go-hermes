@@ -24,7 +24,9 @@ const (
 )
 
 // newAuthAgent builds an agent with a usable durable ledger root and one
-// registered session whose native home is an isolated temp directory.
+// registered session whose native home is an isolated temp directory. The same
+// fake gateway backs the broker every leg speaks to, because the broker is a
+// native launch like any other.
 func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	t.Helper()
 
@@ -32,10 +34,17 @@ func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	client := newFakeHermesClient()
 	client.xdg = nativehermes.XDGDirs{Root: home}
 
-	agent := newTestAgent(WithProviderAuthRoot(t.TempDir()), WithProviderAuthHome(t.TempDir()))
+	agent := newTestAgent(
+		WithProviderAuthRoot(t.TempDir()),
+		WithProviderAuthHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		withTestClientFactory(client),
+	)
 	if agent.providerAuth == nil {
 		t.Fatal("provider auth surface is unavailable with a usable root")
 	}
+
+	t.Cleanup(func() { _ = agent.providerAuth.closeBroker(context.Background()) })
 
 	session := newSession(agent, testSessionID, "/cwd", nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
 	if err := agent.storeStartedSession(session); err != nil {
@@ -43,6 +52,17 @@ func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	}
 
 	return agent, client
+}
+
+// stopAuthBroker is how a test says "this agent has no native gateway left":
+// the broker refuses every later borrow once it is closed, which is the state a
+// leg meets when the harness is gone.
+func stopAuthBroker(t *testing.T, agent *Agent) {
+	t.Helper()
+
+	if err := agent.providerAuth.closeBroker(context.Background()); err != nil {
+		t.Fatalf("close provider auth broker: %v", err)
+	}
 }
 
 // mustType asserts a leg result's concrete type without discarding the failure.

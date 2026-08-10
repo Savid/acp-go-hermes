@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -466,28 +467,21 @@ func TestInventoryFailurePaths(t *testing.T) {
 
 	client.authProvidersErr = nil
 
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("authSession: %v", err)
-	}
-
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-
-	_, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
-	requireAuthCause(t, err, authCauseTransport)
-
-	session.mu.Lock()
-	session.client = client
-	session.mu.Unlock()
-
 	restoreLedgerHooks(t)
 
 	ledgerReadDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("readdir") }
 
 	_, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseProcess)
+
+	// Inventory reads the native side to decide whether a recorded lineage is
+	// still present, so with no gateway to read it refuses rather than reporting
+	// an absence it has not observed. This is last because it is irreversible.
+	restoreLedgerHooks(t)
+	stopAuthBroker(t, agent)
+
+	_, err = callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
+	requireAuthCause(t, err, authCauseTransport)
 }
 
 func TestAuthLedgerPathIsDeterministicAndScopedToTheRoot(t *testing.T) {
@@ -564,13 +558,21 @@ func TestInventorySurvivesAgentRestartWithoutReadingCredentialFiles(t *testing.T
 	}
 	seedConfirmedLineage(t, first, testProviderID)
 
-	second := newTestAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	client := newFakeHermesClient()
+	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: true}}
+
+	second := newTestAgent(
+		WithProviderAuthRoot(root),
+		WithProviderAuthHome(home),
+		WithScratchDir(t.TempDir()),
+		withTestClientFactory(client),
+	)
 	if second.providerAuth == nil {
 		t.Fatal("second provider auth surface unavailable")
 	}
 
-	client := newFakeHermesClient()
-	client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, LoggedIn: true}}
+	t.Cleanup(func() { _ = second.providerAuth.closeBroker(context.Background()) })
+
 	session := newSession(
 		second,
 		testSessionID,

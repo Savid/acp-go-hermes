@@ -243,7 +243,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, publishErr
 	}
 
-	mint, cause := p.mintPresentation(ctx, session, flow)
+	mint, cause := p.mintPresentation(ctx, flow)
 
 	if cause != "" {
 		failure := p.fail(ctx, flow, cause, false)
@@ -257,7 +257,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	// that id before the commit wrote it. Cancelling here is what leaves no
 	// login running for a session nobody can address.
 	if abandoned, ok := p.abandonedCause(flow); ok {
-		p.cancelNativeFlow(ctx, session, flow)
+		p.cancelNative(ctx, flow)
 
 		failure := authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
 		p.settle(flow, failure)
@@ -437,15 +437,15 @@ func (p *providerAuth) resolveMethod(request authorizeRequest) (authCatalogMetho
 // the login running at the provider with nothing left to stop it. An empty
 // cause is the success answer; every other cause carries the transition its
 // caller performs.
-func (p *providerAuth) mintPresentation(ctx context.Context, session *session, flow *authFlow) (authMint, string) {
-	mint, cause := p.buildMint(ctx, session, flow)
+func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authMint, string) {
+	mint, cause := p.buildMint(ctx, flow)
 	p.commitMint(flow, mint)
 
 	return mint, cause
 }
 
 // buildMint produces the presentation an authorize answers with.
-func (p *providerAuth) buildMint(ctx context.Context, session *session, flow *authFlow) (authMint, string) {
+func (p *providerAuth) buildMint(ctx context.Context, flow *authFlow) (authMint, string) {
 	mint := authMint{
 		presentation: authAuthorizeResult{
 			FlowID:        flow.id,
@@ -459,10 +459,12 @@ func (p *providerAuth) buildMint(ctx context.Context, session *session, flow *au
 		probeInterval: flow.probeInterval,
 	}
 
-	client := session.authNativeClient()
-	if client == nil {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return mint, authCauseTransport
 	}
+
+	defer release()
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
@@ -576,19 +578,13 @@ func (p *providerAuth) expire(flow *authFlow) {
 // cancelNative invokes hermes' own flow cancel route. It never claims
 // provider-side cancellation: an issued device code stays valid at the provider
 // until it expires there.
+//
+// The native flow id is read under the mutex because the mint commits it there,
+// and the leg that cancels is routinely the one racing that commit. Cancelling
+// no longer needs the session that started the flow to still exist: the login
+// runs in the broker's process against the durable residence, so a session the
+// host tore down cannot strand a login nobody can stop.
 func (p *providerAuth) cancelNative(ctx context.Context, flow *authFlow) {
-	session, err := p.agent.session(flow.sessionID)
-	if err != nil {
-		return
-	}
-
-	p.cancelNativeFlow(ctx, session, flow)
-}
-
-// cancelNativeFlow cancels through a session the caller already resolved. The
-// native flow id is read under the mutex because the mint commits it there, and
-// the leg that cancels is routinely the one racing that commit.
-func (p *providerAuth) cancelNativeFlow(ctx context.Context, session *session, flow *authFlow) {
 	p.mu.Lock()
 	nativeSessionID := flow.nativeSessionID
 	p.mu.Unlock()
@@ -597,10 +593,12 @@ func (p *providerAuth) cancelNativeFlow(ctx context.Context, session *session, f
 		return
 	}
 
-	client := session.authNativeClient()
-	if client == nil {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return
 	}
+
+	defer release()
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
@@ -676,7 +674,7 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, invalidAuthField(authFieldInput)
 	}
 
-	return p.submitCode(ctx, session, flow, input)
+	return p.submitCode(ctx, flow, input)
 }
 
 // callbackInput reads the value the mint published as this flow's expected
@@ -690,11 +688,13 @@ func (p *providerAuth) callbackInput(flow *authFlow) string {
 
 // submitCode hands the pasted authorization code to hermes and then reads the
 // flow's own poll route, which is the only completion signal on this surface.
-func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *authFlow, input string) (any, error) {
-	client := session.authNativeClient()
-	if client == nil {
+func (p *providerAuth) submitCode(ctx context.Context, flow *authFlow, input string) (any, error) {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return nil, p.fail(ctx, flow, authCauseTransport, true)
 	}
+
+	defer release()
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
@@ -710,7 +710,7 @@ func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *a
 
 	switch poll.State {
 	case nativehermes.AuthPollApproved:
-		if err := p.completeFlow(ctx, session, flow); err != nil {
+		if err := p.completeFlow(ctx, flow); err != nil {
 			return nil, err
 		}
 	case nativehermes.AuthPollDenied:
@@ -726,14 +726,17 @@ func (p *providerAuth) submitCode(ctx context.Context, session *session, flow *a
 
 // completeFlow records the values-free lineage of a native terminal success.
 // Hermes has already persisted the credential in its own durable auth home.
-func (p *providerAuth) completeFlow(ctx context.Context, session *session, flow *authFlow) error {
+func (p *providerAuth) completeFlow(ctx context.Context, flow *authFlow) error {
 	if cause, abandoned := p.abandonedCause(flow); abandoned {
 		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 	}
 
-	if session.authNativeClient() == nil {
+	_, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return p.fail(ctx, flow, authCauseTransport, true)
 	}
+
+	release()
 
 	release, err := p.lockFlowProvider(ctx, flow)
 	if err != nil {
@@ -808,12 +811,12 @@ func (p *providerAuth) addressFlow(sessionID acp.SessionId, providerID string, f
 
 // status reports the flow, not the connection.
 func (p *providerAuth) status(ctx context.Context, params json.RawMessage) (any, error) {
-	session, flow, err := p.addressedFlowLeg(params)
+	flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
 
-	p.probe(ctx, session, flow)
+	p.probe(ctx, flow)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -825,7 +828,7 @@ func (p *providerAuth) status(ctx context.Context, params json.RawMessage) (any,
 // adapter's own interval, serving the cached state in between so a consumer's
 // poll cadence never reaches the provider. The interval is the native one
 // raised to the floor.
-func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFlow) {
+func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 	if !p.tryClaimFlow(flow) {
 		return
 	}
@@ -844,10 +847,12 @@ func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFl
 	flow.nextProbeAt = now.Add(flow.probeInterval)
 	p.mu.Unlock()
 
-	client := session.authNativeClient()
-	if client == nil {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return
 	}
+
+	defer release()
 
 	callCtx, cancel := context.WithTimeout(ctx, authNativeCallTimeout)
 	defer cancel()
@@ -859,7 +864,7 @@ func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFl
 
 	switch poll.State {
 	case nativehermes.AuthPollApproved:
-		_ = p.completeFlow(ctx, session, flow)
+		_ = p.completeFlow(ctx, flow)
 	case nativehermes.AuthPollDenied:
 		p.terminalize(flow, authStateFailed, authReasonProviderRefused)
 	case nativehermes.AuthPollExpired:
@@ -873,7 +878,7 @@ func (p *providerAuth) probe(ctx context.Context, session *session, flow *authFl
 // key, and invokes hermes' native cancel route. It never claims provider-side
 // cancellation.
 func (p *providerAuth) cancel(ctx context.Context, params json.RawMessage) (any, error) {
-	_, flow, err := p.addressedFlowLeg(params)
+	flow, err := p.addressedFlowLeg(params)
 	if err != nil {
 		return nil, err
 	}
@@ -898,38 +903,36 @@ func (p *providerAuth) cancel(ctx context.Context, params json.RawMessage) (any,
 	return authFlowIDResult{FlowID: flow.id}, nil
 }
 
-func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*session, *authFlow, error) {
+// addressedFlowLeg resolves the flow a status or cancel names. The session is
+// resolved and discarded: it is the fence the leg is admitted through and the
+// lifetime the flow is addressed within, not the thing that answers.
+func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*authFlow, error) {
 	fields, err := authParamFields(params, authFieldSessionID, authFieldProviderID, authFieldFlowID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	sessionID, err := authRequiredString(fields, authFieldSessionID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	providerID, err := authRequiredString(fields, authFieldProviderID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	flowID, err := authRequiredString(fields, authFieldFlowID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	session, err := p.authSession(sessionID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	flow, err := p.addressFlow(session.id, providerID, flowID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return session, flow, nil
+	return p.addressFlow(session.id, providerID, flowID)
 }
 
 func (p *providerAuth) cancelProviderFlows(ctx context.Context, providerID string) {

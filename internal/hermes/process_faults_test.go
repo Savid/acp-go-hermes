@@ -158,7 +158,7 @@ func TestProcessVersionProbeReleasesEverythingItTookForAnUnusableEnvironment(t *
 		RetainDiscoveryRoot: func(string, error) { retained++ },
 	})
 
-	_, err := ensureExecutableVersion(t.Context(), options.ExecutablePath, options)
+	err := ensureExecutableVersion(t.Context(), options.ExecutablePath, options)
 	require.ErrorContains(t, err, `process environment contains invalid key "HERMES=INVALID"`)
 	require.Equal(t, []int{1, 1, 0}, []int{native, scratch, retained})
 	require.Len(t, probeRoots, 1)

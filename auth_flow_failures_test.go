@@ -344,13 +344,7 @@ func TestCallbackRejectsMalformedAddressingAndUnavailableGateway(t *testing.T) {
 	_, err := callLeg(t, agent, AuthCallbackMethod, wrongMethod)
 	requireInvalidField(t, err, authFieldMethod)
 
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("auth session: %v", err)
-	}
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
+	stopAuthBroker(t, agent)
 
 	_, err = callLeg(t, agent, AuthCallbackMethod, base)
 	requireAuthCause(t, err, authCauseTransport)
@@ -398,26 +392,16 @@ func TestCompletionFailurePathsRemainValuesFree(t *testing.T) {
 	agent, client := newAuthAgent(t)
 	presentation := startDeviceFlow(t, agent, client)
 	flow := agent.providerAuth.byID[presentation.FlowID]
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("auth session: %v", err)
-	}
 
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), authCauseTransport)
+	stopAuthBroker(t, agent)
+	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), flow), authCauseTransport)
 
 	agent, client = newAuthAgent(t)
 	presentation = startDeviceFlow(t, agent, client)
 	flow = agent.providerAuth.byID[presentation.FlowID]
-	session, err = agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("auth session: %v", err)
-	}
 
 	ledgerRename = func(string, string) error { return errors.New("rename") }
-	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), session, flow), authCauseProcess)
+	requireAuthCause(t, agent.providerAuth.completeFlow(context.Background(), flow), authCauseProcess)
 }
 
 func TestTerminalAndAbandonedFlowDecisions(t *testing.T) {
@@ -520,7 +504,7 @@ func TestAuthMintRequiresLiveNativeClientAndCompleterDisarmsOnce(t *testing.T) {
 		disarm:        make(chan struct{}),
 	}
 
-	_, cause := (&providerAuth{}).buildMint(t.Context(), &session{}, flow)
+	_, cause := (&providerAuth{broker: &authBroker{closed: true}}).buildMint(t.Context(), flow)
 	if cause != authCauseTransport {
 		t.Fatalf("mint cause = %q", cause)
 	}
@@ -877,24 +861,8 @@ func TestCallbackPollAndCompletionErrorsStayClosed(t *testing.T) {
 	flow.state = authStateFailed
 	agent.providerAuth.mu.Unlock()
 
-	_, err = agent.providerAuth.submitCode(
-		context.Background(),
-		mustSession(t, agent),
-		flow,
-		"code",
-	)
+	_, err = agent.providerAuth.submitCode(context.Background(), flow, "code")
 	requireAuthCause(t, err, authCauseFlowState)
-}
-
-func mustSession(t *testing.T, agent *Agent) *session {
-	t.Helper()
-
-	session, err := agent.session(testSessionID)
-	if err != nil {
-		t.Fatalf("session: %v", err)
-	}
-
-	return session
 }
 
 func TestCompleteFlowGateAndLineageFailures(t *testing.T) {
@@ -903,13 +871,12 @@ func TestCompleteFlowGateAndLineageFailures(t *testing.T) {
 	agent, client := newAuthAgent(t)
 	presentation := startDeviceFlow(t, agent, client)
 	flow := agent.providerAuth.byID[presentation.FlowID]
-	session := mustSession(t, agent)
 
 	providerRelease, ok := agent.providerAuth.lockProvider(context.Background(), testProviderID)
 	if !ok {
 		t.Fatal("hold provider gate")
 	}
-	err := agent.providerAuth.completeFlow(endedAuthContext(), session, flow)
+	err := agent.providerAuth.completeFlow(endedAuthContext(), flow)
 	requireAuthCause(t, err, authCauseTimeout)
 	providerRelease()
 
@@ -917,7 +884,7 @@ func TestCompleteFlowGateAndLineageFailures(t *testing.T) {
 	if !ok {
 		t.Fatal("hold ledger gate")
 	}
-	err = agent.providerAuth.completeFlow(endedAuthContext(), session, flow)
+	err = agent.providerAuth.completeFlow(endedAuthContext(), flow)
 	requireAuthCause(t, err, authCauseTimeout)
 	ledgerRelease()
 
@@ -932,7 +899,7 @@ func TestCompleteFlowGateAndLineageFailures(t *testing.T) {
 
 	requireAuthCause(
 		t,
-		agent.providerAuth.completeFlow(context.Background(), session, flow),
+		agent.providerAuth.completeFlow(context.Background(), flow),
 		authCauseBindingConflict,
 	)
 }
@@ -941,7 +908,7 @@ func TestAddressedFlowLegRejectsUnknownField(t *testing.T) {
 	t.Parallel()
 
 	agent, _ := newAuthAgent(t)
-	_, _, err := agent.providerAuth.addressedFlowLeg(authRawParams(t, map[string]any{
+	_, err := agent.providerAuth.addressedFlowLeg(authRawParams(t, map[string]any{
 		"sessionId": string(testSessionID), "extra": true,
 	}))
 	requireInvalidField(t, err, "extra")

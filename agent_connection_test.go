@@ -410,6 +410,7 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 	if _, err := conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{}); err == nil {
 		t.Fatal("unscoped elicitation unexpectedly succeeded")
 	}
+	client.awaitNotifications(t, 1, 1)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if client.updates != 1 || len(client.extensions) != 1 || len(client.elicitations) != 2 {
@@ -453,6 +454,33 @@ type pipeACPClient struct {
 	updates      int
 	extensions   []string
 	elicitations []acp.UnstableCreateElicitationRequest
+}
+
+// awaitNotifications waits until the client has handled the notifications the
+// agent sent. The connection dispatches requests on goroutines of their own and
+// queues notifications for sequential handling, so a request that has already
+// answered proves nothing about a notification sent before it. Polling is what
+// makes the assertion that follows about delivery rather than about scheduling.
+func (c *pipeACPClient) awaitNotifications(t *testing.T, updates int, extensions int) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		c.mu.Lock()
+		gotUpdates, gotExtensions := c.updates, len(c.extensions)
+		c.mu.Unlock()
+
+		if gotUpdates >= updates && gotExtensions >= extensions {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("handled updates=%d extensions=%d, want %d and %d", gotUpdates, gotExtensions, updates, extensions)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
 }
 
 var _ acp.Client = (*pipeACPClient)(nil)

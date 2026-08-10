@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -88,6 +89,13 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	if options := (&session{agent: agent}).configOptions(ctx); options != nil {
 		t.Fatalf("nil client config options = %#v", options)
 	}
+	// A harness that enumerated nothing, for a session that has selected
+	// nothing, leaves the config surface with nothing to publish rather than an
+	// empty select a host would render as a broken picker.
+	unselected := newSession(agent, "unselected", "/tmp/project", nil, nil, nativehermes.Session{ID: "native-unselected"}, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
+	if options := unselected.configOptions(ctx); options != nil {
+		t.Fatalf("empty enumeration config options = %#v", options)
+	}
 	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
 		t.Fatal("missing value accepted")
 	}
@@ -154,6 +162,70 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	}
 }
 
+// TestSetSessionConfigOptionReadsModelOptionsOnce pins the cost of one model
+// selection at exactly one native enumeration. A host probes model support by
+// selecting models under a short per-probe budget, and this call used to read
+// the whole provider catalogue twice — once to validate the value and once to
+// answer — for a mutation that happens entirely inside the wrapper.
+func TestSetSessionConfigOptionReadsModelOptionsOnce(t *testing.T) {
+	ctx := context.Background()
+	client := newFakeHermesClient()
+	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
+		ID:   "p",
+		Name: "Provider",
+		Models: map[string]nativehermes.ProviderModel{
+			"one": {ID: "one", Name: "One"},
+			"two": {ID: "two", Name: "Two"},
+		},
+	}}}
+
+	agent := newTestAgent()
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	sess := testSession(agent, client)
+	sess.providerID, sess.modelID = "p", "one"
+	agent.mu.Lock()
+	agent.sessions[sess.id] = sess
+	agent.mu.Unlock()
+
+	before := client.configProviderCallCount()
+
+	response, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "p/two"))
+	if err != nil {
+		t.Fatalf("set model: %v", err)
+	}
+
+	if reads := client.configProviderCallCount() - before; reads != 1 {
+		t.Fatalf("model.options reads = %d, want 1", reads)
+	}
+
+	if len(response.ConfigOptions) != 1 || response.ConfigOptions[0].Select.CurrentValue != "p/two" {
+		t.Fatalf("response config options = %#v", response.ConfigOptions)
+	}
+
+	if sess.currentModel() != "p/two" {
+		t.Fatalf("current model = %q, want p/two", sess.currentModel())
+	}
+
+	// A refused enumeration is still a rejected value rather than a silent
+	// selection, and it too costs exactly one read.
+	client.providersErr = errors.New("gateway refused")
+	before = client.configProviderCallCount()
+
+	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "p/one")); err == nil {
+		t.Fatal("a refused enumeration accepted a model selection")
+	}
+
+	if reads := client.configProviderCallCount() - before; reads != 1 {
+		t.Fatalf("refused model.options reads = %d, want 1", reads)
+	}
+
+	if sess.currentModel() != "p/two" {
+		t.Fatalf("a refused enumeration changed the model to %q", sess.currentModel())
+	}
+}
+
 func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
@@ -163,13 +235,14 @@ func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
 	sess.providerID = "openai"
 	sess.modelID = "gpt-test"
 
-	if !sess.hasConfigValue(ctx, configModel, "openai/gpt-test") {
+	options := sess.configOptions(ctx)
+	if !hasConfigValue(options, configModel, "openai/gpt-test") {
 		t.Fatal("current ungrouped model value not found")
 	}
-	if sess.hasConfigValue(ctx, configModel, "openai/other") {
+	if hasConfigValue(options, configModel, "openai/other") {
 		t.Fatal("absent ungrouped model value reported present")
 	}
-	if sess.hasConfigValue(ctx, acp.SessionConfigId("mode"), "anything") {
+	if hasConfigValue(options, acp.SessionConfigId("mode"), "anything") {
 		t.Fatal("non-model config id matched")
 	}
 }

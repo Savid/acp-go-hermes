@@ -71,15 +71,18 @@ func (p *providerAuth) methods(ctx context.Context, params json.RawMessage) (any
 		return nil, err
 	}
 
-	session, err := p.authSession(sessionID)
-	if err != nil {
+	// The session id is the fence: it admits the leg and names the lifetime the
+	// catalog generation belongs to. It is not what answers it.
+	if _, err = p.authSession(sessionID); err != nil {
 		return nil, err
 	}
 
-	client := session.authNativeClient()
-	if client == nil {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
+
+	defer release()
 
 	oauth, err := client.AuthProviders(ctx)
 	if err != nil {

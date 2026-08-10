@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -668,8 +669,8 @@ func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
 		t.Fatal("compareVersions mismatch")
 	}
 	markExecutableProbed("already-probed")
-	if needed, err := ensureExecutableVersion(ctx, "already-probed", ProcessOptions{}); err != nil || needed {
-		t.Fatalf("cached executable probe needed=%v err=%v", needed, err)
+	if err := ensureExecutableVersion(ctx, "already-probed", ProcessOptions{}); err != nil {
+		t.Fatalf("cached executable probe err=%v", err)
 	}
 	if err := methodPresent("domain.method", &RPCError{Code: 4001, Message: "domain"}); err != nil {
 		t.Fatalf("methodPresent rejected domain RPC error: %v", err)
@@ -722,7 +723,7 @@ func TestExecutableVersionProbeUsesGenerationHome(t *testing.T) {
 		return nil
 	}
 	nativeReleases, scratchReleases := 0, 0
-	_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
+	err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
 		// An ambient HERMES_HOME is adapter-managed state: it is scrubbed out
 		// of the inherited environment and replaced with the probe generation.
 		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HERMES_HOME": "/account-home"},
@@ -789,7 +790,7 @@ func TestExecutableVersionProbeHandoffFailure(t *testing.T) {
 				return removeErr
 			}
 			nativeReleases, scratchReleases := 0, 0
-			_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
+			err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
 				AmbientEnvironment: testAmbientEnvironment(),
 				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 					return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
@@ -1304,7 +1305,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldWait := waitProcessCommand
 	oldStartContained := startHermesContainedProcess
 	oldNativeTreeHandoff := processNativeTreeHandoff
-	oldProbed := cloneExecutableProbeCache()
+	oldProbed, oldGateway := cloneExecutableProbeCaches()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
 		listenTCP = oldListenTCP
@@ -1320,6 +1321,7 @@ func restoreProcessSeams(t *testing.T) {
 		processNativeTreeHandoff = oldNativeTreeHandoff
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
+		gatewayProbed = oldGateway
 		executableProbeMu.Unlock()
 	})
 }
@@ -1337,18 +1339,35 @@ func resetProcessSeams() {
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	executableProbeMu.Lock()
 	executableProbed = map[string]bool{}
+	gatewayProbed = map[string]bool{}
+	executableProbes = map[string]chan struct{}{}
 	executableProbeMu.Unlock()
 }
 
-func cloneExecutableProbeCache() map[string]bool {
+// markExecutableProbed marks an executable fully proven — version read and
+// gateway sweep answered — which is what a fixture that must not spawn either
+// probe process needs.
+func markExecutableProbed(executable string) {
+	executableProbeMu.Lock()
+	executableProbed[executable] = true
+	gatewayProbed[executable] = true
+	executableProbeMu.Unlock()
+}
+
+// executableVersionProven reports the version marker alone, which is the fact
+// the version probe settles.
+func executableVersionProven(executable string) bool {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
-	out := make(map[string]bool, len(executableProbed))
-	for key, value := range executableProbed {
-		out[key] = value
-	}
 
-	return out
+	return executableProbed[executable]
+}
+
+func cloneExecutableProbeCaches() (map[string]bool, map[string]bool) {
+	executableProbeMu.Lock()
+	defer executableProbeMu.Unlock()
+
+	return maps.Clone(executableProbed), maps.Clone(gatewayProbed)
 }
 
 type errorReader struct {

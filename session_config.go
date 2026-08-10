@@ -39,18 +39,28 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
 	}
 
+	var options []acp.SessionConfigOption
+
 	switch params.ValueId.ConfigId {
 	case configModel:
-		if !session.hasConfigValue(ctx, configModel, value) {
+		// One native model.options read answers the whole call. The value check
+		// and the answer are the same enumeration read once, because the model
+		// selection between them is a local mutation that changes which option
+		// is current and nothing about which options exist. Reading twice made
+		// one selection cost two full provider enumerations over the gateway,
+		// which is what put a healthy harness outside a host's probe budget.
+		providers, ok := session.configProviders(ctx)
+		if !ok || !hasConfigValue(session.configOptionsFrom(providers), configModel, value) {
 			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
 		}
 
 		session.setModel(value)
+
+		options = session.configOptionsFrom(providers)
 	default:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: "configId"})
 	}
 
-	options := session.configOptions(ctx)
 	_ = session.emitUpdate(ctx, acp.SessionUpdate{
 		ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options},
 	})
@@ -58,8 +68,11 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	return acp.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
 }
 
-func (s *session) hasConfigValue(ctx context.Context, configID acp.SessionConfigId, value string) bool {
-	for _, option := range s.configOptions(ctx) {
+// hasConfigValue reports whether an already-read option list publishes value
+// under configID. It takes the list rather than reading one so its caller
+// controls how many native enumerations the surrounding call costs.
+func hasConfigValue(options []acp.SessionConfigOption, configID acp.SessionConfigId, value string) bool {
+	for _, option := range options {
 		if option.Select == nil || option.Select.Id != configID {
 			continue
 		}
@@ -87,20 +100,41 @@ func (s *session) hasConfigValue(ctx context.Context, configID acp.SessionConfig
 }
 
 func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {
-	snapshot := s.snapshot()
-	if snapshot.client == nil {
+	providers, ok := s.configProviders(ctx)
+	if !ok {
 		return nil
 	}
 
-	var options []acp.SessionConfigOption
+	return s.configOptionsFrom(providers)
+}
 
-	if providers, err := snapshot.client.ConfigProviders(ctx); err == nil {
-		if model := modelConfigOption(snapshot, providers); model.Select != nil {
-			options = append(options, model)
-		}
+// configProviders performs one native model.options read. A session with no
+// live gateway, and a gateway that refused the read, both report no
+// enumeration: the config surface publishes what the harness answered or
+// nothing.
+func (s *session) configProviders(ctx context.Context) (nativehermes.ProvidersResponse, bool) {
+	client := s.snapshot().client
+	if client == nil {
+		return nativehermes.ProvidersResponse{}, false
 	}
 
-	return options
+	providers, err := client.ConfigProviders(ctx)
+	if err != nil {
+		return nativehermes.ProvidersResponse{}, false
+	}
+
+	return providers, true
+}
+
+// configOptionsFrom builds the published option list from an enumeration the
+// caller already read, against the session's current selection.
+func (s *session) configOptionsFrom(providers nativehermes.ProvidersResponse) []acp.SessionConfigOption {
+	model := modelConfigOption(s.snapshot(), providers)
+	if model.Select == nil {
+		return nil
+	}
+
+	return []acp.SessionConfigOption{model}
 }
 
 // contextWindow resolves the true context-window size in tokens for the

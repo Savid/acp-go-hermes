@@ -318,15 +318,16 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		return nil, err
 	}
 
-	session, err := p.authSession(sessionID)
-	if err != nil {
+	if _, err = p.authSession(sessionID); err != nil {
 		return nil, err
 	}
 
-	client := session.authNativeClient()
-	if client == nil {
+	client, release, ok := p.nativeClient(ctx)
+	if !ok {
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
+
+	defer release()
 
 	providers, err := client.AuthProviders(ctx)
 	if err != nil {

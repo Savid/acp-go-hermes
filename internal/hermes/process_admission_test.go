@@ -38,12 +38,12 @@ func TestProcessContainmentValidationAndPortFailure(t *testing.T) {
 
 func TestExecutableVersionAdmissionFailures(t *testing.T) {
 	unique := func(suffix string) string { return t.Name() + "-" + suffix }
-	if _, err := ensureExecutableVersion(context.Background(), unique("callbacks"), ProcessOptions{}); err == nil {
+	if err := ensureExecutableVersion(context.Background(), unique("callbacks"), ProcessOptions{}); err == nil {
 		t.Fatal("missing callbacks accepted")
 	}
 
 	want := errors.New("admission failed")
-	_, err := ensureExecutableVersion(context.Background(), unique("admission"), ProcessOptions{
+	err := ensureExecutableVersion(context.Background(), unique("admission"), ProcessOptions{
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return nil, nil, want },
 		RetainDiscoveryRoot:       func(string, error) {},
 	})
@@ -60,7 +60,7 @@ func TestExecutableVersionAdmissionFailures(t *testing.T) {
 		{name: "scratch", native: func() {}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, runErr := ensureExecutableVersion(context.Background(), unique(test.name), ProcessOptions{
+			runErr := ensureExecutableVersion(context.Background(), unique(test.name), ProcessOptions{
 				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return test.native, test.scratch, nil },
 				RetainDiscoveryRoot:       func(string, error) {},
 			})
@@ -73,7 +73,7 @@ func TestExecutableVersionAdmissionFailures(t *testing.T) {
 	originalMkdirTemp := mkdirTemp
 	t.Cleanup(func() { mkdirTemp = originalMkdirTemp })
 	mkdirTemp = func(string, string) (string, error) { return "", want }
-	_, err = ensureExecutableVersion(context.Background(), unique("mkdir"), ProcessOptions{
+	err = ensureExecutableVersion(context.Background(), unique("mkdir"), ProcessOptions{
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return func() {}, func() {}, nil },
 		RetainDiscoveryRoot:       func(string, error) {},
 	})
@@ -98,7 +98,7 @@ func TestExecutableVersionRetainsIncompleteGeneration(t *testing.T) {
 		}, nil
 	}
 	retained := false
-	_, err := ensureExecutableVersion(context.Background(), t.Name(), ProcessOptions{
+	err := ensureExecutableVersion(context.Background(), t.Name(), ProcessOptions{
 		ScratchParent:             testTraversableTempDir(t),
 		AmbientEnvironment:        testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return func() {}, func() {}, nil },

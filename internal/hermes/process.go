@@ -55,9 +55,23 @@ var (
 	startHermesContainedProcess = startContainedProcess
 	newProcessBrowserShim       = newBrowserShim
 	processNativeTreeHandoff    = handoffGeneratedNativeTree
-	executableProbeMu           sync.Mutex
-	executableProbed            = map[string]bool{}
 	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
+)
+
+var (
+	executableProbeMu sync.Mutex
+	// executableProbed records the executables whose --version output has been
+	// read and accepted. gatewayProbed records the executables whose gateway
+	// answered the startup method sweep. They are separate facts: the version
+	// probe spawns its own process and proves the binary, while the sweep proves
+	// one live gateway, so a start that never reached readiness must not cost a
+	// second --version process next time.
+	executableProbed = map[string]bool{}
+	gatewayProbed    = map[string]bool{}
+	// executableProbes holds the version probe currently in flight per
+	// executable, so concurrent starts share one native probe process instead of
+	// each spawning their own. The channel is closed when that probe settles.
+	executableProbes = map[string]chan struct{}{}
 )
 
 type ProcessOptions struct {
@@ -209,13 +223,15 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	}
 
 	versionCtx, versionCancel := context.WithTimeout(ctx, timeout)
-	probeNeeded, err := ensureExecutableVersion(versionCtx, executable, opts)
+	err = ensureExecutableVersion(versionCtx, executable, opts)
 
 	versionCancel()
 
 	if err != nil {
 		return nil, err
 	}
+
+	probeNeeded := !gatewayMethodsProbed(executable)
 
 	env, err := processSessionLaunchEnvironment(opts)
 	if err != nil {
@@ -348,7 +364,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 			return nil, errors.Join(err, process.Close(context.Background()))
 		}
 
-		markExecutableProbed(executable)
+		markGatewayMethodsProbed(executable)
 	}
 
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, nil)
@@ -610,21 +626,102 @@ func upsertProcessEnv(env []string, key string, value string) []string {
 	return append(filtered, prefix+value)
 }
 
-func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) (bool, error) {
+// ensureExecutableVersion proves the harness executable satisfies the minimum
+// version exactly once per executable. The probe is a whole second native
+// process holding a discovery native root and a scratch generation, so
+// concurrent starts share one: the first caller runs it and every other caller
+// waits on that outcome rather than spawning its own.
+//
+// A waiter answers to its own context throughout. It leaves the moment that
+// context ends, without disturbing the probe; and if the probe it joined
+// failed, it takes a turn at running one itself rather than inheriting a
+// verdict that is routinely about the other caller's abandonment and not about
+// the executable.
+//
+// The executable is marked the moment the version parses and passes, because
+// that is precisely what this probe proves. Whether a gateway later answered
+// its startup method sweep is a separate fact with its own marker, so a start
+// that failed at readiness no longer costs a second --version process.
+func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) error {
+	for {
+		settled, run := beginExecutableVersionProbe(executable)
+		if settled == nil {
+			return nil
+		}
+
+		if run {
+			err := probeExecutableVersion(ctx, executable, opts)
+			settleExecutableVersionProbe(executable, settled, err)
+
+			return err
+		}
+
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// beginExecutableVersionProbe reports the probe this caller must wait on, or a
+// nil channel when the executable is already proven. run is true for the single
+// caller that must perform it.
+func beginExecutableVersionProbe(executable string) (chan struct{}, bool) {
 	executableProbeMu.Lock()
-	probed := executableProbed[executable]
+	defer executableProbeMu.Unlock()
+
+	if executableProbed[executable] {
+		return nil, false
+	}
+
+	if settled, inFlight := executableProbes[executable]; inFlight {
+		return settled, false
+	}
+
+	settled := make(chan struct{})
+	executableProbes[executable] = settled
+
+	return settled, true
+}
+
+// settleExecutableVersionProbe records what the probe proved and releases every
+// waiter. A pass is what marks the executable; a failure leaves it unproven, so
+// the next caller through takes its own turn.
+func settleExecutableVersionProbe(executable string, settled chan struct{}, err error) {
+	executableProbeMu.Lock()
+
+	if err == nil {
+		executableProbed[executable] = true
+	}
+
+	delete(executableProbes, executable)
 	executableProbeMu.Unlock()
 
-	if probed {
-		return false, nil
-	}
+	close(settled)
+}
+
+func gatewayMethodsProbed(executable string) bool {
+	executableProbeMu.Lock()
+	defer executableProbeMu.Unlock()
+
+	return gatewayProbed[executable]
+}
+
+func markGatewayMethodsProbed(executable string) {
+	executableProbeMu.Lock()
+	gatewayProbed[executable] = true
+	executableProbeMu.Unlock()
+}
+
+func probeExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) error {
 	if opts.AcquireDiscoveryResources == nil || opts.RetainDiscoveryRoot == nil {
-		return false, errors.New("hermes version discovery resource callbacks are required")
+		return errors.New("hermes version discovery resource callbacks are required")
 	}
 
 	nativeRelease, scratchRelease, err := opts.AcquireDiscoveryResources(ctx)
 	if err != nil {
-		return false, fmt.Errorf("admit Hermes version probe: %w", err)
+		return fmt.Errorf("admit Hermes version probe: %w", err)
 	}
 	if nativeRelease == nil || scratchRelease == nil {
 		if nativeRelease != nil {
@@ -634,7 +731,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 			scratchRelease()
 		}
 
-		return false, errors.New("hermes version discovery resource callback returned a nil release")
+		return errors.New("hermes version discovery resource callback returned a nil release")
 	}
 
 	probeRoot, err := mkdirTemp(opts.ScratchParent, "acp-go-hermes-runtime-")
@@ -642,7 +739,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		nativeRelease()
 		scratchRelease()
 
-		return false, fmt.Errorf("create Hermes version-probe generation: %w", err)
+		return fmt.Errorf("create Hermes version-probe generation: %w", err)
 	}
 
 	var output synchronizedBuffer
@@ -655,7 +752,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 			scratchRelease()
 		}
 
-		return false, errors.Join(envErr, removeErr)
+		return errors.Join(envErr, removeErr)
 	}
 	probeEnvironment = upsertProcessEnv(probeEnvironment, envHermesHome, probeRoot)
 	if handoffErr := processNativeTreeHandoff(probeRoot, opts.Isolation); handoffErr != nil {
@@ -665,7 +762,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 			scratchRelease()
 		}
 
-		return false, fmt.Errorf("handoff Hermes version-probe generation: %w", errors.Join(handoffErr, removeErr))
+		return fmt.Errorf("handoff Hermes version-probe generation: %w", errors.Join(handoffErr, removeErr))
 	}
 	cmd.Env = probeEnvironment
 	cmd.Stdout = &output
@@ -699,25 +796,19 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 		}
 	}
 	if err != nil {
-		return false, fmt.Errorf("hermes --version probe failed: %w: %s", err, output.String())
+		return fmt.Errorf("hermes --version probe failed: %w: %s", err, output.String())
 	}
 
 	version, ok := parseVersion(output.String())
 	if !ok {
-		return false, fmt.Errorf("hermes --version output missing semantic version: %s", output.String())
+		return fmt.Errorf("hermes --version output missing semantic version: %s", output.String())
 	}
 
 	if compareVersions(version, MinimumVersion) < 0 {
-		return false, fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
+		return fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
 
-	return true, nil
-}
-
-func markExecutableProbed(executable string) {
-	executableProbeMu.Lock()
-	executableProbed[executable] = true
-	executableProbeMu.Unlock()
+	return nil
 }
 
 func parseVersion(output string) (string, bool) {

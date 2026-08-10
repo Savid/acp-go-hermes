@@ -126,6 +126,8 @@ type fakeHermesClient struct {
 	todos         []nativehermes.Todo
 	providers     nativehermes.ProvidersResponse
 
+	configProviderCalls int
+
 	pendingPermissions []nativehermes.PermissionRequest
 	permissionReplies  []fakePermissionReply
 	pendingQuestions   []nativehermes.QuestionRequest
@@ -251,6 +253,17 @@ type fakeQuestionReject struct {
 	route     nativehermes.QuestionRoute
 }
 
+// withTestClientFactory makes every native launch this agent performs — a
+// session's and the provider-auth broker's alike — resolve to the supplied fake
+// gateway instead of a hermes process.
+func withTestClientFactory(client nativehermes.Server) Option {
+	return func(options *Options) {
+		options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+			return client, nil
+		}
+	}
+}
+
 func newFakeHermesClient() *fakeHermesClient {
 	return &fakeHermesClient{
 		events: make(chan nativehermes.TurnEvent, 16),
@@ -374,7 +387,20 @@ func (c *fakeHermesClient) Todos(context.Context, string) ([]nativehermes.Todo, 
 }
 
 func (c *fakeHermesClient) ConfigProviders(context.Context) (nativehermes.ProvidersResponse, error) {
+	c.mu.Lock()
+	c.configProviderCalls++
+	c.mu.Unlock()
+
 	return c.providers, c.providersErr
+}
+
+// configProviderCallCount reports how many native model.options enumerations
+// this client has been asked for.
+func (c *fakeHermesClient) configProviderCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.configProviderCalls
 }
 
 func (c *fakeHermesClient) PendingPermissions(context.Context) ([]nativehermes.PermissionRequest, error) {

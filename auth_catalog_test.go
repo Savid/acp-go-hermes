@@ -77,14 +77,7 @@ func TestMethodsFailurePaths(t *testing.T) {
 
 	client.authProvidersErr = nil
 
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("authSession: %v", err)
-	}
-
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
+	stopAuthBroker(t, agent)
 
 	_, err = callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseTransport)

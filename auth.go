@@ -92,6 +92,9 @@ func authMethodNames() []string {
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
+	// broker owns the native process every leg here speaks to. It is bound to
+	// the durable credential residence rather than to any ACP session.
+	broker *authBroker
 
 	mu         sync.Mutex
 	generation string
@@ -145,6 +148,7 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	return &providerAuth{
 		agent:          agent,
 		ledger:         ledger,
+		broker:         newAuthBroker(agent),
 		flows:          make(map[authFlowKey]*authFlow),
 		byID:           make(map[string]*authFlow),
 		retained:       make(map[authFlowKey]*authFlow),
@@ -320,14 +324,6 @@ func (p *providerAuth) authSession(id string) (*session, error) {
 	}
 
 	return session, nil
-}
-
-// authNativeClient reports the session's live gateway.
-func (s *session) authNativeClient() nativehermes.Server {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.client
 }
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,

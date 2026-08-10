@@ -248,6 +248,36 @@ func TestStatusCachesPendingPollsBehindTheFloor(t *testing.T) {
 	}
 }
 
+// TestStatusServesTheCachedStateWhenTheBrokerIsGone keeps a poll that cannot
+// reach a gateway from being an answer. Status reports the flow as the adapter
+// last knew it and leaves the state untouched, because "the harness is not
+// reachable" is not evidence about what the provider did.
+func TestStatusServesTheCachedStateWhenTheBrokerIsGone(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	presentation := startDeviceFlow(t, agent, client)
+
+	client.authPollFunc = func(context.Context, string, string) (nativehermes.AuthPoll, error) {
+		t.Error("status polled the provider without a native gateway")
+
+		return nativehermes.AuthPoll{}, nil
+	}
+
+	stopAuthBroker(t, agent)
+
+	result, err := callLeg(t, agent, AuthStatusMethod, map[string]any{
+		"sessionId":  string(testSessionID),
+		"providerId": testProviderID,
+		"flowId":     presentation.FlowID,
+	})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	if got := mustType[authStatusResult](t, result); got.State != authStatePending {
+		t.Fatalf("status = %#v, want the cached pending state", got)
+	}
+}
+
 func TestAuthorizeReplayAndCancellationAreIdempotent(t *testing.T) {
 	t.Parallel()
 
