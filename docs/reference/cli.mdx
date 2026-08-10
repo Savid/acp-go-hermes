@@ -7,12 +7,18 @@ description: Every flag the acp-go-hermes command accepts.
 acp-go-hermes [flags]
 ```
 
-## Required standalone isolation policy
+## Optional standalone isolation policy
 
-Normal serve mode is Linux-only and requires
-`-process-isolation-config=/absolute/path/process-isolation.json`.
-`-version` and the Darwin containment diagnostic subcommands are exempt.
-The policy must be a root-owned, single-link regular file with mode `0600`.
+Serve mode runs on every supported platform with no isolation policy at all.
+Omitting `-process-isolation-config` is the ordinary default, not an error:
+Hermes runs as this command's own identity, root or non-root alike, the policy
+loader is never called, and the adapter reports `shared_identity`.
+
+Supplying `-process-isolation-config=/absolute/path/process-isolation.json`
+opts into the hardened Linux identity boundary. It is Linux-only and strict:
+every read, decode, validation, account, authority, and unsupported-platform
+error exits before serving or spawning, and the command never retries without
+the policy. The policy must be a root-owned, single-link regular file with mode `0600`.
 Every component is opened from `/` without following symlinks, and every
 ancestor must be root-owned and not writable by group or other. Unknown JSON
 fields and trailing JSON values are rejected.
@@ -51,12 +57,18 @@ that same-name private primary group, no supplementary groups, and a target-owne
 `0700` home matching `HOME`, reached without symlinks beneath protected
 root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
 `LOGNAME` must match the account.
-`PATH` must contain existing canonical absolute directories. The child gets
+`PATH` must contain existing canonical absolute directories, and every `PATH`
+entry used to resolve a bare executable name must be absolute. The child gets
 only `baseEnvironment` plus variables explicitly named in
 `inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
 home, and adapter-private variables cannot be inherited. Unset or duplicate
 inheritance entries fail startup. Darwin, Windows, and other platforms refuse
-standalone native mode rather than weakening this contract.
+this policy rather than weakening it; they still run ordinary standalone mode
+when the flag is omitted.
+
+These absolute-`PATH` rules govern the supplied policy only. Ordinary mode
+resolves the executable the way a shell would, so a `PATH` such as
+`bin:/usr/bin` and a relative `-path` both work there.
 
 Provision the target as a locked system account with a non-login shell, its
 same-name private group, and no sudo policy. Its UID and primary GID cannot be
@@ -69,7 +81,7 @@ home for native tools.
 | Flag | Meaning |
 |---|---|
 | `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
-| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
+| `-process-isolation-config` | Optional absolute path to the Linux isolation policy described above. Omitting it runs Hermes as this process's own identity. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-home` | Unsupported because each session runtime root is isolated. Use `-scratch-dir` for ephemeral state and `-hermes-provider-auth-home` for durable provider credentials. |
 | `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-hermes-provider-auth-home`. |
@@ -96,8 +108,7 @@ acp-go-hermes -seed-file config.yaml=./hermes-config.yaml
 
 ## Darwin containment operations
 
-These commands inspect generations left by an embedded best-effort host; the
-standalone command does not launch native work on Darwin. Diagnosis is
+These commands inspect generations left by a best-effort host. Diagnosis is
 read-only and emits exactly one JSON object:
 
 ```sh

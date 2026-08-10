@@ -8,41 +8,36 @@ import (
 	"unicode/utf8"
 )
 
+// validateProcessIsolationOption validates a supplied hardened policy. It is
+// never reached for an omitted one: omission selects ordinary same-identity
+// execution, which has no policy to validate and is not a configuration error.
+//
+// Every check here fails closed. A policy that cannot be honoured on this
+// platform, or that does not describe a complete authority disposition, refuses
+// the session rather than falling back to ordinary or best-effort execution.
 func validateProcessIsolationOption(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation policy is required")
+	}
+
+	// The hardened boundary is built from Linux-only primitives, so an explicit
+	// policy is refused everywhere else — including through the embedded Go API,
+	// not merely through the command's policy loader.
+	if agentRuntimePlatform != agentRuntimeLinux {
+		return errors.New("explicit process isolation is supported only on linux, not " + agentRuntimePlatform)
 	}
 
 	if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation UID and GID must be nonzero")
 	}
 
-	if agentRuntimePlatform == agentRuntimeLinux {
-		if err := validateStandaloneIdentityOption(
-			isolation.IdentityLock != nil, isolation.AuthorityDomain != nil,
-			isolation.StandaloneOwnerID, isolation.StandaloneStateRoot,
-			sharedProcessIdentity(isolation),
-		); err != nil {
-			return err
-		}
-	}
-
-	if agentRuntimePlatform == agentRuntimeWindows {
-		return errors.New("process isolation is unsupported on windows")
-	}
-
-	return nil
+	return validateStandaloneIdentityOption(
+		isolation.IdentityLock != nil, isolation.AuthorityDomain != nil,
+		isolation.StandaloneOwnerID, isolation.StandaloneStateRoot,
+	)
 }
 
-// sharedIdentitySupervisorRemedy states what an operator can change when the
-// agent was configured to run under the very identity the adapter already runs
-// as and the shape it was handed describes something else. There is no
-// privilege boundary to cross in that deployment, so the two answers are to
-// give the adapter one, or to describe the launch as what it is.
-const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
-	"or launch the agent under the identity the supervisor already holds"
-
-func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerID, stateRoot string, shared bool) error {
+func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerID, stateRoot string) error {
 	if identityLock != authorityDomain {
 		return errors.New("process identity lock and authority domain must be provided together")
 	}
@@ -50,19 +45,6 @@ func validateStandaloneIdentityOption(identityLock, authorityDomain bool, ownerI
 	if identityLock {
 		if ownerID != "" || stateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
-		}
-
-		return nil
-	}
-
-	// A native identity that is already the adapter's own identity cannot be
-	// recorded as a standalone one: the durable record proves an identity no
-	// live task holds, and the adapter asking for it is such a task. The
-	// canonical shape is therefore no capabilities and no standalone fields.
-	if shared {
-		if ownerID != "" || stateRoot != "" {
-			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
-				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil

@@ -2,69 +2,68 @@ package hermesacp
 
 import (
 	"errors"
-	"os"
 	"runtime"
 )
 
 var agentRuntimePlatform = runtime.GOOS
 
 const (
-	agentRuntimeDarwin  = "darwin"
-	agentRuntimeLinux   = "linux"
-	agentRuntimeWindows = "windows"
+	agentRuntimeDarwin = "darwin"
+	agentRuntimeLinux  = "linux"
 )
 
-// containmentEffectiveUID is the seam the shared-identity report is derived
-// through. The mode is selected from a faked platform in tests, so the identity
-// it is compared against has to be selectable there too.
-var containmentEffectiveUID = os.Geteuid
-
-// sharedProcessIdentity reports whether the configured native identity is the
-// identity this process already runs as. Root never qualifies: a zero effective
-// uid is the trusted supervisor identity, and the native uid is required to be
-// nonzero.
-func sharedProcessIdentity(isolation *ProcessIsolation) bool {
-	if isolation == nil || agentRuntimePlatform != agentRuntimeLinux {
-		return false
-	}
-
-	effectiveUID := containmentEffectiveUID()
-
-	return effectiveUID > 0 && uint64(isolation.UID) == uint64(effectiveUID)
-}
-
 // provesWholeTreeLifecycle reports whether the selected boundary can prove that
-// every process it started has exited. Both Linux boundaries can: they differ
-// in whether the agent runs under its own credentials, not in what the
-// subreaper observes.
+// every process it started has exited. Only the explicit hardened Linux
+// backend can: it interposes a subreaper that remains the parent of every
+// orphaned descendant and reaps that complete tree.
+//
+// Ordinary same-identity execution cannot, and neither can Darwin best effort.
+// Both complete exactly the boundary they directly own, and a descendant that
+// left it is outside what either one observed. Returning false here is what
+// keeps the wrapper from publishing a provider-descendant inventory — including
+// a terminal zero — for a boundary that never enumerated one.
 func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
-	return mode == RuntimeContainmentAuthoritative || mode == RuntimeContainmentSharedIdentity
+	return mode == RuntimeContainmentAuthoritative
 }
 
+// containmentMode reports the boundary this Agent's options select. An omitted
+// ProcessIsolation is the ordinary default and reports shared_identity on every
+// platform the adapter otherwise supports: shared_identity is a non-authoritative
+// posture, not a Linux containment achievement, so a platform that cannot host
+// the hardened backend still runs ordinary work and still reports it honestly.
 func containmentMode(options Options) RuntimeContainmentMode {
-	if options.DarwinBestEffortContainment && agentRuntimePlatform != agentRuntimeDarwin {
+	if err := validateContainmentOptions(options); err != nil {
 		return RuntimeContainmentUnavailable
 	}
 
-	switch agentRuntimePlatform {
-	case agentRuntimeLinux:
-		if sharedProcessIdentity(options.ProcessIsolation) {
-			return RuntimeContainmentSharedIdentity
+	// A supplied policy is the strict Linux boundary or nothing. It never
+	// degrades to shared_identity or best effort.
+	if options.ProcessIsolation != nil {
+		if agentRuntimePlatform == agentRuntimeLinux {
+			return RuntimeContainmentAuthoritative
 		}
 
-		return RuntimeContainmentAuthoritative
-	case agentRuntimeDarwin:
-		if options.DarwinBestEffortContainment {
-			return RuntimeContainmentBestEffort
-		}
+		return RuntimeContainmentUnavailable
 	}
 
-	return RuntimeContainmentUnavailable
+	if options.DarwinBestEffortContainment {
+		return RuntimeContainmentBestEffort
+	}
+
+	return RuntimeContainmentSharedIdentity
 }
 
 func validateContainmentOptions(options Options) error {
 	if options.DarwinBestEffortContainment && agentRuntimePlatform != agentRuntimeDarwin {
 		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	// The two explicit options name incompatible boundaries: an explicit
+	// hardened identity policy cannot be downgraded to a process-group
+	// approximation, so asking for both is a configuration error rather than a
+	// precedence question.
+	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
+		return errors.New("darwin best-effort containment cannot be combined with explicit process isolation")
 	}
 
 	return nil

@@ -12,22 +12,106 @@ import (
 
 func configureHermesProcess(*exec.Cmd) {}
 
-type processContainment struct{}
-
-func startContainedProcess(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
-	return nil, fmt.Errorf("hermes runtime containment is unsupported on %s", runtime.GOOS)
+// processContainment on this platform exists only for ordinary same-identity
+// execution. There is no subreaper and no process group to probe, so the
+// boundary is exactly the direct child this wrapper started.
+type processContainment struct {
+	direct            *directChildWait
+	terminateFn       func() error
+	killFn            func() error
+	completeFn        func(time.Duration) error
+	descendantCountFn func() (int, bool)
+	closeFn           func() error
 }
 
-func (*processContainment) complete(time.Duration) error {
-	return errors.New("hermes runtime containment is unavailable")
+// startContainedProcess refuses only the hardened boundary here. An omitted
+// policy is served by the ordinary launch path, which this platform supports on
+// the same terms as every other.
+func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processContainment, error) {
+	var spec ContainmentSpec
+	if len(specs) > 0 {
+		spec = specs[0]
+	}
+
+	if spec.Isolation != nil {
+		return nil, fmt.Errorf("explicit process isolation is supported only on linux, not %s", runtime.GOOS)
+	}
+
+	return startOrdinaryProcess(cmd)
 }
 
-func (*processContainment) descendantCount() (int, bool) { return 0, false }
+func newOrdinaryContainment(process ordinaryChild, direct *directChildWait) *processContainment {
+	containment := &processContainment{direct: direct}
 
-func (*processContainment) terminate(cmd *exec.Cmd) error { return terminateProcess(cmd) }
+	containment.completeFn = func(timeout time.Duration) error {
+		if timeout <= 0 {
+			timeout = ordinaryContainmentDeadline
+		}
 
-func (*processContainment) kill(cmd *exec.Cmd) error { return killProcess(cmd) }
+		if err := process.kill(); err != nil {
+			return err
+		}
 
-func (*processContainment) close() error { return nil }
+		return direct.awaitReaped(timeout)
+	}
+	containment.terminateFn = func() error { return process.terminate() }
+	containment.killFn = func() error { return process.kill() }
+	containment.descendantCountFn = func() (int, bool) { return 0, false }
+	containment.closeFn = func() error { return nil }
 
-func (*processContainment) directChild(*exec.Cmd) *directChildWait { return nil }
+	return containment
+}
+
+func (c *processContainment) complete(timeout time.Duration) error {
+	if c == nil || c.completeFn == nil {
+		return errors.New("hermes runtime containment is unavailable")
+	}
+
+	return c.completeFn(timeout)
+}
+
+func (c *processContainment) descendantCount() (int, bool) {
+	if c == nil || c.descendantCountFn == nil {
+		return 0, false
+	}
+
+	return c.descendantCountFn()
+}
+
+func (c *processContainment) terminate(cmd *exec.Cmd) error {
+	if c == nil || c.terminateFn == nil {
+		return terminateProcess(cmd)
+	}
+
+	return c.terminateFn()
+}
+
+func (c *processContainment) kill(cmd *exec.Cmd) error {
+	if c == nil || c.killFn == nil {
+		return killProcess(cmd)
+	}
+
+	return c.killFn()
+}
+
+func (c *processContainment) close() error {
+	if c == nil || c.closeFn == nil {
+		return nil
+	}
+
+	return c.closeFn()
+}
+
+func (c *processContainment) directChild(cmd *exec.Cmd) *directChildWait {
+	if c == nil {
+		return nil
+	}
+
+	if c.direct == nil {
+		c.direct = installDirectChildWait(cmd, false)
+	}
+
+	c.direct.begin()
+
+	return c.direct
+}

@@ -1072,8 +1072,15 @@ func TestHermesSupervisorProductionIdentityRejectsNonRoot(t *testing.T) {
 		t.Fatalf("non-root production preparation = %v", err)
 	}
 
-	if err = validateHermesSupervisorIdentity(sharedSupervisorIdentity()); err != nil {
-		t.Fatalf("non-root production preparation of its own identity: %v", err)
+	// The identity the supervisor already runs as gets no exemption either:
+	// there is no same-identity arm for a non-root deployment to land on.
+	own := &ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+		BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"},
+	}
+	if err = validateHermesSupervisorIdentity(own); err == nil ||
+		!strings.Contains(err.Error(), "trusted root identity is required") {
+		t.Fatalf("non-root production preparation of its own identity = %v", err)
 	}
 }
 
@@ -1522,6 +1529,17 @@ func runSupervisorCoreTest(t *testing.T, args []string, trigger func(*os.File)) 
 	_ = proofRead.Close()
 
 	return code, proof[0]
+}
+
+// testProcessIsolation is the explicit policy the Linux supervisor tests drive.
+// It opts out of the credential change so the tests can run unprivileged while
+// still exercising the trusted-supervisor and authority rules.
+func testProcessIsolation() *ProcessIsolation {
+	return &ProcessIsolation{
+		UID: 11, GID: 22,
+		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+		TestOnlyNoCredential: true,
+	}
 }
 
 func supervisorTestConfig(args []string) hermesSupervisorConfig {

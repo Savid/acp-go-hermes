@@ -3258,7 +3258,7 @@ func testXDGDirs(t *testing.T) XDGDirs {
 
 func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
 	t.Helper()
-	options.Isolation = testProcessIsolation()
+	options.AmbientEnvironment = testAmbientEnvironment()
 	if options.AcquireDiscoveryResources == nil {
 		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
 	}

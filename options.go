@@ -25,12 +25,15 @@ const defaultImageLimitBytes int64 = 6 * 1024 * 1024
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
-// ProcessIsolation is the mandatory operating-system identity and complete
-// base environment for every native Hermes process.
 type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }
 
+// ProcessIsolation is the optional explicit operating-system identity and
+// complete base environment for every native Hermes process. Leaving
+// Options.ProcessIsolation nil selects ordinary same-identity execution; a
+// non-nil value selects the strict Linux boundary described on
+// WithProcessIsolation.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -87,12 +90,16 @@ type RuntimeContainmentMode string
 const (
 	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
 	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the boundary a supervisor proves when
-	// the native identity is the identity it already runs as. The subreaper
-	// tree, the descendant reaping and the process-group teardown are the
-	// authoritative ones, so whole-tree lifecycle is still proven; what is
-	// absent is the credential separation between the supervisor and the agent,
-	// and the host-global record of who holds the identity.
+	// RuntimeContainmentSharedIdentity is the ordinary default, reported
+	// whenever WithProcessIsolation is omitted. Native work runs as the
+	// adapter's current operating-system identity, root or non-root alike, on
+	// every supported platform.
+	//
+	// It is a non-authoritative posture rather than a containment achievement.
+	// The wrapper completes the direct child and process group it started and
+	// nothing beyond them, so it reports no provider-descendant inventory — not
+	// even a terminal zero — and makes no whole-tree quiescence or
+	// credential-separation claim.
 	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
 	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
 )
@@ -246,10 +253,22 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every Hermes process and version probe to run
-// as the supplied non-root identity with no supplementary
-// groups. BaseEnvironment replaces the adapter environment; WithEnv and
+// WithProcessIsolation explicitly selects the hardened Linux identity
+// boundary: every Hermes process and version probe runs as the supplied
+// nonzero non-root identity with no supplementary groups, under a trusted root
+// supervisor that remains a distinct identity. BaseEnvironment is the complete
+// native environment rather than an overlay on the adapter's own; WithEnv and
 // session values overlay it.
+//
+// The option fails closed. Construction or launch refuses when the platform is
+// not Linux, the supervisor is not root, the native identity is root, or the
+// two identities are not distinct, and it never falls back to ordinary
+// same-identity or Darwin best-effort execution. It cannot be combined with
+// WithDarwinBestEffortContainment.
+//
+// Omitting this option is the ordinary default and is not a configuration
+// error: Hermes then runs as the adapter's current UID/GID, root or non-root
+// alike, on every supported platform, and the Agent reports shared_identity.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation

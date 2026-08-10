@@ -151,6 +151,7 @@ type StartOptions struct {
 	ProviderAuthHome            string
 	Env                         map[string]string
 	Isolation                   *ProcessIsolation
+	AmbientEnvironment          map[string]string
 	HealthTimeout               time.Duration
 	Logger                      *slog.Logger
 	ExistingXDG                 XDGDirs
@@ -601,6 +602,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		ProviderAuthHome:            options.ProviderAuthHome,
 		Env:                         processEnv,
 		Isolation:                   options.Isolation,
+		AmbientEnvironment:          options.AmbientEnvironment,
 		Timeout:                     options.HealthTimeout,
 		Configure:                   configureHermesProcess,
 		ObserveStartupStage:         options.ObserveStartupStage,
@@ -2799,12 +2801,12 @@ func leaseMatchesProcess(path string, lease ServerLease) bool {
 		return false
 	}
 
-	if PasswordHash(identity.Env["HERMES_DASHBOARD_SESSION_TOKEN"]) != lease.TokenHash {
+	if PasswordHash(identity.Env[envHermesSessionToken]) != lease.TokenHash {
 		return false
 	}
 
 	root := firstNonEmpty(lease.XDGRoot, filepath.Dir(filepath.Dir(path)))
-	if filepath.Clean(identity.Env["HERMES_HOME"]) != filepath.Clean(root) {
+	if filepath.Clean(identity.Env[envHermesHome]) != filepath.Clean(root) {
 		return false
 	}
 

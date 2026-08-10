@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -32,8 +33,32 @@ func TestProcessStartRefusesAnUnusableIsolationPolicy(t *testing.T) {
 	options.Isolation = &ProcessIsolation{UID: 0, GID: 0, BaseEnvironment: map[string]string{}}
 
 	_, err := Start(t.Context(), options)
-	require.ErrorContains(t, err, "validate Hermes process isolation")
-	require.ErrorContains(t, err, "UID and GID must be nonzero")
+	if runtime.GOOS == "linux" {
+		require.ErrorContains(t, err, "validate Hermes process isolation")
+		require.ErrorContains(t, err, "UID and GID must be nonzero")
+
+		return
+	}
+
+	// Off Linux the policy is refused for the platform before its shape is even
+	// examined, and it still never reaches a native launch.
+	require.ErrorContains(t, err, "only on linux")
+}
+
+// TestProcessStartRefusesAnUnavailableContainmentBackend proves the opt-in
+// Darwin backend is refused before any launch on a platform that cannot host
+// it, and that the refusal is never softened into ordinary execution.
+func TestProcessStartRefusesAnUnavailableContainmentBackend(t *testing.T) {
+	restoreProcessSeams(t)
+	processCovRefuseLaunch(t)
+
+	original := processRuntimeGOOS
+	t.Cleanup(func() { processRuntimeGOOS = original })
+
+	processRuntimeGOOS = "linux"
+
+	_, err := Start(t.Context(), ProcessOptions{DarwinBestEffortContainment: true})
+	require.ErrorContains(t, err, "supported only on darwin")
 }
 
 // TestProcessStartReportsContainmentRefusalAndRemovesTheShim proves a native

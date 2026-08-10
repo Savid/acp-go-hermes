@@ -945,10 +945,14 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 		ProviderAuthHome: a.options.ProviderAuthHome,
 		Env:              a.observe.InjectTraceEnv(ctx, env),
 		Isolation:        nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential, a.options.testOnlyIdentityLockRoot),
-		Logger:           a.log,
-		ExistingXDG:      existing,
-		MCPServers:       servers,
-		SeedFiles:        cloneStringMap(a.options.SeedFiles),
+		// The ambient snapshot travels alongside the policy rather than inside
+		// it, so an omitted policy stays nil the whole way to the launch
+		// boundary and no ProcessIsolation value is manufactured for it.
+		AmbientEnvironment: cloneStringMap(a.ambientEnv),
+		Logger:             a.log,
+		ExistingXDG:        existing,
+		MCPServers:         servers,
+		SeedFiles:          cloneStringMap(a.options.SeedFiles),
 		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {
@@ -1142,8 +1146,12 @@ func (a *Agent) rejectInvalidConfiguration() error {
 		return unsupportedField(optionFieldProviderAuthDirectHome)
 	}
 
-	if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
-		return err
+	// An omitted policy is the ordinary default rather than a misconfiguration,
+	// so only a supplied one is validated — and a supplied one fails closed.
+	if a.options.ProcessIsolation != nil {
+		if err := validateProcessIsolationOption(a.options.ProcessIsolation); err != nil {
+			return err
+		}
 	}
 
 	return nil

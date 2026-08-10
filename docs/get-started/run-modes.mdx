@@ -9,19 +9,27 @@ behavior is identical in both.
 
 ## Standalone command
 
-Standalone native mode is Linux-only. The root supervisor must receive
-`-process-isolation-config=/absolute/path/process-isolation.json`; the strict
-file schema, account/home checks, closed environment, and explicit
-`inheritEnvironment` behavior are documented in the
-[CLI reference](/docs/reference/cli). `-version` and Darwin containment
-diagnostics do not require the policy. There is no Darwin or Windows
-standalone-launch fallback.
+Standalone native mode runs on every supported platform. By default it needs no
+privilege setup at all: Hermes runs as the identity `acp-go-hermes` itself runs
+as, root or non-root alike, and the adapter reports `shared_identity`.
 
 An ACP client launches `acp-go-hermes` as a subprocess and speaks ACP over its
 stdin/stdout. Stdout carries ACP JSON-RPC only; diagnostics go to stderr.
 
 ```sh
-acp-go-hermes -process-isolation-config /etc/acp-go/hermes-isolation.json -path /usr/bin/hermes -scratch-dir /tmp/acp-hermes
+acp-go-hermes -path /usr/bin/hermes -scratch-dir /tmp/acp-hermes
+```
+
+`-process-isolation-config=/absolute/path/process-isolation.json` is optional
+and opts into the hardened Linux identity boundary instead. It is Linux-only
+and fails closed: a supplied path that cannot be loaded, validated, or honoured
+exits before serving and never falls back to ordinary execution. The strict file
+schema, account/home checks, closed environment, and explicit
+`inheritEnvironment` behavior are documented in the
+[CLI reference](/docs/reference/cli).
+
+```sh
+acp-go-hermes -process-isolation-config /etc/acp-go/hermes-isolation.json -path /usr/bin/hermes
 ```
 
 ## Embedded
@@ -33,7 +41,17 @@ a reader/writer pair:
 ```go NewAgent
 agent := hermesacp.NewAgent(
 	hermesacp.WithScratchDir(scratchDir),
-	hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment}),
+)
+```
+
+```go NewAgent (hardened)
+// Linux only, and fails closed rather than degrading.
+agent := hermesacp.NewAgent(
+	hermesacp.WithScratchDir(scratchDir),
+	hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
+		UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment,
+		StandaloneOwnerID: "hermes-deployment-1", StandaloneStateRoot: "/var/lib/acp-go-hermes",
+	}),
 )
 ```
 

@@ -108,12 +108,14 @@ directories are configured.
   URL on this API path without executing a browser launcher; a required pinned
   Linux canary verifies that no-launch behavior through the production adapter.
 - One isolated `hermes serve` runtime per session, each with a dedicated,
-  freshly generated `HERMES_HOME`. Linux uses authoritative OS containment.
-  Windows native launch fails closed because its process API cannot apply the
-  mandatory Unix UID/GID identity boundary with empty supplementary groups;
-  cross-compilation proves only that this refusal path builds, not runtime
-  support. Darwin is disabled unless its explicitly risky best-effort
-  process-group mode is selected.
+  freshly generated `HERMES_HOME`. By default the runtime executes as the
+  adapter's own identity on every supported platform and reports the
+  non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
+  authoritative Linux OS containment; it is Linux-only and fails closed rather
+  than degrading, and Windows refuses it because its process API cannot apply the
+  Unix UID/GID identity boundary with empty supplementary groups.
+  Cross-compilation proves only that these paths build, not runtime support.
+  Darwin additionally offers an explicitly risky best-effort process-group mode.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session

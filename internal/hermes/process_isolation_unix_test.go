@@ -19,11 +19,11 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 		processIsolationPlatform = originalPlatform
 	})
 
-	// Re-entering an identity the process already holds is the non-Linux arm:
-	// the Linux backend recognises that shape as a shared identity and requests
-	// no credential change at all. Hold the platform there so this test keeps
-	// exercising the verification branches whichever host runs it.
-	processIsolationPlatform = "darwin"
+	// A process that already holds the target identity is the post-drop end of
+	// the supervisor's own descent, so it verifies rather than re-requesting a
+	// credential. The platform is pinned to Linux because an explicit policy is
+	// refused everywhere else, whichever host runs this test.
+	processIsolationPlatform = processPlatformLinux
 	processIsolationGeteuid = func() int { return 11 }
 	processIsolationGetegid = func() int { return 22 }
 	processIsolationGetgroups = func() ([]int, error) { return nil, nil }
@@ -60,13 +60,27 @@ func TestProcessIsolationUnixVerificationBranches(t *testing.T) {
 	require.Equal(t, policy.UID, cmd.SysProcAttr.Credential.Uid)
 	require.Equal(t, policy.GID, cmd.SysProcAttr.Credential.Gid)
 	require.Empty(t, cmd.SysProcAttr.Credential.Groups)
+}
 
-	t.Setenv(envIsolationUID, "invalid")
-	t.Setenv(envIsolationGID, "22")
-	require.Error(t, verifyInheritedProcessIsolation())
-	t.Setenv(envIsolationUID, "11")
-	t.Setenv(envIsolationTest, "true")
-	require.NoError(t, verifyInheritedProcessIsolation())
-	t.Setenv(envIsolationTest, "false")
-	require.Error(t, verifyInheritedProcessIsolation())
+// TestExplicitProcessIsolationIsRefusedOffLinux proves the platform gate lives
+// in the provider boundary rather than only in the command's policy loader, so
+// an embedder calling the Go API directly cannot obtain the hardened boundary
+// on a platform that cannot host it.
+func TestExplicitProcessIsolationIsRefusedOffLinux(t *testing.T) {
+	originalPlatform := processIsolationPlatform
+	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+
+	policy := &ProcessIsolation{
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{},
+		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
+	}
+
+	for _, platform := range []string{"darwin", "freebsd", "openbsd", "windows"} {
+		t.Run(platform, func(t *testing.T) {
+			processIsolationPlatform = platform
+			require.ErrorContains(t, validateProcessIsolation(policy), "only on linux")
+			require.ErrorContains(t, applyProcessIsolation(exec.Command("/usr/bin/true"), policy), "only on linux")
+			require.ErrorContains(t, verifyProcessIsolation(policy), "only on linux")
+		})
+	}
 }

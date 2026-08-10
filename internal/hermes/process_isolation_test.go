@@ -27,6 +27,12 @@ func (processIsolationTestCapability) Duplicate() (*os.File, error) {
 }
 
 func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
+	// An explicit policy is Linux-only, so the platform is pinned here to keep
+	// these strict-policy branches reachable whichever host runs the suite.
+	originalPlatform := processIsolationPlatform
+	processIsolationPlatform = processPlatformLinux
+	t.Cleanup(func() { processIsolationPlatform = originalPlatform })
+
 	t.Setenv("AMBIENT_ISOLATION_CANARY", "must-not-leak")
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "hermes")
@@ -56,7 +62,7 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 		{UID: 0, GID: 1},
 		{UID: 1, GID: 0},
 		{
-			UID: 1, GID: 1, BaseEnvironment: map[string]string{envIsolationUID: "1"},
+			UID: 1, GID: 1, BaseEnvironment: map[string]string{privateSupervisorEnvPrefix + "ISOLATION_UID": "1"},
 			StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
 		},
 		{
@@ -87,17 +93,6 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	require.NoError(t, os.WriteFile(nonExecutable, []byte("x"), 0o600))
 	_, err = executableFile(nonExecutable)
 	require.Error(t, err)
-	_, err = supervisorEnvironment(nil, nil, "MODE=1")
-	require.Error(t, err)
-	supervisorEnv, err := supervisorEnvironment(
-		[]string{"A=B", "MODE=old", envIsolationUID + "=old", envIsolationGID + "=old", envIsolationTest + "=old"},
-		&ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{}, TestOnlyNoCredential: true}, "MODE=1",
-	)
-	require.NoError(t, err)
-	values := envSliceMap(supervisorEnv)
-	require.Equal(t, "B", values["A"])
-	require.Equal(t, "1", values["MODE"])
-	require.Equal(t, "true", values[envIsolationTest])
 }
 
 func TestProcessIsolationStandaloneDisposition(t *testing.T) {
@@ -130,10 +125,12 @@ func TestProcessIsolationStandaloneDisposition(t *testing.T) {
 		StandaloneOwnerID: "deployment-1", StandaloneStateRoot: "/var/lib/hermes",
 	}))
 
+	// Off Linux the standalone disposition is never even consulted: the
+	// platform gate refuses the explicit policy first.
 	processIsolationPlatform = "darwin"
-	require.NoError(t, validateProcessIsolation(&ProcessIsolation{
+	require.ErrorContains(t, validateProcessIsolation(&ProcessIsolation{
 		UID: 1, GID: 2, BaseEnvironment: map[string]string{},
-	}))
+	}), "only on linux")
 }
 
 func TestProcessIsolationStandaloneFieldGrammar(t *testing.T) {
@@ -154,16 +151,4 @@ func TestProcessIsolationStandaloneFieldGrammar(t *testing.T) {
 		require.False(t, validStandaloneStateRootPath(value), value)
 	}
 	require.True(t, validStandaloneStateRootPath("/var/lib/hermes"))
-}
-
-func envSliceMap(environment []string) map[string]string {
-	values := make(map[string]string, len(environment))
-	for _, entry := range environment {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok {
-			values[key] = value
-		}
-	}
-
-	return values
 }

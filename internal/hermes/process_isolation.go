@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -17,6 +16,10 @@ type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }
 
+// ProcessIsolation is the explicit hardened Linux identity boundary. A nil
+// policy is not a member of this type: omission selects ordinary same-identity
+// execution, which manufactures no policy value at all and reaches none of the
+// authority, credential, or supervisor machinery below.
 type ProcessIsolation struct {
 	UID                      uint32
 	GID                      uint32
@@ -34,15 +37,24 @@ var processIsolationPlatform = runtime.GOOS
 const (
 	privateSupervisorEnvPrefix = "ACP_" + "GO_HERMES_INTERNAL_"
 	processSupervisorEnvPrefix = "ACP_" + "GO_HERMES_PROCESS_SUPERVISOR"
-	envIsolationUID            = privateSupervisorEnvPrefix + "ISOLATION_UID"
-	envIsolationGID            = privateSupervisorEnvPrefix + "ISOLATION_GID"
-	envIsolationTest           = privateSupervisorEnvPrefix + "ISOLATION_TEST_ONLY"
 	processPlatformLinux       = "linux"
+	processPlatformDarwin      = "darwin"
 )
 
+// validateProcessIsolation validates an explicit hardened policy. Ordinary
+// same-identity execution never reaches here: it is selected by a nil policy at
+// the launch boundary, so a nil value arriving at this point is a caller that
+// failed to branch rather than a mode to accept.
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation policy is required")
+	}
+
+	// The platform gate runs before every other check so that an embedder
+	// calling the Go API directly is refused off Linux on exactly the terms the
+	// command loader refuses there.
+	if err := validateProcessIsolationPlatform(); err != nil {
+		return err
 	}
 
 	if isolation.UID == 0 || isolation.GID == 0 {
@@ -60,7 +72,11 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		}
 	}
 
-	for key := range isolation.BaseEnvironment {
+	return validateProcessIsolationBaseEnvironment(isolation.BaseEnvironment)
+}
+
+func validateProcessIsolationBaseEnvironment(environment map[string]string) error {
+	for key := range environment {
 		if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 {
 			return fmt.Errorf("process isolation base environment contains invalid key %q", key)
 		}
@@ -71,16 +87,8 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		}
 	}
 
-	return validateProcessIsolationPlatform()
+	return nil
 }
-
-// sharedIdentitySupervisorRemedy states what an operator can change when the
-// supervisor was asked to launch the native process under the very identity it
-// already runs as and the shape it was handed describes something else. There
-// is no privilege boundary to cross in that deployment, so the two answers are
-// to give the supervisor one, or to describe the launch as what it is.
-const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
-	"or launch the agent under the identity the supervisor already holds"
 
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
@@ -93,19 +101,6 @@ func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	if identityLock {
 		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
-		}
-
-		return nil
-	}
-
-	// A native identity that is already the supervisor's own identity cannot be
-	// recorded as a standalone one: the durable record proves an identity no
-	// live task holds, and the supervisor asking for it is such a task. The
-	// canonical shape is therefore no capabilities and no standalone fields.
-	if sharedProcessIdentity(isolation) {
-		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
-			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
-				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil
@@ -254,52 +249,4 @@ func executableFile(path string) (string, error) {
 	}
 
 	return path, nil
-}
-
-func supervisorEnvironment(native []string, isolation *ProcessIsolation, additions ...string) ([]string, error) {
-	if err := validateProcessIsolation(isolation); err != nil {
-		return nil, err
-	}
-
-	env := make([]string, 0, len(native)+len(additions)+3)
-	reserved := map[string]struct{}{envIsolationUID: {}, envIsolationGID: {}, envIsolationTest: {}}
-
-	for _, addition := range additions {
-		name, _, ok := strings.Cut(addition, "=")
-		if ok {
-			reserved[name] = struct{}{}
-		}
-	}
-
-	for _, entry := range native {
-		name, _, ok := strings.Cut(entry, "=")
-		_, isReserved := reserved[name]
-
-		if ok && !isReserved {
-			env = append(env, entry)
-		}
-	}
-
-	env = append(env, additions...)
-
-	return append(env,
-		envIsolationUID+"="+strconv.FormatUint(uint64(isolation.UID), 10),
-		envIsolationGID+"="+strconv.FormatUint(uint64(isolation.GID), 10),
-		envIsolationTest+"="+strconv.FormatBool(isolation.TestOnlyNoCredential),
-	), nil
-}
-
-func verifyInheritedProcessIsolation() error {
-	uid, uidErr := strconv.ParseUint(os.Getenv(envIsolationUID), 10, 32)
-	gid, gidErr := strconv.ParseUint(os.Getenv(envIsolationGID), 10, 32)
-
-	if uidErr != nil || gidErr != nil {
-		return errors.New("process isolation bootstrap identity is invalid")
-	}
-
-	if os.Getenv(envIsolationTest) == "true" {
-		return nil
-	}
-
-	return verifyProcessIsolation(&ProcessIsolation{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: map[string]string{}})
 }

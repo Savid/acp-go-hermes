@@ -122,8 +122,26 @@ func TestSignalProcessBranches(t *testing.T) {
 }
 
 func TestUnixProcessContainmentCompletionBranches(t *testing.T) {
-	if _, err := startContainedProcess(exec.Command("sh", "-c", "exit 0")); err == nil {
-		t.Fatal("startContainedProcess accepted a command without a process group")
+	// An omitted policy selects ordinary same-identity execution: the command
+	// is started directly, the boundary completes when the direct child and its
+	// group are gone, and no descendant inventory is ever published.
+	ordinary := exec.Command("sh", "-c", "exit 0")
+	configureHermesProcess(ordinary)
+	ordinaryTree, err := startContainedProcess(ordinary)
+	if err != nil {
+		t.Fatalf("ordinary start: %v", err)
+	}
+	if _, available := ordinaryTree.descendantCount(); available {
+		t.Fatal("ordinary execution published a provider-descendant inventory")
+	}
+	if err := ordinaryTree.complete(5 * time.Second); err != nil {
+		t.Fatalf("ordinary completion: %v", err)
+	}
+	if err := ordinaryTree.close(); err != nil {
+		t.Fatalf("ordinary close: %v", err)
+	}
+	if _, err := startContainedProcess(nil); err == nil {
+		t.Fatal("startContainedProcess accepted a nil command")
 	}
 
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
@@ -207,9 +225,8 @@ func TestUnixProcessContainmentCompletionBranches(t *testing.T) {
 
 func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
 	t.Helper()
-	isolation := testProcessIsolation()
 	if runtime.GOOS != "darwin" {
-		return ContainmentSpec{Isolation: isolation}
+		return ContainmentSpec{}
 	}
 	parent := t.TempDir()
 	dirs, err := CreateGenerationXDGDirs(parent)
@@ -217,15 +234,7 @@ func darwinTestContainmentSpec(t *testing.T) ContainmentSpec {
 		t.Fatalf("CreateGenerationXDGDirs: %v", err)
 	}
 
-	return ContainmentSpec{DarwinBestEffort: true, ScratchParent: parent, GenerationRoot: dirs.Root, LifecycleKind: "session", Isolation: isolation}
-}
-
-func testProcessIsolation() *ProcessIsolation {
-	return &ProcessIsolation{
-		UID: 11, GID: 22,
-		BaseEnvironment:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
-		TestOnlyNoCredential: true,
-	}
+	return ContainmentSpec{DarwinBestEffort: true, ScratchParent: parent, GenerationRoot: dirs.Root, LifecycleKind: "session"}
 }
 
 func provedProcessContainment() *processContainment {

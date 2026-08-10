@@ -30,24 +30,34 @@ func testIsolationIdentity() (uint32, uint32) {
 	return uint32(uid), uint32(gid)
 }
 
+// newTestAgent builds an agent in the ordinary default configuration: no
+// WithProcessIsolation, so native work runs as the identity the test process
+// already holds. This is what a host that configures nothing gets, so it is
+// what most tests should exercise.
 func newTestAgent(opts ...Option) *Agent {
-	base := make([]Option, 0, 2+len(opts))
+	return NewAgent(opts...)
+}
+
+// newIsolatedTestAgent builds an agent with an explicit hardened policy, for
+// the tests whose subject is that policy. The identity is deliberately distinct
+// from the runner's: an explicit policy that named the runner's own identity
+// would be refused, because there is no same-identity disposition for it to
+// fall back to.
+func newIsolatedTestAgent(opts ...Option) *Agent {
 	uid, gid := testIsolationIdentity()
-	isolation := ProcessIsolation{
-		UID: uid, GID: gid,
-		BaseEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
-	}
-	// Standalone owner fields describe an identity no live task holds. A runner
-	// that isolates to itself holds this one, so the canonical shape there is
-	// the shared one and the fields belong only to the isolated fixture.
-	if !sharedProcessIdentity(&isolation) {
-		isolation.StandaloneOwnerID = "acp-go-hermes-tests"
-		isolation.StandaloneStateRoot = os.TempDir()
-	}
-	base = append(base, WithProcessIsolation(isolation), func(options *Options) {
-		options.testOnlyNoCredential = true
-		options.testOnlyIdentityLockRoot = testIdentityLockRoot()
-	})
+	base := make([]Option, 0, 2+len(opts))
+	base = append(base,
+		WithProcessIsolation(ProcessIsolation{
+			UID: uid, GID: gid,
+			BaseEnvironment:     map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
+			StandaloneOwnerID:   "acp-go-hermes-tests",
+			StandaloneStateRoot: os.TempDir(),
+		}),
+		func(options *Options) {
+			options.testOnlyNoCredential = true
+			options.testOnlyIdentityLockRoot = testIdentityLockRoot()
+		},
+	)
 
 	return NewAgent(append(base, opts...)...)
 }

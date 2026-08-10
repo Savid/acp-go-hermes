@@ -38,7 +38,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
 	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "unsupported: a non-empty value is rejected when a session is established")
 	providerAuthHome := flags.String("hermes-provider-auth-home", "", "durable native Hermes credential residence; provider auth requires this and -provider-auth-root")
-	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
+	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "optional absolute path to a root-owned mode-0600 Linux child-isolation policy; omitting it runs Hermes as this process's own identity")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
@@ -56,17 +56,28 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 0
 	}
 
-	if *isolationConfigPath == "" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+	// An omitted policy path is ordinary standalone mode, not a configuration
+	// error: the loader is not called, no WithProcessIsolation option is
+	// appended, and Hermes runs as this process's own identity. A supplied path
+	// is strict — every loader failure exits before serving, with no retry
+	// without the option.
+	var isolationOptions []hermesacp.Option
 
-		return 2
-	}
+	if *isolationConfigPath != "" {
+		isolation, err := processIsolationConfigLoader(*isolationConfigPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-hermes: process isolation: %v\n", err)
 
-	isolation, err := processIsolationConfigLoader(*isolationConfigPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: process isolation: %v\n", err)
+			return 1
+		}
 
-		return 1
+		isolationOptions = append(isolationOptions, hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
+		}))
 	}
 
 	seeded, err := seedFiles.contents()
@@ -113,14 +124,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		hermesacp.WithProviderAuthHome(*providerAuthHome),
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
-		hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
-			UID:                 isolation.UID,
-			GID:                 isolation.GID,
-			BaseEnvironment:     isolation.BaseEnvironment,
-			StandaloneOwnerID:   isolation.StandaloneOwnerID,
-			StandaloneStateRoot: isolation.StandaloneStateRoot,
-		}),
 	)
+	opts = append(opts, isolationOptions...)
 	if len(seeded) > 0 {
 		opts = append(opts, hermesacp.WithSeedFiles(seeded))
 	}

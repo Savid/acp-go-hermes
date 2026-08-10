@@ -8,15 +8,24 @@ coordinates native OAuth flows and records only values-free lineage.
 
 ## Standalone credential input
 
-The standalone root supervisor never forwards its ambient environment.
-To pass provider API-key variables, name each variable explicitly in the
-`inheritEnvironment` array of the root-owned
-`-process-isolation-config` policy. The value must be set in the supervisor
-environment or startup fails; identity, path, loader, XDG/native-home, and
-adapter-private variables cannot be inherited. File-backed or provider-broker
-credentials must live only in the explicit target-owned native home described
-by the adapter. No standalone path reads root `HOME`, root native config, or
-an unlisted root credential.
+Under an explicit `-process-isolation-config` policy the standalone root
+supervisor never forwards its ambient environment. To pass provider API-key
+variables there, name each variable explicitly in the `inheritEnvironment` array
+of the root-owned policy. The value must be set in the supervisor environment or
+startup fails; identity, path, loader, XDG/native-home, and adapter-private
+variables cannot be inherited. File-backed or provider-broker credentials must
+live only in the explicit target-owned native home described by the adapter. No
+such standalone path reads root `HOME`, root native config, or an unlisted root
+credential.
+
+In ordinary mode — the default, with no policy supplied — Hermes inherits the
+adapter's own environment, so provider API-key variables set for the adapter are
+already visible to it. The adapter still removes its private
+`ACP_GO_HERMES_INTERNAL_*` and supervisor variables, its runtime and scratch
+markers, and the Hermes state roots it manages itself (`HERMES_HOME`,
+`HERMES_AUTH_HOME`, and `HERMES_DASHBOARD_SESSION_TOKEN`), so an ambient value
+can never redirect native state or credential residence away from the roots the
+adapter generated.
 
 ## No ACP auth methods
 
@@ -38,9 +47,9 @@ The launch environment also sets a random
 shim as defense in depth. Hermes v0.19.0 does not invoke that shim on this API
 path: its dashboard auth endpoint returns the authorization URL to its caller,
 and the dashboard UI owns opening it. The adapter relays that returned URL.
-Windows rejects every native Hermes launch at the mandatory Unix UID/GID
-identity boundary, so authorization is unavailable there. Independently, a
-native browser launch cannot be contained there.
+Windows rejects an explicit Unix UID/GID isolation policy, though ordinary
+same-identity launch is available there. Independently, a native browser launch
+cannot be contained on Windows.
 
 The required Linux native canary installs the exact v0.19.0 wheel with SHA-256
 `bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f`,

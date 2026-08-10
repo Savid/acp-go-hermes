@@ -65,11 +65,16 @@ type ProcessOptions struct {
 	// ScratchParent is the resolved parent directory used to materialize an
 	// isolated home when Home is empty. The internal package never consults the
 	// system temp directory itself.
-	ScratchParent               string
-	Cwd                         string
-	ProviderAuthHome            string
-	Env                         map[string]string
-	Isolation                   *ProcessIsolation
+	ScratchParent    string
+	Cwd              string
+	ProviderAuthHome string
+	Env              map[string]string
+	Isolation        *ProcessIsolation
+	// AmbientEnvironment is the adapter's own environment, captured once by the
+	// host-facing Agent. Ordinary same-identity execution sanitizes it into the
+	// native environment; an explicit policy ignores it entirely, because that
+	// policy's BaseEnvironment is a replacement rather than an overlay.
+	AmbientEnvironment          map[string]string
 	Timeout                     time.Duration
 	Configure                   func(*exec.Cmd)
 	LogWriter                   io.Writer
@@ -152,8 +157,14 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err := validateProcessContainment(opts.DarwinBestEffortContainment); err != nil {
 		return nil, err
 	}
-	if err := validateProcessIsolation(opts.Isolation); err != nil {
-		return nil, fmt.Errorf("validate Hermes process isolation: %w", err)
+	// A supplied policy carries its own Linux-only platform gate, so this is the
+	// single place an explicit request is refused for the platform. An omitted
+	// policy has nothing to validate: ordinary same-identity execution is what
+	// it selects, and every supported platform can perform it.
+	if opts.Isolation != nil {
+		if err := validateProcessIsolation(opts.Isolation); err != nil {
+			return nil, fmt.Errorf("validate Hermes process isolation: %w", err)
+		}
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -164,10 +175,16 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if executable == "" {
 		executable = valHermes
 	}
-	baseEnvironment, _ := isolationEnvironment(opts.Isolation, opts.Env)
-	executable, err := lookPathInEnvironment(executable, baseEnvironment)
+
+	// The version probe below rebuilds this environment authoritatively and
+	// reports an unusable one after it has taken, and can release, the
+	// admissions it needs. Resolution here only needs a PATH to find the
+	// executable with, so an environment failure is deliberately not fatal yet.
+	baseEnvironment, _ := processLaunchEnvironment(opts)
+
+	executable, err := resolveHarnessExecutable(opts.Isolation, executable, baseEnvironment)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Hermes executable: %w", err)
+		return nil, err
 	}
 
 	home := opts.Home
@@ -217,11 +234,11 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	// PYTHONUNBUFFERED is a launch precondition rather than a preference: off a
 	// TTY hermes block-buffers stdout and emits nothing while working normally.
-	env = upsertProcessEnv(env, "HERMES_HOME", home)
-	env = upsertProcessEnv(env, "HERMES_DASHBOARD_SESSION_TOKEN", token)
+	env = upsertProcessEnv(env, envHermesHome, home)
+	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
 	if opts.ProviderAuthHome != "" {
-		env = upsertProcessEnv(env, "HERMES_AUTH_HOME", opts.ProviderAuthHome)
+		env = upsertProcessEnv(env, envHermesAuthHome, opts.ProviderAuthHome)
 	}
 
 	// A login runs inside this process, and hermes opens a browser for it even
@@ -326,6 +343,41 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	return process, nil
 }
 
+// processLaunchEnvironment builds the environment the native harness receives.
+// The two modes differ in kind rather than degree: an explicit policy supplies
+// the complete replacement environment, and an omitted one sanitizes the
+// adapter's captured ambient environment.
+func processLaunchEnvironment(opts ProcessOptions) ([]string, error) {
+	if opts.Isolation != nil {
+		return isolationEnvironment(opts.Isolation, opts.Env)
+	}
+
+	return ordinaryEnvironment(opts.AmbientEnvironment, opts.Env)
+}
+
+// resolveHarnessExecutable resolves the harness executable against the launch
+// environment. Resolution follows the same split as the environment itself: a
+// closed policy requires absolute PATH entries because its author wrote the
+// whole environment, while an ordinary launch resolves the way a shell would.
+func resolveHarnessExecutable(isolation *ProcessIsolation, executable string, environment []string) (string, error) {
+	var (
+		resolved string
+		err      error
+	)
+
+	if isolation != nil {
+		resolved, err = lookPathInEnvironment(executable, environment)
+	} else {
+		resolved, err = lookOrdinaryPathInEnvironment(executable, environment)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("resolve Hermes executable: %w", err)
+	}
+
+	return resolved, nil
+}
+
 func upsertProcessEnv(env []string, key string, value string) []string {
 	prefix := key + "="
 	filtered := env[:0]
@@ -377,7 +429,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 
 	var output synchronizedBuffer
 	cmd := command(executable, "--version")
-	probeEnvironment, envErr := isolationEnvironment(opts.Isolation, opts.Env)
+	probeEnvironment, envErr := processLaunchEnvironment(opts)
 	if envErr != nil {
 		nativeRelease()
 		removeErr := removeAll(probeRoot)
@@ -387,7 +439,7 @@ func ensureExecutableVersion(ctx context.Context, executable string, opts Proces
 
 		return false, errors.Join(envErr, removeErr)
 	}
-	probeEnvironment = upsertProcessEnv(probeEnvironment, "HERMES_HOME", probeRoot)
+	probeEnvironment = upsertProcessEnv(probeEnvironment, envHermesHome, probeRoot)
 	if handoffErr := processNativeTreeHandoff(probeRoot, opts.Isolation); handoffErr != nil {
 		nativeRelease()
 		removeErr := removeAll(probeRoot)

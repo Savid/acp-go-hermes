@@ -644,8 +644,10 @@ func TestExecutableVersionProbeUsesGenerationHome(t *testing.T) {
 	var handedOff string
 	processNativeTreeHandoff = func(root string, isolation *ProcessIsolation) error {
 		handedOff = root
-		if isolation == nil {
-			t.Fatal("probe handoff omitted isolation")
+		// Ordinary mode owns its generation already, so the handoff is reached
+		// with no policy and surrenders nothing.
+		if isolation != nil {
+			t.Fatalf("ordinary probe handoff carried a policy %+v", isolation)
 		}
 
 		return nil
@@ -658,10 +660,9 @@ func TestExecutableVersionProbeUsesGenerationHome(t *testing.T) {
 	}
 	nativeReleases, scratchReleases := 0, 0
 	_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
-		Isolation: &ProcessIsolation{
-			UID: 1, GID: 1, BaseEnvironment: map[string]string{"HERMES_HOME": "/account-home"},
-			StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
-		},
+		// An ambient HERMES_HOME is adapter-managed state: it is scrubbed out
+		// of the inherited environment and replaced with the probe generation.
+		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH"), "HERMES_HOME": "/account-home"},
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -717,10 +718,7 @@ func TestExecutableVersionProbeHandoffFailure(t *testing.T) {
 			}
 			nativeReleases, scratchReleases := 0, 0
 			_, err := ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{
-				Isolation: &ProcessIsolation{
-					UID: 1, GID: 1, BaseEnvironment: map[string]string{},
-					StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
-				},
+				AmbientEnvironment: testAmbientEnvironment(),
 				AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 					return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 				},
@@ -1259,7 +1257,7 @@ func (f fakeFileInfo) Sys() any           { return nil }
 
 func darwinTestProcessOptions(t *testing.T, options ProcessOptions) ProcessOptions {
 	t.Helper()
-	options.Isolation = testProcessIsolation()
+	options.AmbientEnvironment = testAmbientEnvironment()
 	if options.AcquireDiscoveryResources == nil {
 		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
 	}

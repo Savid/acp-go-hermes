@@ -79,12 +79,11 @@ func runDarwinLaunchBootstrap() {
 	if os.Getenv(darwinLaunchBootstrapEnv) != darwinLaunchBootstrapMode {
 		return
 	}
-	err := verifyInheritedProcessIsolation()
-	var configFile, gate io.ReadCloser
-	var status io.WriteCloser
-	if err == nil {
-		configFile, gate, status, err = darwinLaunchInput()
-	}
+	// There is no inherited identity to verify here. Darwin runs the native
+	// harness as the identity this adapter already holds, and the explicit
+	// hardened policy that would name a different one is refused on this
+	// platform before any launch is prepared.
+	configFile, gate, status, err := darwinLaunchInput()
 	if err == nil {
 		err = runDarwinLaunchBootstrapCore(configFile, gate)
 	}
@@ -190,11 +189,13 @@ func (launch *darwinLaunch) releaseGate() error {
 }
 
 func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*processContainment, error) {
+	// An explicit hardened policy is Linux-only and must never be downgraded to
+	// this backend, so it is refused before anything is prepared or spawned.
+	if spec.Isolation != nil {
+		return nil, errors.New("explicit process isolation is supported only on linux, not darwin")
+	}
 	if !spec.DarwinBestEffort {
 		return nil, fmt.Errorf("%w: Darwin containment is unavailable without explicit best-effort opt-in", ErrProcessContainmentIncomplete)
-	}
-	if err := validateProcessIsolation(spec.Isolation); err != nil {
-		return nil, fmt.Errorf("validate Darwin Hermes isolation: %w", err)
 	}
 	runtimeID, err := newContainmentRuntimeID()
 	if err != nil {
@@ -206,7 +207,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if err != nil {
 		return nil, fmt.Errorf("prepare Darwin containment record: %w", err)
 	}
-	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot, spec.Isolation)
+	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot)
 	if err != nil {
 		return nil, errors.Join(err, completeContainmentRecord(record, containmentStateAbsent))
 	}
@@ -259,7 +260,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	return tree, nil
 }
 
-func prepareDarwinLaunch(native *exec.Cmd, generationRoot string, isolations ...*ProcessIsolation) (*darwinLaunch, error) {
+func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch, error) {
 	if native == nil || native.Path == "" || len(native.Args) == 0 {
 		return nil, errors.New("prepare Darwin native launch: command is incomplete")
 	}
@@ -309,27 +310,11 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string, isolations ...
 	}
 	helper := darwinLaunchCommand(self)
 	helper.Dir, helper.Stdin, helper.Stdout, helper.Stderr = native.Dir, native.Stdin, native.Stdout, native.Stderr
-	if len(isolations) > 0 {
-		helper.Env, err = supervisorEnvironment(native.Env, isolations[0], darwinLaunchBootstrapEnv+"="+darwinLaunchBootstrapMode)
-		if err != nil {
-			cleanup()
-			_ = gateRead.Close()
-			_ = gateWrite.Close()
-			_ = statusRead.Close()
-			_ = statusWrite.Close()
-			return nil, err
-		}
-		if err := applyProcessIsolation(helper, isolations[0]); err != nil {
-			cleanup()
-			_ = gateRead.Close()
-			_ = gateWrite.Close()
-			_ = statusRead.Close()
-			_ = statusWrite.Close()
-			return nil, err
-		}
-	} else {
-		helper.Env = darwinBootstrapEnvironment()
-	}
+	// The helper carries the bootstrap marker and nothing else. It requests no
+	// credential change: this backend runs the native harness as the identity
+	// the adapter already holds, and the native environment travels in the
+	// sealed config rather than through the helper's own environment.
+	helper.Env = darwinBootstrapEnvironment()
 	helper.WaitDelay = darwinPipeWait
 	helper.ExtraFiles = []*os.File{configFile, gateRead, statusWrite}
 	configureHermesProcess(helper)

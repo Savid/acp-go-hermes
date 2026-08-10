@@ -46,6 +46,10 @@ type Agent struct {
 	processes       *providerProcessTracker
 	containmentMode RuntimeContainmentMode
 	providerAuth    *providerAuth
+	// ambientEnv is the adapter's environment as it stood at construction. It is
+	// the base ordinary same-identity execution sanitizes; an explicit policy
+	// never reads it.
+	ambientEnv map[string]string
 
 	mu                 sync.Mutex
 	closed             bool
@@ -113,6 +117,7 @@ func NewAgent(opts ...Option) *Agent {
 		incompleteRoots: make(map[acp.SessionId]map[string]struct{}),
 		clientCalls:     make(chan struct{}, limits.MaxConcurrentClientCalls),
 		containmentMode: mode,
+		ambientEnv:      ambientEnvironment(),
 	}
 	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	agent.providerAuth = newProviderAuth(agent)

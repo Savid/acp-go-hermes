@@ -22,6 +22,15 @@ func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processCon
 		spec = specs[0]
 	}
 
+	// An omitted policy selects ordinary same-identity execution, and it selects
+	// it here rather than inside a platform backend, so no supervisor, authority,
+	// or credential machinery is entered on the way. Darwin best effort is the
+	// one stronger boundary a host can layer onto an omitted policy, and it is
+	// explicitly opted into.
+	if spec.Isolation == nil && !spec.DarwinBestEffort {
+		return startOrdinaryProcess(cmd)
+	}
+
 	return startUnixContainedProcess(cmd, spec)
 }
 
@@ -70,6 +79,15 @@ func (c *processContainment) completeAuthoritative(timeout time.Duration) error 
 		return nil
 	}
 
+	return c.completeProcessGroup(timeout)
+}
+
+// completeProcessGroup runs the bounded SIGTERM-then-SIGKILL ladder against the
+// process group this containment leads and waits for that group to become
+// unobservable. It is the teardown primitive both the authoritative backend and
+// ordinary same-identity execution use; what differs is the claim each makes of
+// the result, not the signalling.
+func (c *processContainment) completeProcessGroup(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	_ = c.signal(syscall.SIGTERM)
 

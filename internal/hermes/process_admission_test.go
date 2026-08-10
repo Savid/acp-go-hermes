@@ -29,7 +29,7 @@ func TestProcessContainmentValidationAndPortFailure(t *testing.T) {
 	want := errors.New("listen failed")
 	listenTCP = func(string, string) (net.Listener, error) { return nil, want }
 	_, err := Start(context.Background(), ProcessOptions{
-		ExecutablePath: executable, Home: t.TempDir(), Isolation: testProcessIsolation(),
+		ExecutablePath: executable, Home: t.TempDir(), AmbientEnvironment: testAmbientEnvironment(),
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("Start port failure = %v", err)
@@ -100,7 +100,7 @@ func TestExecutableVersionRetainsIncompleteGeneration(t *testing.T) {
 	retained := false
 	_, err := ensureExecutableVersion(context.Background(), t.Name(), ProcessOptions{
 		ScratchParent:             testTraversableTempDir(t),
-		Isolation:                 testProcessIsolation(),
+		AmbientEnvironment:        testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) { return func() {}, func() {}, nil },
 		RetainDiscoveryRoot:       func(string, error) { retained = true },
 	})

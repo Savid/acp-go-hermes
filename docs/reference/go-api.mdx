@@ -29,11 +29,11 @@ still reach.
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Path to the `hermes` binary (falls back to `hermes` on `PATH`). |
-| `WithProcessIsolation` | Mandatory non-root UID/GID and complete replacement environment for native Hermes processes. On Linux the embedded supervisor stays trusted root; only `hermes serve` receives the configured identity, with supplementary groups cleared. |
+| `WithProcessIsolation` | Optional. Opts into the hardened Linux identity boundary: nonzero non-root UID/GID and a complete replacement environment for native Hermes processes. The embedded supervisor stays a distinct trusted root; only `hermes serve` receives the configured identity, with supplementary groups cleared. Linux-only and fail-closed. Omitting it runs Hermes as the adapter's own identity. |
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported because each session runtime root is isolated. Use `WithScratchDir` for ephemeral state and `WithProviderAuthHome` for durable provider credentials. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Environment overlaid on `ProcessIsolation.BaseEnvironment` for each `hermes serve` process. |
+| `WithEnv` | Environment overlaid on `ProcessIsolation.BaseEnvironment`, or on the sanitized ambient environment in ordinary mode, for each `hermes serve` process. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
@@ -45,7 +45,7 @@ still reach.
 | `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
-| `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin. |
+| `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin, and rejected when combined with `WithProcessIsolation`. |
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
@@ -77,12 +77,13 @@ the deadline. A timeout is a failure, not a user cancel, so it is never reported
 as the `cancelled` stop reason — see
 [Prompt streaming](/docs/core/prompt-streaming).
 
-Linux completion authoritatively empties the native tree. Windows native launch
-is unavailable because the mandatory Unix UID/GID identity boundary with empty
-supplementary groups cannot be applied; cross-compilation proves only that the
-refusal path builds, not runtime support. Darwin best-effort completion means
-only direct-child reaping plus absence of the captured original process group;
-it does not establish that escaped descendants are gone.
+Linux completion under an explicit policy authoritatively empties the native
+tree. Ordinary same-identity completion covers exactly the direct child and the
+process group the adapter started, and makes no claim about work that left that
+boundary. Darwin best-effort completion means only direct-child reaping plus
+absence of the captured original process group; it does not establish that
+escaped descendants are gone. The explicit hardened policy is Linux-only and is
+refused elsewhere rather than downgraded.
 
 `WithImageLimits(ImageLimits)` replaces all four image limits:
 `MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
@@ -106,12 +107,13 @@ capability unadvertised.
 
 `RuntimeContainmentMode` reports `authoritative`, `shared_identity`,
 `best_effort`, or `unavailable`. Embedded hosts can observe it through the
-runtime-resource hooks. In best-effort mode provider-process snapshots are
-non-authoritative and therefore suppressed, including zero-valued snapshots.
-`shared_identity` is reported on Linux when `WithProcessIsolation` names the
-identity the adapter already runs as; the subreaper tree, descendant reaping,
-and process-group teardown are unchanged, so snapshots keep publishing, and
-what is absent is the credential separation between adapter and agent.
+runtime-resource hooks. `shared_identity` is the ordinary default reported on
+every supported platform when `WithProcessIsolation` is omitted; it is
+non-authoritative, so it publishes no provider-descendant snapshots and makes no
+whole-tree quiescence or credential-separation claim. Best-effort snapshots are
+suppressed for the same reason, including zero-valued ones. `unavailable` means
+native launch fails closed, which is what an explicit policy reports on a
+platform that cannot host it. Only `authoritative` publishes inventory.
 
 `WithSeedFiles` confines paths to the config root: absolute paths, `..`
 segments, and empty keys are rejected at session start. `config.yaml` is the one
@@ -148,10 +150,10 @@ callbacks leave standalone operation unbounded. Hermes reserves the isolated
 session home before creating it, holds the native permit for the one
 `hermes serve` tree, and releases the reservation only after clean shutdown and
 root deletion. Linux process snapshots include the dedicated per-session
-subreaper plus every currently owned native descendant. Windows produces no
-native-process snapshots because native launch is unavailable. Descendant
-snapshots require authoritative containment; startup observations distinguish
-spawn, readiness, configuration, and native session creation.
+subreaper plus every currently owned native descendant. Descendant snapshots
+require authoritative containment, so ordinary `shared_identity` execution
+produces none on any platform; startup observations distinguish spawn,
+readiness, configuration, and native session creation.
 
 ## Session store
 

@@ -30,14 +30,16 @@ context is extracted for adapter spans and injected into each launched
 
 `acp_go_hermes.runtime.containment` records the selected `containment` mode as
 `authoritative`, `shared_identity`, `best_effort`, or `unavailable`.
-`shared_identity` is the Linux boundary reported when the configured native
-identity is the identity the adapter already runs as: whole-tree lifecycle is
-still proven, so provider-process snapshots keep publishing, but the agent runs
-under the adapter's own credentials rather than its own. Darwin best-effort startup
-also emits a structured warning with `containment=best_effort`. Because that
-mode cannot authoritatively enumerate escaped descendants, provider-process
-snapshots are suppressed rather than publishing a misleading count, even when
-the observed count would be zero.
+`shared_identity` is the ordinary default, reported on every supported platform
+whenever `WithProcessIsolation` is omitted: native work runs as the adapter's
+own identity, root or non-root alike. It is a non-authoritative posture rather
+than a containment achievement, so it makes no whole-tree quiescence or
+credential-separation claim and publishes no provider-process snapshots at all —
+not even a terminal zero. Darwin best-effort startup also emits a structured
+warning with `containment=best_effort`, and suppresses provider-process
+snapshots for the same reason: it cannot authoritatively enumerate escaped
+descendants, so a count would mislead even when it would read zero. Only
+`authoritative` publishes provider-descendant inventory.
 
 <Note>
 Telemetry avoids recording prompt text, tool inputs, tool outputs, and raw

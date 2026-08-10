@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -143,17 +142,9 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 	}
 }
 
-func setTestIsolationBootstrapEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv(envIsolationUID, strconv.Itoa(os.Geteuid()))
-	t.Setenv(envIsolationGID, strconv.Itoa(os.Getegid()))
-	t.Setenv(envIsolationTest, "true")
-}
-
 func TestDarwinLaunchBootstrapDispatch(t *testing.T) {
 	restoreDarwinLaunchSeams(t)
 	t.Setenv(darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode)
-	setTestIsolationBootstrapEnv(t)
 	darwinLaunchExec = func(string, []string, []string) error { return nil }
 	var exits []int
 	darwinLaunchExit = func(code int) { exits = append(exits, code) }
@@ -368,14 +359,16 @@ func TestDarwinLaunchPreparationAndStatusBranches(t *testing.T) {
 }
 
 func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
-	require.Error(t, validateProcessContainment(false))
-	_, err := Start(t.Context(), ProcessOptions{})
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	// Darwin can host both boundaries it offers, so the containment check
+	// accepts an omitted policy with or without the best-effort opt-in. The
+	// explicit hardened policy is refused by validateProcessIsolation instead.
+	require.NoError(t, validateProcessContainment(false))
+	require.NoError(t, validateProcessContainment(true))
 
 	restoreDarwinLaunchSeams(t)
 	originalRandom := containmentRandomRead
 	containmentRandomRead = func([]byte) (int, error) { return 0, errors.New("entropy") }
-	_, err = newContainmentRuntimeID()
+	_, err := newContainmentRuntimeID()
 	require.Error(t, err)
 	containmentRandomRead = originalRandom
 
@@ -417,7 +410,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("listen") }
 	_, err = Start(t.Context(), ProcessOptions{
 		ExecutablePath: "/usr/bin/true", Home: t.TempDir(), DarwinBestEffortContainment: true,
-		Isolation: testProcessIsolation(),
+		AmbientEnvironment: testAmbientEnvironment(),
 	})
 	require.ErrorContains(t, err, "listen")
 	processKill = previousKill
@@ -428,7 +421,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	cancel()
 	_, err = ensureExecutableVersion(probeCtx, script, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
-		Isolation:                 testProcessIsolation(),
+		AmbientEnvironment:        testAmbientEnvironment(),
 		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
 		RetainDiscoveryRoot:       func(string, error) {},
 	})
@@ -439,7 +432,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	nativeReleases, scratchReleases := 0, 0
 	needed, err := ensureExecutableVersion(t.Context(), versionScript, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
-		Isolation: testProcessIsolation(),
+		AmbientEnvironment: testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -452,7 +445,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 
 	wantAdmissionErr := errors.New("discovery admission rejected")
 	_, err = ensureExecutableVersion(t.Context(), script+"-admission", ProcessOptions{
-		Isolation: testProcessIsolation(),
+		AmbientEnvironment: testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return nil, nil, wantAdmissionErr
 		},
@@ -464,7 +457,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	mkdirTemp = func(string, string) (string, error) { return "", errors.New("probe generation failed") }
 	nativeReleases, scratchReleases = 0, 0
 	_, err = ensureExecutableVersion(t.Context(), script+"-generation", ProcessOptions{
-		Isolation: testProcessIsolation(),
+		AmbientEnvironment: testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -499,23 +492,40 @@ func TestDarwinVersionDiscoveryRequiresCompleteResourceCallbacks(t *testing.T) {
 	require.Equal(t, 1, scratchReleases)
 }
 
-func TestDarwinProcessIsolationFailureBranches(t *testing.T) {
-	_, err := Start(t.Context(), ProcessOptions{DarwinBestEffortContainment: true})
-	require.ErrorContains(t, err, "process isolation")
+// TestDarwinExplicitProcessIsolationRefusesWithoutSpawning proves the explicit
+// hardened policy is refused on Darwin at both entry points, and that neither
+// refusal is followed by an ordinary or best-effort spawn attempt. The policy
+// is structurally valid, so what is being proven is the platform verdict rather
+// than early shape validation.
+func TestDarwinExplicitProcessIsolationRefusesWithoutSpawning(t *testing.T) {
+	restoreProcessSeams(t)
 
-	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), ContainmentSpec{DarwinBestEffort: true})
-	require.ErrorContains(t, err, "isolation")
+	spawns := 0
+	startHermesContainedProcess = func(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
+		spawns++
 
-	_, err = prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir(), nil)
-	require.ErrorContains(t, err, "process isolation")
+		return nil, errors.New("unexpected spawn")
+	}
 
-	originalGroups := processIsolationGetgroups
-	t.Cleanup(func() { processIsolationGetgroups = originalGroups })
-	processIsolationGetgroups = func() ([]int, error) { return []int{os.Getegid(), os.Getegid() + 1}, nil }
-	_, err = prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir(), &ProcessIsolation{
-		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()), BaseEnvironment: map[string]string{},
+	policy := &ProcessIsolation{
+		UID: 4242, GID: 4242,
+		BaseEnvironment:     map[string]string{"PATH": "/usr/bin"},
+		StandaloneOwnerID:   "operator",
+		StandaloneStateRoot: "/var/lib/hermes-state",
+	}
+
+	_, err := Start(t.Context(), ProcessOptions{Isolation: policy})
+	require.ErrorContains(t, err, "only on linux")
+
+	_, err = Start(t.Context(), ProcessOptions{Isolation: policy, DarwinBestEffortContainment: true})
+	require.ErrorContains(t, err, "only on linux")
+
+	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), ContainmentSpec{
+		DarwinBestEffort: true, Isolation: policy,
 	})
-	require.ErrorContains(t, err, "supplementary group")
+	require.ErrorContains(t, err, "only on linux")
+
+	require.Zero(t, spawns)
 }
 
 func TestDarwinVersionDiscoveryIsolationEnvironmentFailures(t *testing.T) {
@@ -562,7 +572,7 @@ func TestDarwinVersionDiscoveryRetainsIncompleteGenerationAndAdmissions(t *testi
 
 	_, err := ensureExecutableVersion(t.Context(), script, ProcessOptions{
 		ScratchParent: parent, DarwinBestEffortContainment: true,
-		Isolation: testProcessIsolation(),
+		AmbientEnvironment: testAmbientEnvironment(),
 		AcquireDiscoveryResources: func(context.Context) (func(), func(), error) {
 			return func() { nativeReleases++ }, func() { scratchReleases++ }, nil
 		},
@@ -832,7 +842,7 @@ func TestDarwinStartContainmentFailureBranches(t *testing.T) {
 
 	_, err = startUnixContainedProcess(&exec.Cmd{}, darwinTestContainmentSpec(t))
 	require.ErrorContains(t, err, "command is incomplete")
-	invalidSpec := ContainmentSpec{DarwinBestEffort: true, ScratchParent: t.TempDir(), GenerationRoot: filepath.Join(t.TempDir(), "outside"), LifecycleKind: "session", Isolation: testProcessIsolation()}
+	invalidSpec := ContainmentSpec{DarwinBestEffort: true, ScratchParent: t.TempDir(), GenerationRoot: filepath.Join(t.TempDir(), "outside"), LifecycleKind: "session"}
 	_, err = startUnixContainedProcess(exec.Command("/usr/bin/true"), invalidSpec)
 	require.ErrorContains(t, err, "prepare Darwin containment record")
 
