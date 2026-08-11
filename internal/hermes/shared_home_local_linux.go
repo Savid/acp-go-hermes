@@ -14,7 +14,7 @@ func ensureLocalSharedHermesHome(path string) error {
 		return fmt.Errorf("inspect shared Hermes home filesystem: %w", err)
 	}
 
-	if !linuxSharedHomeFilesystemLocal(int64(stat.Type)) {
+	if !linuxSharedHomeFilesystemLocal(stat.Type) {
 		return fmt.Errorf("shared Hermes home requires a supported local filesystem (type %#x)", stat.Type)
 	}
 
