@@ -129,6 +129,7 @@ func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnec
 		hermesacp.AuthStatusMethod,
 		hermesacp.AuthCancelMethod,
 		hermesacp.AuthInventoryMethod,
+		hermesacp.AuthDisconnectMethod,
 	}
 	if !slices.Equal(names, wantNames) {
 		t.Fatalf("advertised provider auth methods = %#v, want %#v", names, wantNames)

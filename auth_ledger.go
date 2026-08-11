@@ -17,6 +17,7 @@ import (
 const (
 	authLedgerIntent    = "intent"
 	authLedgerConfirmed = "confirmed"
+	authLedgerRemoved   = "removed"
 )
 
 // Closed proofSource enum. Native presence alone is never enough: without

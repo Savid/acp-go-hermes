@@ -196,6 +196,27 @@ func (s *hermesServer) AuthCancelFlow(ctx context.Context, nativeSessionID strin
 	return s.authRequest(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// AuthDisconnect removes one provider from Hermes' native credential
+// residence. A successful response with ok=false is still conclusive absence:
+// the native endpoint found no credential to clear, which is exactly the
+// postcondition disconnect needs.
+func (s *hermesServer) AuthDisconnect(ctx context.Context, providerID string) error {
+	var payload struct {
+		Provider string `json:"provider"`
+	}
+
+	path := authProvidersPath + "/" + url.PathEscape(providerID)
+	if err := s.authRequest(ctx, http.MethodDelete, path, nil, &payload); err != nil {
+		return err
+	}
+
+	if payload.Provider != providerID {
+		return errors.New("hermes auth disconnect returned the wrong provider")
+	}
+
+	return nil
+}
+
 func (s *hermesServer) authRequest(ctx context.Context, method string, path string, body any, out any) error {
 	base, token := s.authEndpoint()
 	if base == "" {

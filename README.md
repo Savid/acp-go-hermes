@@ -101,7 +101,7 @@ directories are configured.
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
   delete, and fork.
-- Provider OAuth brokered through six session-scoped `_hermes/auth/*`
+- Provider OAuth brokered through seven session-scoped `_hermes/auth/*`
   extension methods over the `hermes serve` REST auth API. Native Hermes owns
   credential bytes in a shared durable `HERMES_AUTH_HOME`; the adapter keeps
   only values-free connection lineage. Hermes v0.19.0 returns its authorization

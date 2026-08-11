@@ -1,6 +1,6 @@
 ---
 title: Authentication
-description: Agent auth stays native, while provider OAuth is coordinated through six values-free extension methods.
+description: Agent auth stays native, while provider OAuth is coordinated through seven values-free extension methods.
 ---
 
 Hermes owns authentication and every provider credential byte. The adapter
@@ -92,7 +92,8 @@ When enabled, `initialize` advertises exactly:
       "_hermes/auth/callback",
       "_hermes/auth/status",
       "_hermes/auth/cancel",
-      "_hermes/auth/inventory"
+      "_hermes/auth/inventory",
+      "_hermes/auth/disconnect"
     ]
   }
 }
@@ -150,6 +151,17 @@ remain available to later sessions and process restarts.
 `logged_in=false` both when a credential is absent and when status or validation
 fails, so the adapter cannot honestly report `confirmed_absent`. Ambient native
 logins without adapter lineage are not attributed to a connection.
+
+## Disconnect
+
+`_hermes/auth/disconnect` accepts `sessionId`, `providerId`, `connectionId`,
+and `bindingGeneration`. It equality-checks the exact confirmed ledger lineage
+before invoking Hermes' native provider-specific disconnect route. The native
+route treats an already-absent or invalid credential as successful absence, so
+an owner can clean a broken binding without a valid token. A different
+connection or generation is a `binding_conflict` and never reaches native
+removal. Success records a generation-bumped removed tombstone; inventory no
+longer publishes the provider, while the next login inherits the newer fence.
 
 ## Store exclusion
 

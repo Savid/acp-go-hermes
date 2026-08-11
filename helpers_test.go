@@ -177,6 +177,8 @@ type fakeHermesClient struct {
 	authPollFunc      func(context.Context, string, string) (nativehermes.AuthPoll, error)
 	authCancelled     []string
 	authCancelFlowErr error
+	authDisconnected  []string
+	authDisconnectErr error
 }
 
 func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthProvider, error) {
@@ -184,6 +186,15 @@ func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthPr
 	defer c.mu.Unlock()
 
 	return c.authProviders, c.authProvidersErr
+}
+
+func (c *fakeHermesClient) AuthDisconnect(_ context.Context, providerID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.authDisconnected = append(c.authDisconnected, providerID)
+
+	return c.authDisconnectErr
 }
 
 func (c *fakeHermesClient) AuthStart(ctx context.Context, providerID string) (nativehermes.AuthStart, error) {

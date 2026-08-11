@@ -237,6 +237,53 @@ func TestAuthSubmitPollAndCancel(t *testing.T) {
 	}
 }
 
+func TestAuthDisconnectTreatsAlreadyAbsentAsSuccess(t *testing.T) {
+	t.Parallel()
+
+	server := newAuthTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/providers/oauth/xai-oauth" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Hermes-Session-Token") != "session-token" {
+			t.Errorf("missing session token header")
+		}
+
+		_, _ = w.Write([]byte(`{"ok":false,"provider":"xai-oauth","added_upstream":true}`))
+	})
+
+	if err := server.AuthDisconnect(context.Background(), "xai-oauth"); err != nil {
+		t.Fatalf("AuthDisconnect: %v", err)
+	}
+}
+
+func TestAuthDisconnectRejectsWrongNativeProvider(t *testing.T) {
+	t.Parallel()
+
+	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"provider":"other"}`))
+	})
+
+	if err := server.AuthDisconnect(context.Background(), "xai-oauth"); err == nil {
+		t.Fatal("disconnect accepted the wrong native provider")
+	}
+}
+
+func TestAuthDisconnectForwardsNativeFailureWithoutItsBody(t *testing.T) {
+	t.Parallel()
+
+	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "credential-canary", http.StatusInternalServerError)
+	})
+
+	err := server.AuthDisconnect(context.Background(), "xai-oauth")
+	if err == nil {
+		t.Fatal("disconnect accepted a native failure")
+	}
+	if strings.Contains(err.Error(), "credential-canary") {
+		t.Fatalf("disconnect forwarded native response material: %v", err)
+	}
+}
+
 func TestAuthPollNormalizesTheNativeStateVocabulary(t *testing.T) {
 	t.Parallel()
 

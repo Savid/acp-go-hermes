@@ -155,8 +155,8 @@ func TestAuthCapabilityListsEveryLeg(t *testing.T) {
 	}
 
 	names, _ := capability[providerAuthMethodsField].([]string)
-	if len(names) != 6 {
-		t.Fatalf("advertised %d legs, want 6: %#v", len(names), names)
+	if len(names) != 7 {
+		t.Fatalf("advertised %d legs, want 7: %#v", len(names), names)
 	}
 
 	unset, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
