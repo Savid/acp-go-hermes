@@ -62,22 +62,14 @@ func TestNativeOwnedDirectoryAcceptsTheNativeIdentityHome(t *testing.T) {
 	require.NoError(t, validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation()))
 }
 
-// TestStrictPolicySessionValidatesTheSharedHermesHomeAtTheAdapterBoundary is
-// the adapter-level proof for the policy-conditional provider-auth check. It
-// drives NewSession as a trusted root with a distinct target identity, captures
-// the native launch policy and durable auth residence, then reaches the auth
-// surface through that live session. Ordinary-mode tests cannot exercise this
-// ownership walk because a nil policy intentionally skips it.
-func TestStrictPolicySessionValidatesTheSharedHermesHomeAtTheAdapterBoundary(t *testing.T) {
+// TestStrictPolicySessionRejectsSharedHermesHomeBeforeNativeLaunch pins the
+// hard-cut boundary: official shared-home mode is ordinary same-identity only.
+// A strict isolation policy must fail before a native process can observe or
+// mutate the shared residence.
+func TestStrictPolicySessionRejectsSharedHermesHomeBeforeNativeLaunch(t *testing.T) {
 	requireNativeOwnershipRoot(t)
 
 	authHome := testNativeOwnedDir(t, "native-auth")
-	client := newFakeHermesClient()
-	client.createSession = testNativeSession("native-strict-auth")
-	client.getSession = client.createSession
-	client.authProviders = []nativehermes.AuthProvider{{
-		ID: "xai-oauth", Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode,
-	}}
 
 	var starts []nativehermes.StartOptions
 	agent := newIsolatedTestAgent(
@@ -88,28 +80,14 @@ func TestStrictPolicySessionValidatesTheSharedHermesHomeAtTheAdapterBoundary(t *
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				starts = append(starts, opts)
 
-				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
-				if err != nil {
-					return nil, err
-				}
-				client.xdg = xdg
-
-				return client, nil
+				return nil, errors.New("unexpected native launch")
 			}
 		},
 	)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.NoError(t, err)
-	require.Len(t, starts, 1)
-	require.NotNil(t, starts[0].Isolation)
-	require.Equal(t, authHome, starts[0].SharedHermesHome)
-
-	methods, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{
-		"sessionId": string(created.SessionId),
-	})
-	require.NoError(t, err)
-	require.NotNil(t, methods)
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.ErrorContains(t, err, "shared Hermes home requires ordinary same-identity execution")
+	require.Empty(t, starts)
 }
 
 // TestNativeOwnedDirectoryWithoutIsolationIsNotChecked proves the check is

@@ -578,11 +578,13 @@ func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner side
 	originalFileChmod := sharedOwnerFileChmod
 	originalTryLock := sharedOwnerTryLock
 	originalMarshal := sharedOwnerJSONMarshal
+	originalStartTime := sharedOwnerInspectStartTime
 	t.Cleanup(func() {
 		sharedOwnerChmod = originalChmod
 		sharedOwnerFileChmod = originalFileChmod
 		sharedOwnerTryLock = originalTryLock
 		sharedOwnerJSONMarshal = originalMarshal
+		sharedOwnerInspectStartTime = originalStartTime
 	})
 
 	t.Run("input and owner directory", func(t *testing.T) {
@@ -746,12 +748,14 @@ func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner side
 		if err := owner.Release(); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(claimPath, []byte("{\"pid\":99999999,\"kernelStartTime\":\"unknown\"}\n"), 0o600); err != nil {
+		if err := os.WriteFile(claimPath, []byte("{\"pid\":1,\"kernelStartTime\":\"unknown\"}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		sharedOwnerInspectStartTime = func(int) (string, error) { return "", errors.New("inspection uncertain") }
 		if _, err := AcquireSharedNativeSessionOwner(home, "claim-inspect"); err == nil || !strings.Contains(err.Error(), "verify") {
 			t.Fatalf("uncertain claimant inspection error = %v", err)
 		}
+		sharedOwnerInspectStartTime = originalStartTime
 	})
 
 	t.Run("bind and retained wrappers", func(t *testing.T) {
@@ -814,9 +818,11 @@ func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner side
 		if gone, err := sharedSessionOwnerClaimGone(sharedSessionOwnerClaim{PID: -1}); err != nil || !gone {
 			t.Fatalf("missing claimant = %t, %v", gone, err)
 		}
-		if gone, err := sharedSessionOwnerClaimGone(sharedSessionOwnerClaim{PID: 99999999}); err == nil || gone {
+		sharedOwnerInspectStartTime = func(int) (string, error) { return "", errors.New("uncertain") }
+		if gone, err := sharedSessionOwnerClaimGone(sharedSessionOwnerClaim{PID: 1, KernelStartTime: "start"}); err == nil || gone {
 			t.Fatalf("uncertain claimant = %t, %v", gone, err)
 		}
+		sharedOwnerInspectStartTime = originalStartTime
 	})
 }
 

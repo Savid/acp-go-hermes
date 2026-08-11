@@ -31,10 +31,11 @@ type sharedSessionOwnerClaim struct {
 }
 
 var (
-	sharedOwnerChmod       = os.Chmod
-	sharedOwnerFileChmod   = (*os.File).Chmod
-	sharedOwnerTryLock     = tryLockHermesFile
-	sharedOwnerJSONMarshal = json.Marshal
+	sharedOwnerChmod            = os.Chmod
+	sharedOwnerFileChmod        = (*os.File).Chmod
+	sharedOwnerTryLock          = tryLockHermesFile
+	sharedOwnerJSONMarshal      = json.Marshal
+	sharedOwnerInspectStartTime = inspectHermesProcessStartTime
 )
 
 // acquireSharedSessionOwner prevents two official Hermes processes from
@@ -142,7 +143,7 @@ func readSharedSessionOwnerClaim(path string) (sharedSessionOwnerClaim, error) {
 }
 
 func sharedSessionOwnerClaimGone(claim sharedSessionOwnerClaim) (bool, error) {
-	startTime, err := inspectHermesProcessStartTime(claim.PID)
+	startTime, err := sharedOwnerInspectStartTime(claim.PID)
 	if err != nil {
 		if sharedOwnerInspectionProvesGone(err) {
 			return true, nil
@@ -178,7 +179,7 @@ func (o *SharedSessionOwner) BindProcess(pid int) error {
 		return nil
 	}
 
-	startTime, err := inspectHermesProcessStartTime(pid)
+	startTime, err := sharedOwnerInspectStartTime(pid)
 	if err != nil {
 		return fmt.Errorf("inspect shared Hermes session-owner process: %w", err)
 	}

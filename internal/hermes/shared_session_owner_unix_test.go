@@ -24,7 +24,7 @@ type sharedOwnerCrashIdentity struct {
 	StartTime string `json:"startTime"`
 }
 
-func TestSharedSessionOwnerInheritedLockSurvivesPrebindAdapterCrash(t *testing.T) {
+func TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement(t *testing.T) {
 	if os.Getenv(sharedOwnerPrebindCrashEnv) == "1" {
 		runSharedOwnerPrebindCrashHelper()
 
@@ -38,7 +38,7 @@ func TestSharedSessionOwnerInheritedLockSurvivesPrebindAdapterCrash(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := exec.Command(testBinary, "-test.run=^TestSharedSessionOwnerInheritedLockSurvivesPrebindAdapterCrash$")
+	helper := exec.Command(testBinary, "-test.run=^TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement$")
 	helper.Env = append(os.Environ(),
 		sharedOwnerPrebindCrashEnv+"=1",
 		"ACP_GO_HERMES_TEST_OWNER_HOME="+home,
@@ -61,15 +61,10 @@ func TestSharedSessionOwnerInheritedLockSurvivesPrebindAdapterCrash(t *testing.T
 		t.Fatalf("incomplete orphan identity: %+v", identity)
 	}
 	t.Cleanup(func() {
-		if current, inspectErr := inspectHermesProcessStartTime(identity.PID); inspectErr == nil && current == identity.StartTime {
-			_ = syscall.Kill(-identity.PID, syscall.SIGKILL)
-			_ = syscall.Kill(identity.PID, syscall.SIGKILL)
-		}
+		killSharedOwnerCrashProcessIfLive(identity)
 	})
 
-	if _, err := AcquireSharedNativeSessionOwner(home, "prebind-native"); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("same native ID after adapter crash error = %v", err)
-	}
+	assertSharedOwnerCrashReclaimBoundary(t, home, identity)
 	other, err := AcquireSharedNativeSessionOwner(home, "different-native")
 	if err != nil {
 		t.Fatalf("different native ID after adapter crash: %v", err)
@@ -78,15 +73,70 @@ func TestSharedSessionOwnerInheritedLockSurvivesPrebindAdapterCrash(t *testing.T
 		t.Fatalf("release different native ID: %v", err)
 	}
 
-	current, err := inspectHermesProcessStartTime(identity.PID)
-	if err != nil || current != identity.StartTime {
-		t.Fatalf("orphan changed before exact kill: current=%+v err=%v", current, err)
+	killSharedOwnerCrashProcess(t, identity)
+	waitForSharedOwnerCrashReclaim(t, home)
+}
+
+func assertSharedOwnerCrashReclaimBoundary(
+	t *testing.T,
+	home string,
+	identity sharedOwnerCrashIdentity,
+) {
+	t.Helper()
+
+	same, acquireErr := AcquireSharedNativeSessionOwner(home, "prebind-native")
+	if acquireErr != nil {
+		if !strings.Contains(acquireErr.Error(), "already active") {
+			t.Fatalf("same native ID after adapter crash error = %v", acquireErr)
+		}
+
+		return
+	}
+
+	current, inspectErr := inspectHermesProcessStartTime(identity.PID)
+	if inspectErr == nil && current == identity.StartTime {
+		t.Fatalf("replacement acquired while exact orphan %d remained live", identity.PID)
+	}
+	if inspectErr != nil && !sharedOwnerInspectionProvesGone(inspectErr) {
+		t.Fatalf("replacement acquired with uncertain orphan state: %v", inspectErr)
+	}
+	if err := same.Release(); err != nil {
+		t.Fatalf("release replacement after proven orphan death: %v", err)
+	}
+}
+
+func killSharedOwnerCrashProcess(t *testing.T, identity sharedOwnerCrashIdentity) {
+	t.Helper()
+
+	current, inspectErr := inspectHermesProcessStartTime(identity.PID)
+	if inspectErr != nil {
+		if !sharedOwnerInspectionProvesGone(inspectErr) {
+			t.Fatalf("orphan state became uncertain before cleanup: current=%+v err=%v", current, inspectErr)
+		}
+
+		return
+	}
+	if current != identity.StartTime {
+		return
 	}
 	if err := syscall.Kill(-identity.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		if directErr := syscall.Kill(identity.PID, syscall.SIGKILL); directErr != nil && !errors.Is(directErr, syscall.ESRCH) {
 			t.Fatalf("kill exact orphan: group=%v direct=%v", err, directErr)
 		}
 	}
+}
+
+func killSharedOwnerCrashProcessIfLive(identity sharedOwnerCrashIdentity) {
+	current, inspectErr := inspectHermesProcessStartTime(identity.PID)
+	if inspectErr != nil || current != identity.StartTime {
+		return
+	}
+	_ = syscall.Kill(-identity.PID, syscall.SIGKILL)
+	_ = syscall.Kill(identity.PID, syscall.SIGKILL)
+}
+
+func waitForSharedOwnerCrashReclaim(t *testing.T, home string) {
+	t.Helper()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
