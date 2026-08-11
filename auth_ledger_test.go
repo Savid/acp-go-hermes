@@ -370,29 +370,29 @@ func TestWriteLedgerFileClosesOnEveryFailure(t *testing.T) {
 	}
 }
 
-func TestAuthProofSourceIsTheTotalFunctionOfLedgerAndProbe(t *testing.T) {
+func TestAuthProofSourceIsTheTotalFunctionOfLedgerAndNativeStatus(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		state   string
-		present bool
-		want    string
+		state    string
+		loggedIn bool
+		want     string
 	}{
 		{authLedgerConfirmed, true, authProofConfirmedPresent},
-		{authLedgerConfirmed, false, authProofConfirmedAbsent},
+		{authLedgerConfirmed, false, authProofNotConfirmed},
 		{authLedgerIntent, true, authProofNotConfirmed},
 		{authLedgerIntent, false, authProofNotConfirmed},
 		{"", true, authProofNotConfirmed},
 	}
 
 	for _, tt := range cases {
-		if got := authProofSource(tt.state, tt.present); got != tt.want {
-			t.Fatalf("authProofSource(%q, %v) = %q, want %q", tt.state, tt.present, got, tt.want)
+		if got := authProofSource(tt.state, tt.loggedIn); got != tt.want {
+			t.Fatalf("authProofSource(%q, %v) = %q, want %q", tt.state, tt.loggedIn, got, tt.want)
 		}
 	}
 }
 
-func TestInventoryCombinesConfirmedLineageWithNativeStatus(t *testing.T) {
+func TestInventoryKeepsExactXAILineageUnconfirmedWhenNativeReportsLoggedOut(t *testing.T) {
 	restoreLedgerHooks(t)
 
 	agent, client := newAuthAgent(t)
@@ -423,7 +423,11 @@ func TestInventoryCombinesConfirmedLineageWithNativeStatus(t *testing.T) {
 		t.Fatalf("entries = %#v", entries)
 	}
 
-	if entries[0].ProviderID != testProviderID || entries[0].ProofSource != authProofConfirmedAbsent {
+	if entries[0].ProviderID != testProviderID ||
+		entries[0].ConnectionID != testConnectionID ||
+		entries[0].Revision != 1 ||
+		entries[0].BindingGeneration != 1 ||
+		entries[0].ProofSource != authProofNotConfirmed {
 		t.Fatalf("logged-out entry = %#v", entries[0])
 	}
 

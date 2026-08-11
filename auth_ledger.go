@@ -24,7 +24,6 @@ const (
 // is not_confirmed.
 const (
 	authProofConfirmedPresent = "confirmed_present"
-	authProofConfirmedAbsent  = "confirmed_absent"
 	authProofNotConfirmed     = "not_confirmed"
 )
 
@@ -306,7 +305,10 @@ type authInventoryResult struct {
 }
 
 // inventory combines confirmed lineage with the native catalog's values-free
-// logged-in status. Neither source is sufficient on its own.
+// logged-in status. Neither source is sufficient on its own. In particular,
+// logged_in=false is not proof that the native credential is absent: Hermes
+// uses the same value for status failures and credentials it cannot currently
+// validate.
 func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
@@ -362,16 +364,19 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 	return authInventoryResult{Entries: entries}, nil
 }
 
-// authProofSource is the total function of ledger state and native probe. A
-// sibling reports exactly the cell the two select and never chooses a value.
-func authProofSource(state string, present bool) string {
+// authProofSource is the total function of ledger state and native status. A
+// confirmed lineage paired with logged_in=true proves residence. Every other
+// pair is inconclusive: Hermes' false status does not distinguish physical
+// absence from a status or validation failure, so it must never be promoted to
+// confirmed_absent.
+func authProofSource(state string, loggedIn bool) string {
 	if state != authLedgerConfirmed {
 		return authProofNotConfirmed
 	}
 
-	if present {
+	if loggedIn {
 		return authProofConfirmedPresent
 	}
 
-	return authProofConfirmedAbsent
+	return authProofNotConfirmed
 }

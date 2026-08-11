@@ -145,10 +145,11 @@ remain available to later sessions and process restarts.
 1. a confirmed ledger lineage for the requested connection; and
 2. Hermes' native `status.logged_in` boolean for that provider.
 
-`proofSource` is `confirmed_present` when both agree and
-`confirmed_absent` when confirmed lineage exists but Hermes reports logged out.
-Ambient native logins without adapter lineage are not attributed to a
-connection.
+`proofSource` is `confirmed_present` when both agree. A false native status is
+`not_confirmed`, even with exact confirmed lineage: Hermes uses
+`logged_in=false` both when a credential is absent and when status or validation
+fails, so the adapter cannot honestly report `confirmed_absent`. Ambient native
+logins without adapter lineage are not attributed to a connection.
 
 ## Store exclusion
 
