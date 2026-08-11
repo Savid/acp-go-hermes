@@ -126,7 +126,7 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 	args := []string{
 		"-seed-file", "config.yaml=" + configPath,
 		"-provider-auth-root", t.TempDir(),
-		"-hermes-provider-auth-home", hermesAuthHome,
+		"-shared-hermes-home", hermesAuthHome,
 	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)

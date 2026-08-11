@@ -52,7 +52,6 @@ func TestRunServeSuccessAndError(t *testing.T) {
 		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "hermes",
 		"-scratch-dir", "/tmp/scratch",
-		"-provider-auth-direct-home", "/tmp/direct",
 		"-model", "openai/gpt-test",
 		"-debug",
 	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
@@ -64,9 +63,6 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	var configured hermesacp.Options
 	for _, option := range gotOptions {
 		option(&configured)
-	}
-	if configured.ProviderAuthDirectHome != "/tmp/direct" {
-		t.Fatalf("provider auth direct home = %q", configured.ProviderAuthDirectHome)
 	}
 	if configured.ProcessIsolation == nil || configured.ProcessIsolation.UID != 20001 {
 		t.Fatalf("process isolation = %#v", configured.ProcessIsolation)

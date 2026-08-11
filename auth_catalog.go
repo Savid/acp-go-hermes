@@ -81,7 +81,7 @@ func (p *providerAuth) methods(ctx context.Context, params json.RawMessage) (any
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
 
-	if !nativeProviderAuthHomeSupported(client) {
+	if !nativeProviderAuthSupported(client) {
 		generation, tokenErr := newAuthToken()
 		if tokenErr != nil {
 			return nil, authFailed(authCauseProcess, "", "", "")

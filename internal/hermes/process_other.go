@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package hermes
 
@@ -42,4 +42,8 @@ func killProcessGroupID(pid int) error {
 
 func inspectHermesProcess(int) (ProcessIdentity, error) {
 	return ProcessIdentity{}, os.ErrNotExist
+}
+
+func inspectHermesProcessStartTime(int) (string, error) {
+	return "", os.ErrNotExist
 }

@@ -1,3 +1,4 @@
+//nolint:gocyclo // Fake process method matrices intentionally enumerate the full protocol.
 package hermes
 
 import (
@@ -7,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -34,8 +35,9 @@ type wsGateway struct {
 	t      *testing.T
 	server *httptest.Server
 
-	mu    sync.Mutex
-	calls []rpcCall
+	mu         sync.Mutex
+	calls      []rpcCall
+	failMethod string
 }
 
 func newWSGateway(t *testing.T) *wsGateway {
@@ -95,7 +97,13 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(req.Params, &params)
 		g.mu.Lock()
 		g.calls = append(g.calls, rpcCall{Method: req.Method, Params: params})
+		failMethod := g.failMethod
 		g.mu.Unlock()
+		if req.Method == failMethod {
+			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 4999, "message": "injected"}})
+
+			continue
+		}
 		switch req.Method {
 		case "missing":
 			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 4007, "message": "missing"}})
@@ -116,12 +124,39 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func TestStartupMethodProbeCleansDurableSessionAfterModelOptionsFailure(t *testing.T) {
+	gateway := newWSGateway(t)
+	gateway.failMethod = "model.options"
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+	process := &Process{Client: client, Home: t.TempDir()}
+	if err := process.probeGatewayMethods(ctx); err == nil || !strings.Contains(err.Error(), "model.options") {
+		t.Fatalf("startup probe error = %v", err)
+	}
+	gateway.mu.Lock()
+	calls := append([]rpcCall(nil), gateway.calls...)
+	gateway.mu.Unlock()
+	var closed, deleted bool
+	for _, call := range calls {
+		closed = closed || call.Method == "session.close"
+		deleted = deleted || call.Method == "session.delete"
+	}
+	if !closed || !deleted {
+		t.Fatalf("startup cleanup calls missing: %#v", calls)
+	}
+}
+
 func resultForMethod(method string, params map[string]any) any {
 	switch method {
 	case "session.create":
 		return map[string]any{"session_id": "live", "stored_session_id": "stored"}
 	case "session.branch":
-		return map[string]any{"session_id": "live-branch", "title": "Branch", "parent": "stored"}
+		return map[string]any{"session_id": "live-branch", "stored_session_id": "stored-branch", "title": "Branch", "parent": "stored"}
 	case "session.resume":
 		return map[string]any{"session_id": "live-resume", "session_key": params["session_id"]}
 	case "session.title":
@@ -130,8 +165,19 @@ func resultForMethod(method string, params map[string]any) any {
 		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
 	case "session.active_list":
 		return map[string]any{"sessions": []map[string]any{{"id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
+	case "session.list":
+		return map[string]any{"sessions": []map[string]any{{"id": "stored", "title": "Hermes session"}}}
 	case "image.attach_bytes":
 		return map[string]any{"attached": true}
+	case "config.set":
+		value, _ := params["value"].(string)
+		raw := strings.Fields(value)[0]
+		if raw == "mismatch" {
+			raw = "different"
+		}
+		deferred := raw == "deferred"
+
+		return map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false, "deferred": deferred}
 	case "model.options":
 		return map[string]any{
 			"model":    "anthropic/claude-sonnet-4",
@@ -258,14 +304,29 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 	assertClientWrappers(t, ctx, client)
 	gateway.mu.Lock()
 	var clarifyParams map[string]any
+	var configParams []map[string]any
 	for _, call := range gateway.calls {
 		if call.Method == "clarify.respond" {
 			clarifyParams = call.Params
+		}
+		if call.Method == "config.set" {
+			configParams = append(configParams, call.Params)
 		}
 	}
 	gateway.mu.Unlock()
 	if clarifyParams["session_id"] != "live" || clarifyParams["request_id"] != "request-1" || clarifyParams["answer"] != "yes" {
 		t.Fatalf("clarify.respond params = %#v", clarifyParams)
+	}
+	wantAggregator := map[string]any{
+		"session_id":              "live",
+		"key":                     "model",
+		"value":                   "x-ai/grok-4.5 --provider openrouter --session",
+		"confirm_expensive_model": true,
+	}
+	if len(configParams) != 4 || configParams[0]["value"] != "claude-sonnet-4 --provider anthropic --session" ||
+		!reflect.DeepEqual(configParams[1], wantAggregator) || configParams[2]["value"] != "deferred --provider provider --session" ||
+		configParams[3]["value"] != "mismatch --provider provider --session" {
+		t.Fatalf("config.set params = %#v", configParams)
 	}
 	assertClientCallEdges(t, ctx, client)
 	assertClientCloseSemantics(t, ctx, client, gateway)
@@ -315,7 +376,7 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	if err := client.CloseSession(ctx, "live"); err != nil {
 		t.Fatalf("CloseSession: %v", err)
 	}
-	if out, err := client.Branch(ctx, "live", "name"); err != nil || out.SessionID != "live-branch" || out.Title != "Branch" || out.Parent != "stored" {
+	if out, err := client.Branch(ctx, "live", "name"); err != nil || out.SessionID != "live-branch" || out.StoredSessionID != "stored-branch" || out.Title != "Branch" || out.Parent != "stored" {
 		t.Fatalf("Branch = %#v err=%v", out, err)
 	}
 	if err := client.SubmitPrompt(ctx, "live", "hello"); err != nil {
@@ -338,6 +399,18 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	}
 	if out, err := client.ModelOptions(ctx, "live"); err != nil || len(out.Providers) != 2 {
 		t.Fatalf("ModelOptions = %#v err=%v", out, err)
+	}
+	if err := client.SetModel(ctx, "live", "anthropic/claude-sonnet-4"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if err := client.SetModel(ctx, "live", "openrouter/x-ai/grok-4.5"); err != nil {
+		t.Fatalf("SetModel aggregator: %v", err)
+	}
+	if err := client.SetModel(ctx, "live", "provider/deferred"); err != nil {
+		t.Fatalf("SetModel deferred accepted mutation: %v", err)
+	}
+	if err := client.SetModel(ctx, "live", "provider/mismatch"); err == nil {
+		t.Fatal("SetModel accepted a different returned model")
 	}
 }
 
@@ -414,6 +487,21 @@ func assertClientCloseSemantics(t *testing.T, ctx context.Context, client *Clien
 	go func() { waitLoopDone <- reconnected.Call(context.Background(), "close", nil, nil) }()
 	if err := <-waitLoopDone; err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("read loop pending close error = %v", err)
+	}
+}
+
+func TestModelSwitchCommandUsesRawModelAndExplicitSessionProvider(t *testing.T) {
+	command, raw, err := modelSwitchCommand("openrouter/x-ai/grok-4.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw != "x-ai/grok-4.5" || command != "x-ai/grok-4.5 --provider openrouter --session" {
+		t.Fatalf("model switch command/raw = %q/%q", command, raw)
+	}
+	for _, invalid := range []string{"", "unqualified", "/model", "provider/", "provider/model\x00suffix", "custom/provider model", "--provider/model", "provider/--session"} {
+		if _, _, err := modelSwitchCommand(invalid); err == nil {
+			t.Fatalf("invalid model selection %q accepted", invalid)
+		}
 	}
 }
 
@@ -503,13 +591,12 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	defer cancel()
 	usedConfigure := false
 	proc, startErr := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:             t.TempDir(),
-		ProviderAuthHome: t.TempDir(),
-		Cwd:              t.TempDir(),
-		Env:              map[string]string{"BASE_ENV": "1", "HERMES_WEB_DIST": "1"},
-		Timeout:          5 * time.Second,
-		LogWriter:        io.Discard,
+		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
+		Home:           t.TempDir(),
+		Cwd:            t.TempDir(),
+		Env:            map[string]string{"BASE_ENV": "1", "HERMES_WEB_DIST": "1"},
+		Timeout:        5 * time.Second,
+		LogWriter:      io.Discard,
 		Configure: func(cmd *exec.Cmd) {
 			usedConfigure = true
 			cmd.Env = append(cmd.Env, "CONFIGURED=1")
@@ -832,7 +919,7 @@ func assertProcessStartSeams(t *testing.T, ctx context.Context) {
 	restoreProcessSeams(t)
 	commandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
 		if len(args) == 1 && args[0] == "--version" {
-			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.19.0\\n'")
+			return exec.CommandContext(ctx, "sh", "-c", "printf 'Hermes Agent v0.20.0\\n'")
 		}
 
 		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-hermes"), args...)
@@ -947,6 +1034,17 @@ func assertStartFaultModes(t *testing.T, ctx context.Context) {
 	if _, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{ExecutablePath: fakeHermesExecutable(t, fakeProcessModeMissingMethod), Home: t.TempDir(), Timeout: 10 * time.Second})); err == nil ||
 		!strings.Contains(err.Error(), "model.options") {
 		t.Fatalf("missing method probe error = %v", err)
+	}
+	sentinelProcess, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
+		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeProbeSentinel),
+		Home:           t.TempDir(),
+		Timeout:        10 * time.Second,
+	}))
+	if err != nil {
+		t.Fatalf("presence probes activated the real startup session: %v", err)
+	}
+	if err := sentinelProcess.Close(ctx); err != nil {
+		t.Fatalf("close sentinel probe process: %v", err)
 	}
 	for _, tt := range []struct {
 		mode string
@@ -1131,8 +1229,8 @@ const (
 	fakeProcessModeOldVersion     = "old-version"
 	fakeProcessModeBadVersion     = "bad-version"
 	fakeProcessModeMissingMethod  = "missing-method"
+	fakeProcessModeProbeSentinel  = "probe-sentinel"
 	fakeProcessModeSessionCLI     = "session-cli"
-	fakeProcessModeOfficial       = "official-no-auth-home"
 )
 
 type fakeSessionCLICapture struct {
@@ -1182,10 +1280,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 
 				return nil
 			}
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (test)")
-			if mode != fakeProcessModeOfficial {
-				_, _ = fmt.Fprintln(os.Stdout, "Runtime capabilities: provider-auth-home-v1")
-			}
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (test)")
 
 			return nil
 		}
@@ -1200,9 +1295,6 @@ func runFakeHermesProcess(args []string, mode string) error {
 	}
 	if port == "" {
 		return fmt.Errorf("missing --port in %q", strings.Join(args, " "))
-	}
-	if mode == fakeProcessModeOfficial && os.Getenv("HERMES_AUTH_HOME") != "" {
-		return errors.New("official runtime received unsupported HERMES_AUTH_HOME")
 	}
 	if mode == fakeProcessModeSessionCLI {
 		if err := captureFakeSessionCLI(); err != nil {
@@ -1255,6 +1347,13 @@ func runFakeHermesProcess(args []string, mode string) error {
 					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 4007, "message": "session not found"}})
 				} else if target, ok := strings.CutPrefix(mode, "probe-empty:"); ok && req.Method == target {
 					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+				} else if mode == fakeProcessModeProbeSentinel &&
+					(req.Method == "approval.respond" || req.Method == "clarify.respond") &&
+					params["session_id"] != missingProbeSessionID {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "presence probe activated a real session"}})
+				} else if mode == fakeProcessModeProbeSentinel &&
+					(req.Method == "approval.respond" || req.Method == "clarify.respond") {
+					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": 4007, "message": "session not found"}})
 				} else if mode == fakeProcessModeMissingMethod && req.Method == "model.options" {
 					response, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "method not found"}})
 				} else {
@@ -1312,7 +1411,8 @@ func restoreProcessSeams(t *testing.T) {
 	oldWait := waitProcessCommand
 	oldStartContained := startHermesContainedProcess
 	oldNativeTreeHandoff := processNativeTreeHandoff
-	oldProbed, oldCapabilities, oldGateway := cloneExecutableProbeCaches()
+	oldAfterOwnerSpawn := afterHermesSpawnBeforeOwnerBind
+	oldProbed, oldVersions, oldGateway := cloneExecutableProbeCaches()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
 		listenTCP = oldListenTCP
@@ -1326,9 +1426,10 @@ func restoreProcessSeams(t *testing.T) {
 		waitProcessCommand = oldWait
 		startHermesContainedProcess = oldStartContained
 		processNativeTreeHandoff = oldNativeTreeHandoff
+		afterHermesSpawnBeforeOwnerBind = oldAfterOwnerSpawn
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
-		executableCapabilities = oldCapabilities
+		executableVersions = oldVersions
 		gatewayProbed = oldGateway
 		executableProbeMu.Unlock()
 	})
@@ -1347,7 +1448,7 @@ func resetProcessSeams() {
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	executableProbeMu.Lock()
 	executableProbed = map[string]bool{}
-	executableCapabilities = map[string]map[string]struct{}{}
+	executableVersions = map[string]string{}
 	gatewayProbed = map[string]bool{}
 	executableProbes = map[string]chan struct{}{}
 	executableProbeMu.Unlock()
@@ -1356,13 +1457,10 @@ func resetProcessSeams() {
 // markExecutableProbed marks an executable fully proven — version read and
 // gateway sweep answered — which is what a fixture that must not spawn either
 // probe process needs.
-func markExecutableProbed(executable string, capabilities ...string) {
+func markExecutableProbed(executable string) {
 	executableProbeMu.Lock()
 	executableProbed[executable] = true
-	executableCapabilities[executable] = make(map[string]struct{}, len(capabilities))
-	for _, capability := range capabilities {
-		executableCapabilities[executable][capability] = struct{}{}
-	}
+	executableVersions[executable] = MinimumVersion
 	gatewayProbed[executable] = true
 	executableProbeMu.Unlock()
 }
@@ -1376,16 +1474,20 @@ func executableVersionProven(executable string) bool {
 	return executableProbed[executable]
 }
 
-func cloneExecutableProbeCaches() (map[string]bool, map[string]map[string]struct{}, map[string]bool) {
+func cloneExecutableProbeCaches() (map[string]bool, map[string]string, map[string]bool) {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
 
-	capabilities := make(map[string]map[string]struct{}, len(executableCapabilities))
-	for executable, values := range executableCapabilities {
-		capabilities[executable] = maps.Clone(values)
+	return cloneBoolMap(executableProbed), cloneEnvironmentMap(executableVersions), cloneBoolMap(gatewayProbed)
+}
+
+func cloneBoolMap(input map[string]bool) map[string]bool {
+	result := make(map[string]bool, len(input))
+	for key, value := range input {
+		result[key] = value
 	}
 
-	return maps.Clone(executableProbed), capabilities, maps.Clone(gatewayProbed)
+	return result
 }
 
 type errorReader struct {

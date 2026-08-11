@@ -1,4 +1,4 @@
-//nolint:tagliatelle // Hermes native JSON fields use modelID/sessionID/providerID spellings.
+//nolint:tagliatelle,gocyclo,gocritic // Native wire fields and ordered startup/config transactions are intentional.
 package hermes
 
 import (
@@ -138,6 +138,31 @@ type Server interface {
 	AuthDisconnect(context.Context, string) error
 }
 
+// SessionDraft identifies a newly-created live draft before session.title
+// persists it. Callers use this boundary to fsync recovery intent first.
+type SessionDraft struct {
+	LiveSessionID   string
+	StoredSessionID string
+}
+
+// DraftSessionCreator exposes Hermes's draft-to-durable boundary without
+// expanding the ordinary Server interface call shape.
+type DraftSessionCreator interface {
+	CreateSessionWithDraft(context.Context, string, func(SessionDraft) error) (Session, error)
+}
+
+type PersistedSessionLister interface {
+	PersistedSessions(context.Context) ([]Session, error)
+}
+
+// RecoverableSessionForker lets the adapter establish an exact durable
+// baseline before invoking official Hermes's non-atomic session.branch.
+type RecoverableSessionForker interface {
+	ForkWithBaseline(context.Context, string, string, []string) (Session, error)
+}
+
+var ErrBranchRecoveryAmbiguous = errors.New("hermes branch recovery is ambiguous")
+
 type StartOptions struct {
 	ACPSessionID ACPSessionIDString
 	Root         string
@@ -145,11 +170,16 @@ type StartOptions struct {
 	// ScratchParent is the resolved parent directory for ephemeral on-disk
 	// materialization, supplied by the caller. The internal package never
 	// consults the system temp directory itself.
-	ScratchParent               string
-	Cwd                         string
-	ExecutablePath              string
-	DefaultModel                string
-	ProviderAuthHome            string
+	ScratchParent  string
+	Cwd            string
+	ExecutablePath string
+	DefaultModel   string
+	// SharedHermesHome is the exact durable HERMES_HOME selected by the
+	// official shared-home mode. ExistingXDG remains the
+	// unique wrapper-owned control generation; multiple Servers may use the same
+	// shared native home concurrently.
+	SharedHermesHome            string
+	SharedNativeSessionOwner    *SharedSessionOwner
 	Env                         map[string]string
 	SessionEnv                  map[string]string
 	ExtraPathDirs               []string
@@ -188,13 +218,15 @@ type hermesServer struct {
 	closed chan struct{}
 	once   sync.Once
 
-	gateway      *Client
-	process      *Process
-	gatewayMu    sync.Mutex
-	liveByStored map[string]string
-	storedByLive map[string]string
-	cwd          string
-	defaultModel string
+	gateway               *Client
+	process               *Process
+	gatewayMu             sync.Mutex
+	liveByStored          map[string]string
+	storedByLive          map[string]string
+	cwd                   string
+	defaultModel          string
+	providerAuthSupported bool
+	sharedSessionOwner    *SharedSessionOwner
 
 	connMu   sync.Mutex
 	turnBusy int
@@ -213,11 +245,10 @@ func (s *hermesServer) ProviderDescendantCount() (int, bool) {
 	return s.process.ProviderDescendantCount()
 }
 
-// ProviderAuthHomeSupported is intentionally an optional server capability:
-// test doubles and embedders that do not prove the native runtime contract are
-// treated as unsupported by the broker rather than assumed safe.
-func (s *hermesServer) ProviderAuthHomeSupported() bool {
-	return s != nil && s.process != nil && s.process.ProviderAuthHomeSupported()
+// ProviderAuthSupported reports that this server's exact credential residence
+// is durable. Official shared-HERMES_HOME mode is the only supported residence.
+func (s *hermesServer) ProviderAuthSupported() bool {
+	return s != nil && s.providerAuthSupported
 }
 
 type Session struct {
@@ -507,7 +538,7 @@ var (
 	InspectProcess      = inspectHermesProcess
 )
 
-func StartServer(ctx context.Context, options StartOptions) (Server, error) {
+func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr error) {
 	if options.AcquireDiscoveryResources == nil || options.RetainDiscoveryRoot == nil {
 		return nil, errors.New("hermes version discovery resource callbacks are required")
 	}
@@ -553,6 +584,44 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		return nil, err
 	}
 
+	nativeXDG := xdg
+
+	if options.SharedHermesHome != "" {
+		var sharedErr error
+
+		nativeXDG, sharedErr = SharedHomeXDGDirs(options.SharedHermesHome)
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+
+		if sharedErr = sharedHomeLocalValidator(nativeXDG.Root); sharedErr != nil {
+			return nil, sharedErr
+		}
+	}
+
+	var sessionOwner *SharedSessionOwner
+
+	keepSessionOwner := false
+
+	if options.SharedHermesHome != "" {
+		var ownerErr error
+
+		sessionOwner, ownerErr = acquireSharedACPSessionOwner(nativeXDG.Root, options.ACPSessionID)
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+
+		defer func() {
+			if !keepSessionOwner {
+				if errors.Is(resultErr, ErrProcessContainmentIncomplete) {
+					retainSharedSessionOwner(sessionOwner)
+				} else {
+					resultErr = errors.Join(resultErr, sessionOwner.Release())
+				}
+			}
+		}()
+	}
+
 	controlDir := options.ControlDir
 	if controlDir == "" {
 		controlDir = ControlDirForXDG(xdg.Root)
@@ -589,13 +658,18 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		return nil, err
 	}
 
-	if configErr := materializeHermesConfig(xdg.Root, servers, options.SeedFiles); configErr != nil {
+	var configErr error
+	if options.SharedHermesHome == "" {
+		configErr = materializeHermesConfig(nativeXDG.Root, servers, options.SeedFiles)
+	}
+
+	if configErr != nil {
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, configErr)
 
 		return nil, configErr
 	}
 
-	if ownershipErr := hermesNativeHandoff(xdg.Root, options.Isolation); ownershipErr != nil {
+	if ownershipErr := hermesNativeHandoff(nativeXDG.Root, options.Isolation); ownershipErr != nil {
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, ownershipErr)
 
 		return nil, ownershipErr
@@ -619,11 +693,16 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	processEnv["HERMES_TUI_TOOL_PROGRESS"] = "all"
 
 	proc, err := Start(ctx, ProcessOptions{
-		ExecutablePath:              options.ExecutablePath,
-		Home:                        xdg.Root,
+		ExecutablePath:  options.ExecutablePath,
+		Home:            nativeXDG.Root,
+		ContainmentRoot: xdg.Root,
+		SharedHome:      options.SharedHermesHome != "",
+		PrepareSharedHome: func(prepareCtx context.Context, home string) error {
+			return materializeSharedHermesConfig(prepareCtx, home, servers, options.SeedFiles)
+		},
+		SharedSessionOwners:         []*SharedSessionOwner{sessionOwner, options.SharedNativeSessionOwner},
 		ScratchParent:               options.ScratchParent,
 		Cwd:                         options.Cwd,
-		ProviderAuthHome:            options.ProviderAuthHome,
 		Env:                         cloneEnvironmentMap(options.Env),
 		SessionEnv:                  processEnv,
 		ExtraPathDirs:               extraPathDirs,
@@ -645,7 +724,7 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 		Port:      proc.Port,
 		StartedAt: time.Now().UnixMilli(),
 		TokenHash: PasswordHash(proc.Token),
-		XDGRoot:   xdg.Root,
+		XDGRoot:   nativeXDG.Root,
 	}
 	if identity, err := InspectProcess(proc.Cmd.Process.Pid); err == nil {
 		lease.ProcessStartTime = identity.StartTime
@@ -658,24 +737,46 @@ func StartServer(ctx context.Context, options StartOptions) (Server, error) {
 	}
 
 	server := &hermesServer{
-		cmd:          proc.Cmd,
-		xdg:          xdg,
-		log:          options.Logger,
-		lease:        lease,
-		leasePath:    leasePath,
-		events:       make(chan TurnEvent, 256),
-		errs:         make(chan error, 8),
-		closed:       make(chan struct{}),
-		gateway:      proc.Client,
-		process:      proc,
-		liveByStored: make(map[string]string),
-		storedByLive: make(map[string]string),
-		cwd:          options.Cwd,
-		defaultModel: options.DefaultModel,
+		cmd:                   proc.Cmd,
+		xdg:                   xdg,
+		log:                   options.Logger,
+		lease:                 lease,
+		leasePath:             leasePath,
+		events:                make(chan TurnEvent, 256),
+		errs:                  make(chan error, 8),
+		closed:                make(chan struct{}),
+		gateway:               proc.Client,
+		process:               proc,
+		liveByStored:          make(map[string]string),
+		storedByLive:          make(map[string]string),
+		cwd:                   options.Cwd,
+		defaultModel:          options.DefaultModel,
+		providerAuthSupported: options.SharedHermesHome != "",
+		sharedSessionOwner:    sessionOwner,
 	}
 	server.enableReconnect(proc.Redial)
 
+	keepSessionOwner = true
+
 	return server, nil
+}
+
+// SharedSessionOwnerProcessIdentity returns the exact process identity already
+// owned by this Server so an adapter-created native-session claim can be bound
+// immediately after official Hermes allocates its native ID.
+func (s *hermesServer) SharedSessionOwnerProcessIdentity() (int, string, error) {
+	if s == nil || s.process == nil || s.process.Cmd == nil || s.process.Cmd.Process == nil {
+		return 0, "", errors.New("hermes server has no native process identity")
+	}
+
+	pid := s.process.Cmd.Process.Pid
+
+	startTime, err := inspectHermesProcessStartTime(pid)
+	if err != nil {
+		return 0, "", err
+	}
+
+	return pid, startTime, nil
 }
 
 func observeHermesStartupStage(ctx context.Context, observe func(context.Context, string, string, time.Duration, error), lifecycle, stage string, started time.Time, err error) {
@@ -702,14 +803,20 @@ func (s *hermesServer) Close(ctx context.Context) error {
 			}
 		}
 
+		var processErr error
 		if s.process != nil {
-			err = s.process.Close(ctx)
+			processErr = s.process.Close(ctx)
+			err = processErr
 		}
 
 		s.supervisorWG.Wait()
 
 		if s.leasePath != "" {
 			err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
+		}
+
+		if !errors.Is(processErr, ErrProcessContainmentIncomplete) {
+			err = errors.Join(err, s.sharedSessionOwner.Release())
 		}
 	})
 
@@ -1051,6 +1158,14 @@ func (s *hermesServer) reconnectGateway() {
 }
 
 func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session, error) {
+	return s.CreateSessionWithDraft(ctx, title, nil)
+}
+
+func (s *hermesServer) CreateSessionWithDraft(
+	ctx context.Context,
+	title string,
+	bindDraft func(SessionDraft) error,
+) (Session, error) {
 	params := map[string]any{jsonFieldCwd: s.cwd, keySource: valACPGoHermes}
 	if title != "" {
 		params[keyTitle] = title
@@ -1074,6 +1189,24 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session
 
 	if result.StoredSessionID == "" {
 		return Session{}, fmt.Errorf("hermes session.create response missing stored_session_id")
+	}
+
+	if bindDraft != nil {
+		if bindErr := bindDraft(SessionDraft{
+			LiveSessionID:   result.SessionID,
+			StoredSessionID: result.StoredSessionID,
+		}); bindErr != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
+
+			cleanupCancel()
+
+			if IsNotFound(closeErr) {
+				closeErr = nil
+			}
+
+			return Session{}, errors.Join(fmt.Errorf("bind Hermes session draft: %w", bindErr), closeErr)
+		}
 	}
 
 	s.rememberGatewaySession(result.StoredSessionID, result.SessionID)
@@ -1105,7 +1238,18 @@ func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session
 		return Session{}, fmt.Errorf("persist Hermes session: session.title response missing durable title")
 	}
 
-	return s.nativeSessionFromGateway(result.StoredSessionID, durableTitle), nil
+	persisted, err := s.PersistedSessions(ctx)
+	if err != nil {
+		return Session{}, fmt.Errorf("verify persisted Hermes session: %w", err)
+	}
+
+	for _, candidate := range persisted {
+		if candidate.ID == result.StoredSessionID {
+			return s.nativeSessionFromGateway(result.StoredSessionID, durableTitle), nil
+		}
+	}
+
+	return Session{}, fmt.Errorf("verify persisted Hermes session %q: durable row missing", result.StoredSessionID)
 }
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, error) {
@@ -1175,13 +1319,63 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]Session,
 	return out, nil
 }
 
+func (s *hermesServer) PersistedSessions(ctx context.Context) ([]Session, error) {
+	result, err := s.gatewayClient().PersistedSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(result.Sessions) >= 10000 {
+		return nil, errors.New("hermes session.list reached its limit; persisted inventory is not exhaustive")
+	}
+
+	out := make([]Session, 0, len(result.Sessions))
+	for _, item := range result.Sessions {
+		if item.SessionID == "" {
+			return nil, fmt.Errorf("hermes session.list response missing id")
+		}
+
+		out = append(out, s.nativeSessionFromGateway(item.SessionID, item.Title))
+	}
+
+	return out, nil
+}
+
 func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
+	live := s.liveSessionID(id)
+	if live == "" {
+		active, listErr := s.gatewayClient().ActiveList(ctx)
+		if listErr != nil && !IsNotFound(listErr) {
+			return fmt.Errorf("list live Hermes sessions before delete: %w", listErr)
+		}
+
+		for _, item := range active.Sessions {
+			if item.SessionKey == id {
+				if item.SessionID == "" {
+					return fmt.Errorf("hermes active_list response missing id for stored session %q", id)
+				}
+
+				live = item.SessionID
+				s.rememberGatewaySession(id, live)
+
+				break
+			}
+		}
+	}
+
+	if live != "" {
+		closeErr := s.gatewayClient().CloseSession(ctx, live)
+		if closeErr != nil && !IsNotFound(closeErr) {
+			return fmt.Errorf("close Hermes session before delete: %w", closeErr)
+		}
+	}
+
+	s.forgetGatewaySession(id)
+
 	err := s.gatewayClient().DeleteSession(ctx, id)
 	if IsNotFound(err) {
 		err = nil
 	}
-
-	s.forgetGatewaySession(id)
 
 	return err
 }
@@ -1227,7 +1421,37 @@ func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {
+	if req.Model != nil {
+		if err := s.SetModel(ctx, id, ModelSelectionValue(req.Model.ProviderID, req.Model.ModelID)); err != nil {
+			return NativeMessage{}, err
+		}
+	}
+
 	return s.submitGatewayParts(ctx, id, req.Parts)
+}
+
+// ModelSelectionValue qualifies one official model row with its owning
+// provider exactly once. A slash inside an aggregator's raw model ID is part of
+// that model ID; it suppresses qualification only when the exact provider
+// prefix is already present.
+func ModelSelectionValue(providerID string, modelID string) string {
+	if providerID != "" && strings.HasPrefix(modelID, providerID+"/") {
+		return modelID
+	}
+
+	return firstNonEmptyModelSelection(providerID, modelID)
+}
+
+func firstNonEmptyModelSelection(providerID string, modelID string) string {
+	if providerID == "" {
+		return modelID
+	}
+
+	if modelID == "" {
+		return providerID
+	}
+
+	return providerID + "/" + modelID
 }
 
 func assistantMessageError(message NativeMessage) error {
@@ -2091,14 +2315,31 @@ func (s *hermesServer) Abort(ctx context.Context, id string) error {
 }
 
 func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (Session, error) {
-	_ = messageID
+	persisted, err := s.PersistedSessions(ctx)
+	if err != nil {
+		return Session{}, fmt.Errorf("list Hermes sessions before branch: %w", err)
+	}
 
+	baseline := make([]string, 0, len(persisted))
+	for _, session := range persisted {
+		baseline = append(baseline, session.ID)
+	}
+
+	return s.ForkWithBaseline(ctx, id, messageID, baseline)
+}
+
+func (s *hermesServer) ForkWithBaseline(
+	ctx context.Context,
+	id string,
+	marker string,
+	baseline []string,
+) (Session, error) {
 	live, err := s.ensureLiveGatewaySession(ctx, id)
 	if err != nil {
 		return Session{}, err
 	}
 
-	result, err := s.gatewayClient().Branch(ctx, live, "")
+	result, err := s.gatewayClient().Branch(ctx, live, marker)
 	if IsNotFound(err) {
 		s.forgetGatewaySession(id)
 
@@ -2107,25 +2348,108 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (S
 			return Session{}, err
 		}
 
-		result, err = s.gatewayClient().Branch(ctx, live, "")
+		result, err = s.gatewayClient().Branch(ctx, live, marker)
 	}
 
 	if err != nil {
-		return Session{}, err
+		return Session{}, s.recoverFailedBranch(ctx, marker, baseline, err)
 	}
 
 	if result.SessionID == "" {
 		return Session{}, fmt.Errorf("hermes branch response missing session_id")
 	}
 
-	stored, err := s.storedSessionIDForLive(ctx, result.SessionID)
-	if err != nil {
-		return Session{}, err
+	if result.StoredSessionID == "" {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
+
+		cleanupCancel()
+
+		if IsNotFound(closeErr) {
+			closeErr = nil
+		}
+
+		return Session{}, errors.Join(errors.New("hermes branch response missing stored_session_id"), closeErr)
 	}
 
-	s.rememberGatewaySession(stored, result.SessionID)
+	// session.branch returns a live child owned by the parent's gateway. Close
+	// that runtime before publishing the durable child ID: the child adapter
+	// process will resume the same stored session, and two live gateways must
+	// never be able to drive it concurrently.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
 
-	return s.nativeSessionFromGateway(stored, firstNonEmpty(result.Title, "Hermes branch")), nil
+	cleanupCancel()
+
+	if IsNotFound(closeErr) {
+		closeErr = nil
+	}
+
+	s.forgetGatewaySession(result.StoredSessionID)
+
+	if closeErr != nil {
+		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		deleteErr := s.gatewayClient().DeleteSession(deleteCtx, result.StoredSessionID)
+
+		deleteCancel()
+
+		if IsNotFound(deleteErr) {
+			deleteErr = nil
+		}
+
+		return Session{}, errors.Join(fmt.Errorf("close Hermes branch runtime: %w", closeErr), deleteErr)
+	}
+
+	return s.nativeSessionFromGateway(result.StoredSessionID, firstNonEmpty(result.Title, "Hermes branch")), nil
+}
+
+func (s *hermesServer) recoverFailedBranch(ctx context.Context, marker string, baseline []string, branchErr error) error {
+	persisted, listErr := s.PersistedSessions(ctx)
+	if listErr != nil {
+		return errors.Join(branchErr, fmt.Errorf("list durable Hermes sessions after failed branch: %w", listErr))
+	}
+
+	known := make(map[string]struct{}, len(baseline))
+	for _, id := range baseline {
+		known[id] = struct{}{}
+	}
+
+	delta := make([]Session, 0, 1)
+
+	for _, session := range persisted {
+		if _, ok := known[session.ID]; !ok {
+			delta = append(delta, session)
+		}
+	}
+
+	if len(delta) == 0 {
+		return branchErr
+	}
+
+	if len(delta) != 1 || marker == "" || delta[0].Title != marker {
+		return errors.Join(branchErr, fmt.Errorf("%w: durable session delta has %d rows", ErrBranchRecoveryAmbiguous, len(delta)))
+	}
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cleanupCancel()
+
+	cleanupErr := s.DeleteSession(cleanupCtx, delta[0].ID)
+	if cleanupErr != nil {
+		return errors.Join(branchErr, fmt.Errorf("delete failed Hermes branch %q: %w", delta[0].ID, cleanupErr))
+	}
+
+	remaining, verifyErr := s.PersistedSessions(cleanupCtx)
+	if verifyErr != nil {
+		return errors.Join(branchErr, fmt.Errorf("verify failed Hermes branch cleanup: %w", verifyErr))
+	}
+
+	for _, session := range remaining {
+		if session.ID == delta[0].ID {
+			return errors.Join(branchErr, fmt.Errorf("delete failed Hermes branch %q: durable row remains", delta[0].ID))
+		}
+	}
+
+	return branchErr
 }
 
 func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
@@ -2168,6 +2492,25 @@ func (s *hermesServer) ConfigProviders(ctx context.Context) (ProvidersResponse, 
 	}
 
 	return providersFromGateway(models), nil
+}
+
+// SetModel applies a session-scoped official gateway model selection.
+func (s *hermesServer) SetModel(ctx context.Context, stored string, value string) error {
+	for attempt := 0; ; attempt++ {
+		live, err := s.ensureLiveGatewaySession(ctx, stored)
+		if err != nil {
+			return err
+		}
+
+		err = s.gatewayClient().SetModel(ctx, live, value)
+		if IsNotFound(err) && attempt == 0 {
+			s.forgetGatewaySession(stored)
+
+			continue
+		}
+
+		return err
+	}
 }
 
 func (s *hermesServer) PendingPermissions(ctx context.Context) ([]PermissionRequest, error) {
@@ -2259,7 +2602,11 @@ func CreateXDGDirs(root string, sessionID string) (XDGDirs, error) {
 		State:  filepath.Join(base, "state"),
 	}
 
-	return dirs, ensureXDGDirs(dirs)
+	if err := ensureXDGDirs(dirs); err != nil {
+		return XDGDirs{}, err
+	}
+
+	return dirs, nil
 }
 
 // CreateGenerationXDGDirs creates the actual wrapper-owned writable state for
@@ -2286,6 +2633,25 @@ func CreateGenerationXDGDirs(scratchParent string) (XDGDirs, error) {
 	return dirs, nil
 }
 
+// SharedHomeXDGDirs maps one exact durable HERMES_HOME to the XDG directory
+// shape used by the server. It creates no per-session suffix.
+func SharedHomeXDGDirs(home string) (XDGDirs, error) {
+	if home == "" || !filepath.IsAbs(home) {
+		return XDGDirs{}, errors.New("shared Hermes home must be an absolute path")
+	}
+
+	root := filepath.Clean(home)
+	dirs := XDGDirs{
+		Root:   root,
+		Data:   filepath.Join(root, "data"),
+		Config: filepath.Join(root, "config"),
+		Cache:  filepath.Join(root, "cache"),
+		State:  filepath.Join(root, "state"),
+	}
+
+	return dirs, ensureXDGDirs(dirs)
+}
+
 func ensureXDGDirs(dirs XDGDirs) error {
 	for _, dir := range []string{dirs.Root, dirs.Data, dirs.Config, dirs.Cache, dirs.State} {
 		if dir == "" {
@@ -2309,6 +2675,7 @@ var (
 const (
 	hermesConfigFileName   = "config.yaml"
 	hermesSeedManifestName = ".seed-manifest.json"
+	hermesSeedPendingName  = ".seed-pending.json"
 	hermesSeedBackupSuffix = ".seed.bak"
 )
 
@@ -2331,6 +2698,10 @@ type seedWrite struct {
 // uniform unsupported error. Every final write is routed through the ownership
 // manifest so a seed can never clobber an operator-authored file.
 func materializeHermesConfig(home string, servers []acp.McpServer, files map[string]string) error {
+	return materializeHermesConfigWithWriter(home, servers, files, os.WriteFile)
+}
+
+func materializeHermesConfigWithWriter(home string, servers []acp.McpServer, files map[string]string, writeFile func(string, []byte, os.FileMode) error) error {
 	var managed map[string]any
 
 	if len(servers) > 0 {
@@ -2357,7 +2728,7 @@ func materializeHermesConfig(home string, servers []acp.McpServer, files map[str
 		})
 	}
 
-	return applyHermesSeedGuard(home, writes)
+	return applyHermesSeedGuardWithWriter(home, writes, writeFile)
 }
 
 // hermesConfigBytes returns the final config.yaml bytes: the seeded contents
@@ -2394,6 +2765,10 @@ func hermesConfigBytes(managed map[string]any, seededConfig string, haveSeededCo
 // manifest. The isolation harness gives each session a fresh root, so the
 // manifest is normally absent and every write is a first write.
 func applyHermesSeedGuard(home string, writes []seedWrite) error {
+	return applyHermesSeedGuardWithWriter(home, writes, os.WriteFile)
+}
+
+func applyHermesSeedGuardWithWriter(home string, writes []seedWrite, writeFile func(string, []byte, os.FileMode) error) error {
 	if len(writes) == 0 {
 		return nil
 	}
@@ -2407,8 +2782,25 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 		return err
 	}
 
+	pending, pendingExists, err := loadHermesSeedPending(home)
+	if err != nil {
+		return err
+	}
+
+	intended := make(map[string]string, len(writes))
+	for _, write := range writes {
+		digest := sha256.Sum256(write.bytes)
+		intended[write.relative] = hex.EncodeToString(digest[:])
+	}
+
+	if pendingExists && !equalStringMaps(pending, intended) {
+		return errors.New("shared Hermes seed recovery does not match the pending managed configuration")
+	}
+
 	// Pre-flight: reject before touching disk if any target is an existing
-	// operator file, so a rejected pass leaves every file untouched.
+	// operator file. A pending journal admits only exact bytes written by an
+	// interrupted prior pass; it never turns a different existing file into a
+	// managed one.
 	for _, write := range writes {
 		if _, err := os.Lstat(write.target); err != nil {
 			// Absent (or a non-directory parent): not a managed clobber; the
@@ -2416,15 +2808,37 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 			continue
 		}
 
+		if manifest[write.relative] {
+			continue
+		}
+
+		if pendingExists {
+			current, readErr := os.ReadFile(write.target)
+			if readErr != nil {
+				return readErr
+			}
+
+			digest := sha256.Sum256(current)
+			if hex.EncodeToString(digest[:]) == pending[write.relative] {
+				continue
+			}
+		}
+
 		if !manifest[write.relative] {
 			return seedFileInvalid(write.relative)
+		}
+	}
+
+	if !pendingExists {
+		if err := saveHermesSeedPendingWithWriter(home, intended, writeFile); err != nil {
+			return err
 		}
 	}
 
 	changed := false
 
 	for _, write := range writes {
-		if err := writeManagedSeedFile(write.target, write.bytes); err != nil {
+		if err := writeManagedSeedFileWithWriter(write.target, write.bytes, writeFile); err != nil {
 			return err
 		}
 
@@ -2434,17 +2848,82 @@ func applyHermesSeedGuard(home string, writes []seedWrite) error {
 		}
 	}
 
-	if !changed {
+	if changed {
+		if err := saveHermesSeedManifestWithWriter(home, manifest, writeFile); err != nil {
+			return err
+		}
+	}
+
+	return clearHermesSeedPending(home)
+}
+
+func loadHermesSeedPending(home string) (map[string]string, bool, error) {
+	data, err := os.ReadFile(filepath.Join(home, hermesSeedPendingName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	var pending map[string]string
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return nil, false, err
+	}
+
+	if pending == nil {
+		return nil, false, errors.New("hermes seed pending journal is empty")
+	}
+
+	return pending, true, nil
+}
+
+func saveHermesSeedPendingWithWriter(home string, pending map[string]string, writeFile func(string, []byte, os.FileMode) error) error {
+	data, err := hermesMarshalIndent(pending, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return writeFile(filepath.Join(home, hermesSeedPendingName), append(data, '\n'), 0o600)
+}
+
+func clearHermesSeedPending(home string) error {
+	//nolint:gosec // home is the validated and confined Hermes configuration root.
+	err := os.Remove(filepath.Join(home, hermesSeedPendingName))
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 
-	return saveHermesSeedManifest(home, manifest)
+	if err != nil {
+		return err
+	}
+
+	return syncSharedHermesDirectory(home)
+}
+
+func equalStringMaps(left map[string]string, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+
+	return true
 }
 
 // writeManagedSeedFile writes data to target, first copying the current on-disk
 // bytes to <target>.seed.bak when they differ from data. An identical existing
 // file is left untouched (no backup, no rewrite).
 func writeManagedSeedFile(target string, data []byte) error {
+	return writeManagedSeedFileWithWriter(target, data, os.WriteFile)
+}
+
+func writeManagedSeedFileWithWriter(target string, data []byte, writeFile func(string, []byte, os.FileMode) error) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
@@ -2455,8 +2934,8 @@ func writeManagedSeedFile(target string, data []byte) error {
 		if bytes.Equal(current, data) {
 			return nil
 		}
-		//nolint:gosec // backup path is target (confined under home by resolveSeedFilePath) plus a constant suffix.
-		if writeErr := os.WriteFile(target+hermesSeedBackupSuffix, current, 0o600); writeErr != nil {
+
+		if writeErr := writeFile(target+hermesSeedBackupSuffix, current, 0o600); writeErr != nil {
 			return writeErr
 		}
 	case errors.Is(err, os.ErrNotExist):
@@ -2465,7 +2944,7 @@ func writeManagedSeedFile(target string, data []byte) error {
 		return err
 	}
 
-	return os.WriteFile(target, data, 0o600)
+	return writeFile(target, data, 0o600)
 }
 
 // loadHermesSeedManifest reads the ownership manifest under home into a set of
@@ -2497,6 +2976,10 @@ func loadHermesSeedManifest(home string) (map[string]bool, error) {
 // saveHermesSeedManifest writes the sorted, deterministic ownership manifest
 // under home.
 func saveHermesSeedManifest(home string, manifest map[string]bool) error {
+	return saveHermesSeedManifestWithWriter(home, manifest, os.WriteFile)
+}
+
+func saveHermesSeedManifestWithWriter(home string, manifest map[string]bool, writeFile func(string, []byte, os.FileMode) error) error {
 	entries := make([]string, 0, len(manifest))
 	for entry := range manifest {
 		entries = append(entries, entry)
@@ -2509,7 +2992,7 @@ func saveHermesSeedManifest(home string, manifest map[string]bool) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(home, hermesSeedManifestName), append(data, '\n'), 0o600)
+	return writeFile(filepath.Join(home, hermesSeedManifestName), append(data, '\n'), 0o600)
 }
 
 // seedFileInvalid is the uniform unsupported-field error naming an offending
@@ -2564,7 +3047,7 @@ func MCPServersConfig(servers []acp.McpServer) map[string]any {
 	return map[string]any{"mcp_servers": mcpServers}
 }
 
-// mcpServersWithSecretEnv replaces every literal HTTP header value with a
+// mcpServersWithSecretEnv replaces every literal stdio environment and HTTP header value with a
 // generated environment reference before config.yaml is authored. The values
 // are returned separately for injection into this session's hermes process;
 // neither the config nor adapter-owned durable state receives the secret.
@@ -2574,6 +3057,24 @@ func mcpServersWithSecretEnv(servers []acp.McpServer, baseEnv map[string]string)
 
 	for serverIndex, server := range servers {
 		cloned[serverIndex] = server
+		if server.Stdio != nil {
+			stdioServer := *server.Stdio
+			stdioServer.Args = append([]string(nil), server.Stdio.Args...)
+
+			stdioServer.Env = append([]acp.EnvVariable(nil), server.Stdio.Env...)
+			for envIndex := range stdioServer.Env {
+				name := fmt.Sprintf("ACP_GO_HERMES_MCP_ENV_%d_%d", serverIndex+1, envIndex+1)
+				if _, exists := baseEnv[name]; exists {
+					return nil, nil, fmt.Errorf("reserved MCP environment variable collision: %s", name)
+				}
+
+				secrets[name] = stdioServer.Env[envIndex].Value
+				stdioServer.Env[envIndex].Value = "${" + name + "}"
+			}
+
+			cloned[serverIndex].Stdio = &stdioServer
+		}
+
 		if server.Http == nil {
 			continue
 		}
@@ -2595,6 +3096,16 @@ func mcpServersWithSecretEnv(servers []acp.McpServer, baseEnv map[string]string)
 	}
 
 	return cloned, secrets, nil
+}
+
+// RedactedMCPServers returns the deterministic config shape used by a shared
+// Hermes home without retaining any stdio environment or HTTP header values.
+// Adapter admission uses it so per-session secret rotation does not look like
+// a process-global MCP configuration change.
+func RedactedMCPServers(servers []acp.McpServer) ([]acp.McpServer, error) {
+	redacted, _, err := mcpServersWithSecretEnv(servers, nil)
+
+	return redacted, err
 }
 
 func cloneEnvironmentMap(source map[string]string) map[string]string {
@@ -2663,6 +3174,18 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	}
 
 	clean := filepath.Clean(filepath.FromSlash(relative))
+
+	slashClean := filepath.ToSlash(clean)
+	for _, segment := range strings.Split(slashClean, "/") {
+		folded := strings.ToLower(segment)
+		if strings.EqualFold(folded, sharedSessionOwnersDir) ||
+			strings.HasPrefix(folded, ".acp-go-hermes-") ||
+			strings.EqualFold(folded, hermesSeedManifestName) ||
+			strings.EqualFold(folded, hermesSeedPendingName) ||
+			strings.HasSuffix(folded, strings.ToLower(hermesSeedBackupSuffix)) {
+			return "", "", invalid()
+		}
+	}
 
 	return clean, filepath.Join(home, clean), nil
 }

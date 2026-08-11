@@ -15,3 +15,7 @@ func configureHermesProcess(cmd *exec.Cmd) {
 func inspectHermesProcess(int) (ProcessIdentity, error) {
 	return ProcessIdentity{}, errors.ErrUnsupported
 }
+
+func inspectHermesProcessStartTime(int) (string, error) {
+	return "", errors.ErrUnsupported
+}

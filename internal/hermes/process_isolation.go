@@ -174,6 +174,10 @@ func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]st
 	// execution, which is the only mode a Windows host ever reaches.
 	env := make(map[string]string, len(isolation.BaseEnvironment))
 	for key, value := range isolation.BaseEnvironment {
+		if strings.EqualFold(key, envHermesAuthHome) {
+			continue
+		}
+
 		env[key] = value
 	}
 
@@ -181,6 +185,10 @@ func isolationEnvironment(isolation *ProcessIsolation, overlays ...map[string]st
 		for key, value := range overlay {
 			if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 {
 				return nil, fmt.Errorf("process environment contains invalid key %q", key)
+			}
+
+			if strings.EqualFold(key, envHermesAuthHome) {
+				continue
 			}
 
 			env[key] = value

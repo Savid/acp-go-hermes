@@ -18,16 +18,7 @@ func configureHermesProcess(cmd *exec.Cmd) {
 }
 
 func inspectHermesProcess(pid int) (ProcessIdentity, error) {
-	if pid <= 0 {
-		return ProcessIdentity{}, syscall.ESRCH
-	}
-
-	stat, err := procReadFile(procPath(pid, "stat"))
-	if err != nil {
-		return ProcessIdentity{}, err
-	}
-
-	startTime, err := procStartTime(string(stat))
+	startTime, err := inspectHermesProcessStartTime(pid)
 	if err != nil {
 		return ProcessIdentity{}, err
 	}
@@ -47,6 +38,24 @@ func inspectHermesProcess(pid int) (ProcessIdentity, error) {
 		Cmdline:   splitProcNUL(cmdlineData),
 		Env:       splitProcEnv(envData),
 	}, nil
+}
+
+func inspectHermesProcessStartTime(pid int) (string, error) {
+	if pid <= 0 {
+		return "", syscall.ESRCH
+	}
+
+	stat, err := procReadFile(procPath(pid, "stat"))
+	if err != nil {
+		return "", err
+	}
+
+	startTime, err := procStartTime(string(stat))
+	if err != nil {
+		return "", err
+	}
+
+	return startTime, nil
 }
 
 func procPath(pid int, name string) string {

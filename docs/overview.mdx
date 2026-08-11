@@ -16,8 +16,9 @@ Hermes owns model execution, provider authentication, and native durable state.
 This adapter owns everything between the ACP host and that harness:
 
 - ACP method dispatch and the `Serve`/`Agent` public API.
-- Launching and supervising one `hermes serve` process per session, each with an
-  isolated `HERMES_HOME`.
+- Launching and supervising one `hermes serve` process per session. Homes are
+  isolated by default; explicit shared-home mode uses one durable official
+  Hermes residence while retaining per-session processes and wrapper controls.
 - Loopback WebSocket gateway hygiene: connect, reconnect, and terminal
   turn-failure fencing.
 - Prompt streaming, permissions, elicitation, and usage mapping.

@@ -475,39 +475,39 @@ func TestLedgerLineageComparisonAndReadFailure(t *testing.T) {
 	}
 }
 
-func TestProviderAuthHomeValidationAndPreparationFailures(t *testing.T) {
+func TestProviderAuthResidenceValidationAndPreparationFailures(t *testing.T) {
 	if err := validateProviderAuthRoots(Options{
 		ProviderAuthRoot: t.TempDir(),
-		ProviderAuthHome: "relative",
+		SharedHermesHome: "relative",
 	}); err == nil {
-		t.Fatal("relative provider auth home accepted")
+		t.Fatal("relative provider auth residence accepted")
 	}
 
-	if _, err := prepareProviderAuthHome("relative"); err == nil {
-		t.Fatal("relative provider auth home prepared")
+	if _, err := prepareProviderAuthResidence("relative"); err == nil {
+		t.Fatal("relative provider auth residence prepared")
 	}
 
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if _, err := prepareProviderAuthHome(filepath.Join(file, "child")); err == nil {
-		t.Fatal("provider auth home beneath a file prepared")
+	if _, err := prepareProviderAuthResidence(filepath.Join(file, "child")); err == nil {
+		t.Fatal("provider auth residence beneath a file prepared")
 	}
 
 	agent := newTestAgent(
 		WithProviderAuthRoot(t.TempDir()),
-		WithProviderAuthHome(filepath.Join(file, "child")),
+		WithSharedHermesHome(filepath.Join(file, "child")),
 	)
 	if agent.providerAuth != nil {
-		t.Fatal("unusable provider auth home advertised")
+		t.Fatal("unusable provider auth residence advertised")
 	}
 
 	if _, err := newAuthLedger(Options{
 		ProviderAuthRoot: t.TempDir(),
-		ProviderAuthHome: "relative",
+		SharedHermesHome: "relative",
 	}); err == nil {
-		t.Fatal("ledger accepted relative provider auth home")
+		t.Fatal("ledger accepted relative provider auth residence")
 	}
 }
 
@@ -968,18 +968,18 @@ func TestCloseSessionSkipsPeerAndTerminalFlows(t *testing.T) {
 	}
 }
 
-func TestProviderAuthHomeHookFailures(t *testing.T) {
+func TestProviderAuthResidenceHookFailures(t *testing.T) {
 	restoreLedgerHooks(t)
 
 	home := filepath.Join(t.TempDir(), "auth")
 	ledgerChmod = func(string, os.FileMode) error { return errors.New("chmod") }
-	if _, err := prepareProviderAuthHome(home); err == nil {
-		t.Fatal("provider auth home chmod failure accepted")
+	if _, err := prepareProviderAuthResidence(home); err == nil {
+		t.Fatal("provider auth residence chmod failure accepted")
 	}
 
 	restoreLedgerHooks(t)
 	ledgerEvalPath = func(string) (string, error) { return "", errors.New("resolve") }
-	if _, err := prepareProviderAuthHome(home); err == nil {
-		t.Fatal("provider auth home resolution failure accepted")
+	if _, err := prepareProviderAuthResidence(home); err == nil {
+		t.Fatal("provider auth residence resolution failure accepted")
 	}
 }

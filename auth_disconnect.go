@@ -50,6 +50,12 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 	}
 	defer releaseProvider()
 
+	providerLease, lockErr := p.ledger.acquireProviderLease(ctx, providerID)
+	if lockErr != nil {
+		return nil, authFailed(authCauseTimeout, providerID, "", "")
+	}
+	defer func() { _ = providerLease.Release() }()
+
 	releaseLedger, acquired := p.lockLedger(ctx, providerID)
 	if !acquired {
 		return nil, authFailed(authCauseTimeout, providerID, "", "")

@@ -1,3 +1,4 @@
+//nolint:gocyclo // Lifecycle branch matrices intentionally share setup.
 package hermesacp
 
 import (
@@ -24,6 +25,62 @@ type toggleReplaceStore struct {
 	*InMemorySessionStore
 	mu   sync.Mutex
 	fail bool
+}
+
+type ackLostReplaceStore struct {
+	*InMemorySessionStore
+}
+
+func (s *ackLostReplaceStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
+	if err := s.InMemorySessionStore.Replace(ctx, main, replacements); err != nil {
+		return err
+	}
+
+	return errors.New("replace acknowledgement lost")
+}
+
+func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
+	ctx := t.Context()
+	home := t.TempDir()
+	store := &ackLostReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
+	newClient := newFakeHermesClient()
+	newClient.createSession = testNativeSession("native-new")
+	agent := newTestAgent(WithSessionStore(store), WithSharedHermesHome(home), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+			newClient.xdg = opts.ExistingXDG
+
+			return newClient, nil
+		}
+	})
+	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewSession after committed acknowledgement loss: %v", err)
+	}
+	if agent.activeSession(created.SessionId) == nil {
+		t.Fatal("committed NewSession was not registered")
+	}
+
+	childClient := newFakeHermesClient()
+	childClient.getSession = testNativeSession("native-child")
+	parentClient := newFakeHermesClient()
+	parentClient.forkSession = testNativeSession("native-child")
+	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+		childClient.xdg = opts.ExistingXDG
+
+		return childClient, nil
+	}
+	parent := testSession(agent, parentClient)
+	parent.id = "parent-for-ack-loss"
+	parent.idmap.SessionID = string(parent.id)
+	parent.idmap.NativeSessionID = "native-parent"
+	agent.sessions[parent.id] = parent
+	forked, err := agent.forkSession(ctx, ForkSessionRequest(parent.id, t.TempDir()))
+	if err != nil {
+		t.Fatalf("Fork after committed acknowledgement loss: %v", err)
+	}
+	if agent.activeSession(forked.SessionId) == nil || len(parentClient.deleted) != 0 {
+		t.Fatalf("committed fork registration/deletion = %#v/%#v", agent.activeSession(forked.SessionId), parentClient.deleted)
+	}
 }
 
 func (s *toggleReplaceStore) setFail(fail bool) {
@@ -1400,8 +1457,8 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 		if _, err := agent.NewSession(ctx, NewSessionRequest(cwd)); err == nil {
 			t.Fatal("NewSession ignored storeStartedSession error")
 		}
-		if !client.closed {
-			t.Fatal("storeStartedSession error did not close client")
+		if client.closed {
+			t.Fatal("active-session admission launched and then closed a client")
 		}
 	})
 }
@@ -1508,14 +1565,40 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("delete active ignores native delete error after tombstone", func(t *testing.T) {
+	t.Run("delete refuses live prompt before store or native mutation", func(t *testing.T) {
+		client := newFakeHermesClient()
+		store := NewInMemorySessionStore()
+		agent := newTestAgent(WithSessionStore(store))
+		session := testSession(agent, client)
+		session.cancel = func() {}
+		session.turnEpoch = 1
+		agent.sessions[session.id] = session
+		entry, _ := json.Marshal(stateSnapshot{Format: SessionStoreFormat, Session: stateSnapshotSession{SessionID: string(session.id)}})
+		if err := store.Replace(ctx, SessionKey{SessionID: string(session.id)}, []SessionStoreReplacement{{Key: SessionKey{SessionID: string(session.id)}, Entries: []SessionStoreEntry{entry}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err == nil || !strings.Contains(err.Error(), "prompt is active") {
+			t.Fatalf("active delete error = %v", err)
+		}
+		if len(client.deleted) != 0 {
+			t.Fatalf("native delete attempts = %#v", client.deleted)
+		}
+		if _, ok := agent.sessions[session.id]; !ok {
+			t.Fatal("active delete removed in-memory session")
+		}
+		if _, err := store.Load(ctx, SessionKey{SessionID: string(session.id)}); err != nil {
+			t.Fatalf("active delete removed store state: %v", err)
+		}
+	})
+
+	t.Run("delete active propagates native delete error after tombstone", func(t *testing.T) {
 		client := newFakeHermesClient()
 		client.deleteErr = errors.New("native delete failed")
 		agent := newTestAgent()
 		session := testSession(agent, client)
 		agent.sessions[session.id] = session
-		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err != nil {
-			t.Fatalf("delete returned native delete error: %v", err)
+		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); !errors.Is(err, client.deleteErr) {
+			t.Fatalf("delete error = %v, want native delete error", err)
 		}
 		if len(client.deleted) != 1 || client.deleted[0] != "native-1" {
 			t.Fatalf("native delete attempts = %#v", client.deleted)
@@ -1637,14 +1720,22 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		parentAgent.sessions[parent.id] = parent
 
 		sessionIDRandReader = errorReader{err: errors.New("id failed")}
+		forkCalls := parentClient.forkCallCount()
 		if _, err := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err == nil {
 			t.Fatal("fork ignored session id error")
+		}
+		if parentClient.forkCallCount() != forkCalls {
+			t.Fatal("fork mutated native state before ACP ID preparation")
 		}
 		sessionIDRandReader = oldReader
 
 		parentClient.xdg = nativehermes.XDGDirs{Root: string([]byte{0})}
+		forkCalls = parentClient.forkCallCount()
 		if _, err := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err == nil {
 			t.Fatal("fork ignored state db clone error")
+		}
+		if parentClient.forkCallCount() != forkCalls+1 || len(parentClient.deleted) == 0 || parentClient.deleted[len(parentClient.deleted)-1] != "native-child" {
+			t.Fatal("post-branch clone failure did not compensate the durable child")
 		}
 		parentClient.xdg, _ = nativehermes.CreateXDGDirs(t.TempDir(), "parent")
 
@@ -1657,6 +1748,9 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		factoryErrAgent.sessions[factoryParent.id] = factoryParent
 		if _, err := factoryErrAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(factoryParent.id, cwd))); err == nil {
 			t.Fatal("fork ignored child factory error")
+		}
+		if len(parentClient.deleted) == 0 || parentClient.deleted[len(parentClient.deleted)-1] != "native-child" {
+			t.Fatalf("fork factory failure did not compensate durable child: %#v", parentClient.deleted)
 		}
 
 		getErrClient := newFakeHermesClient()
@@ -1675,6 +1769,40 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		}
 		if !getErrClient.closed {
 			t.Fatal("child get error did not close client")
+		}
+		if len(parentClient.deleted) == 0 || parentClient.deleted[len(parentClient.deleted)-1] != "native-child" {
+			t.Fatalf("fork get failure did not compensate durable child: %#v", parentClient.deleted)
+		}
+
+		driftChild := newFakeHermesClient()
+		driftChild.getSession = testNativeSession("native-drift")
+		driftAgent := newTestAgent(func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				driftChild.xdg = opts.ExistingXDG
+
+				return driftChild, nil
+			}
+		})
+		driftParent := testSession(driftAgent, parentClient)
+		driftAgent.sessions[driftParent.id] = driftParent
+		if _, err := driftAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(driftParent.id, cwd))); err == nil || !strings.Contains(err.Error(), "native session drift") {
+			t.Fatalf("fork native drift error = %v", err)
+		}
+		if !driftChild.closed || len(parentClient.deleted) == 0 || parentClient.deleted[len(parentClient.deleted)-1] != "native-child" {
+			t.Fatalf("fork drift cleanup childClosed=%v parentDeleted=%#v", driftChild.closed, parentClient.deleted)
+		}
+
+		busyParent := testSession(parentAgent, parentClient)
+		busyParent.mu.Lock()
+		busyParent.turnInFlight = true
+		busyParent.mu.Unlock()
+		parentAgent.sessions[busyParent.id] = busyParent
+		forkCalls = parentClient.forkCallCount()
+		if _, err := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(busyParent.id, cwd))); err == nil || !strings.Contains(err.Error(), "session cannot be forked") {
+			t.Fatalf("busy fork error = %v", err)
+		}
+		if parentClient.forkCallCount() != forkCalls {
+			t.Fatal("busy parent reached native fork")
 		}
 
 		limitChild := newFakeHermesClient()
@@ -1906,7 +2034,7 @@ func TestForkSessionCarriesChildEnvironmentAndPath(t *testing.T) {
 	}
 }
 
-func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
+func TestSharedHermesHomePreservesPerSessionWrapperGenerations(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -1914,8 +2042,7 @@ func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
 	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithProviderAuthRoot(t.TempDir()),
-		WithProviderAuthHome(authHome),
-		WithEnv(map[string]string{"HERMES_AUTH_HOME": "/ignored-agent-value"}),
+		WithSharedHermesHome(authHome),
 	)
 
 	var captured []nativehermes.StartOptions
@@ -1931,7 +2058,7 @@ func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
 		ctx,
 		"session-a",
 		t.TempDir(),
-		sessionMeta{Env: map[string]string{"HERMES_AUTH_HOME": "/ignored-session-value"}},
+		sessionMeta{Env: map[string]string{"WAGIE_OPERATION_ID": "first"}},
 		nativehermes.XDGDirs{},
 	)
 	if err != nil {
@@ -1960,15 +2087,42 @@ func TestIsolatedSessionsShareOnlyTheDurableProviderAuthHome(t *testing.T) {
 	}
 
 	for _, options := range captured {
-		if options.ProviderAuthHome != agent.options.ProviderAuthHome {
-			t.Fatalf("provider auth home = %q, want %q", options.ProviderAuthHome, agent.options.ProviderAuthHome)
+		if options.SharedHermesHome != agent.options.SharedHermesHome {
+			t.Fatalf("shared Hermes home = %q, want %q", options.SharedHermesHome, agent.options.SharedHermesHome)
 		}
-		if _, present := options.Env["HERMES_AUTH_HOME"]; present {
-			t.Fatalf("user environment retained protected auth home: %#v", options.Env)
+	}
+	if captured[0].SessionEnv["WAGIE_OPERATION_ID"] != "first" || captured[1].SessionEnv["WAGIE_OPERATION_ID"] != "" {
+		t.Fatalf("per-session environments were not preserved: %#v", captured)
+	}
+}
+
+func TestSharedHermesHomeAdmitsRotatedMCPSecretsByRedactedShape(t *testing.T) {
+	agent := newTestAgent(WithSharedHermesHome(t.TempDir()))
+	first := []acp.McpServer{
+		StdioMCPServer("stdio", "runner", nil, map[string]string{"TOKEN": "first-stdio"}),
+		HTTPMCPServer("http", "https://mcp.example.test", map[string]string{"Authorization": "first-http"}),
+	}
+	second := []acp.McpServer{
+		StdioMCPServer("stdio", "runner", nil, map[string]string{"TOKEN": "second-stdio"}),
+		HTTPMCPServer("http", "https://mcp.example.test", map[string]string{"Authorization": "second-http"}),
+	}
+	if err := agent.admitSharedHermesConfig(first); err != nil {
+		t.Fatalf("first MCP shape: %v", err)
+	}
+	if err := agent.admitSharedHermesConfig(second); err != nil {
+		t.Fatalf("rotated secrets changed shared MCP shape: %v", err)
+	}
+	encoded, err := json.Marshal(agent.sharedMCPServers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"first-stdio", "first-http", "second-stdio", "second-http"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("redacted shared MCP admission retained %q: %s", secret, encoded)
 		}
-		if _, present := options.SessionEnv["HERMES_AUTH_HOME"]; present {
-			t.Fatalf("session environment retained protected auth home: %#v", options.SessionEnv)
-		}
+	}
+	if err := agent.admitSharedHermesConfig([]acp.McpServer{StdioMCPServer("different", "runner", nil, map[string]string{"TOKEN": "third"})}); err == nil {
+		t.Fatal("different MCP structure was admitted")
 	}
 }
 
@@ -2011,24 +2165,6 @@ func TestAgentRejectsHomeOption(t *testing.T) {
 
 	_, forkErr := agent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest("session-1", cwd)))
 	requireUnsupportedField(t, forkErr, optionFieldHome, "fork session")
-}
-
-func TestAgentRejectsProviderAuthDirectHomeOption(t *testing.T) {
-	ctx := context.Background()
-	cwd := t.TempDir()
-	agent := newTestAgent(WithProviderAuthDirectHome(t.TempDir()))
-
-	_, newErr := agent.NewSession(ctx, NewSessionRequest(cwd))
-	requireUnsupportedField(t, newErr, optionFieldProviderAuthDirectHome, "new session")
-
-	_, loadErr := agent.LoadSession(ctx, LoadSessionRequest("session-1", cwd))
-	requireUnsupportedField(t, loadErr, optionFieldProviderAuthDirectHome, "load session")
-
-	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd))
-	requireUnsupportedField(t, resumeErr, optionFieldProviderAuthDirectHome, "resume session")
-
-	_, forkErr := agent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest("session-1", cwd)))
-	requireUnsupportedField(t, forkErr, optionFieldProviderAuthDirectHome, "fork session")
 }
 
 // TestAgentRejectsUnvalidatedOptionsWithoutInitialize proves the handshake is not

@@ -26,7 +26,7 @@ const liveTokenHermesConfig = `model:
 //
 // Each launch passes a caller-provided `-scratch-dir` temp root so the
 // subprocess owns an isolated HERMES_HOME. Tests that need durable credentials
-// pass HERMES_AUTH_HOME separately.
+// use an explicit disposable shared HERMES_HOME.
 type liveAgent struct {
 	cmd    interface{ ProcessState() *os.ProcessState }
 	stdin  io.WriteCloser

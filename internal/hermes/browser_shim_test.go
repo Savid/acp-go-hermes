@@ -107,20 +107,20 @@ func TestUpsertProcessEnvMakesProtectedValuesAuthoritative(t *testing.T) {
 	t.Parallel()
 
 	env := []string{
-		"HERMES_AUTH_HOME=/attacker",
+		"HERMES_DASHBOARD_SESSION_TOKEN=attacker",
 		"A=1",
-		"HERMES_AUTH_HOME=/stale",
+		"HERMES_DASHBOARD_SESSION_TOKEN=stale",
 	}
-	env = upsertProcessEnv(env, "HERMES_AUTH_HOME", "/durable")
+	env = upsertProcessEnv(env, "HERMES_DASHBOARD_SESSION_TOKEN", "durable")
 
 	var values []string
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "HERMES_AUTH_HOME=") {
+		if strings.HasPrefix(entry, "HERMES_DASHBOARD_SESSION_TOKEN=") {
 			values = append(values, entry)
 		}
 	}
 
-	if len(values) != 1 || values[0] != "HERMES_AUTH_HOME=/durable" {
+	if len(values) != 1 || values[0] != "HERMES_DASHBOARD_SESSION_TOKEN=durable" {
 		t.Fatalf("protected environment = %#v", env)
 	}
 }

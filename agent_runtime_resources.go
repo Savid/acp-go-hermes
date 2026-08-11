@@ -15,14 +15,52 @@ var runtimeRemoveAll = os.RemoveAll
 
 type managedHermesServer struct {
 	nativehermes.Server
-	root             string
-	sessionID        acp.SessionId
-	nativeRelease    func()
-	scratchRelease   func()
-	retainIncomplete func(error, acp.SessionId, string)
-	processRoot      *providerProcessRoot
-	once             sync.Once
-	closeErr         error
+	root                  string
+	sessionID             acp.SessionId
+	nativeRelease         func()
+	scratchRelease        func()
+	retainIncomplete      func(error, acp.SessionId, string)
+	processRoot           *providerProcessRoot
+	providerAuthSupported bool
+	nativeSessionOwner    *nativehermes.SharedSessionOwner
+	once                  sync.Once
+	closeErr              error
+}
+
+func (s *managedHermesServer) CreateSessionWithDraft(
+	ctx context.Context,
+	title string,
+	bind func(nativehermes.SessionDraft) error,
+) (nativehermes.Session, error) {
+	creator, ok := s.Server.(nativehermes.DraftSessionCreator)
+	if !ok {
+		return nativehermes.Session{}, errors.New("hermes server does not expose draft session creation")
+	}
+
+	return creator.CreateSessionWithDraft(ctx, title, bind)
+}
+
+func (s *managedHermesServer) PersistedSessions(ctx context.Context) ([]nativehermes.Session, error) {
+	lister, ok := s.Server.(nativehermes.PersistedSessionLister)
+	if !ok {
+		return nil, errors.New("hermes server does not expose persisted session inventory")
+	}
+
+	return lister.PersistedSessions(ctx)
+}
+
+func (s *managedHermesServer) ForkWithBaseline(
+	ctx context.Context,
+	id string,
+	marker string,
+	baseline []string,
+) (nativehermes.Session, error) {
+	forker, ok := s.Server.(nativehermes.RecoverableSessionForker)
+	if !ok {
+		return nativehermes.Session{}, errors.New("hermes server does not expose recoverable session fork")
+	}
+
+	return forker.ForkWithBaseline(ctx, id, marker, baseline)
 }
 
 func (s *managedHermesServer) Close(ctx context.Context) error {
@@ -37,12 +75,16 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 		}
 
 		if errors.Is(s.closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+			s.nativeSessionOwner.Retain()
+
 			if s.retainIncomplete != nil {
 				s.retainIncomplete(s.closeErr, s.sessionID, s.root)
 			}
 
 			return
 		}
+
+		s.closeErr = errors.Join(s.closeErr, s.nativeSessionOwner.Release())
 
 		s.nativeRelease()
 
@@ -65,8 +107,57 @@ func (s *managedHermesServer) ProviderDescendantCount() (int, bool) {
 	return inventory.ProviderDescendantCount()
 }
 
+func (s *managedHermesServer) ProviderAuthSupported() bool {
+	if s.providerAuthSupported {
+		return true
+	}
+
+	supported, ok := s.Server.(interface{ ProviderAuthSupported() bool })
+	if ok {
+		return supported.ProviderAuthSupported()
+	}
+
+	return false
+}
+
 func (a *Agent) retainIncompleteHermesRoot(id acp.SessionId, root string) {
 	a.recordIncompleteContainment(nativehermes.ErrProcessContainmentIncomplete, id, root)
+}
+
+func (a *Agent) claimSharedNativeSession(client nativehermes.Server, nativeSessionID string) error {
+	owner, err := a.acquireSharedNativeSessionOwner(nativeSessionID)
+	if err != nil {
+		return err
+	}
+
+	if owner == nil {
+		return nil
+	}
+
+	managed, ok := client.(*managedHermesServer)
+	if !ok {
+		return errors.Join(errors.New("shared Hermes native session claim requires a managed server"), owner.Release())
+	}
+
+	if managed.nativeSessionOwner != nil {
+		return errors.Join(errors.New("shared Hermes native session is already claimed by this server"), owner.Release())
+	}
+
+	if err := nativehermes.BindSharedSessionOwnerToServer(owner, managed.Server); err != nil {
+		return errors.Join(err, owner.Release())
+	}
+
+	managed.nativeSessionOwner = owner
+
+	return nil
+}
+
+func (a *Agent) acquireSharedNativeSessionOwner(nativeSessionID string) (*nativehermes.SharedSessionOwner, error) {
+	if a.options.SharedHermesHome == "" {
+		return nil, nil //nolint:nilnil // No owner is the explicit isolated-home result.
+	}
+
+	return nativehermes.AcquireSharedNativeSessionOwner(a.options.SharedHermesHome, nativeSessionID)
 }
 
 func (a *Agent) recordIncompleteContainment(err error, id acp.SessionId, root string) {

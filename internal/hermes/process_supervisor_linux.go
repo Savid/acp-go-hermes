@@ -232,6 +232,11 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 		supervisor.ExtraFiles = append(supervisor.ExtraFiles, authorityDomain)
 		defer authorityDomain.Close()
 	}
+	// The trusted guardian keeps the exact session-owner lock descriptions open
+	// until it has proved every native descendant quiescent. If the adapter is
+	// killed between spawn and PID metadata publication, the guardian still
+	// prevents another adapter from acquiring the same ACP/native session.
+	supervisor.ExtraFiles = append(supervisor.ExtraFiles, spec.SharedSessionOwnerFiles...)
 
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Install the wrapper command before launch. exec.Cmd must not be copied

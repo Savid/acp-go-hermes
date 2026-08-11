@@ -42,6 +42,9 @@ func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processCon
 	if spec.DarwinBestEffort {
 		return nil, fmt.Errorf("darwin best-effort containment is supported only on darwin, not %s", runtime.GOOS)
 	}
+	if len(spec.SharedSessionOwnerFiles) != 0 {
+		return nil, fmt.Errorf("shared Hermes home is unsupported on %s: inherited session-owner locks are unavailable", runtime.GOOS)
+	}
 
 	return startOrdinaryProcess(cmd)
 }

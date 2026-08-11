@@ -1,4 +1,4 @@
-//nolint:tagliatelle // Store metadata preserves Hermes native modelID/providerID spellings.
+//nolint:tagliatelle,gocyclo,goconst // Store metadata preserves Hermes spellings and one ordered commit transaction.
 package hermesacp
 
 import (
@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +36,8 @@ const (
 // store reads only: a slow-but-successful write never fails the operation
 // just because it outlived the read budget.
 const sessionStoreWriteTimeout = 60 * time.Second
+
+var errSessionStoreCommitUnknown = errors.New("session store commit outcome is unknown")
 
 func sessionStoreWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, sessionStoreWriteTimeout)
@@ -294,25 +298,34 @@ func (s *session) snapshotToStoreLocked(
 	replacements := []SessionStoreReplacement{}
 	mainKey := SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}
 
-	xdg := snapshot.client.XDGDirs()
-	if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
-		return archiveErr
-	} else if ok {
-		main.Archives["state-db"] = archiveInfo{
-			Subpath: stateDBSubpath,
-			SHA256:  sha,
-			Bytes:   len(archive),
-		}
-
-		entries, encodeErr := encodeArchiveEntries(archive, sha)
-		if encodeErr != nil {
-			return encodeErr
-		}
-
+	if s.agent.options.SharedHermesHome != "" {
+		// The official shared database is the native authority. An empty
+		// replacement also removes any legacy per-session archive left by an old
+		// adapter instead of leaving sensitive cross-session state unreferenced.
 		replacements = append(replacements, SessionStoreReplacement{
-			Key:     SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
-			Entries: entries,
+			Key: SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
 		})
+	} else {
+		xdg := snapshot.client.XDGDirs()
+		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
+			return archiveErr
+		} else if ok {
+			main.Archives["state-db"] = archiveInfo{
+				Subpath: stateDBSubpath,
+				SHA256:  sha,
+				Bytes:   len(archive),
+			}
+
+			entries, encodeErr := encodeArchiveEntries(archive, sha)
+			if encodeErr != nil {
+				return encodeErr
+			}
+
+			replacements = append(replacements, SessionStoreReplacement{
+				Key:     SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
+				Entries: entries,
+			})
+		}
 	}
 
 	mainEntry, err := stateJSONMarshal(main)
@@ -346,8 +359,38 @@ func (s *session) snapshotToStoreLocked(
 		}
 	}
 
-	if err := s.agent.sessionStore().Replace(snapshotCtx, mainKey, replacements); err != nil {
-		return err
+	journal := s.operationJournal
+	if journal != nil && journal.record.Prepared == nil {
+		if err := journal.prepareReplacements(replacements); err != nil {
+			return fmt.Errorf("prepare Hermes session publication: %w", err)
+		}
+	}
+
+	if replaceErr := s.agent.sessionStore().Replace(snapshotCtx, mainKey, replacements); replaceErr != nil {
+		reconcileCtx, reconcileCancel := s.agent.sessionStoreContext(context.Background())
+		committed, absent, reconcileErr := reconcileSessionStoreReplacement(reconcileCtx, s.agent.sessionStore(), mainKey, replacements)
+
+		reconcileCancel()
+
+		switch {
+		case reconcileErr != nil:
+			return errors.Join(errSessionStoreCommitUnknown, replaceErr, reconcileErr)
+		case committed:
+			// Replace committed and only its acknowledgement was lost.
+		case absent:
+			return replaceErr
+		default:
+			return errors.Join(errSessionStoreCommitUnknown, replaceErr)
+		}
+	}
+
+	if journal != nil {
+		if err := journal.markStoreCommitted(); err != nil {
+			// Store publication is already exact and authoritative. A journal
+			// cleanup/write failure must not turn success into a retry that could
+			// duplicate or delete the committed native session.
+			s.agent.log.DebugContext(ctx, "retain Hermes session-operation journal after committed store publication", slog.String(jsonFieldError, err.Error()))
+		}
 	}
 
 	s.mu.Lock()
@@ -355,6 +398,57 @@ func (s *session) snapshotToStoreLocked(
 	s.mu.Unlock()
 
 	return nil
+}
+
+// reconcileSessionStoreReplacement distinguishes an acknowledgement loss from
+// a definite non-commit without guessing from the original error. The exact
+// prepared bundle is the authority: every expected entry and the complete
+// subkey set must byte-match. A partial/different or unreadable state is
+// unknown and must never trigger destructive native compensation.
+func reconcileSessionStoreReplacement(ctx context.Context, store SessionStore, main SessionKey, replacements []SessionStoreReplacement) (committed bool, absent bool, err error) {
+	expectedSubkeys := make([]string, 0, len(replacements)-1)
+	mainAbsent := false
+	allExact := true
+
+	for _, replacement := range replacements {
+		entries, loadErr := store.Load(ctx, replacement.Key)
+		if loadErr != nil {
+			return false, false, loadErr
+		}
+
+		if replacement.Key.Subpath == SessionStoreMainSubpath && len(entries) == 0 {
+			mainAbsent = true
+		}
+
+		if replacement.Key.Subpath != SessionStoreMainSubpath {
+			expectedSubkeys = append(expectedSubkeys, replacement.Key.Subpath)
+		}
+
+		if !slices.EqualFunc(entries, replacement.Entries, func(left, right SessionStoreEntry) bool {
+			return bytes.Equal(left, right)
+		}) {
+			allExact = false
+		}
+	}
+
+	slices.Sort(expectedSubkeys)
+
+	actualSubkeys, listErr := store.ListSubkeys(ctx, main)
+	if listErr != nil {
+		return false, false, listErr
+	}
+
+	slices.Sort(actualSubkeys)
+
+	if allExact && slices.Equal(actualSubkeys, expectedSubkeys) {
+		return true, false, nil
+	}
+
+	if mainAbsent && len(actualSubkeys) == 0 {
+		return false, true, nil
+	}
+
+	return false, false, nil
 }
 
 func (s *session) claimTerminalCommit(turnCtx context.Context, turnEpoch uint64) error {
@@ -389,6 +483,18 @@ func (s *session) terminalCommitCancelled(turnCtx context.Context, turnEpoch uin
 }
 
 func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
+	return hydrateStateFromStoreMode(ctx, store, sessionID, xdg, true)
+}
+
+// hydrateStateFromStoreWithoutNativeArchive loads logical metadata only. In
+// shared-home mode the durable official Hermes database is authoritative; a
+// legacy per-session archive must never be decoded into the wrapper generation
+// or copied back over the shared database.
+func hydrateStateFromStoreWithoutNativeArchive(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
+	return hydrateStateFromStoreMode(ctx, store, sessionID, xdg, false)
+}
+
+func hydrateStateFromStoreMode(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs, restoreNativeArchive bool) (idmapRecord, stateSnapshot, bool, error) {
 	idEntries, err := store.Load(ctx, SessionKey{SessionID: sessionID, Subpath: idmapSubpath})
 	if err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
@@ -422,6 +528,10 @@ func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID st
 	}
 
 	if _, ok := snapshot.Archives["state-db"]; ok {
+		if !restoreNativeArchive {
+			return idmap, snapshot, true, nil
+		}
+
 		entries, err := store.Load(ctx, SessionKey{SessionID: sessionID, Subpath: stateDBSubpath})
 		if err != nil {
 			return idmapRecord{}, stateSnapshot{}, false, err

@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/coder/websocket"
 )
@@ -359,6 +361,18 @@ type ActiveSession struct {
 	Cwd        string `json:"cwd"`
 }
 
+// PersistedSession is one durable state.db row returned by session.list.
+type PersistedSession struct {
+	SessionID    string `json:"id"`
+	Title        string `json:"title"`
+	MessageCount int    `json:"message_count"`
+	Source       string `json:"source"`
+}
+
+type SessionListResult struct {
+	Sessions []PersistedSession `json:"sessions"`
+}
+
 type ModelOptionsResult struct {
 	Model     string          `json:"model"`
 	Provider  string          `json:"provider"`
@@ -461,9 +475,10 @@ type ProviderModelPricing struct {
 }
 
 type BranchResult struct {
-	SessionID string `json:"session_id"`
-	Title     string `json:"title"`
-	Parent    string `json:"parent"`
+	SessionID       string `json:"session_id"`
+	StoredSessionID string `json:"stored_session_id"`
+	Title           string `json:"title"`
+	Parent          string `json:"parent"`
 }
 
 func (c *Client) CreateSession(ctx context.Context, params map[string]any) (SessionCreateResult, error) {
@@ -511,6 +526,16 @@ func (c *Client) ActiveList(ctx context.Context) (ActiveListResult, error) {
 	var out ActiveListResult
 
 	err := c.Call(ctx, "session.active_list", map[string]any{}, &out)
+
+	return out, err
+}
+
+// PersistedSessions lists durable Hermes sessions, including sessions that are
+// not currently resident in this gateway process.
+func (c *Client) PersistedSessions(ctx context.Context) (SessionListResult, error) {
+	var out SessionListResult
+
+	err := c.Call(ctx, "session.list", map[string]any{"limit": 10000}, &out)
 
 	return out, err
 }
@@ -594,4 +619,54 @@ func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelO
 	err := c.Call(ctx, "model.options", map[string]any{fieldSessionID: liveSessionID}, &out)
 
 	return out, err
+}
+
+//nolint:goconst // Wire keys remain adjacent to this protocol method for auditability.
+func (c *Client) SetModel(ctx context.Context, liveSessionID string, value string) error {
+	var out struct {
+		Key             string `json:"key"`
+		Value           string `json:"value"`
+		Scope           string `json:"scope"`
+		ConfirmRequired bool   `json:"confirm_required"`
+		Deferred        bool   `json:"deferred"`
+	}
+
+	command, rawModel, err := modelSwitchCommand(value)
+	if err != nil {
+		return err
+	}
+
+	err = c.Call(ctx, "config.set", map[string]any{
+		fieldSessionID:            liveSessionID,
+		"key":                     "model",
+		"value":                   command,
+		"confirm_expensive_model": true,
+	}, &out)
+	if err != nil {
+		return err
+	}
+	// deferred=true means Hermes accepted the session-scoped choice while a
+	// turn was running and will apply it on the next turn. That is successful
+	// mutation, not an error: returning an error would leave native state ahead
+	// of the ACP model metadata.
+	if out.Key != "model" || out.Value != rawModel || out.Scope != "session" || out.ConfirmRequired {
+		return fmt.Errorf("hermes config.set model returned an invalid result")
+	}
+
+	return nil
+}
+
+func modelSwitchCommand(value string) (string, string, error) {
+	provider, rawModel, ok := strings.Cut(value, "/")
+
+	invalidToken := func(token string) bool {
+		return token == "" || strings.HasPrefix(token, "--") || strings.IndexFunc(token, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) >= 0
+	}
+	if !ok || invalidToken(provider) || invalidToken(rawModel) {
+		return "", "", fmt.Errorf("hermes model selection %q is not provider-qualified", value)
+	}
+
+	return rawModel + " --provider " + provider + " --session", rawModel, nil
 }

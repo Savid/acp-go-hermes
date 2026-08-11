@@ -2,6 +2,8 @@ package hermesacp
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,8 +25,7 @@ func TestApplyOptions(t *testing.T) {
 		WithHome("/tmp/home"),
 		WithScratchDir("/tmp/scratch"),
 		WithProviderAuthRoot("/tmp/provider-ledger"),
-		WithProviderAuthDirectHome("/tmp/provider-direct"),
-		WithProviderAuthHome("/tmp/provider-home"),
+		WithSharedHermesHome("/tmp/provider-home"),
 		WithDefaultModel("openai/gpt"),
 		WithEnv(map[string]string{"A": "1"}),
 		WithTracerProvider(tracenoop.NewTracerProvider()),
@@ -48,13 +49,10 @@ func TestApplyOptions(t *testing.T) {
 	if opts.Home != "/tmp/home" || opts.ScratchDir != "/tmp/scratch" {
 		t.Fatalf("home/scratch options = %q / %q", opts.Home, opts.ScratchDir)
 	}
-	if opts.ProviderAuthRoot != "/tmp/provider-ledger" ||
-		opts.ProviderAuthDirectHome != "/tmp/provider-direct" ||
-		opts.ProviderAuthHome != "/tmp/provider-home" {
-		t.Fatalf("provider auth options = %q / %q / %q",
+	if opts.ProviderAuthRoot != "/tmp/provider-ledger" || opts.SharedHermesHome != "/tmp/provider-home" {
+		t.Fatalf("provider auth options = %q / %q",
 			opts.ProviderAuthRoot,
-			opts.ProviderAuthDirectHome,
-			opts.ProviderAuthHome,
+			opts.SharedHermesHome,
 		)
 	}
 	if opts.ImageLimits != (ImageLimits{
@@ -105,4 +103,29 @@ func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
 	agentRuntimePlatform = "windows"
 	t.Cleanup(func() { agentRuntimePlatform = original })
 	require.Error(t, validateProcessIsolationOption(&ProcessIsolation{UID: 1, GID: 1}))
+}
+
+func TestSharedHermesHomeRejectsProcessIsolation(t *testing.T) {
+	opts := applyOptions([]Option{
+		WithSharedHermesHome("/var/lib/hermes"),
+		WithProcessIsolation(ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{}}),
+	})
+	require.ErrorContains(t, validateSharedHermesHomeOptions(opts), "ordinary same-identity execution")
+}
+
+func TestInvalidSharedHermesHomeIsolationHasNoProviderAuthFilesystemSideEffects(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "must-not-exist")
+	ledger := filepath.Join(root, "ledger-must-not-exist")
+	agent := NewAgent(
+		WithSharedHermesHome(home),
+		WithProviderAuthRoot(ledger),
+		WithProcessIsolation(ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{}}),
+	)
+	require.ErrorContains(t, agent.optionsErr, "ordinary same-identity execution")
+	require.Nil(t, agent.providerAuth)
+	for _, path := range []string{home, ledger} {
+		_, err := os.Stat(path)
+		require.ErrorIs(t, err, os.ErrNotExist, path)
+	}
 }

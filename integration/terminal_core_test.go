@@ -11,9 +11,26 @@ import (
 )
 
 func TestHermesTerminalCoreSessionCWDIsolation(t *testing.T) {
+	agentRoot := os.Getenv("ACP_GO_HERMES_AGENT_ROOT")
+	if agentRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("resolve home for official Hermes install: %v", err)
+		}
+		agentRoot = filepath.Join(home, ".hermes", "hermes-agent")
+	}
+	python := filepath.Join(agentRoot, "venv", "bin", "python")
+	info, err := os.Stat(python)
+	if err != nil {
+		t.Fatalf("official Hermes venv interpreter %q: %v", python, err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("official Hermes venv interpreter is not executable: %q", python)
+	}
+
 	root := filepath.Join(t.TempDir(), "terminal-core")
-	command := exec.CommandContext(t.Context(), "python3", "terminal_core_probe.py", root)
-	command.Env = os.Environ()
+	command := exec.CommandContext(t.Context(), python, "terminal_core_probe.py", root) // #nosec G204,G702 -- exact local official-Hermes venv selected above.
+	command.Env = append(os.Environ(), "ACP_GO_HERMES_AGENT_ROOT="+agentRoot)
 
 	output, err := command.CombinedOutput()
 	if err != nil {

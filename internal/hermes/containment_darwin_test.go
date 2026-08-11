@@ -325,6 +325,21 @@ func TestDarwinLaunchPreparationAndStatusBranches(t *testing.T) {
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 		launch.close()
 	})
+	t.Run("owner inheritance duplicates without closing adapter lock", func(t *testing.T) {
+		restoreDarwinLaunchSeams(t)
+		owner, err := os.CreateTemp(t.TempDir(), "owner")
+		require.NoError(t, err)
+		defer owner.Close()
+		require.NoError(t, unix.Flock(int(owner.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+		launch, err := prepareDarwinLaunch(exec.Command("/usr/bin/true"), t.TempDir(), []*os.File{owner})
+		require.NoError(t, err)
+		require.Len(t, launch.inherited, 4)
+		require.NotEqual(t, owner.Fd(), launch.inherited[3].Fd())
+		launch.close()
+		_, err = owner.Stat()
+		require.NoError(t, err, "launch cleanup closed the adapter-owned lock descriptor")
+		require.NoError(t, unix.Flock(int(owner.Fd()), unix.LOCK_UN))
+	})
 
 	require.Error(t, awaitDarwinLaunchExec(nil))
 	t.Run("deadline", func(t *testing.T) {
@@ -430,7 +445,7 @@ func TestDarwinContainmentMiscellaneousBranches(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	versionScript := filepath.Join(t.TempDir(), "version-hermes")
-	require.NoError(t, os.WriteFile(versionScript, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.19.0\\n'\n"), 0o700))
+	require.NoError(t, os.WriteFile(versionScript, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.20.0\\n'\n"), 0o700))
 	nativeReleases, scratchReleases := 0, 0
 	err = ensureExecutableVersion(t.Context(), versionScript, ProcessOptions{
 		ScratchParent: t.TempDir(), DarwinBestEffortContainment: true,
@@ -564,7 +579,7 @@ func TestDarwinVersionDiscoveryRetainsIncompleteGenerationAndAdmissions(t *testi
 	restoreProcessSeams(t)
 
 	script := filepath.Join(t.TempDir(), "hermes-version")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.19.0\\n'\n"), 0o700))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Hermes Agent v0.20.0\\n'\n"), 0o700))
 	parent := t.TempDir()
 	nativeReleases, scratchReleases := 0, 0
 	retainedRoot := ""

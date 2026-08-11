@@ -65,6 +65,38 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 	}
 }
 
+func TestModelSelectionQualifiesProviderExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		provider string
+		model    string
+		want     string
+	}{
+		{provider: "xai-oauth", model: "grok-4.5", want: "xai-oauth/grok-4.5"},
+		{provider: "openrouter", model: "x-ai/grok-4.5", want: "openrouter/x-ai/grok-4.5"},
+		{provider: "nous", model: "nous/x-ai/grok-4.5", want: "nous/x-ai/grok-4.5"},
+	} {
+		if got := modelSelectionValue(test.provider, test.model); got != test.want {
+			t.Fatalf("modelSelectionValue(%q, %q) = %q, want %q", test.provider, test.model, got, test.want)
+		}
+	}
+
+	native := testNativeSession("native-qualified")
+	native.Model.ProviderID = "xai-oauth"
+	native.Model.ModelID = "xai-oauth/grok-4.5"
+	sess := newSession(newTestAgent(), "qualified", t.TempDir(), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
+	if got := sess.currentModel(); got != "xai-oauth/grok-4.5" {
+		t.Fatalf("current model duplicated provider: %q", got)
+	}
+	meta := sessionResponseMeta(sess.snapshot())
+	hermesMeta, ok := meta[hermesMetaKey].(map[string]any)
+	if !ok {
+		t.Fatalf("Hermes meta type = %T", meta[hermesMetaKey])
+	}
+	if hermesMeta["modelId"] != "xai-oauth/grok-4.5" || hermesMeta["model"] != "xai-oauth/grok-4.5" {
+		t.Fatalf("qualified response meta = %#v", hermesMeta)
+	}
+}
+
 func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()

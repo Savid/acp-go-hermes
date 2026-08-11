@@ -57,6 +57,7 @@ type Agent struct {
 	closeErr           error
 	containmentErr     error
 	constructions      sync.WaitGroup
+	constructing       int
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
@@ -65,6 +66,10 @@ type Agent struct {
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+
+	sharedConfigMu          sync.Mutex
+	sharedConfigInitialized bool
+	sharedMCPServers        []acp.McpServer
 }
 
 var (
@@ -77,7 +82,8 @@ func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
-		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options))
+		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
+		validateSharedHermesHomeOptions(options))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -120,7 +126,12 @@ func NewAgent(opts ...Option) *Agent {
 		ambientEnv:      ambientEnvironment(),
 	}
 	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
-	agent.providerAuth = newProviderAuth(agent)
+	// Invalid option combinations must be side-effect free. In particular,
+	// provider-auth initialization prepares the durable Hermes residence, which
+	// must never happen after shared-home/process-isolation validation failed.
+	if optionsErr == nil {
+		agent.providerAuth = newProviderAuth(agent)
+	}
 
 	return agent
 }
@@ -209,7 +220,6 @@ func (a *Agent) close() error {
 
 		cancel()
 	}
-
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	a.mu.Lock()
 	err = errors.Join(err, a.containmentErr)
@@ -225,13 +235,20 @@ func (a *Agent) beginSessionConstruction() error {
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
+	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
+	}
 
+	a.constructing++
 	a.constructions.Add(1)
 
 	return nil
 }
 
 func (a *Agent) endSessionConstruction() {
+	a.mu.Lock()
+	a.constructing--
+	a.mu.Unlock()
 	a.constructions.Done()
 }
 

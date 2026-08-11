@@ -29,11 +29,7 @@ func configureHermesProcess(cmd *exec.Cmd) {
 }
 
 func inspectHermesProcess(pid int) (ProcessIdentity, error) {
-	if pid <= 0 {
-		return ProcessIdentity{}, syscall.ESRCH
-	}
-
-	kinfo, err := darwinSysctlKinfoProc("kern.proc.pid", pid)
+	startTime, err := inspectHermesProcessStartTime(pid)
 	if err != nil {
 		return ProcessIdentity{}, err
 	}
@@ -48,13 +44,26 @@ func inspectHermesProcess(pid int) (ProcessIdentity, error) {
 		return ProcessIdentity{}, err
 	}
 
-	start := kinfo.Proc.P_starttime
-
 	return ProcessIdentity{
-		StartTime: strconv.FormatInt(start.Sec, 10) + "." + strconv.FormatInt(int64(start.Usec), 10),
+		StartTime: startTime,
 		Cmdline:   cmdline,
 		Env:       env,
 	}, nil
+}
+
+func inspectHermesProcessStartTime(pid int) (string, error) {
+	if pid <= 0 {
+		return "", syscall.ESRCH
+	}
+
+	kinfo, err := darwinSysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return "", err
+	}
+
+	start := kinfo.Proc.P_starttime
+
+	return strconv.FormatInt(start.Sec, 10) + "." + strconv.FormatInt(int64(start.Usec), 10), nil
 }
 
 // parseProcArgs2 decodes a kern.procargs2 sysctl buffer: an int32 argc, the

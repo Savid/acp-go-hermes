@@ -1,3 +1,4 @@
+//nolint:goconst // User-facing native fallback titles remain explicit at their lifecycle boundaries.
 package hermesacp
 
 import (
@@ -47,6 +48,9 @@ type session struct {
 	rawMessages           rawMessageConfig
 
 	client nativehermes.Server
+	// operationJournal is non-nil only until the initial New/Fork store bundle
+	// has been durably published and the session registered in this Agent.
+	operationJournal *sessionOperationJournal
 
 	turn                chan struct{}
 	lifecycleMu         sync.Mutex
@@ -758,7 +762,7 @@ func (s *session) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return joinModelValue(s.providerID, s.modelID)
+	return modelSelectionValue(s.providerID, s.modelID)
 }
 
 func (s *session) modelSelector() *nativehermes.ModelSelector {
@@ -848,9 +852,13 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 		return nil
 	}
 
+	var deleteErr error
+
 	if deleteNative && nativeID != "" {
 		deleteCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		if deleteErr := client.DeleteSession(deleteCtx, nativeID); deleteErr != nil && s.agent != nil && s.agent.log != nil {
+
+		deleteErr = client.DeleteSession(deleteCtx, nativeID)
+		if deleteErr != nil && s.agent != nil && s.agent.log != nil {
 			s.agent.log.DebugContext(deleteCtx, "delete native Hermes session failed", slog.String(jsonFieldError, deleteErr.Error()))
 		}
 
@@ -869,7 +877,7 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 
 	closeCancel()
 
-	return err
+	return errors.Join(deleteErr, err)
 }
 
 func (s *session) info() acp.SessionInfo {

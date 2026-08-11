@@ -62,13 +62,13 @@ func TestNativeOwnedDirectoryAcceptsTheNativeIdentityHome(t *testing.T) {
 	require.NoError(t, validateNativeOwnedDirectory(home, nativeOwnershipTestIsolation()))
 }
 
-// TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary is
+// TestStrictPolicySessionValidatesTheSharedHermesHomeAtTheAdapterBoundary is
 // the adapter-level proof for the policy-conditional provider-auth check. It
 // drives NewSession as a trusted root with a distinct target identity, captures
 // the native launch policy and durable auth residence, then reaches the auth
 // surface through that live session. Ordinary-mode tests cannot exercise this
 // ownership walk because a nil policy intentionally skips it.
-func TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary(t *testing.T) {
+func TestStrictPolicySessionValidatesTheSharedHermesHomeAtTheAdapterBoundary(t *testing.T) {
 	requireNativeOwnershipRoot(t)
 
 	authHome := testNativeOwnedDir(t, "native-auth")
@@ -83,7 +83,7 @@ func TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary(t *
 	agent := newIsolatedTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithProviderAuthRoot(t.TempDir()),
-		WithProviderAuthHome(authHome),
+		WithSharedHermesHome(authHome),
 		func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				starts = append(starts, opts)
@@ -103,7 +103,7 @@ func TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary(t *
 	require.NoError(t, err)
 	require.Len(t, starts, 1)
 	require.NotNil(t, starts[0].Isolation)
-	require.Equal(t, authHome, starts[0].ProviderAuthHome)
+	require.Equal(t, authHome, starts[0].SharedHermesHome)
 
 	methods, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{
 		"sessionId": string(created.SessionId),
@@ -113,7 +113,7 @@ func TestStrictPolicySessionValidatesTheProviderAuthHomeAtTheAdapterBoundary(t *
 }
 
 // TestNativeOwnedDirectoryWithoutIsolationIsNotChecked proves the check is
-// scoped to isolated sessions. Without process isolation the provider auth home
+// scoped to isolated sessions. Without process isolation the shared Hermes home
 // stays under the wrapper's own identity, and demanding a foreign owner would
 // refuse every unisolated session.
 func TestNativeOwnedDirectoryWithoutIsolationIsNotChecked(t *testing.T) {
@@ -252,7 +252,7 @@ func TestNativeOwnershipTraversalFailsClosedOnKernelFaults(t *testing.T) {
 
 // TestDurableNativeAncestorStatesEachRefusal pins the exact reason the
 // native-owned ancestry validator refuses each unsafe shape. These reasons are
-// the containment contract for the provider auth home: only the wrapper or the
+// the containment contract for the shared Hermes home: only the wrapper or the
 // native identity may own any ancestor, a writable ancestor is tolerated only
 // when the wrapper owns it and it is sticky, the leaf must be owned outright by
 // the native identity with full owner rights, and every ancestor must be

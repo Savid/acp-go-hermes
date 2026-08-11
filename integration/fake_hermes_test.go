@@ -387,8 +387,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 func runFakeHermesServer(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (fake)")
-			_, _ = fmt.Fprintln(os.Stdout, "Runtime capabilities: provider-auth-home-v1")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
 			return nil
 		}
 	}
@@ -457,6 +456,7 @@ func captureIntegrationSessionCLI() error {
 type fakeGatewayState struct {
 	mu       sync.Mutex
 	messages []map[string]any
+	title    string
 }
 
 func (s *fakeGatewayState) recordAssistant(text string) {
@@ -526,6 +526,9 @@ func handleFakeGatewayRPC(
 			"session_key": stored,
 		})
 	case "session.title":
+		state.mu.Lock()
+		state.title, _ = params["title"].(string)
+		state.mu.Unlock()
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
 			"pending": false,
 			"title":   params["title"],
@@ -545,14 +548,22 @@ func handleFakeGatewayRPC(
 				"cwd":         params["cwd"],
 			},
 		}})
+	case "session.list":
+		state.mu.Lock()
+		title := state.title
+		state.mu.Unlock()
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{
+			"id": fakeStoredSessionKey, "title": title,
+		}}})
 	case "session.history":
 		messages := state.history()
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": len(messages), "messages": messages})
 	case "session.branch":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
-			"session_id": "live-branch",
-			"title":      "Branch",
-			"parent":     fakeStoredSessionKey,
+			"session_id":        "live-branch",
+			"stored_session_id": "stored-branch",
+			"title":             "Branch",
+			"parent":            fakeStoredSessionKey,
 		})
 	case "model.options":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
@@ -600,7 +611,7 @@ func handleFakeGatewayRPC(
 			"result":  map[string]any{"probe": "authorized", "status": "ok"},
 		})
 		state.recordAssistant("fake response")
-		// Hermes 0.19.0 may deliver the entire assistant reply only on the
+		// Hermes may deliver the entire assistant reply only on the
 		// authoritative completion event, with no preceding message.delta.
 		writeFakeGatewayEvent(ctx, conn, "message.complete", live, map[string]any{
 			"text":  "fake response",
@@ -609,6 +620,10 @@ func handleFakeGatewayRPC(
 	case "session.delete", "session.close", "session.interrupt",
 		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
+	case "config.set":
+		value, _ := params["value"].(string)
+		raw := strings.Trim(strings.Fields(value)[0], "'")
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
 	default:
 		writeFakeGatewayError(ctx, conn, id, -32601, "missing")
 	}

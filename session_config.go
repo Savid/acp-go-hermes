@@ -54,6 +54,21 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
 		}
 
+		snapshot := session.snapshot()
+
+		client := snapshot.client
+		if managed, ok := client.(*managedHermesServer); ok {
+			client = managed.Server
+		}
+
+		if setter, supported := client.(interface {
+			SetModel(context.Context, string, string) error
+		}); supported {
+			if err := setter.SetModel(ctx, snapshot.idmap.NativeSessionID, value); err != nil {
+				return acp.SetSessionConfigOptionResponse{}, err
+			}
+		}
+
 		session.setModel(value)
 
 		options = session.configOptionsFrom(providers)
@@ -157,7 +172,7 @@ func (s *session) contextWindow(ctx context.Context) int {
 
 		for key := range provider.Models {
 			model := provider.Models[key]
-			if firstNonEmpty(model.ID, key) != snapshot.modelID {
+			if modelSelectionValue(provider.ID, firstNonEmpty(model.ID, key)) != snapshot.modelValue() {
 				continue
 			}
 
@@ -195,7 +210,7 @@ func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.Provider
 			model := provider.Models[key]
 			modelID := firstNonEmpty(model.ID, key)
 
-			value := provider.ID + "/" + modelID
+			value := modelSelectionValue(provider.ID, modelID)
 			if current == "" {
 				current = value
 			}
@@ -239,12 +254,16 @@ func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.Provider
 	}}
 }
 
+func modelSelectionValue(providerID string, modelID string) string {
+	return nativehermes.ModelSelectionValue(providerID, modelID)
+}
+
 func (snapshot sessionSnapshot) modelValue() string {
-	return joinModelValue(snapshot.providerID, snapshot.modelID)
+	return modelSelectionValue(snapshot.providerID, snapshot.modelID)
 }
 
 func modelMeta(providerID string, modelID string, model nativehermes.ProviderModel) map[string]any {
-	meta := map[string]any{"modelId": providerID + "/" + modelID}
+	meta := map[string]any{"modelId": modelSelectionValue(providerID, modelID)}
 	if n, ok := nativehermes.IntFromNumber(model.Limit["context"]); ok {
 		meta["contextWindow"] = n
 	}

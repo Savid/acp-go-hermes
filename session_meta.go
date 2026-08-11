@@ -303,7 +303,7 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 	hermesMeta := map[string]any{
 		hermesNativeIDMetaKey: snapshot.idmap.NativeSessionID,
 	}
-	if model := joinModelValue(snapshot.providerID, snapshot.modelID); model != "" {
+	if model := modelSelectionValue(snapshot.providerID, snapshot.modelID); model != "" {
 		hermesMeta["model"] = model
 		hermesMeta["modelId"] = model
 	}

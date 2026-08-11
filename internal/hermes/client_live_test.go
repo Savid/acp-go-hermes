@@ -23,8 +23,6 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create generation root: %v", err)
 	}
-	runLiveTokens := os.Getenv("ACP_GO_HERMES_RUN_LIVE_TOKENS") != ""
-
 	opts := ProcessOptions{
 		Home:          home,
 		Cwd:           t.TempDir(),
@@ -37,29 +35,11 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
 		RetainDiscoveryRoot:       func(string, error) {},
 	}
-	if runLiveTokens {
-		authHome := filepath.Join(os.Getenv("HOME"), ".hermes")
-		if _, statErr := os.Stat(filepath.Join(authHome, "auth.json")); statErr != nil {
-			t.Skipf("ambient Hermes auth not available: %v", statErr)
-		}
-		const config = "model:\n" +
-			"  provider: xai-oauth\n" +
-			"  default: grok-4.5\n" +
-			"  base_url: https://api.x.ai/v1\n" +
-			"  max_tokens: 1024\n"
-		if writeErr := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0o600); writeErr != nil {
-			t.Fatalf("write live-test Hermes config: %v", writeErr)
-		}
-		opts.ProviderAuthHome = authHome
-	} else {
-		// image.attach_bytes is a local upload rather than a model call, but
-		// the gateway refuses it until some inference provider is configured.
-		// The non-token tier therefore names one it never reaches: a
-		// placeholder key satisfies that precondition, no prompt is submitted,
-		// and no credential or real Hermes home is involved. That is what keeps
-		// the upload exercised against the real gateway on every smoke run.
-		opts.Env["OPENAI_API_KEY"] = "acp-go-hermes-smoke-placeholder-not-a-credential"
-	}
+	// image.attach_bytes is a local upload rather than a model call, but the
+	// gateway refuses it until some inference provider is configured. A
+	// placeholder key satisfies that precondition; no prompt is submitted and
+	// no credential or real Hermes home is involved.
+	opts.Env["OPENAI_API_KEY"] = "acp-go-hermes-smoke-placeholder-not-a-credential"
 	if runtime.GOOS == "darwin" {
 		opts.DarwinBestEffortContainment = true
 	}
@@ -92,19 +72,8 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	)); err != nil {
 		t.Fatalf("image.attach_bytes: %v", err)
 	}
-	if runLiveTokens {
-		if err := proc.Client.SubmitPrompt(ctx, created.SessionID, "Reply with exactly HERMES_LIVE_OK."); err != nil {
-			t.Fatalf("prompt.submit: %v", err)
-		}
-		waitForEvent(t, ctx, proc.Client, "message.complete")
-	}
 	if _, err := os.Stat(filepath.Join(home, "state.db")); err != nil {
 		t.Fatalf("state.db not created: %v", err)
-	}
-	if runLiveTokens {
-		if _, err := proc.Client.Branch(ctx, created.SessionID, "acp-go-hermes branch probe"); err != nil {
-			t.Fatalf("session.branch: %v", err)
-		}
 	}
 	if err := proc.Client.CloseSession(ctx, created.SessionID); err != nil {
 		t.Fatalf("session.close: %v", err)

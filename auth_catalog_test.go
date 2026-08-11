@@ -5,7 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
@@ -61,7 +63,7 @@ func TestMethodsEnumeratesOnlyNativeOAuthCatalog(t *testing.T) {
 func TestMethodsPublishesNoBrokerLoginForOfficialHermesWithoutDurableAuthHome(t *testing.T) {
 	agent, client := newAuthAgent(t)
 	unsupported := false
-	client.providerAuthHomeSupported = &unsupported
+	client.providerAuthSupported = &unsupported
 	client.authProvidersErr = errors.New("native catalog must not be consulted")
 
 	result, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
@@ -128,7 +130,7 @@ func TestMethodsFailsClosedWhenNoGenerationCanBeMinted(t *testing.T) {
 	requireAuthCause(t, err, authCauseProcess)
 
 	unsupported := false
-	client.providerAuthHomeSupported = &unsupported
+	client.providerAuthSupported = &unsupported
 	_, err = callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseProcess)
 }
@@ -337,5 +339,60 @@ func TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn(t *testing.T) {
 
 	if launches != 0 {
 		t.Fatalf("provider-auth legs performed %d native launches, want none", launches)
+	}
+}
+
+func TestCrossAgentPendingProviderFlowDoesNotBlockInventory(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	newAgent := func(sessionID acp.SessionId) (*Agent, *fakeHermesClient) {
+		client := newFakeHermesClient()
+		client.xdg = nativehermes.XDGDirs{Root: home}
+		client.authProviders = []nativehermes.AuthProvider{{ID: testProviderID, Name: "xAI", Flow: nativehermes.AuthFlowDeviceCode, LoggedIn: true}}
+		client.authStart = nativehermes.AuthStart{SessionID: "native-flow", Flow: nativehermes.AuthFlowDeviceCode, URL: "https://example.test/device"}
+		agent := newTestAgent(WithProviderAuthRoot(root), WithSharedHermesHome(home))
+		if agent.providerAuth == nil {
+			t.Fatal("provider auth unavailable")
+		}
+		session := newSession(agent, sessionID, "/cwd", nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
+		if err := agent.storeStartedSession(session); err != nil {
+			t.Fatal(err)
+		}
+
+		return agent, client
+	}
+	agentA, _ := newAgent("agent-a-session")
+	agentB, _ := newAgent("agent-b-session")
+
+	catalog, err := callLeg(t, agentA, AuthMethodsMethod, map[string]any{"sessionId": "agent-a-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods := mustType[authMethodsResult](t, catalog)
+	authorized, err := callLeg(t, agentA, AuthAuthorizeMethod, map[string]any{
+		"sessionId": "agent-a-session", "providerId": testProviderID,
+		"connectionId": testConnectionID, "methodsGeneration": methods.Generation,
+		"method": nativehermes.AuthFlowDeviceCode, "authorizeRequestId": "cross-agent-pending",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := mustType[authAuthorizeResult](t, authorized)
+
+	started := time.Now()
+	result, err := callLeg(t, agentB, AuthInventoryMethod, map[string]any{"sessionId": "agent-b-session"})
+	if err != nil {
+		t.Fatalf("inventory behind pending cross-agent flow: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("inventory blocked for %s", elapsed)
+	}
+	if entries := mustType[authInventoryResult](t, result).Entries; len(entries) != 0 {
+		t.Fatalf("pending provider was reported as proven: %#v", entries)
+	}
+	if _, err := callLeg(t, agentA, AuthCancelMethod, map[string]any{
+		"sessionId": "agent-a-session", "providerId": testProviderID, "flowId": flow.FlowID,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

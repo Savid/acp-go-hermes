@@ -28,6 +28,14 @@ func startContainedProcess(cmd *exec.Cmd, specs ...ContainmentSpec) (*processCon
 	// one stronger boundary a host can layer onto an omitted policy, and it is
 	// explicitly opted into.
 	if spec.Isolation == nil && !spec.DarwinBestEffort {
+		if len(spec.SharedSessionOwnerFiles) != 0 {
+			if cmd == nil {
+				return nil, errors.New("hermes command is unavailable for inherited session-owner locks")
+			}
+
+			cmd.ExtraFiles = append(cmd.ExtraFiles, spec.SharedSessionOwnerFiles...)
+		}
+
 		return startOrdinaryProcess(cmd)
 	}
 

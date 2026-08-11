@@ -25,14 +25,14 @@ import (
 )
 
 const (
-	MinimumVersion             = "0.19.0"
-	providerAuthHomeCapability = "provider-auth-home-v1"
+	MinimumVersion = "0.20.0"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the compatibility sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
 	fieldCwd              = "cwd"
 	fieldTitle            = "title"
 	eventGatewayReady     = "gateway.ready"
+	missingProbeSessionID = "__acp_go_hermes_missing_probe__"
 )
 
 // ErrProcessContainmentIncomplete means the selected native containment
@@ -40,36 +40,41 @@ const (
 var ErrProcessContainmentIncomplete = errors.New("hermes process containment incomplete")
 
 var (
-	commandContext              = exec.CommandContext
-	command                     = exec.Command
-	listenTCP                   = net.Listen
-	randReader                  = rand.Reader
-	mkdirTemp                   = os.MkdirTemp
-	mkdirAll                    = os.MkdirAll
-	removeAll                   = os.RemoveAll
-	userHomeDir                 = os.UserHomeDir
-	statPath                    = os.Stat
-	after                       = time.After
-	newStatusHTTPClient         = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
-	waitProcessCommand          = func(cmd *exec.Cmd) error { return cmd.Wait() }
-	processTreeClose            = func(tree *processContainment) error { return tree.close() }
-	startHermesContainedProcess = startContainedProcess
-	newProcessBrowserShim       = newBrowserShim
-	processNativeTreeHandoff    = handoffGeneratedNativeTree
-	versionPattern              = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
+	commandContext                  = exec.CommandContext
+	command                         = exec.Command
+	listenTCP                       = net.Listen
+	randReader                      = rand.Reader
+	mkdirTemp                       = os.MkdirTemp
+	mkdirAll                        = os.MkdirAll
+	removeAll                       = os.RemoveAll
+	userHomeDir                     = os.UserHomeDir
+	statPath                        = os.Stat
+	after                           = time.After
+	newStatusHTTPClient             = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
+	waitProcessCommand              = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	processTreeClose                = func(tree *processContainment) error { return tree.close() }
+	startHermesContainedProcess     = startContainedProcess
+	newProcessBrowserShim           = newBrowserShim
+	processNativeTreeHandoff        = handoffGeneratedNativeTree
+	afterHermesSpawnBeforeOwnerBind = func(*exec.Cmd) {}
+	versionPattern                  = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
 )
 
 var (
 	executableProbeMu sync.Mutex
+	// sharedExecutableVersionProbeMu serializes the deliberately uncached
+	// shared-home probes. Every shared process start re-runs --version so a
+	// binary replaced at the same path cannot inherit an earlier verdict.
+	sharedExecutableVersionProbeMu sync.Mutex
 	// executableProbed records the executables whose --version output has been
 	// read and accepted. gatewayProbed records the executables whose gateway
 	// answered the startup method sweep. They are separate facts: the version
 	// probe spawns its own process and proves the binary, while the sweep proves
 	// one live gateway, so a start that never reached readiness must not cost a
 	// second --version process next time.
-	executableProbed       = map[string]bool{}
-	executableCapabilities = map[string]map[string]struct{}{}
-	gatewayProbed          = map[string]bool{}
+	executableProbed   = map[string]bool{}
+	executableVersions = map[string]string{}
+	gatewayProbed      = map[string]bool{}
 	// executableProbes holds the version probe currently in flight per
 	// executable, so concurrent starts share one native probe process instead of
 	// each spawning their own. The channel is closed when that probe settles.
@@ -79,12 +84,25 @@ var (
 type ProcessOptions struct {
 	ExecutablePath string
 	Home           string
+	// ContainmentRoot is the unique wrapper-owned generation used for process
+	// ownership records when Home is an intentionally shared durable residence.
+	// Empty uses Home.
+	ContainmentRoot string
+	// SharedHome binds the exact probed Hermes version to Home before launch.
+	SharedHome bool
+	// PrepareSharedHome runs after a fresh executable version probe and exact
+	// home-version binding, but before any serve process is spawned. It is used
+	// for the serialized shared config transaction so an unproven or mismatched
+	// executable can never mutate the durable residence.
+	PrepareSharedHome func(context.Context, string) error
+	// SharedSessionOwners are bound to the native PID/start-time immediately
+	// after spawn, before readiness or compatibility probes can run.
+	SharedSessionOwners []*SharedSessionOwner
 	// ScratchParent is the resolved parent directory used to materialize an
 	// isolated home when Home is empty. The internal package never consults the
 	// system temp directory itself.
-	ScratchParent    string
-	Cwd              string
-	ProviderAuthHome string
+	ScratchParent string
+	Cwd           string
 	// Env is the static Agent-scoped overlay used for executable lookup,
 	// version probing, and as the native base environment.
 	Env map[string]string
@@ -115,6 +133,9 @@ type ContainmentSpec struct {
 	RuntimeID        string
 	LifecycleKind    string
 	Isolation        *ProcessIsolation
+	// SharedSessionOwnerFiles are already-locked descriptors whose kernel lock
+	// must be inherited atomically by the native child or its trusted guardian.
+	SharedSessionOwnerFiles []*os.File
 }
 
 // synchronizedBuffer is used where exec may still be retiring its pipe-copy
@@ -147,15 +168,9 @@ type Process struct {
 	Token      string
 	StatusURL  string
 	APIBaseURL string
-	// providerAuthHomeSupported records whether this exact executable
-	// advertised the contract that makes HERMES_AUTH_HOME authoritative. An
-	// official Hermes release that does not know the variable must never be
-	// allowed to turn an ephemeral login into a purported durable binding.
-	providerAuthHomeSupported bool
-
-	cancel context.CancelFunc
-	tree   *processContainment
-	shim   *browserShim
+	cancel     context.CancelFunc
+	tree       *processContainment
+	shim       *browserShim
 
 	waitOnce sync.Once
 	waitDone chan struct{}
@@ -180,13 +195,7 @@ func (p *Process) BrowserLaunchContained() bool {
 	return p != nil && p.shim != nil
 }
 
-// ProviderAuthHomeSupported reports whether the executable promised to keep
-// provider credentials in HERMES_AUTH_HOME independently of the session's
-// ephemeral HERMES_HOME.
-func (p *Process) ProviderAuthHomeSupported() bool {
-	return p != nil && p.providerAuthHomeSupported
-}
-
+//nolint:gocyclo,govet // Startup is one ordered containment transaction with narrow failure scopes.
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err := validateProcessContainment(opts.DarwinBestEffortContainment); err != nil {
 		return nil, err
@@ -244,9 +253,22 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	providerAuthHomeSupported := executableSupportsCapability(executable, providerAuthHomeCapability)
-
-	probeNeeded := !gatewayMethodsProbed(executable)
+	if opts.SharedHome {
+		if err := bindSharedHermesVersion(ctx, home, executableVersion(executable)); err != nil {
+			return nil, err
+		}
+		if opts.PrepareSharedHome != nil {
+			if err := opts.PrepareSharedHome(ctx, home); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Official shared-home startup must not create the compatibility probe's
+	// durable draft outside the adapter's cross-process session-set journal.
+	// Exact v0.20 version binding is the compatibility boundary in this mode;
+	// ordinary session methods are exercised only after the Agent holds its
+	// shared/exclusive operation fence.
+	probeNeeded := gatewayMethodProbeNeeded(opts, executable)
 
 	env, err := processSessionLaunchEnvironment(opts)
 	if err != nil {
@@ -277,10 +299,6 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	env = upsertProcessEnv(env, envHermesHome, home)
 	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
-	if opts.ProviderAuthHome != "" && providerAuthHomeSupported {
-		env = upsertProcessEnv(env, envHermesAuthHome, opts.ProviderAuthHome)
-	}
-
 	// A login runs inside this process, and hermes opens a browser for it even
 	// when told not to: --no-browser is accepted and then ignored. The shim
 	// shadows every launcher it could exec and points BROWSER at one of those
@@ -316,15 +334,22 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	}
 
 	configureHermesProcess(cmd)
+	ownerFiles, err := sharedSessionOwnerFiles(opts.SharedSessionOwners)
+	if err != nil {
+		cancel()
+
+		return nil, errors.Join(err, shim.remove())
+	}
 
 	spawnStarted := time.Now()
 
 	tree, startErr := startHermesContainedProcess(cmd, ContainmentSpec{
-		DarwinBestEffort: opts.DarwinBestEffortContainment,
-		ScratchParent:    opts.ScratchParent,
-		GenerationRoot:   home,
-		LifecycleKind:    containmentSessionKind,
-		Isolation:        opts.Isolation,
+		DarwinBestEffort:        opts.DarwinBestEffortContainment,
+		ScratchParent:           opts.ScratchParent,
+		GenerationRoot:          firstNonEmpty(opts.ContainmentRoot, home),
+		LifecycleKind:           containmentSessionKind,
+		Isolation:               opts.Isolation,
+		SharedSessionOwnerFiles: ownerFiles,
 	})
 	if startErr != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, startErr)
@@ -336,18 +361,23 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, nil)
 
 	process := &Process{
-		Cmd:                       cmd,
-		Home:                      home,
-		Port:                      port,
-		Token:                     token,
-		StatusURL:                 "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
-		APIBaseURL:                "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
-		providerAuthHomeSupported: providerAuthHomeSupported,
-		cancel:                    cancel,
-		tree:                      tree,
-		shim:                      shim,
+		Cmd:        cmd,
+		Home:       home,
+		Port:       port,
+		Token:      token,
+		StatusURL:  "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
+		APIBaseURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
+		cancel:     cancel,
+		tree:       tree,
+		shim:       shim,
 	}
 	process.beginWait()
+	afterHermesSpawnBeforeOwnerBind(cmd)
+	for _, owner := range opts.SharedSessionOwners {
+		if bindErr := owner.BindProcess(cmd.Process.Pid); bindErr != nil {
+			return nil, errors.Join(bindErr, process.Close(context.Background()))
+		}
+	}
 
 	readyCtx, readyCancel := context.WithTimeout(ctx, timeout)
 	defer readyCancel()
@@ -386,6 +416,10 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, nil)
 
 	return process, nil
+}
+
+func gatewayMethodProbeNeeded(opts ProcessOptions, executable string) bool {
+	return !opts.SharedHome && !gatewayMethodsProbed(executable)
 }
 
 // processLaunchEnvironment builds the environment the native harness receives.
@@ -659,6 +693,13 @@ func upsertProcessEnv(env []string, key string, value string) []string {
 // its startup method sweep is a separate fact with its own marker, so a start
 // that failed at readiness no longer costs a second --version process.
 func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) error {
+	if opts.SharedHome {
+		sharedExecutableVersionProbeMu.Lock()
+		defer sharedExecutableVersionProbeMu.Unlock()
+
+		return probeExecutableVersion(ctx, executable, opts)
+	}
+
 	for {
 		settled, run := beginExecutableVersionProbe(executable)
 		if settled == nil {
@@ -823,45 +864,22 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	if compareVersions(version, MinimumVersion) < 0 {
 		return fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
-
-	markExecutableCapabilities(executable, parseRuntimeCapabilities(output.String()))
+	recordExecutableVersion(executable, version)
 
 	return nil
 }
 
-func parseRuntimeCapabilities(output string) map[string]struct{} {
-	capabilities := make(map[string]struct{})
-
-	for line := range strings.SplitSeq(output, "\n") {
-		value, ok := strings.CutPrefix(strings.TrimSpace(line), "Runtime capabilities:")
-		if !ok {
-			continue
-		}
-
-		for field := range strings.FieldsSeq(value) {
-			capability := strings.Trim(field, ",")
-			if capability != "" {
-				capabilities[capability] = struct{}{}
-			}
-		}
-	}
-
-	return capabilities
-}
-
-func markExecutableCapabilities(executable string, capabilities map[string]struct{}) {
+func recordExecutableVersion(executable string, version string) {
 	executableProbeMu.Lock()
-	executableCapabilities[executable] = capabilities
+	executableVersions[executable] = version
 	executableProbeMu.Unlock()
 }
 
-func executableSupportsCapability(executable string, capability string) bool {
+func executableVersion(executable string) string {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
 
-	_, supported := executableCapabilities[executable][capability]
-
-	return supported
+	return executableVersions[executable]
 }
 
 func parseVersion(output string) (string, bool) {
@@ -901,7 +919,7 @@ func versionParts(value string) [3]int {
 	return out
 }
 
-func (p *Process) probeGatewayMethods(ctx context.Context) error {
+func (p *Process) probeGatewayMethods(ctx context.Context) (returnErr error) {
 	created, err := p.Client.CreateSession(ctx, map[string]any{fieldCwd: p.Home, fieldTitle: "acp-go-hermes startup probe"})
 	if err != nil {
 		return fmt.Errorf("hermes startup probe session.create failed: %w", err)
@@ -910,6 +928,23 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 	if created.SessionID == "" || created.StoredSessionID == "" {
 		return fmt.Errorf("hermes startup probe session.create schema drift")
 	}
+	liveSessions := map[string]struct{}{created.SessionID: {}}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+		var cleanupErr error
+		for liveID := range liveSessions {
+			if closeErr := p.Client.CloseSession(cleanupCtx, liveID); closeErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("hermes startup probe session.close failed: %w", closeErr))
+			}
+		}
+		if deleteErr := p.Client.DeleteSession(cleanupCtx, created.StoredSessionID); deleteErr != nil {
+			if presentErr := methodPresent("session.delete", deleteErr); presentErr != nil {
+				cleanupErr = errors.Join(cleanupErr, presentErr)
+			}
+		}
+		returnErr = errors.Join(returnErr, cleanupErr)
+	}()
 
 	if resumed, err := p.Client.ResumeSession(ctx, created.StoredSessionID, map[string]any{}); err != nil {
 		if presentErr := methodPresent("session.resume", err); presentErr != nil {
@@ -917,6 +952,8 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 		}
 	} else if resumed.SessionID == "" || resumed.SessionKey == "" {
 		return fmt.Errorf("hermes startup probe session.resume schema drift")
+	} else {
+		liveSessions[resumed.SessionID] = struct{}{}
 	}
 
 	if active, err := p.Client.ActiveList(ctx); err != nil {
@@ -932,30 +969,24 @@ func (p *Process) probeGatewayMethods(ctx context.Context) error {
 		return fmt.Errorf("hermes startup probe model.options schema drift")
 	}
 
-	if err := methodPresent("prompt.submit", p.Client.SubmitPrompt(ctx, "__acp_go_hermes_missing_probe__", "")); err != nil {
+	if err := methodPresent("prompt.submit", p.Client.SubmitPrompt(ctx, missingProbeSessionID, "")); err != nil {
 		return err
 	}
 
-	if err := methodPresent("image.attach_bytes", p.Client.AttachImageBytes(ctx, "__acp_go_hermes_missing_probe__", []byte{0})); err != nil {
+	if err := methodPresent("image.attach_bytes", p.Client.AttachImageBytes(ctx, missingProbeSessionID, []byte{0})); err != nil {
 		return err
 	}
 
-	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, live, "deny", false)); err != nil {
+	// Presence-only response probes use a missing sentinel. Official Hermes
+	// resolves a real session through _sess, which can trigger its deferred full
+	// agent build and runtime dependency discovery. Startup must not activate a
+	// session merely to prove that these methods exist.
+	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, missingProbeSessionID, "deny", false)); err != nil {
 		return err
 	}
 
-	if err := methodPresent("clarify.respond", p.Client.ClarifyRespond(ctx, live, "acp-go-hermes-probe", "")); err != nil {
+	if err := methodPresent("clarify.respond", p.Client.ClarifyRespond(ctx, missingProbeSessionID, "acp-go-hermes-probe", "")); err != nil {
 		return err
-	}
-
-	if err := p.Client.CloseSession(ctx, live); err != nil {
-		return fmt.Errorf("hermes startup probe session.close failed: %w", err)
-	}
-
-	if err := p.Client.DeleteSession(ctx, created.StoredSessionID); err != nil {
-		if presentErr := methodPresent("session.delete", err); presentErr != nil {
-			return presentErr
-		}
 	}
 
 	return nil

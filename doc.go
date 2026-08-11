@@ -17,13 +17,11 @@
 // agent directly construct one with [NewAgent] and the same [Option] values.
 // Hermes authentication and provider credentials remain owned by native
 // Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
-// beneath the scratch parent from [WithScratchDir]. Provider OAuth requires the
-// paired [WithProviderAuthRoot] and [WithProviderAuthHome] options. A native
-// executable that advertises `provider-auth-home-v1` receives the latter as
-// `HERMES_AUTH_HOME`, while the former stores only values-free connection
-// lineage. An official executable without that capability keeps ordinary
-// sessions but offers no broker login methods. [WithHome] and
-// [WithProviderAuthDirectHome] remain unsupported.
+// beneath the scratch parent from [WithScratchDir]. [WithSharedHermesHome]
+// explicitly opts official Hermes into one durable native home shared by its
+// otherwise independent per-session processes. Provider OAuth additionally
+// requires [WithProviderAuthRoot] for values-free connection lineage. The
+// adapter never reads or copies credentials. [WithHome] remains unsupported.
 //
 // Prompt images arrive either as embedded base64 or, for a co-located host that
 // sets [WithInputHandoffRoot], as digest-verified files under that read-only
@@ -36,7 +34,8 @@
 // session store receives `hermes-state-db-v1` snapshots keyed by the
 // ACP-visible session ID and subpath, can back session/list, and can hydrate
 // a snapshot into a fresh per-session Hermes home for session/load or
-// session/resume when the local native state is absent.
+// session/resume when isolated native state is absent. Shared-home mode stores
+// logical metadata only and resumes against the durable official database.
 //
 // Hosts can call [CallForkSession] for the Hermes fork extension method
 // _hermes/session/fork. Raw Hermes gateway events are emitted as

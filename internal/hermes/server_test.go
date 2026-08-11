@@ -1,3 +1,4 @@
+//nolint:gocyclo // Stateful gateway/config matrices intentionally enumerate protocol branches.
 package hermes
 
 import (
@@ -36,11 +37,15 @@ type fakeGatewayServer struct {
 	closeAfterResult    string
 	closeNowAfterResult string
 	failMethods         map[string]struct{}
+	failAfterCalls      map[string]int
 	promptEvents        *[]Event
 	promptEventDelay    time.Duration
 	promptRawFrames     []string
 	branchNotFound      int
 	branchCreated       bool
+	branchTitle         string
+	branchWrongTitle    bool
+	branchFailAfterSave bool
 	branchNoSession     bool
 	branchNoActive      bool
 	branchNoKey         bool
@@ -48,7 +53,12 @@ type fakeGatewayServer struct {
 	createNoStored      bool
 	titlePending        bool
 	titleMissing        bool
+	titleDoesNotPersist bool
 	durableCreated      bool
+	durableTitle        string
+	persistedCount      int
+	persistedMissingID  bool
+	deleteKeepsBranch   bool
 	requireDurable      bool
 	resumeNoLive        bool
 	resumeNoKey         bool
@@ -65,6 +75,7 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	fake := &fakeGatewayServer{
 		t:               t,
 		failMethods:     map[string]struct{}{},
+		failAfterCalls:  map[string]int{},
 		notFoundMethods: map[string]int{},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
@@ -75,7 +86,7 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 
 func TestMCPServersWithSecretEnv(t *testing.T) {
 	servers := []acp.McpServer{
-		{Stdio: &acp.McpServerStdio{Name: "stdio", Command: "tool"}},
+		stdioMCPServer("stdio", "tool", nil, map[string]string{"TOKEN": "stdio-secret"}),
 		{Http: &acp.McpServerHttpInline{
 			Name: "http",
 			Url:  "https://example.test/mcp",
@@ -93,6 +104,12 @@ func TestMCPServersWithSecretEnv(t *testing.T) {
 	if got := materialized[1].Http.Headers[0].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_1}" {
 		t.Fatalf("authorization placeholder = %q", got)
 	}
+	if got := materialized[0].Stdio.Env[0].Value; got != "${ACP_GO_HERMES_MCP_ENV_1_1}" {
+		t.Fatalf("stdio placeholder = %q", got)
+	}
+	if env["ACP_GO_HERMES_MCP_ENV_1_1"] != "stdio-secret" {
+		t.Fatalf("stdio secret environment = %#v", env)
+	}
 	if got := materialized[1].Http.Headers[1].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_2}" {
 		t.Fatalf("API key placeholder = %q", got)
 	}
@@ -101,6 +118,9 @@ func TestMCPServersWithSecretEnv(t *testing.T) {
 	}
 	if servers[1].Http.Headers[0].Value != "Bearer secret" {
 		t.Fatalf("input server was mutated: %#v", servers[1])
+	}
+	if servers[0].Stdio.Env[0].Value != "stdio-secret" {
+		t.Fatalf("input stdio server was mutated: %#v", servers[0])
 	}
 
 	_, _, err = mcpServersWithSecretEnv(servers, map[string]string{"ACP_GO_HERMES_MCP_HEADER_2_1": "occupied"})
@@ -176,6 +196,13 @@ func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
 		closeAfterResult := s.closeAfterResult == req.Method
 		closeNowAfterResult := s.closeNowAfterResult == req.Method
 		_, fail := s.failMethods[req.Method]
+		if remaining, delayed := s.failAfterCalls[req.Method]; delayed {
+			if remaining == 0 {
+				fail = true
+			} else {
+				s.failAfterCalls[req.Method] = remaining - 1
+			}
+		}
 		notFound := s.notFoundMethods[req.Method] > 0
 		if notFound {
 			s.notFoundMethods[req.Method]--
@@ -295,12 +322,51 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			})
 		}
 		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
+	case "session.list":
+		s.mu.Lock()
+		durableCreated := s.durableCreated
+		durableTitle := s.durableTitle
+		branchCreated := s.branchCreated
+		branchTitle := firstNonEmpty(s.branchTitle, "branch")
+		persistedCount := s.persistedCount
+		persistedMissingID := s.persistedMissingID
+		s.mu.Unlock()
+		if persistedMissingID {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{"title": "missing id"}}})
+
+			return
+		}
+		if persistedCount > 0 {
+			sessions := make([]map[string]any, persistedCount)
+			for index := range sessions {
+				sessions[index] = map[string]any{"id": fmt.Sprintf("stored-%d", index)}
+			}
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
+
+			return
+		}
+		sessions := make([]map[string]any, 0, 2)
+		if durableCreated {
+			sessions = append(sessions, map[string]any{"id": "stored-1", "title": durableTitle})
+		}
+		if branchCreated {
+			sessions = append(sessions, map[string]any{"id": "stored-branch", "title": branchTitle})
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
 	case "session.delete":
 		sessionID, _ := params["session_id"].(string)
 		if sessionID == "missing" {
 			s.writeError(ctx, conn, id, 4007, "not found")
 
 			return
+		}
+		s.mu.Lock()
+		deleteKeepsBranch := s.deleteKeepsBranch
+		s.mu.Unlock()
+		if sessionID == "stored-branch" && !deleteKeepsBranch {
+			s.mu.Lock()
+			s.branchCreated = false
+			s.mu.Unlock()
 		}
 		s.writeResult(ctx, conn, id, map[string]any{})
 	case "reload.mcp":
@@ -316,8 +382,10 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.mu.Lock()
 		pending := s.titlePending
 		missing := s.titleMissing
-		if !pending {
+		doesNotPersist := s.titleDoesNotPersist
+		if !pending && !doesNotPersist {
 			s.durableCreated = true
+			s.durableTitle = title
 		}
 		s.mu.Unlock()
 		result := map[string]any{"pending": pending, "title": title}
@@ -346,6 +414,10 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 	case "approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond", "session.interrupt", "session.close":
 		s.writeResult(ctx, conn, id, map[string]any{})
+	case "config.set":
+		value, _ := params["value"].(string)
+		raw := strings.Trim(strings.Fields(value)[0], "'")
+		s.writeResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
 	case "session.history":
 		s.writeResult(ctx, conn, id, map[string]any{"count": 2, "messages": []map[string]any{
 			{"role": "user", "content": "hi"},
@@ -365,21 +437,41 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		s.mu.Lock()
 		s.branchCreated = true
+		branchTitle, _ := params["name"].(string)
+		if branchTitle == "" {
+			branchTitle = "branch"
+		}
+		if s.branchWrongTitle {
+			branchTitle = "other"
+		}
+		s.branchTitle = branchTitle
+		branchFailAfterSave := s.branchFailAfterSave
 		branchNoSession := s.branchNoSession
+		branchNoKey := s.branchNoKey
 		s.mu.Unlock()
+		if branchFailAfterSave {
+			s.writeError(ctx, conn, id, -32000, "branch failed after save")
+
+			return
+		}
 		if branchNoSession {
 			s.writeResult(ctx, conn, id, map[string]any{
-				"title":  "branch",
+				"title":  branchTitle,
 				"parent": "stored-1",
 			})
 
 			return
 		}
-		s.writeResult(ctx, conn, id, map[string]any{
-			"session_id": "live-branch",
-			"title":      "branch",
-			"parent":     "stored-1",
-		})
+		result := map[string]any{
+			"session_id":        "live-branch",
+			"stored_session_id": "stored-branch",
+			"title":             branchTitle,
+			"parent":            "stored-1",
+		}
+		if branchNoKey {
+			delete(result, "stored_session_id")
+		}
+		s.writeResult(ctx, conn, id, result)
 	case "model.options":
 		s.writeResult(ctx, conn, id, map[string]any{
 			"model":    "anthropic/claude-sonnet-4",
@@ -516,6 +608,12 @@ func (s *fakeGatewayServer) setFail(method string) {
 	s.mu.Lock()
 	s.failMethods[method] = struct{}{}
 	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setFailAfter(method string, successfulCalls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failAfterCalls[method] = successfulCalls
 }
 
 func (s *fakeGatewayServer) setNotFound(method string, count int) {
@@ -800,6 +898,58 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	}
 }
 
+func TestHermesGatewayForkDetachesParentRuntimeBeforePublishingChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	child, err := server.Fork(t.Context(), "stored-parent", "")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if child.ID != "stored-branch" || server.liveSessionID(child.ID) != "" {
+		t.Fatalf("published child/runtime map = %#v/%q", child, server.liveSessionID(child.ID))
+	}
+
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	branchIndex, closeIndex := -1, -1
+	for index, call := range calls {
+		switch call.Method {
+		case "session.branch":
+			branchIndex = index
+		case "session.close":
+			if call.Params[fieldSessionID] == "live-branch" {
+				closeIndex = index
+			}
+		}
+	}
+	if branchIndex < 0 || closeIndex <= branchIndex {
+		t.Fatalf("branch runtime was not detached in order: %#v", calls)
+	}
+}
+
+func TestHermesGatewayForkCloseFailureDeletesDurableChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.setFail("session.close")
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	if _, err := server.Fork(t.Context(), "stored-parent", ""); err == nil || !strings.Contains(err.Error(), "close Hermes branch runtime") {
+		t.Fatalf("Fork close failure = %v", err)
+	}
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	for _, call := range calls {
+		if call.Method == "session.delete" && call.Params[fieldSessionID] == "stored-branch" {
+			return
+		}
+	}
+	t.Fatalf("durable branch was not deleted after detach failure: %#v", calls)
+}
+
 func TestHermesGatewayCreatePublishesOnlyDurableSession(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	fake.mu.Lock()
@@ -832,6 +982,63 @@ func TestHermesGatewayCreatePublishesOnlyDurableSession(t *testing.T) {
 		if !containsString(methods, want) {
 			t.Fatalf("durability method %q missing from %v", want, methods)
 		}
+	}
+}
+
+func TestHermesGatewayCreateBindsDraftBeforeDurableTitle(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	creator := DraftSessionCreator(server)
+	callbackCalled := false
+	created, err := creator.CreateSessionWithDraft(t.Context(), "unique-title", func(draft SessionDraft) error {
+		callbackCalled = true
+		if draft.LiveSessionID != "live-1" || draft.StoredSessionID != "stored-1" {
+			t.Fatalf("draft = %#v", draft)
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		for _, call := range fake.calls {
+			if call.Method == "session.title" {
+				t.Fatal("session.title ran before draft recovery callback")
+			}
+		}
+
+		return nil
+	})
+	if err != nil || !callbackCalled || created.ID != "stored-1" {
+		t.Fatalf("CreateSessionWithDraft = %#v, %v callback=%t", created, err, callbackCalled)
+	}
+}
+
+func TestHermesGatewayPersistedInventoryFailsClosedAtLimit(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.persistedCount = 10000
+	server := newGatewayBackedHermesServer(t, fake, "")
+	if _, err := server.PersistedSessions(t.Context()); err == nil || !strings.Contains(err.Error(), "not exhaustive") {
+		t.Fatalf("PersistedSessions saturation error = %v", err)
+	}
+}
+
+func TestHermesGatewayFailedBranchCleansUnknownLiveDurableChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.branchFailAfterSave = true
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	_, err := server.ForkWithBaseline(t.Context(), "stored-parent", "unique-marker", nil)
+	if err == nil || !strings.Contains(err.Error(), "branch failed after save") {
+		t.Fatalf("ForkWithBaseline error = %v", err)
+	}
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	var closed, deleted bool
+	for _, call := range calls {
+		closed = closed || call.Method == "session.close" && call.Params[fieldSessionID] == "live-branch"
+		deleted = deleted || call.Method == "session.delete" && call.Params[fieldSessionID] == "stored-branch"
+	}
+	if !closed || !deleted {
+		t.Fatalf("failed branch cleanup calls = %#v", calls)
 	}
 }
 
@@ -1717,6 +1924,31 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("rejects reserved adapter metadata case-insensitively", func(t *testing.T) {
+		for name, relative := range map[string]string{
+			"config lock":            ".acp-go-hermes-config.lock",
+			"fingerprint nested":     "nested/.ACP-GO-HERMES-CONFIG.SHA256",
+			"version":                ".acp-go-hermes-version",
+			"owner subtree":          filepath.FromSlash(".acp-go-hermes-session-owners/claim"),
+			"owner subtree case":     filepath.FromSlash(".ACP-GO-HERMES-SESSION-OWNERS/claim"),
+			"manifest":               ".seed-manifest.json",
+			"pending nested":         filepath.FromSlash("nested/.SEED-PENDING.JSON"),
+			"backup suffix":          "config.yaml.seed.bak",
+			"backup suffix casefold": "nested/CONFIG.YAML.SEED.BAK",
+		} {
+			t.Run(name, func(t *testing.T) {
+				err := materializeHermesConfig(t.TempDir(), nil, map[string]string{relative: "hostile"})
+				if err == nil {
+					t.Fatalf("reserved seed path %q accepted", relative)
+				}
+				var reqErr *acp.RequestError
+				if !errors.As(err, &reqErr) {
+					t.Fatalf("reserved seed path %q error = %T, want *acp.RequestError", relative, err)
+				}
+			})
+		}
+	})
 }
 
 func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
@@ -2326,18 +2558,6 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 			name: "missing branch session id",
 			configure: func(fake *fakeGatewayServer) {
 				fake.branchNoSession = true
-			},
-		},
-		{
-			name: "missing branch active session",
-			configure: func(fake *fakeGatewayServer) {
-				fake.branchNoActive = true
-			},
-		},
-		{
-			name: "branch active list failure",
-			configure: func(fake *fakeGatewayServer) {
-				fake.setFail("session.active_list")
 			},
 		},
 		{
@@ -3098,9 +3318,25 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string) string {
 func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (fake)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
 
 			return nil
+		}
+	}
+	if capture := os.Getenv("ACP_GO_HERMES_TEST_CAPTURE_MCP_ENV"); capture != "" {
+		values := map[string]string{}
+		for _, entry := range os.Environ() {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok && strings.HasPrefix(key, sharedMCPSecretEnvPrefix) {
+				values[key] = value
+			}
+		}
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(capture, encoded, 0o600); err != nil {
+			return err
 		}
 	}
 	port := ""
@@ -3177,6 +3413,8 @@ func gatewayProcessResult(method string, params map[string]any) any {
 		return map[string]any{"pending": false, "title": params["title"]}
 	case "session.active_list":
 		return map[string]any{"sessions": []any{}}
+	case "session.list":
+		return map[string]any{"sessions": []map[string]any{{"id": "stored-fake", "title": "Hermes session"}}}
 	case "session.history":
 		return map[string]any{"count": 0, "messages": []any{}}
 	case "model.options":

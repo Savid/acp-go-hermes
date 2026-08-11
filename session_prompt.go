@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -243,7 +244,7 @@ func (s *session) cancelRouted(meta map[string]any) error {
 	return s.fenceTurnLocked(context.Background(), epoch, true)
 }
 
-func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) { //nolint:gocyclo // The turn select intentionally centralizes settlement precedence.
+func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.PromptResponse, returnErr error) { //nolint:gocyclo // The turn select intentionally centralizes settlement precedence.
 	route, err := parseInboundTurnRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, err
@@ -258,6 +259,27 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		return acp.PromptResponse{}, err
 	}
 	defer release()
+
+	turnPublished := false
+
+	if s.agent.options.SharedHermesHome != "" {
+		sessionSetLock, lockErr := acquireSharedSessionSetLock(
+			ctx, s.agent.options.SharedHermesHome, nativehermes.SharedSessionSetLockShared,
+		)
+		if lockErr != nil {
+			return acp.PromptResponse{}, lockErr
+		}
+		defer func() {
+			releaseErr := sessionSetLock.Release()
+			if turnPublished && releaseErr != nil {
+				s.agent.log.DebugContext(ctx, "release committed Hermes turn session-set lock", slog.String(jsonFieldError, releaseErr.Error()))
+
+				return
+			}
+
+			returnErr = errors.Join(returnErr, releaseErr)
+		}()
+	}
 
 	parts, err := promptToHermesParts(ctx, params.Prompt, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
 	if err != nil {
@@ -447,6 +469,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			}
 
 			turnActive = false
+			turnPublished = true
 
 			terminal := s.committedTerminalState()
 

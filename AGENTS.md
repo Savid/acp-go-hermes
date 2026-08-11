@@ -68,8 +68,9 @@ ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=240s -v
 `make test-integration-live` adds `ACP_GO_HERMES_RUN_LIVE_TOKENS=1` and may
 spend model tokens. Use `make test-integration-cover` for compiled
 `acp-go-hermes` coverage through `GOCOVERDIR`. Set `ACP_GO_HERMES_MODEL` to
-override the model used by live tests. Live tests always launch Hermes with an
-isolated temp `HERMES_HOME` and never touch the user's real Hermes home.
+override the model used by live tests. Live tests use disposable temp homes and
+never touch the user's real Hermes home; the explicit shared-home lane may
+share one temp residence across processes.
 
 `make test-integration-attended` sets `ACP_GO_HERMES_RUN_ATTENDED=1` and runs the
 provider-auth flows a human must approve at the provider.
@@ -120,8 +121,9 @@ Unless explicitly requested, ask before:
 
 - **IMPORTANT**: Do not silently bypass permission prompts. Permission flow is
   load-bearing for user trust in this agent.
-- **IMPORTANT**: Do not manage the user's real Hermes authentication state. Each
-  session runs against an isolated temp `HERMES_HOME`.
+- **IMPORTANT**: Do not manage the user's real Hermes authentication state.
+  Sessions use isolated temp homes except for the explicit shared-home proof,
+  which uses one disposable temp residence.
 - Do not log auth material, user secrets, prompts, tool input, tool output, or
   raw Hermes gateway event bodies by default.
 - Keep permission rules session-scoped. Copy them only through intentional

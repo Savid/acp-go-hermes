@@ -45,6 +45,20 @@ the full-archive SHA-256. Restore requires a contiguous sequence, exactly one
 terminal chunk, matching size/checksum metadata, and then reassembles the
 archive into a fresh per-session `HERMES_HOME`.
 
+In explicit shared-home mode the durable official Hermes database is already
+the native authority. Snapshots contain logical metadata only: they do not
+encode or restore `state-db`. A prior per-session native archive is ignored
+during hydrate and its store entries are removed by the next snapshot.
+
+Shared New and Fork publication is fenced by a cross-process session-set lock
+and an fsynced operation journal outside `HERMES_HOME`. Recovery adopts an
+exact byte-matching Store commit, or removes only a uniquely marked native
+child after proving the originating ACP/parent process owner is vacant. A live
+or unprovable owner, partial Store state, non-exhaustive native inventory, or
+marker mismatch fails closed without deleting anything. A retained Fork
+journal whose parent gateway is still active therefore requires that parent to
+close (or the runner to restart and settle it) before recovery proceeds.
+
 The `idmap` subpath records the ACP session ID, durable Hermes session key, and
 fork lineage. Live gateway session IDs and auth tokens are not persisted.
 

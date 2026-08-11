@@ -17,10 +17,6 @@ const (
 	// optionFieldHome names the unsupported Home option in the uniform
 	// unsupported-option error. Each session runtime root is isolated.
 	optionFieldHome = "home"
-
-	// optionFieldProviderAuthDirectHome names the unsupported exact-home consent
-	// gate.
-	optionFieldProviderAuthDirectHome = "providerAuthDirectHome"
 )
 
 func validateSessionStartPaths(cwd string, additionalDirectories []string) error {
@@ -128,6 +124,26 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 func validateInputHandoffRoot(root string) error {
 	if root != "" && !filepath.IsAbs(root) {
 		return fmt.Errorf("input handoff root must be an absolute path")
+	}
+
+	return nil
+}
+
+func validateSharedHermesHomeOptions(options Options) error {
+	if options.SharedHermesHome == "" {
+		return nil
+	}
+
+	if !filepath.IsAbs(options.SharedHermesHome) {
+		return fmt.Errorf("shared Hermes home must be an absolute path")
+	}
+
+	if filepath.Clean(options.SharedHermesHome) != options.SharedHermesHome {
+		return fmt.Errorf("shared Hermes home must be a clean absolute path")
+	}
+
+	if options.ProcessIsolation != nil {
+		return fmt.Errorf("shared Hermes home requires ordinary same-identity execution; process isolation is unsupported")
 	}
 
 	return nil

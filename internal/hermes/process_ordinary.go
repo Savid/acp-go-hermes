@@ -20,7 +20,10 @@ import (
 // value it generated, so these are the names an inherited environment must
 // never be allowed to supply.
 const (
-	envHermesHome         = "HERMES_HOME"
+	envHermesHome = "HERMES_HOME"
+	// envHermesAuthHome is a legacy forbidden key, not a supported residence.
+	// Scrubbing prevents an inherited host environment from reactivating custom
+	// nonofficial behavior in a substituted executable.
 	envHermesAuthHome     = "HERMES_AUTH_HOME"
 	envHermesSessionToken = "HERMES_DASHBOARD_SESSION_TOKEN"
 	// envHermesWebDist is operator-supplied rather than adapter-managed, so it

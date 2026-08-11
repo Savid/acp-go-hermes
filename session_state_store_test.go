@@ -1,3 +1,4 @@
+//nolint:gocyclo,govet // Snapshot fault matrices intentionally share setup and scoped errors.
 package hermesacp
 
 import (
@@ -70,6 +71,103 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	}
 	if countSQLiteRows(t, restoredDB, "message") != 1 {
 		t.Fatal("non-credential table did not round-trip")
+	}
+}
+
+func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testing.T) {
+	ctx := t.Context()
+	store := NewInMemorySessionStore()
+	legacyXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSQLiteStore(t, filepath.Join(legacyXDG.Root, "state.db"))
+	legacyClient := newFakeHermesClient()
+	legacyClient.xdg = legacyXDG
+	legacySession := testSession(newTestAgent(WithSessionStore(store)), legacyClient)
+	if err := legacySession.snapshotToStore(ctx); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+	legacyEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
+	if err != nil || len(legacyEntries) == 0 {
+		t.Fatalf("legacy archive entries = %d, err=%v", len(legacyEntries), err)
+	}
+
+	wrapperXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-wrapper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, snapshot, ok, err := hydrateStateFromStoreWithoutNativeArchive(ctx, store, "session-1", wrapperXDG)
+	if err != nil || !ok || snapshot.Session.NativeSessionID != "native-1" {
+		t.Fatalf("metadata-only hydrate snapshot=%#v ok=%t err=%v", snapshot, ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(wrapperXDG.Root, "state.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy native archive restored into shared wrapper: %v", err)
+	}
+
+	sharedHome := t.TempDir()
+	authSentinel := []byte("shared-auth-secret-sentinel")
+	stateSentinel := []byte("shared-state-secret-sentinel")
+	if err := os.WriteFile(filepath.Join(sharedHome, "auth.json"), authSentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "state.db"), stateSentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedClient := newFakeHermesClient()
+	sharedClient.xdg = wrapperXDG
+	sharedAgent := newTestAgent(WithSessionStore(store), WithSharedHermesHome(sharedHome))
+	sharedSession := testSession(sharedAgent, sharedClient)
+	if err := sharedSession.snapshotToStore(ctx); err != nil {
+		t.Fatalf("write shared snapshot: %v", err)
+	}
+	entries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("legacy state-db archive was not purged: entries=%d err=%v", len(entries), err)
+	}
+	mainEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: SessionStoreMainSubpath})
+	if err != nil || len(mainEntries) == 0 {
+		t.Fatalf("shared main snapshot missing: %v", err)
+	}
+	var committed stateSnapshot
+	if err := json.Unmarshal(mainEntries[len(mainEntries)-1], &committed); err != nil {
+		t.Fatal(err)
+	}
+	if len(committed.Archives) != 0 {
+		t.Fatalf("shared snapshot retained native archives: %#v", committed.Archives)
+	}
+	subkeys, err := store.ListSubkeys(ctx, SessionKey{SessionID: "session-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, subkey := range subkeys {
+		stored, loadErr := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: subkey})
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		for _, entry := range stored {
+			if bytes.Contains(entry, authSentinel) || bytes.Contains(entry, stateSentinel) {
+				t.Fatalf("shared native secret reached store subkey %q", subkey)
+			}
+		}
+	}
+	emptyWrapper, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-empty-wrapper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := hydrateStateFromStoreWithoutNativeArchive(ctx, store, "session-1", emptyWrapper); err != nil || !ok {
+		t.Fatalf("metadata-only rehydrate ok=%t err=%v", ok, err)
+	}
+	for _, name := range []string{"auth.json", "state.db"} {
+		if _, err := os.Stat(filepath.Join(emptyWrapper.Root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hydrate authored %s in wrapper: %v", name, err)
+		}
+	}
+	for name, want := range map[string][]byte{"auth.json": authSentinel, "state.db": stateSentinel} {
+		got, err := os.ReadFile(filepath.Join(sharedHome, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("hydrate changed shared %s: %q err=%v", name, got, err)
+		}
 	}
 }
 

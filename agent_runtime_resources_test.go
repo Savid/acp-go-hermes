@@ -280,9 +280,9 @@ func TestHermesGenerationAndScratchPreparationFailures(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("provider auth home ownership", func(t *testing.T) {
+	t.Run("shared Hermes home ownership", func(t *testing.T) {
 		agent := newTestAgent(
-			WithProviderAuthHome(t.TempDir()),
+			WithSharedHermesHome(t.TempDir()),
 			WithProcessIsolation(ProcessIsolation{
 				UID: uint32(os.Geteuid() + 1), GID: uint32(os.Getegid() + 1),
 			}),
@@ -389,6 +389,26 @@ func TestHermesSessionRetainsNativeAdmissionWhenQuiescenceIsUnproven(t *testing.
 		require.Zero(t, scratchReleases)
 		require.NoError(t, previousRemove(xdg.Root))
 	})
+}
+
+func TestDifferentACPRecordsCannotClaimTheSameSharedNativeSession(t *testing.T) {
+	home := t.TempDir()
+	firstAgent := newTestAgent(WithSharedHermesHome(home))
+	secondAgent := newTestAgent(WithSharedHermesHome(home))
+	first := &managedHermesServer{Server: newFakeHermesClient()}
+	second := &managedHermesServer{Server: newFakeHermesClient()}
+
+	if err := firstAgent.claimSharedNativeSession(first, "same-native"); err != nil {
+		t.Fatalf("first native claim: %v", err)
+	}
+	t.Cleanup(func() { _ = first.nativeSessionOwner.Release() })
+	if err := secondAgent.claimSharedNativeSession(second, "same-native"); err == nil {
+		t.Fatal("different ACP record claimed an already-owned native session")
+	}
+	if err := secondAgent.claimSharedNativeSession(second, "different-native"); err != nil {
+		t.Fatalf("different native session claim: %v", err)
+	}
+	t.Cleanup(func() { _ = second.nativeSessionOwner.Release() })
 }
 
 func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {

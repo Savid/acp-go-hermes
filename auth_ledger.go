@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // Ledger record states. The proof a residence answer can carry is a total
@@ -79,22 +80,26 @@ var ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
 // authLedger is the durable values-free record of which connection lineage
 // owns a provider in one native credential residence.
 type authLedger struct {
-	dir string
+	dir             string
+	providerLockDir string
 }
 
 // validateProviderAuthRoots requires the ledger and native residence as one
-// pair and rejects relative paths.
+// pair and rejects ambiguous or relative paths. SharedHermesHome can be used
+// without the broker, but when ProviderAuthRoot is set it is the residence the
+// values-free ledger binds.
 func validateProviderAuthRoots(options Options) error {
-	if (options.ProviderAuthRoot == "") != (options.ProviderAuthHome == "") {
-		return errors.New("provider auth requires both root and home")
+	residence := providerAuthResidence(options)
+	if options.ProviderAuthRoot != "" && residence == "" {
+		return errors.New("provider auth root requires shared Hermes home")
 	}
 
 	if options.ProviderAuthRoot != "" && !filepath.IsAbs(options.ProviderAuthRoot) {
 		return fmt.Errorf("provider auth root must be an absolute path")
 	}
 
-	if options.ProviderAuthHome != "" && !filepath.IsAbs(options.ProviderAuthHome) {
-		return fmt.Errorf("provider auth home must be an absolute path")
+	if residence != "" && !filepath.IsAbs(residence) {
+		return fmt.Errorf("provider auth residence must be an absolute path")
 	}
 
 	return nil
@@ -104,26 +109,30 @@ func validateProviderAuthRoots(options Options) error {
 // root at all, which is what separates a surface nobody asked for from one that
 // was asked for and could not be prepared.
 func authLedgerRootConfigured(options Options) bool {
-	return options.ProviderAuthRoot != "" && options.ProviderAuthHome != ""
+	return options.ProviderAuthRoot != "" && providerAuthResidence(options) != ""
 }
 
-func prepareProviderAuthHome(path string) (string, error) {
+func providerAuthResidence(options Options) string {
+	return options.SharedHermesHome
+}
+
+func prepareProviderAuthResidence(path string) (string, error) {
 	if !filepath.IsAbs(path) {
-		return "", errors.New("provider auth home must be an absolute path")
+		return "", errors.New("provider auth residence must be an absolute path")
 	}
 
 	clean := filepath.Clean(path)
 	if err := ledgerMkdirAll(clean, authLedgerDirMode); err != nil {
-		return "", fmt.Errorf("create provider auth home: %w", err)
+		return "", fmt.Errorf("create provider auth residence: %w", err)
 	}
 
 	if err := ledgerChmod(clean, authLedgerDirMode); err != nil {
-		return "", fmt.Errorf("restrict provider auth home: %w", err)
+		return "", fmt.Errorf("restrict provider auth residence: %w", err)
 	}
 
 	resolved, err := ledgerEvalPath(clean)
 	if err != nil {
-		return "", fmt.Errorf("resolve provider auth home: %w", err)
+		return "", fmt.Errorf("resolve provider auth residence: %w", err)
 	}
 
 	return resolved, nil
@@ -132,14 +141,17 @@ func prepareProviderAuthHome(path string) (string, error) {
 // newAuthLedger resolves and validates the configured durable root. A root that
 // does not exist and cannot be created, is not a directory, or is not writable
 // leaves the provider-auth surface unadvertised, exactly as an unset one does.
+//
+//nolint:govet // Narrow setup scopes keep each filesystem error at its operation.
 func newAuthLedger(options Options) (*authLedger, error) {
 	root := options.ProviderAuthRoot
 	if !filepath.IsAbs(root) {
 		return nil, errors.New("provider auth root must be an absolute path")
 	}
 
-	if !filepath.IsAbs(options.ProviderAuthHome) {
-		return nil, errors.New("provider auth home must be an absolute path")
+	residence := providerAuthResidence(options)
+	if !filepath.IsAbs(residence) {
+		return nil, errors.New("provider auth residence must be an absolute path")
 	}
 
 	// The operator-configured root is restricted as well as the leaf: a
@@ -152,7 +164,7 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, fmt.Errorf("restrict provider auth root: %w", err)
 	}
 
-	dir := filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey(options.ProviderAuthHome), authLedgerLeafDir)
+	dir := filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey(residence), authLedgerLeafDir)
 	if err := ledgerMkdirAll(dir, authLedgerDirMode); err != nil {
 		return nil, fmt.Errorf("create provider auth ledger root: %w", err)
 	}
@@ -170,6 +182,15 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, errors.New("provider auth ledger root is not a directory")
 	}
 
+	providerLockDir := filepath.Join(dir, authProviderLockDir)
+	if err := ledgerMkdirAll(providerLockDir, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("create provider auth lock root: %w", err)
+	}
+
+	if err := ledgerChmod(providerLockDir, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("restrict provider auth lock root: %w", err)
+	}
+
 	probe, err := ledgerCreateTemp(dir, "writable-")
 	if err != nil {
 		return nil, fmt.Errorf("verify provider auth ledger root is writable: %w", err)
@@ -177,7 +198,7 @@ func newAuthLedger(options Options) (*authLedger, error) {
 
 	name := probe.Name()
 
-	return &authLedger{dir: dir}, errors.Join(probe.Close(), ledgerRemove(name))
+	return &authLedger{dir: dir, providerLockDir: providerLockDir}, errors.Join(probe.Close(), ledgerRemove(name))
 }
 
 func authLedgerHomeKey(home string) string {
@@ -331,9 +352,64 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
 
+	// Take the cross-process provider fences from a first values-free snapshot,
+	// then re-read under those fences. A provider created after the first list is
+	// linearized after this inventory and is intentionally absent; every record
+	// this response does inspect is stable across the native status read.
+	initialRecords, err := p.ledger.list()
+	if err != nil {
+		return nil, authFailed(authCauseProcess, "", "", "")
+	}
+
+	leases := make([]*authProviderLease, 0, len(initialRecords))
+	providerReleases := make([]func(), 0, len(initialRecords))
+
+	lockedProviders := make(map[string]struct{}, len(initialRecords))
+	defer func() {
+		for index := len(leases) - 1; index >= 0; index-- {
+			_ = leases[index].Release()
+		}
+
+		for index := len(providerReleases) - 1; index >= 0; index-- {
+			providerReleases[index]()
+		}
+	}()
+
+	for _, record := range initialRecords {
+		if _, duplicate := lockedProviders[record.ProviderID]; duplicate {
+			continue
+		}
+
+		releaseProvider, acquired := p.lockProvider(ctx, record.ProviderID)
+		if !acquired {
+			return nil, authFailed(authCauseTimeout, record.ProviderID, "", "")
+		}
+
+		if !p.ownsLiveProviderLease(record.ProviderID) {
+			lockCtx, lockCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			lease, lockErr := p.ledger.acquireProviderLease(lockCtx, record.ProviderID)
+
+			lockCancel()
+
+			if lockErr != nil {
+				// Another broker is mutating this provider. Its durable intent is
+				// not proof of either presence or absence, so omit it from this
+				// inventory rather than blocking/failing the whole provider list.
+				releaseProvider()
+
+				continue
+			}
+
+			leases = append(leases, lease)
+		}
+
+		providerReleases = append(providerReleases, releaseProvider)
+		lockedProviders[record.ProviderID] = struct{}{}
+	}
+
 	loggedIn := map[string]bool{}
 
-	if nativeProviderAuthHomeSupported(client) {
+	if nativeProviderAuthSupported(client) {
 		providers, providersErr := client.AuthProviders(ctx)
 		if providersErr != nil {
 			return nil, authFailed(authNativeCause(providersErr), "", "", "")
@@ -353,6 +429,10 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 	entries := make([]authInventoryEntry, 0, len(records))
 
 	for _, record := range records {
+		if _, locked := lockedProviders[record.ProviderID]; !locked {
+			continue
+		}
+
 		if record.State != authLedgerConfirmed {
 			continue
 		}

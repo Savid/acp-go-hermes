@@ -34,10 +34,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	hermesPath := flags.String("path", "", "path to hermes CLI")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
-	hermesHome := flags.String("home", "", "unsupported: each session runtime root is isolated (use -scratch-dir for ephemeral state and -hermes-provider-auth-home for durable provider credentials)")
+	hermesHome := flags.String("home", "", "unsupported: use -scratch-dir for isolated ephemeral state or -shared-hermes-home for the official-Hermes shared durable mode")
 	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
-	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "unsupported: a non-empty value is rejected when a session is established")
-	providerAuthHome := flags.String("hermes-provider-auth-home", "", "durable native Hermes credential residence; provider auth requires this and -provider-auth-root")
+	sharedHermesHome := flags.String("shared-hermes-home", "", "opt in to one durable HERMES_HOME shared by official Hermes session processes; disables native-home isolation while preserving per-session process and control isolation")
 	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "optional absolute path to a root-owned mode-0600 Linux child-isolation policy; omitting it runs Hermes as this process's own identity")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
@@ -120,8 +119,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		hermesacp.WithScratchDir(*scratchDir),
 		hermesacp.WithHome(*hermesHome),
 		hermesacp.WithProviderAuthRoot(*providerAuthRoot),
-		hermesacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
-		hermesacp.WithProviderAuthHome(*providerAuthHome),
+		hermesacp.WithSharedHermesHome(*sharedHermesHome),
 		hermesacp.WithDefaultModel(*model),
 		hermesacp.WithLogger(logger),
 	)

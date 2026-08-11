@@ -83,10 +83,9 @@ home for native tools.
 | `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
 | `-process-isolation-config` | An optional absolute path to the Linux isolation policy described above. Omitting it runs Hermes as this process's own identity. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
-| `-home` | Unsupported because each session runtime root is isolated. Use `-scratch-dir` for ephemeral state and `-hermes-provider-auth-home` for durable provider credentials. |
-| `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-hermes-provider-auth-home`. |
-| `-provider-auth-direct-home` | Unsupported. A non-empty value fails closed at session start. |
-| `-hermes-provider-auth-home` | Absolute durable native credential residence supplied to Hermes as `HERMES_AUTH_HOME` when `hermes --version` advertises `provider-auth-home-v1`. Requires `-provider-auth-root`; an official executable without the capability keeps ordinary sessions but offers no broker login methods. |
+| `-home` | Unsupported. Use `-scratch-dir` for isolated ephemeral state or `-shared-hermes-home` for the explicit official-Hermes durable mode. |
+| `-shared-hermes-home` | Absolute supported local-filesystem path used as the exact durable `HERMES_HOME` by all per-session official Hermes processes. Native database/auth state is shared; ports, tokens, browser shims, environment, events, and wrapper controls remain separate. |
+| `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-shared-hermes-home`. |
 | `-model` | Default model value passed as `provider/model`. |
 | `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
 | `-debug` | Enable debug logging on stderr. |

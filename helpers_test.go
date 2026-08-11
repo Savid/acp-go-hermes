@@ -118,13 +118,14 @@ type fakeHermesClient struct {
 
 	xdg nativehermes.XDGDirs
 
-	createSession nativehermes.Session
-	getSession    nativehermes.Session
-	listSessions  []nativehermes.Session
-	forkSession   nativehermes.Session
-	messages      []nativehermes.NativeMessage
-	todos         []nativehermes.Todo
-	providers     nativehermes.ProvidersResponse
+	createSession     nativehermes.Session
+	getSession        nativehermes.Session
+	listSessions      []nativehermes.Session
+	persistedSessions []nativehermes.Session
+	forkSession       nativehermes.Session
+	messages          []nativehermes.NativeMessage
+	todos             []nativehermes.Todo
+	providers         nativehermes.ProvidersResponse
 
 	configProviderCalls int
 
@@ -154,6 +155,7 @@ type fakeHermesClient struct {
 	skipAssistantHistory bool
 	abortErr             error
 	forkErr              error
+	forkCalls            int
 	todosErr             error
 	providersErr         error
 	permissionsErr       error
@@ -165,28 +167,28 @@ type fakeHermesClient struct {
 	reloadFunc           func(context.Context, string) error
 	closeFunc            func(context.Context) error
 
-	authProviders             []nativehermes.AuthProvider
-	authProvidersErr          error
-	authStart                 nativehermes.AuthStart
-	authStartErr              error
-	authStartFunc             func(context.Context, string) (nativehermes.AuthStart, error)
-	authSubmitErr             error
-	authSubmits               []string
-	authPoll                  nativehermes.AuthPoll
-	authPollErr               error
-	authPollFunc              func(context.Context, string, string) (nativehermes.AuthPoll, error)
-	authCancelled             []string
-	authCancelFlowErr         error
-	authDisconnected          []string
-	authDisconnectErr         error
-	providerAuthHomeSupported *bool
+	authProviders         []nativehermes.AuthProvider
+	authProvidersErr      error
+	authStart             nativehermes.AuthStart
+	authStartErr          error
+	authStartFunc         func(context.Context, string) (nativehermes.AuthStart, error)
+	authSubmitErr         error
+	authSubmits           []string
+	authPoll              nativehermes.AuthPoll
+	authPollErr           error
+	authPollFunc          func(context.Context, string, string) (nativehermes.AuthPoll, error)
+	authCancelled         []string
+	authCancelFlowErr     error
+	authDisconnected      []string
+	authDisconnectErr     error
+	providerAuthSupported *bool
 }
 
-func (c *fakeHermesClient) ProviderAuthHomeSupported() bool {
+func (c *fakeHermesClient) ProviderAuthSupported() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.providerAuthHomeSupported == nil || *c.providerAuthHomeSupported
+	return c.providerAuthSupported == nil || *c.providerAuthSupported
 }
 
 func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthProvider, error) {
@@ -300,6 +302,22 @@ func (c *fakeHermesClient) CreateSession(ctx context.Context, title string) (nat
 	return c.createSession, c.createErr
 }
 
+func (c *fakeHermesClient) CreateSessionWithDraft(
+	ctx context.Context,
+	title string,
+	bind func(nativehermes.SessionDraft) error,
+) (nativehermes.Session, error) {
+	native, err := c.CreateSession(ctx, title)
+	if err != nil {
+		return nativehermes.Session{}, err
+	}
+	if err := bind(nativehermes.SessionDraft{LiveSessionID: "live-" + native.ID, StoredSessionID: native.ID}); err != nil {
+		return nativehermes.Session{}, err
+	}
+
+	return native, nil
+}
+
 func (c *fakeHermesClient) GetSession(_ context.Context, id string) (nativehermes.Session, error) {
 	c.mu.Lock()
 	c.getSessionIDs = append(c.getSessionIDs, id)
@@ -312,9 +330,23 @@ func (c *fakeHermesClient) ListSessions(context.Context, string) ([]nativehermes
 	return append([]nativehermes.Session(nil), c.listSessions...), c.listErr
 }
 
+func (c *fakeHermesClient) PersistedSessions(context.Context) ([]nativehermes.Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]nativehermes.Session(nil), c.persistedSessions...), c.listErr
+}
+
 func (c *fakeHermesClient) DeleteSession(_ context.Context, id string) error {
 	c.mu.Lock()
 	c.deleted = append(c.deleted, id)
+	for index := range c.persistedSessions {
+		if c.persistedSessions[index].ID == id {
+			c.persistedSessions = append(c.persistedSessions[:index], c.persistedSessions[index+1:]...)
+
+			break
+		}
+	}
 	c.mu.Unlock()
 
 	return c.deleteErr
@@ -387,7 +419,22 @@ func (c *fakeHermesClient) Abort(_ context.Context, id string) error {
 }
 
 func (c *fakeHermesClient) Fork(context.Context, string, string) (nativehermes.Session, error) {
+	c.mu.Lock()
+	c.forkCalls++
+	c.mu.Unlock()
+
 	return c.forkSession, c.forkErr
+}
+
+func (c *fakeHermesClient) ForkWithBaseline(ctx context.Context, id string, marker string, _ []string) (nativehermes.Session, error) {
+	return c.Fork(ctx, id, marker)
+}
+
+func (c *fakeHermesClient) forkCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.forkCalls
 }
 
 func (c *fakeHermesClient) Todos(context.Context, string) ([]nativehermes.Todo, error) {
@@ -463,6 +510,16 @@ func (c *fakeHermesClient) EventErrors() <-chan error {
 
 func (c *fakeHermesClient) XDGDirs() nativehermes.XDGDirs {
 	return c.xdg
+}
+
+func (c *fakeHermesClient) SharedSessionOwnerProcessIdentity() (int, string, error) {
+	pid := os.Getpid()
+	identity, err := nativehermes.InspectProcess(pid)
+	if err != nil {
+		return 0, "", err
+	}
+
+	return pid, identity.StartTime, nil
 }
 
 func (c *fakeHermesClient) abortCount() int {

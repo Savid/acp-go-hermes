@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -25,16 +24,14 @@ import (
 )
 
 const (
-	nativeBrowserFixtureDir         = "native-browser"
-	nativeBrowserProbePath          = "/usr/local/bin/native-browser.test"
-	nativeBrowserAdapterPath        = "/usr/local/bin/acp-go-hermes.test"
-	nativeBrowserTracePath          = "/tmp/native-browser.trace"
-	nativeBrowserHermesPath         = "/usr/local/bin/hermes"
-	nativeBrowserHostname           = "native-browser-canary"
-	nativeBrowserInsideEnv          = "ACP_GO_HERMES_NATIVE_BROWSER_INSIDE"
-	nativeBrowserTestName           = "TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher"
-	nativeBrowserCanaryUID   uint32 = 10001
-	nativeBrowserCanaryGID   uint32 = 10001
+	nativeBrowserFixtureDir  = "native-browser"
+	nativeBrowserProbePath   = "/usr/local/bin/native-browser.test"
+	nativeBrowserAdapterPath = "/usr/local/bin/acp-go-hermes.test"
+	nativeBrowserTracePath   = "/tmp/native-browser.trace"
+	nativeBrowserHermesPath  = "/usr/local/bin/hermes"
+	nativeBrowserHostname    = "native-browser-canary"
+	nativeBrowserInsideEnv   = "ACP_GO_HERMES_NATIVE_BROWSER_INSIDE"
+	nativeBrowserTestName    = "TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher"
 )
 
 var nativeBrowserLauncherNames = []string{
@@ -52,7 +49,7 @@ var nativeBrowserLauncherNames = []string{
 }
 
 // TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher drives the pinned
-// Hermes v0.19.0 wheel through the production adapter auth surface. Hermes'
+// Hermes v0.20.0 source through the production adapter auth surface. Hermes'
 // dashboard auth API returns the authorization URL to its caller; the
 // dashboard, not the server, owns opening it. The syscall trace is therefore
 // an executable no-attempt proof, not a claim that the shim was exercised.
@@ -121,6 +118,18 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	}
 	if inspection.HostConfig == nil {
 		t.Fatal("native browser fixture lacks host configuration")
+	}
+	var authorityMount *container.MountPoint
+	for index := range inspection.Mounts {
+		if inspection.Mounts[index].Destination == "/var/lib/acp-go/agent-identities" {
+			authorityMount = &inspection.Mounts[index]
+
+			break
+		}
+	}
+	if authorityMount == nil || authorityMount.Type != "volume" || authorityMount.Driver != "local" ||
+		authorityMount.Name != authorityVolume || !authorityMount.RW {
+		t.Fatalf("native browser authority mount is not a writable local volume: %#v", authorityMount)
 	}
 	if inspection.HostConfig.NetworkMode != container.NetworkMode("none") {
 		t.Fatalf("native browser fixture network mode = %q, want none", inspection.HostConfig.NetworkMode)
@@ -219,76 +228,26 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run pinned Hermes version: %v: %s", err, versionOutput)
 	}
-	if !strings.Contains(string(versionOutput), "0.19.0") {
-		t.Fatalf("Hermes version = %q, want 0.19.0", strings.TrimSpace(string(versionOutput)))
+	versionLine := strings.SplitN(strings.TrimSpace(string(versionOutput)), "\n", 2)[0]
+	if versionLine != "Hermes Agent v0.20.0 (2026.8.3)" {
+		t.Fatalf("Hermes version = %q, want exact official v0.20.0 release", versionLine)
 	}
 
-	root, err := os.MkdirTemp("/var/lib", "acp-go-hermes-native-runtime-")
-	if err != nil {
-		t.Fatalf("create native runtime root: %v", err)
-	}
-	t.Cleanup(func() {
-		if removeErr := os.RemoveAll(root); removeErr != nil {
-			t.Errorf("remove native runtime root: %v", removeErr)
-		}
-	})
-	if chmodErr := os.Chmod(root, 0o755); chmodErr != nil {
-		t.Fatalf("make canary root traversable: %v", chmodErr)
-	}
-	policyRoot, err := os.MkdirTemp("/root", "acp-go-hermes-native-browser-")
-	if err != nil {
-		t.Fatalf("create trusted policy directory: %v", err)
-	}
-	t.Cleanup(func() {
-		if removeErr := os.RemoveAll(policyRoot); removeErr != nil {
-			t.Errorf("remove trusted policy directory: %v", removeErr)
-		}
-	})
-	home := filepath.Join(root, "native-home")
-	authHome := filepath.Join(home, "hermes-auth")
+	root := "/var/lib/acp-go/agent-identities"
+	sharedHome := filepath.Join(root, "hermes-home")
 	ledgerRoot := filepath.Join(root, "ledger")
-	cwd := filepath.Join(home, "workspace")
-	for _, dir := range []string{home, authHome, cwd} {
+	cwd := filepath.Join(root, "workspace")
+	for _, dir := range []string{sharedHome, ledgerRoot, cwd} {
 		if mkdirErr := os.MkdirAll(dir, 0o700); mkdirErr != nil {
-			t.Fatalf("create target-owned directory: %v", mkdirErr)
+			t.Fatalf("create canary durable directory: %v", mkdirErr)
 		}
-		if chownErr := os.Chown(dir, int(nativeBrowserCanaryUID), int(nativeBrowserCanaryGID)); chownErr != nil {
-			t.Fatalf("chown target-owned directory: %v", chownErr)
-		}
-	}
-	if mkdirErr := os.Mkdir(ledgerRoot, 0o700); mkdirErr != nil {
-		t.Fatalf("create trusted ledger directory: %v", mkdirErr)
-	}
-
-	policyPath := filepath.Join(policyRoot, "policy.json")
-	policy := map[string]any{
-		"uid":                 nativeBrowserCanaryUID,
-		"gid":                 nativeBrowserCanaryGID,
-		"standaloneOwnerId":   "acp-go-hermes-native-browser-canary",
-		"standaloneStateRoot": home,
-		"baseEnvironment": map[string]string{
-			"HOME":    "/home/native-canary",
-			"LANG":    "C.UTF-8",
-			"LOGNAME": "native-canary",
-			"PATH":    "/usr/local/bin:/usr/bin:/bin",
-			"USER":    "native-canary",
-		},
-		"inheritEnvironment": []string{},
-	}
-	encoded, err := json.Marshal(policy)
-	if err != nil {
-		t.Fatalf("encode process-isolation policy: %v", err)
-	}
-	if writeErr := os.WriteFile(policyPath, encoded, 0o600); writeErr != nil {
-		t.Fatalf("write process-isolation policy: %v", writeErr)
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	agent := startLiveAgent(t, ctx, root,
-		"-process-isolation-config", policyPath,
 		"-provider-auth-root", ledgerRoot,
-		"-hermes-provider-auth-home", authHome,
+		"-shared-hermes-home", sharedHome,
 	)
 	defer agent.close()
 
@@ -323,7 +282,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		}
 	}
 	if method == "" {
-		t.Fatalf("Hermes 0.19.0 exposed no Anthropic OAuth method: %#v", methods.Providers)
+		t.Fatalf("Hermes 0.20.0 exposed no Anthropic OAuth method: %#v", methods.Providers)
 	}
 
 	var authorization authAuthorizeWire

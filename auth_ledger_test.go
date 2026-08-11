@@ -38,7 +38,7 @@ func restoreLedgerHooks(t *testing.T) {
 func newTestLedger(t *testing.T) *authLedger {
 	t.Helper()
 
-	ledger, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), ProviderAuthHome: t.TempDir()})
+	ledger, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()})
 	if err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestInventoryKeepsOfficialHermesLineageInconclusiveWithoutReadingNativeStat
 	agent, client := newAuthAgent(t)
 	seedConfirmedLineage(t, agent, testProviderID)
 	unsupported := false
-	client.providerAuthHomeSupported = &unsupported
+	client.providerAuthSupported = &unsupported
 	client.authProvidersErr = errors.New("native status must not be consulted")
 
 	result, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
@@ -86,7 +86,7 @@ func TestInventoryKeepsOfficialHermesLineageInconclusiveWithoutReadingNativeStat
 func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative", ProviderAuthHome: t.TempDir()}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative", SharedHermesHome: t.TempDir()}); err == nil {
 		t.Fatal("relative root accepted")
 	}
 
@@ -148,7 +148,7 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 				target = file
 			}
 
-			if _, err := newAuthLedger(Options{ProviderAuthRoot: target, ProviderAuthHome: t.TempDir()}); err == nil {
+			if _, err := newAuthLedger(Options{ProviderAuthRoot: target, SharedHermesHome: t.TempDir()}); err == nil {
 				t.Fatal("unusable root accepted")
 			}
 		})
@@ -167,7 +167,7 @@ func TestAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 		t.Fatalf("relax root: %v", err)
 	}
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: t.TempDir()}); err != nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()}); err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
 
@@ -527,25 +527,25 @@ func TestAuthLedgerPathIsDeterministicAndScopedToTheRoot(t *testing.T) {
 		t.Fatalf("ledger path %q is outside the vendor leaf", first)
 	}
 
-	if !authLedgerRootConfigured(Options{ProviderAuthRoot: "/root", ProviderAuthHome: "/home"}) ||
+	if !authLedgerRootConfigured(Options{ProviderAuthRoot: "/root", SharedHermesHome: "/home"}) ||
 		authLedgerRootConfigured(Options{}) {
 		t.Fatal("root configuration reported incorrectly")
 	}
 }
 
-func TestAuthLedgerIsScopedByCanonicalProviderAuthHome(t *testing.T) {
+func TestAuthLedgerIsScopedByCanonicalSharedHermesHome(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	homeA := t.TempDir()
 	homeB := t.TempDir()
 
-	ledgerA, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: homeA})
+	ledgerA, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: homeA})
 	if err != nil {
 		t.Fatalf("new ledger A: %v", err)
 	}
 
-	ledgerB, err := newAuthLedger(Options{ProviderAuthRoot: root, ProviderAuthHome: homeB})
+	ledgerB, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: homeB})
 	if err != nil {
 		t.Fatalf("new ledger B: %v", err)
 	}
@@ -580,13 +580,13 @@ func TestInventorySurvivesAgentRestartWithoutReadingCredentialFiles(t *testing.T
 	root := t.TempDir()
 	home := t.TempDir()
 
-	first := newTestAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	first := newTestAgent(WithProviderAuthRoot(root), WithSharedHermesHome(home))
 	if first.providerAuth == nil {
 		t.Fatal("first provider auth surface unavailable")
 	}
 	seedConfirmedLineage(t, first, testProviderID)
 
-	second := newTestAgent(WithProviderAuthRoot(root), WithProviderAuthHome(home))
+	second := newTestAgent(WithProviderAuthRoot(root), WithSharedHermesHome(home))
 	if second.providerAuth == nil {
 		t.Fatal("second provider auth surface unavailable")
 	}
@@ -640,7 +640,7 @@ func TestNewAuthLedgerRejectsARootThatIsNotADirectory(t *testing.T) {
 	ledgerChmod = func(string, os.FileMode) error { return nil }
 	ledgerStat = func(string) (os.FileInfo, error) { return os.Stat(file) }
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), ProviderAuthHome: t.TempDir()}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()}); err == nil {
 		t.Fatal("a root that is not a directory was accepted")
 	}
 }

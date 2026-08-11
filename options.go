@@ -137,9 +137,9 @@ type Options struct {
 
 	ExecutablePath   string
 	ProcessIsolation *ProcessIsolation
-	// Home is unsupported because each session runtime root is isolated. Use
-	// ScratchDir for ephemeral state and ProviderAuthHome for durable provider
-	// credentials.
+	// Home is unsupported because native residence selection is explicit. Use
+	// ScratchDir for isolated ephemeral state or SharedHermesHome for the
+	// official-Hermes shared durable mode.
 	Home string
 	// ScratchDir is the sole parent directory for all ephemeral on-disk
 	// materialization: isolated per-session Hermes homes, sqlite temp
@@ -155,16 +155,13 @@ type Options struct {
 	// houses the values-free provider-auth ledger. It is not ephemeral
 	// materialization: the ledger deliberately outlives every session and every
 	// native generation, which is the one class of state a scratch parent must
-	// not hold. Provider auth is enabled only when ProviderAuthHome is also set.
+	// not hold. Provider auth is enabled only when SharedHermesHome is also set.
 	ProviderAuthRoot string
-	// ProviderAuthDirectHome is unsupported. A non-empty value is rejected when
-	// a session is established.
-	ProviderAuthDirectHome string
-	// ProviderAuthHome is the absolute, durable native Hermes credential
-	// residence shared by every isolated session runtime. Hermes alone reads and
-	// writes credential material there; the adapter supplies it to native
-	// processes through HERMES_AUTH_HOME.
-	ProviderAuthHome string
+	// SharedHermesHome selects official shared-home mode. Every native
+	// process uses this one durable home, so per-session Hermes-home isolation is
+	// intentionally disabled. Per-session processes and adapter-owned control
+	// generations remain independent.
+	SharedHermesHome string
 	DefaultModel     string
 	Env              map[string]string
 
@@ -277,9 +274,9 @@ func WithProcessIsolation(isolation ProcessIsolation) Option {
 	}
 }
 
-// WithHome is unsupported because each session runtime root is isolated. Use
-// WithScratchDir for ephemeral state and WithProviderAuthHome for durable
-// provider credentials.
+// WithHome is unsupported because native residence selection is explicit. Use
+// WithScratchDir for isolated ephemeral state or WithSharedHermesHome for the
+// official-Hermes shared durable mode.
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
@@ -317,7 +314,7 @@ func WithInputHandoffRoot(dir string) Option {
 // entries are written 0600. Omitting the option, or supplying a root that is
 // not a writable directory, leaves every provider-auth method unadvertised and
 // answering method-not-found: a leg that cannot record what it did is never
-// offered. Provider auth is enabled only when WithProviderAuthHome is also set.
+// offered. Provider auth is enabled only when WithSharedHermesHome is also set.
 // The root carries no config or auth-resolution semantics and is never a
 // scratch parent.
 func WithProviderAuthRoot(path string) Option {
@@ -326,22 +323,21 @@ func WithProviderAuthRoot(path string) Option {
 	}
 }
 
-// WithProviderAuthDirectHome is unsupported. Establishing a session with a
-// non-empty value fails closed.
-func WithProviderAuthDirectHome(path string) Option {
+// WithSharedHermesHome explicitly selects official shared-home mode: every
+// native gateway uses path as its exact durable HERMES_HOME. This
+// intentionally gives up per-session Hermes-home isolation so credentials and
+// native sessions survive adapter restarts with the official runtime.
+//
+// The path must be absolute and requires ordinary same-identity execution;
+// combining it with WithProcessIsolation is rejected. Provider-auth extension
+// methods additionally require WithProviderAuthRoot.
+// Each ACP session retains its own native process, environment, PATH additions,
+// event stream, and adapter-owned control generation. Native database and auth
+// state are intentionally shared through path. Managed MCP configuration must
+// be identical for every session owned by the Agent.
+func WithSharedHermesHome(path string) Option {
 	return func(options *Options) {
-		options.ProviderAuthDirectHome = path
-	}
-}
-
-// WithProviderAuthHome sets the durable native credential residence shared by
-// every isolated Hermes session runtime. The path must be absolute. Hermes owns
-// all credential reads and writes there; the adapter never parses or copies its
-// credential files. Provider auth is enabled only when WithProviderAuthRoot is
-// also set.
-func WithProviderAuthHome(path string) Option {
-	return func(options *Options) {
-		options.ProviderAuthHome = path
+		options.SharedHermesHome = path
 	}
 }
 

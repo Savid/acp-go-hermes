@@ -90,12 +90,13 @@ func main() {
 See [Go API docs](docs/reference/go-api.mdx) for options such as the Hermes
 executable path, the scratch directory for ephemeral per-session state, default
 model, environment, session storage, concurrency limits, and OpenTelemetry
-providers. `WithHome` and `WithProviderAuthDirectHome` are unsupported and
-reject a non-empty value at session start. Use `WithScratchDir` for ephemeral
-state and `WithProviderAuthHome` for durable provider credentials.
+providers. `WithHome` is unsupported and rejects a non-empty value at session
+start. Use `WithScratchDir` for ephemeral
+state. `WithSharedHermesHome` explicitly opts official Hermes into one durable
+native home shared by its otherwise independent per-session processes.
 `WithProviderAuthRoot` names the durable directory that holds the values-free
-provider-auth ledger. Provider auth is advertised only when both provider-auth
-directories are configured.
+provider-auth ledger. Provider auth is advertised only when that ledger root
+and the shared Hermes home are configured.
 
 ## What It Provides
 
@@ -103,12 +104,15 @@ directories are configured.
   delete, and fork.
 - Provider OAuth brokered through seven session-scoped `_hermes/auth/*`
   extension methods over the `hermes serve` REST auth API. Native Hermes owns
-  credential bytes in a shared durable `HERMES_AUTH_HOME`; the adapter keeps
-  only values-free connection lineage. Hermes v0.19.0 returns its authorization
+  credential bytes in the explicit shared durable `HERMES_HOME`; the adapter
+  keeps only values-free connection lineage. Hermes returns its authorization
   URL on this API path without executing a browser launcher; a required pinned
   Linux canary verifies that no-launch behavior through the production adapter.
-- One isolated `hermes serve` runtime per session, each with a dedicated,
-  freshly generated `HERMES_HOME`. By default the runtime executes as the
+- One `hermes serve` process per session. By default each has a freshly
+  generated isolated `HERMES_HOME`. The explicit shared-home mode keeps
+  separate processes, ports, tokens, browser shims, event streams, environment,
+  and wrapper control roots while official Hermes shares its native database
+  and auth residence. By default the runtime executes as the
   adapter's own identity on every supported platform and reports the
   non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
   authoritative Linux OS containment; it is Linux-only and fails closed rather
@@ -160,13 +164,9 @@ make test-integration-live
 make test-integration-cover
 ```
 
-Live integration tests require a local authenticated `hermes` CLI. The live
-target sets `ACP_GO_HERMES_RUN_INTEGRATION=1` and
-`ACP_GO_HERMES_RUN_LIVE_TOKENS=1` and may spend model tokens. Set
-`ACP_GO_HERMES_MODEL` to override the model used by live tests. Live tests
-always launch Hermes with an isolated temp `HERMES_HOME`. Credentialed tests
-pass a durable `HERMES_AUTH_HOME` explicitly and never copy credential files
-into a session home.
+Live integration tests use disposable temporary Hermes homes. The official
+shared-home proof plants a fake xAI OAuth fixture, makes no provider request,
+and never reads or mutates the operator's Hermes home.
 
 ## License
 

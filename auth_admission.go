@@ -106,6 +106,19 @@ func (p *providerAuth) lockFlowProvider(ctx context.Context, flow *authFlow) (fu
 	return release, nil
 }
 
+func (p *providerAuth) ownsLiveProviderLease(providerID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for key, flow := range p.flows {
+		if key.providerID == providerID && flow.providerLease != nil && !authTerminal(flow.state) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // lockLedger serializes every read-modify-write of one provider's durable
 // ledger entry: authorize's revision bump and completion's lineage check and
 // confirmation. Each decides what to write from what it just read.

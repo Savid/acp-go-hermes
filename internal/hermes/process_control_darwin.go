@@ -204,7 +204,7 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	if err != nil {
 		return nil, fmt.Errorf("prepare Darwin containment record: %w", err)
 	}
-	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot)
+	launch, err := prepareDarwinLaunch(target, spec.GenerationRoot, spec.SharedSessionOwnerFiles)
 	if err != nil {
 		return nil, errors.Join(err, completeContainmentRecord(record, containmentStateAbsent))
 	}
@@ -257,16 +257,45 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 	return tree, nil
 }
 
-func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch, error) {
+func prepareDarwinLaunch(native *exec.Cmd, generationRoot string, ownerFileSets ...[]*os.File) (*darwinLaunch, error) {
 	if native == nil || native.Path == "" || len(native.Args) == 0 {
 		return nil, errors.New("prepare Darwin native launch: command is incomplete")
 	}
+	var ownerFiles []*os.File
+	if len(ownerFileSets) > 0 {
+		ownerFiles = ownerFileSets[0]
+	}
+	ownerDuplicates := make([]*os.File, 0, len(ownerFiles))
+	for _, owner := range ownerFiles {
+		if owner == nil {
+			for _, duplicate := range ownerDuplicates {
+				_ = duplicate.Close()
+			}
+
+			return nil, errors.New("duplicate Darwin shared-session owner: nil file")
+		}
+		fd, duplicateErr := unix.Dup(int(owner.Fd()))
+		if duplicateErr != nil {
+			for _, duplicate := range ownerDuplicates {
+				_ = duplicate.Close()
+			}
+
+			return nil, fmt.Errorf("duplicate Darwin shared-session owner: %w", duplicateErr)
+		}
+		ownerDuplicates = append(ownerDuplicates, os.NewFile(uintptr(fd), owner.Name()+"-launch"))
+	}
+	cleanupOwnerDuplicates := func() {
+		for _, duplicate := range ownerDuplicates {
+			_ = duplicate.Close()
+		}
+	}
 	configFile, err := darwinLaunchCreateTemp(generationRoot, ".launch-")
 	if err != nil {
+		cleanupOwnerDuplicates()
 		return nil, fmt.Errorf("create Darwin native launch config: %w", err)
 	}
 	name := configFile.Name()
-	cleanup := func() { _ = configFile.Close(); _ = darwinLaunchRemove(name) }
+	cleanup := func() { _ = configFile.Close(); _ = darwinLaunchRemove(name); cleanupOwnerDuplicates() }
 	if chmodErr := darwinLaunchFileChmod(configFile, 0o600); chmodErr != nil {
 		cleanup()
 		return nil, chmodErr
@@ -287,6 +316,7 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 	gateRead, gateWrite, err := darwinLaunchPipe()
 	if err != nil {
 		_ = configFile.Close()
+		cleanupOwnerDuplicates()
 		return nil, err
 	}
 	statusRead, statusWrite, err := darwinLaunchPipe()
@@ -294,6 +324,7 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 		_ = configFile.Close()
 		_ = gateRead.Close()
 		_ = gateWrite.Close()
+		cleanupOwnerDuplicates()
 		return nil, err
 	}
 	self, err := darwinLaunchExecutable()
@@ -303,6 +334,7 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 		_ = gateWrite.Close()
 		_ = statusRead.Close()
 		_ = statusWrite.Close()
+		cleanupOwnerDuplicates()
 		return nil, err
 	}
 	helper := darwinLaunchCommand(self)
@@ -313,9 +345,9 @@ func prepareDarwinLaunch(native *exec.Cmd, generationRoot string) (*darwinLaunch
 	// sealed config rather than through the helper's own environment.
 	helper.Env = darwinBootstrapEnvironment()
 	helper.WaitDelay = darwinPipeWait
-	helper.ExtraFiles = []*os.File{configFile, gateRead, statusWrite}
+	helper.ExtraFiles = append([]*os.File{configFile, gateRead, statusWrite}, ownerDuplicates...)
 	configureHermesProcess(helper)
-	return &darwinLaunch{cmd: helper, inherited: []*os.File{configFile, gateRead, statusWrite}, gate: gateWrite, status: statusRead}, nil
+	return &darwinLaunch{cmd: helper, inherited: append([]*os.File{configFile, gateRead, statusWrite}, ownerDuplicates...), gate: gateWrite, status: statusRead}, nil
 }
 
 func awaitDarwinLaunchExec(status *os.File) error {

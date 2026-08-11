@@ -97,6 +97,8 @@ type authFlow struct {
 	mintErr error
 
 	disarm chan struct{}
+
+	providerLease *authProviderLease
 }
 
 // authMint is what one native start produces: the wire presentation and the
@@ -214,12 +216,27 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	now := authNow()
 
+	// A previous flow owned by this broker retains the same cross-process
+	// provider lease. Settle its cancellation before acquiring the next lease,
+	// or this process would wait on its own open-file description.
+	p.cancelProviderFlows(ctx, request.providerID)
+
+	providerLease, err := p.ledger.acquireProviderLease(ctx, request.providerID)
+	if err != nil {
+		return nil, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			_ = providerLease.Release()
+		}
+	}()
+
 	record, err := p.recordAuthorizeIntent(ctx, request, flowID, now)
 	if err != nil {
 		return nil, err
 	}
-
-	p.cancelProviderFlows(ctx, request.providerID)
 
 	flow := &authFlow{
 		id:                 flowID,
@@ -237,6 +254,7 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		probeInterval:      authPollFloor,
 		ready:              make(chan struct{}),
 		disarm:             make(chan struct{}),
+		providerLease:      providerLease,
 	}
 
 	// The flow is published before the mint that fills it in has run: a repeat
@@ -247,6 +265,8 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	if publishErr := p.publishFlow(ctx, session, key, flow); publishErr != nil {
 		return nil, publishErr
 	}
+
+	leaseTransferred = true
 
 	mint, cause := p.mintPresentation(ctx, session, flow)
 
@@ -576,6 +596,7 @@ func (p *providerAuth) expire(flow *authFlow) {
 	defer cancel()
 
 	p.cancelNativeFlow(ctx, flow.session, flow)
+	p.releaseFlowProviderLease(flow)
 }
 
 // cancelNativeFlow cancels through the exact session lifetime the caller
@@ -771,12 +792,13 @@ func (p *providerAuth) confirm(ctx context.Context, flow *authFlow) error {
 // key. A flow that already reached one keeps it: a native answer still in
 // flight when the owner cancelled arrives into a record the owner already
 // closed, and what it carries is no longer the flow's outcome.
-func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
+func (p *providerAuth) terminalizeState(flow *authFlow, state string, reason string) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if authTerminal(flow.state) {
-		return
+		p.mu.Unlock()
+
+		return false
 	}
 
 	flow.state = state
@@ -784,6 +806,15 @@ func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) 
 
 	flow.stopCompleter()
 	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
+	p.mu.Unlock()
+
+	return true
+}
+
+func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
+	if p.terminalizeState(flow, state, reason) {
+		p.releaseFlowProviderLease(flow)
+	}
 }
 
 // addressFlow resolves a flowId a caller supplied. A missing, unknown,
@@ -875,6 +906,7 @@ func (p *providerAuth) cancel(ctx context.Context, params json.RawMessage) (any,
 
 	if p.markOwnerCancelled(flow) {
 		p.cancelNativeFlow(ctx, session, flow)
+		p.releaseFlowProviderLease(flow)
 	}
 
 	return authFlowIDResult{FlowID: flow.id}, nil
@@ -956,6 +988,7 @@ func (p *providerAuth) cancelProviderFlows(ctx context.Context, providerID strin
 
 	for _, flow := range flows {
 		p.cancelNativeFlow(ctx, flow.session, flow)
+		p.releaseFlowProviderLease(flow)
 	}
 }
 
@@ -1010,5 +1043,6 @@ func (p *providerAuth) closeSession(ctx context.Context, sessionID acp.SessionId
 
 	for _, flow := range pending {
 		p.cancelNativeFlow(ctx, flow.session, flow)
+		p.releaseFlowProviderLease(flow)
 	}
 }

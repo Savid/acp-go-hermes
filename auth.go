@@ -129,14 +129,14 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		return nil
 	}
 
-	home, err := prepareProviderAuthHome(agent.options.ProviderAuthHome)
+	home, err := prepareProviderAuthResidence(providerAuthResidence(agent.options))
 	if err != nil {
 		agent.log.WarnContext(context.Background(), "provider auth surface is unavailable", slog.String(jsonFieldError, err.Error()))
 
 		return nil
 	}
 
-	agent.options.ProviderAuthHome = home
+	agent.options.SharedHermesHome = home
 
 	ledger, err := newAuthLedger(agent.options)
 	if err != nil {
@@ -337,14 +337,14 @@ func (s *session) authNativeClient() nativehermes.Server {
 	return s.client
 }
 
-type providerAuthHomeSupporter interface {
-	ProviderAuthHomeSupported() bool
+type providerAuthSupporter interface {
+	ProviderAuthSupported() bool
 }
 
-func nativeProviderAuthHomeSupported(client nativehermes.Server) bool {
-	supported, ok := client.(providerAuthHomeSupporter)
+func nativeProviderAuthSupported(client nativehermes.Server) bool {
+	supported, ok := client.(providerAuthSupporter)
 
-	return ok && supported.ProviderAuthHomeSupported()
+	return ok && supported.ProviderAuthSupported()
 }
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,
