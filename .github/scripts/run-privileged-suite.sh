@@ -17,8 +17,11 @@
 #
 # The runner's docker socket is the host daemon, which is how the native-browser
 # canary already reaches the host PID namespace. Use the same door: run the
-# suite in a container started with --pid=host, root, a tmpfs temp root, and a
-# fresh volume for the authority tree.
+# suite in a container started with --pid=host and root, with one fresh local
+# volume per shard for its temp root and one for its authority tree. /tmp stays
+# tmpfs-backed for fixtures that name it directly; shared-home tests inherit
+# TMPDIR=/acp-go-tmp so their locking residence has local-volume semantics and
+# does not consume the runner container's writable layer or memory-backed tmpfs.
 #
 # What the container must NOT be able to do is change the checkout it is
 # testing. /src stays writable because the suites write into it — coverage-check
@@ -115,19 +118,122 @@ esac
 }
 GO_CACHE_VOLUME=acp-go-privileged-gocache-$(printf '%s' "$module_path" | tr -c 'A-Za-z0-9_.-' '-')
 
-root_authority_volume=$(docker volume create)
-provider_authority_volume=$(docker volume create)
-private_authority_volume=$(docker volume create)
+resource_nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+case "$resource_nonce" in
+'' | *[!0-9a-f]*)
+	echo "privileged-suite resource nonce is not lowercase hexadecimal" >&2
+	exit 1
+	;;
+esac
+[ "${#resource_nonce}" -eq 32 ] || {
+	echo "privileged-suite resource nonce has the wrong length" >&2
+	exit 1
+}
+
+resource_run=acp-go-privileged-$provider_name-$target-$resource_nonce
+resource_label=com.savid.acp-go.privileged-run
+root_authority_volume=$resource_run-root-authority
+provider_authority_volume=$resource_run-provider-authority
+private_authority_volume=$resource_run-private-authority
+root_temp_volume=$resource_run-root-tmp
+provider_temp_volume=$resource_run-provider-tmp
+root_container=$resource_run-root
+provider_container=$resource_run-provider
+private_container=$resource_run-private-pid1
 root_log="$repo_root/.tmp/privileged-$target-root-$$.log"
 provider_log="$repo_root/.tmp/privileged-$target-provider-$$.log"
 private_log="$repo_root/.tmp/privileged-$target-private-pid1-$$.log"
 root_coverage=".tmp/coverage-$target-root-$$.out"
 provider_coverage=".tmp/coverage-$target-provider-$$.out"
-cleanup() {
-	docker volume rm "$root_authority_volume" "$provider_authority_volume" "$private_authority_volume" >/dev/null 2>&1 || true
-	rm -f "$root_log" "$provider_log" "$private_log" "$repo_root/$root_coverage" "$repo_root/$provider_coverage"
+root_job=
+provider_job=
+
+remove_container() {
+	container_name=$1
+	if ! container_run=$(docker container inspect --format "{{ index .Config.Labels \"$resource_label\" }}" "$container_name" 2>/dev/null); then
+		docker info >/dev/null 2>&1 || return 1
+
+		return 0
+	fi
+	if [ "$container_run" != "$resource_run" ]; then
+		echo "refusing to remove container $container_name with foreign privileged-run label $container_run" >&2
+
+		return 1
+	fi
+
+	docker container rm --force "$container_name" >/dev/null
 }
-trap cleanup EXIT HUP INT TERM
+
+remove_volume() {
+	volume_name=$1
+	if ! volume_run=$(docker volume inspect --format "{{ index .Labels \"$resource_label\" }}" "$volume_name" 2>/dev/null); then
+		docker info >/dev/null 2>&1 || return 1
+
+		return 0
+	fi
+	if [ "$volume_run" != "$resource_run" ]; then
+		echo "refusing to remove volume $volume_name with foreign privileged-run label $volume_run" >&2
+
+		return 1
+	fi
+
+	docker volume rm "$volume_name" >/dev/null
+}
+
+cleanup() {
+	status=$?
+	trap - EXIT HUP INT TERM
+	cleanup_status=0
+	for job in "$root_job" "$provider_job"; do
+		if [ -n "$job" ]; then
+			kill "$job" 2>/dev/null || true
+		fi
+	done
+	for container_name in "$root_container" "$provider_container" "$private_container"; do
+		remove_container "$container_name" || cleanup_status=1
+	done
+	for volume_name in \
+		"$root_authority_volume" "$provider_authority_volume" "$private_authority_volume" \
+		"$root_temp_volume" "$provider_temp_volume"; do
+		remove_volume "$volume_name" || cleanup_status=1
+	done
+	rm -f "$root_log" "$provider_log" "$private_log" "$repo_root/$root_coverage" "$repo_root/$provider_coverage"
+	if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+		status=$cleanup_status
+	fi
+
+	exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+create_volume() {
+	volume_name=$1
+	volume_role=$2
+	docker volume create \
+		--driver local \
+		--label "$resource_label=$resource_run" \
+		--label "com.savid.acp-go.privileged-role=$volume_role" \
+		"$volume_name" >/dev/null
+	volume_run=$(docker volume inspect --format "{{ index .Labels \"$resource_label\" }}" "$volume_name")
+	[ "$volume_run" = "$resource_run" ] || {
+		echo "privileged-suite volume $volume_name did not retain its exact run label" >&2
+		exit 1
+	}
+	volume_driver=$(docker volume inspect --format '{{ .Driver }}' "$volume_name")
+	[ "$volume_driver" = local ] || {
+		echo "privileged-suite volume $volume_name uses driver $volume_driver, want local" >&2
+		exit 1
+	}
+}
+
+create_volume "$root_authority_volume" root-authority
+create_volume "$provider_authority_volume" provider-authority
+create_volume "$private_authority_volume" private-authority
+create_volume "$root_temp_volume" root-tmp
+create_volume "$provider_temp_volume" provider-tmp
 
 docker volume create "$GO_CACHE_VOLUME" >/dev/null
 mkdir -p "$repo_root/.tmp"
@@ -167,6 +273,8 @@ root_packages=${root_packages# }
 # require its namespace refusal before the requested make target can run.
 private_status=0
 docker run --rm \
+	--name "$private_container" \
+	--label "$resource_label=$resource_run" \
 	--user 0:0 \
 	--mount "type=volume,source=$private_authority_volume,target=/var/lib/acp-go/agent-identities" \
 	--volume "$ACP_GO_WORKSPACE_HOST:/src" \
@@ -204,15 +312,19 @@ run_shard() {
 	packages=$3
 	coverage=$4
 	required=$5
+	temp_volume=$6
+	container_name=$7
 
 	docker run --rm \
+		--name "$container_name" \
+		--label "$resource_label=$resource_run" \
 		--pid=host \
 		--user 0:0 \
 		--cap-add SYS_PTRACE \
 		--security-opt seccomp=unconfined \
 		--security-opt apparmor=unconfined \
-		--tmpfs /acp-go-tmp:rw,exec,mode=0755,size=4g \
 		--tmpfs /tmp:rw,exec,size=2g \
+		--mount "type=volume,source=$temp_volume,target=/acp-go-tmp,volume-nocopy" \
 		--mount "type=volume,source=$authority_volume,target=/var/lib/acp-go/agent-identities" \
 		--mount "type=volume,source=$GO_CACHE_VOLUME,target=/gocache" \
 		--volume "$ACP_GO_WORKSPACE_HOST:/src" \
@@ -236,15 +348,17 @@ run_shard() {
 		sh -eu /src/.github/scripts/privileged-suite-entrypoint.sh "$target"
 }
 
-run_shard root "$root_authority_volume" "$root_packages" "$root_coverage" "$root_required" >"$root_log" 2>&1 &
+run_shard root "$root_authority_volume" "$root_packages" "$root_coverage" "$root_required" "$root_temp_volume" "$root_container" >"$root_log" 2>&1 &
 root_job=$!
-run_shard provider "$provider_authority_volume" "$provider_package" "$provider_coverage" "$provider_required" >"$provider_log" 2>&1 &
+run_shard provider "$provider_authority_volume" "$provider_package" "$provider_coverage" "$provider_required" "$provider_temp_volume" "$provider_container" >"$provider_log" 2>&1 &
 provider_job=$!
 
 root_status=0
 provider_status=0
 wait "$root_job" || root_status=$?
+root_job=
 wait "$provider_job" || provider_status=$?
+provider_job=
 
 echo "::group::privileged root shard"
 cat "$root_log"
