@@ -331,14 +331,18 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
 
-	providers, err := client.AuthProviders(ctx)
-	if err != nil {
-		return nil, authFailed(authNativeCause(err), "", "", "")
-	}
+	loggedIn := map[string]bool{}
 
-	loggedIn := make(map[string]bool, len(providers))
-	for _, provider := range providers {
-		loggedIn[provider.ID] = provider.LoggedIn
+	if nativeProviderAuthHomeSupported(client) {
+		providers, providersErr := client.AuthProviders(ctx)
+		if providersErr != nil {
+			return nil, authFailed(authNativeCause(providersErr), "", "", "")
+		}
+
+		loggedIn = make(map[string]bool, len(providers))
+		for _, provider := range providers {
+			loggedIn[provider.ID] = provider.LoggedIn
+		}
 	}
 
 	records, err := p.ledger.list()

@@ -165,20 +165,28 @@ type fakeHermesClient struct {
 	reloadFunc           func(context.Context, string) error
 	closeFunc            func(context.Context) error
 
-	authProviders     []nativehermes.AuthProvider
-	authProvidersErr  error
-	authStart         nativehermes.AuthStart
-	authStartErr      error
-	authStartFunc     func(context.Context, string) (nativehermes.AuthStart, error)
-	authSubmitErr     error
-	authSubmits       []string
-	authPoll          nativehermes.AuthPoll
-	authPollErr       error
-	authPollFunc      func(context.Context, string, string) (nativehermes.AuthPoll, error)
-	authCancelled     []string
-	authCancelFlowErr error
-	authDisconnected  []string
-	authDisconnectErr error
+	authProviders             []nativehermes.AuthProvider
+	authProvidersErr          error
+	authStart                 nativehermes.AuthStart
+	authStartErr              error
+	authStartFunc             func(context.Context, string) (nativehermes.AuthStart, error)
+	authSubmitErr             error
+	authSubmits               []string
+	authPoll                  nativehermes.AuthPoll
+	authPollErr               error
+	authPollFunc              func(context.Context, string, string) (nativehermes.AuthPoll, error)
+	authCancelled             []string
+	authCancelFlowErr         error
+	authDisconnected          []string
+	authDisconnectErr         error
+	providerAuthHomeSupported *bool
+}
+
+func (c *fakeHermesClient) ProviderAuthHomeSupported() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.providerAuthHomeSupported == nil || *c.providerAuthHomeSupported
 }
 
 func (c *fakeHermesClient) AuthProviders(context.Context) ([]nativehermes.AuthProvider, error) {

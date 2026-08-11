@@ -37,10 +37,18 @@ The agent advertises `authMethods: []`, rejects `authenticate`, and treats
 Every ACP session has an isolated, ephemeral `HERMES_HOME`. Session config,
 SQLite state, and runtime files cannot leak between sessions.
 
-Provider auth uses a separate, durable `HERMES_AUTH_HOME`. Every session process
-receives the same canonical path, and native Hermes performs all credential
-reads and writes there. The adapter never parses, copies, returns, injects, or
-snapshots credential material.
+Provider auth uses a separate, durable `HERMES_AUTH_HOME` only when the exact
+native executable advertises `Runtime capabilities: provider-auth-home-v1` in
+its `--version` output. Every session process then receives the same canonical
+path, and native Hermes performs all credential reads and writes there. The
+adapter never parses, copies, returns, injects, or snapshots credential
+material.
+
+Official Hermes releases that do not advertise that capability still run
+ordinary ACP sessions, but publish an empty broker-login catalog and never
+receive `HERMES_AUTH_HOME`. Their native auth command stores credentials under
+the session's ephemeral `HERMES_HOME`; accepting such a login as durable would
+lose it on the next session or restart, so the adapter refuses to offer it.
 
 The launch environment also sets a random
 `HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser
@@ -77,7 +85,10 @@ so two native homes under one ledger root cannot observe or mutate each other's
 lineage.
 
 If either path is missing, relative, or cannot be prepared, provider auth is not
-advertised.
+advertised. If both paths are configured but the executable lacks
+`provider-auth-home-v1`, the extension remains reachable for values-free
+inventory and cleanup of prior lineage, but its methods catalog is empty and no
+new login can be authorized.
 
 ## Capability
 

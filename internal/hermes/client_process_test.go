@@ -1132,6 +1132,7 @@ const (
 	fakeProcessModeBadVersion     = "bad-version"
 	fakeProcessModeMissingMethod  = "missing-method"
 	fakeProcessModeSessionCLI     = "session-cli"
+	fakeProcessModeOfficial       = "official-no-auth-home"
 )
 
 type fakeSessionCLICapture struct {
@@ -1182,6 +1183,9 @@ func runFakeHermesProcess(args []string, mode string) error {
 				return nil
 			}
 			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.19.0 (test)")
+			if mode != fakeProcessModeOfficial {
+				_, _ = fmt.Fprintln(os.Stdout, "Runtime capabilities: provider-auth-home-v1")
+			}
 
 			return nil
 		}
@@ -1196,6 +1200,9 @@ func runFakeHermesProcess(args []string, mode string) error {
 	}
 	if port == "" {
 		return fmt.Errorf("missing --port in %q", strings.Join(args, " "))
+	}
+	if mode == fakeProcessModeOfficial && os.Getenv("HERMES_AUTH_HOME") != "" {
+		return errors.New("official runtime received unsupported HERMES_AUTH_HOME")
 	}
 	if mode == fakeProcessModeSessionCLI {
 		if err := captureFakeSessionCLI(); err != nil {
@@ -1305,7 +1312,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldWait := waitProcessCommand
 	oldStartContained := startHermesContainedProcess
 	oldNativeTreeHandoff := processNativeTreeHandoff
-	oldProbed, oldGateway := cloneExecutableProbeCaches()
+	oldProbed, oldCapabilities, oldGateway := cloneExecutableProbeCaches()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
 		listenTCP = oldListenTCP
@@ -1321,6 +1328,7 @@ func restoreProcessSeams(t *testing.T) {
 		processNativeTreeHandoff = oldNativeTreeHandoff
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
+		executableCapabilities = oldCapabilities
 		gatewayProbed = oldGateway
 		executableProbeMu.Unlock()
 	})
@@ -1339,6 +1347,7 @@ func resetProcessSeams() {
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	executableProbeMu.Lock()
 	executableProbed = map[string]bool{}
+	executableCapabilities = map[string]map[string]struct{}{}
 	gatewayProbed = map[string]bool{}
 	executableProbes = map[string]chan struct{}{}
 	executableProbeMu.Unlock()
@@ -1347,9 +1356,13 @@ func resetProcessSeams() {
 // markExecutableProbed marks an executable fully proven — version read and
 // gateway sweep answered — which is what a fixture that must not spawn either
 // probe process needs.
-func markExecutableProbed(executable string) {
+func markExecutableProbed(executable string, capabilities ...string) {
 	executableProbeMu.Lock()
 	executableProbed[executable] = true
+	executableCapabilities[executable] = make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		executableCapabilities[executable][capability] = struct{}{}
+	}
 	gatewayProbed[executable] = true
 	executableProbeMu.Unlock()
 }
@@ -1363,11 +1376,16 @@ func executableVersionProven(executable string) bool {
 	return executableProbed[executable]
 }
 
-func cloneExecutableProbeCaches() (map[string]bool, map[string]bool) {
+func cloneExecutableProbeCaches() (map[string]bool, map[string]map[string]struct{}, map[string]bool) {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
 
-	return maps.Clone(executableProbed), maps.Clone(gatewayProbed)
+	capabilities := make(map[string]map[string]struct{}, len(executableCapabilities))
+	for executable, values := range executableCapabilities {
+		capabilities[executable] = maps.Clone(values)
+	}
+
+	return maps.Clone(executableProbed), capabilities, maps.Clone(gatewayProbed)
 }
 
 type errorReader struct {

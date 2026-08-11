@@ -25,7 +25,8 @@ import (
 )
 
 const (
-	MinimumVersion = "0.19.0"
+	MinimumVersion             = "0.19.0"
+	providerAuthHomeCapability = "provider-auth-home-v1"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the compatibility sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
@@ -66,8 +67,9 @@ var (
 	// probe spawns its own process and proves the binary, while the sweep proves
 	// one live gateway, so a start that never reached readiness must not cost a
 	// second --version process next time.
-	executableProbed = map[string]bool{}
-	gatewayProbed    = map[string]bool{}
+	executableProbed       = map[string]bool{}
+	executableCapabilities = map[string]map[string]struct{}{}
+	gatewayProbed          = map[string]bool{}
 	// executableProbes holds the version probe currently in flight per
 	// executable, so concurrent starts share one native probe process instead of
 	// each spawning their own. The channel is closed when that probe settles.
@@ -145,6 +147,11 @@ type Process struct {
 	Token      string
 	StatusURL  string
 	APIBaseURL string
+	// providerAuthHomeSupported records whether this exact executable
+	// advertised the contract that makes HERMES_AUTH_HOME authoritative. An
+	// official Hermes release that does not know the variable must never be
+	// allowed to turn an ephemeral login into a purported durable binding.
+	providerAuthHomeSupported bool
 
 	cancel context.CancelFunc
 	tree   *processContainment
@@ -171,6 +178,13 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 // operator's desktop.
 func (p *Process) BrowserLaunchContained() bool {
 	return p != nil && p.shim != nil
+}
+
+// ProviderAuthHomeSupported reports whether the executable promised to keep
+// provider credentials in HERMES_AUTH_HOME independently of the session's
+// ephemeral HERMES_HOME.
+func (p *Process) ProviderAuthHomeSupported() bool {
+	return p != nil && p.providerAuthHomeSupported
 }
 
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
@@ -230,6 +244,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
+	providerAuthHomeSupported := executableSupportsCapability(executable, providerAuthHomeCapability)
 
 	probeNeeded := !gatewayMethodsProbed(executable)
 
@@ -262,7 +277,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	env = upsertProcessEnv(env, envHermesHome, home)
 	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
-	if opts.ProviderAuthHome != "" {
+	if opts.ProviderAuthHome != "" && providerAuthHomeSupported {
 		env = upsertProcessEnv(env, envHermesAuthHome, opts.ProviderAuthHome)
 	}
 
@@ -321,15 +336,16 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, nil)
 
 	process := &Process{
-		Cmd:        cmd,
-		Home:       home,
-		Port:       port,
-		Token:      token,
-		StatusURL:  "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
-		APIBaseURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
-		cancel:     cancel,
-		tree:       tree,
-		shim:       shim,
+		Cmd:                       cmd,
+		Home:                      home,
+		Port:                      port,
+		Token:                     token,
+		StatusURL:                 "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
+		APIBaseURL:                "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
+		providerAuthHomeSupported: providerAuthHomeSupported,
+		cancel:                    cancel,
+		tree:                      tree,
+		shim:                      shim,
 	}
 	process.beginWait()
 
@@ -808,7 +824,44 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 		return fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
 
+	markExecutableCapabilities(executable, parseRuntimeCapabilities(output.String()))
+
 	return nil
+}
+
+func parseRuntimeCapabilities(output string) map[string]struct{} {
+	capabilities := make(map[string]struct{})
+
+	for line := range strings.SplitSeq(output, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "Runtime capabilities:")
+		if !ok {
+			continue
+		}
+
+		for field := range strings.FieldsSeq(value) {
+			capability := strings.Trim(field, ",")
+			if capability != "" {
+				capabilities[capability] = struct{}{}
+			}
+		}
+	}
+
+	return capabilities
+}
+
+func markExecutableCapabilities(executable string, capabilities map[string]struct{}) {
+	executableProbeMu.Lock()
+	executableCapabilities[executable] = capabilities
+	executableProbeMu.Unlock()
+}
+
+func executableSupportsCapability(executable string, capability string) bool {
+	executableProbeMu.Lock()
+	defer executableProbeMu.Unlock()
+
+	_, supported := executableCapabilities[executable][capability]
+
+	return supported
 }
 
 func parseVersion(output string) (string, bool) {

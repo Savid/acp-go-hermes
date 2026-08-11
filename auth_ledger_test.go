@@ -65,6 +65,24 @@ func seedConfirmedLineage(t *testing.T, agent *Agent, providerID string) authLed
 	return record
 }
 
+func TestInventoryKeepsOfficialHermesLineageInconclusiveWithoutReadingNativeStatus(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	seedConfirmedLineage(t, agent, testProviderID)
+	unsupported := false
+	client.providerAuthHomeSupported = &unsupported
+	client.authProvidersErr = errors.New("native status must not be consulted")
+
+	result, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{"sessionId": string(testSessionID)})
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	inventory := mustType[authInventoryResult](t, result)
+	if len(inventory.Entries) != 1 || inventory.Entries[0].ProofSource != authProofNotConfirmed {
+		t.Fatalf("official Hermes inventory = %#v", inventory)
+	}
+}
+
 func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 	restoreLedgerHooks(t)
 

@@ -18,9 +18,11 @@
 // Hermes authentication and provider credentials remain owned by native
 // Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
 // beneath the scratch parent from [WithScratchDir]. Provider OAuth requires the
-// paired [WithProviderAuthRoot] and [WithProviderAuthHome] options; every native
-// process receives the latter as `HERMES_AUTH_HOME`, while the former stores
-// only values-free connection lineage. [WithHome] and
+// paired [WithProviderAuthRoot] and [WithProviderAuthHome] options. A native
+// executable that advertises `provider-auth-home-v1` receives the latter as
+// `HERMES_AUTH_HOME`, while the former stores only values-free connection
+// lineage. An official executable without that capability keeps ordinary
+// sessions but offers no broker login methods. [WithHome] and
 // [WithProviderAuthDirectHome] remain unsupported.
 //
 // Prompt images arrive either as embedded base64 or, for a co-located host that

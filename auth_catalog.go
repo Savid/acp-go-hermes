@@ -81,6 +81,20 @@ func (p *providerAuth) methods(ctx context.Context, params json.RawMessage) (any
 		return nil, authFailed(authCauseTransport, "", "", "")
 	}
 
+	if !nativeProviderAuthHomeSupported(client) {
+		generation, tokenErr := newAuthToken()
+		if tokenErr != nil {
+			return nil, authFailed(authCauseProcess, "", "", "")
+		}
+
+		p.mu.Lock()
+		p.generation = generation
+		p.catalog = map[string][]authCatalogMethod{}
+		p.mu.Unlock()
+
+		return authMethodsResult{Providers: map[string][]authMethodEntry{}, Generation: generation}, nil
+	}
+
 	oauth, err := client.AuthProviders(ctx)
 	if err != nil {
 		return nil, authFailed(authNativeCause(err), "", "", "")

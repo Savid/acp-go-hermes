@@ -58,6 +58,31 @@ func TestMethodsEnumeratesOnlyNativeOAuthCatalog(t *testing.T) {
 	}
 }
 
+func TestMethodsPublishesNoBrokerLoginForOfficialHermesWithoutDurableAuthHome(t *testing.T) {
+	agent, client := newAuthAgent(t)
+	unsupported := false
+	client.providerAuthHomeSupported = &unsupported
+	client.authProvidersErr = errors.New("native catalog must not be consulted")
+
+	result, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
+	if err != nil {
+		t.Fatalf("methods: %v", err)
+	}
+
+	catalog := mustType[authMethodsResult](t, result)
+	if catalog.Generation == "" || len(catalog.Providers) != 0 {
+		t.Fatalf("official Hermes catalog = %#v", catalog)
+	}
+
+	_, err = callLeg(t, agent, AuthAuthorizeMethod, map[string]any{
+		"sessionId": string(testSessionID), "providerId": "xai-oauth",
+		"connectionId": testConnectionID, "methodsGeneration": catalog.Generation,
+		"method": nativehermes.AuthFlowDeviceCode, "authorizeRequestId": "request-1",
+		"inputs": map[string]string{},
+	})
+	requireInvalidField(t, err, authFieldMethod)
+}
+
 func TestMethodsFailurePaths(t *testing.T) {
 	t.Parallel()
 
@@ -92,7 +117,7 @@ func TestMethodsFailurePaths(t *testing.T) {
 }
 
 func TestMethodsFailsClosedWhenNoGenerationCanBeMinted(t *testing.T) {
-	agent, _ := newAuthAgent(t)
+	agent, client := newAuthAgent(t)
 
 	original := authRandRead
 	authRandRead = func([]byte) (int, error) { return 0, errors.New("entropy") }
@@ -100,6 +125,11 @@ func TestMethodsFailsClosedWhenNoGenerationCanBeMinted(t *testing.T) {
 	t.Cleanup(func() { authRandRead = original })
 
 	_, err := callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
+	requireAuthCause(t, err, authCauseProcess)
+
+	unsupported := false
+	client.providerAuthHomeSupported = &unsupported
+	_, err = callLeg(t, agent, AuthMethodsMethod, map[string]any{"sessionId": string(testSessionID)})
 	requireAuthCause(t, err, authCauseProcess)
 }
 

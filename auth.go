@@ -337,6 +337,16 @@ func (s *session) authNativeClient() nativehermes.Server {
 	return s.client
 }
 
+type providerAuthHomeSupporter interface {
+	ProviderAuthHomeSupported() bool
+}
+
+func nativeProviderAuthHomeSupported(client nativehermes.Server) bool {
+	supported, ok := client.(providerAuthHomeSupporter)
+
+	return ok && supported.ProviderAuthHomeSupported()
+}
+
 // authParamFields walks a leg's params object once, rejecting an unknown field,
 // a duplicate field, and a non-object body with the offending field path. Every
 // request object on this surface is closed, and encoding/json alone would let a

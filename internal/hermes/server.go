@@ -213,6 +213,13 @@ func (s *hermesServer) ProviderDescendantCount() (int, bool) {
 	return s.process.ProviderDescendantCount()
 }
 
+// ProviderAuthHomeSupported is intentionally an optional server capability:
+// test doubles and embedders that do not prove the native runtime contract are
+// treated as unsupported by the broker rather than assumed safe.
+func (s *hermesServer) ProviderAuthHomeSupported() bool {
+	return s != nil && s.process != nil && s.process.ProviderAuthHomeSupported()
+}
+
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`

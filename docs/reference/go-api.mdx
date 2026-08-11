@@ -65,8 +65,11 @@ processes receive neither capability nor descriptor.
 
 `WithProviderAuthRoot` and `WithProviderAuthHome` are a required pair. The
 former stores only connection lineage; the latter is canonicalized and supplied
-to native Hermes as `HERMES_AUTH_HOME`. The adapter never exposes a public
-credential type and never reads, copies, or returns native credential bytes.
+to native Hermes as `HERMES_AUTH_HOME` only after `hermes --version` advertises
+`provider-auth-home-v1`. An official executable without that contract keeps
+ordinary sessions available but receives no auth-home override and publishes
+no broker login methods. The adapter never exposes a public credential type and
+never reads, copies, or returns native credential bytes.
 See [Authentication](/docs/features/authentication).
 
 `WithTurnTimeout(time.Duration)` bounds how long a single native turn may run
