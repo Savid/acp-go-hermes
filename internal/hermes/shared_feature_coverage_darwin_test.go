@@ -39,8 +39,4 @@ func TestSharedOwnerDarwinLaunchFaultCoverage(t *testing.T) {
 	if launch, err := prepareDarwinLaunch(cmd, t.TempDir(), []*os.File{owner}); err == nil || launch != nil {
 		t.Fatalf("owner cleanup launch = %#v, %v", launch, err)
 	}
-
-	if tree, err := startContainedProcess(nil, ContainmentSpec{SharedSessionOwnerFiles: []*os.File{owner}}); err == nil || tree != nil {
-		t.Fatalf("nil contained command = %#v, %v", tree, err)
-	}
 }

@@ -74,6 +74,7 @@ func procStartTime(stat string) (string, error) {
 	if len(fields) < 20 {
 		return "", errors.New("proc stat missing start time")
 	}
+
 	flags, err := strconv.ParseUint(fields[6], 10, 64)
 	if err != nil {
 		return "", errors.New("proc stat contains malformed process flags")

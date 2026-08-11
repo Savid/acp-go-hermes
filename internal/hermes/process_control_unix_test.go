@@ -143,6 +143,14 @@ func TestUnixProcessContainmentCompletionBranches(t *testing.T) {
 	if _, err := startContainedProcess(nil); err == nil {
 		t.Fatal("startContainedProcess accepted a nil command")
 	}
+	ownerFile, createOwnerErr := os.CreateTemp(t.TempDir(), "owner")
+	if createOwnerErr != nil {
+		t.Fatal(createOwnerErr)
+	}
+	defer ownerFile.Close()
+	if tree, err := startContainedProcess(nil, ContainmentSpec{SharedSessionOwnerFiles: []*os.File{ownerFile}}); err == nil || tree != nil || !strings.Contains(err.Error(), "unavailable for inherited session-owner locks") {
+		t.Fatalf("nil contained command with inherited owner = %#v, %v", tree, err)
+	}
 
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing"))
 	configureHermesProcess(missing)
