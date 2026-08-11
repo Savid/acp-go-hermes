@@ -1112,6 +1112,21 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 		return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("hermes fork native session drift: got %q want %q", native.ID, nativeChild.ID), closeErr)
 	}
+	// The child server may start with a process-wide default that differs from
+	// the parent's current (or explicitly requested) model. Bind the resolved
+	// selection natively before the child can be snapshotted or published, so
+	// its response, durable state, and first prompt all describe one model.
+	if meta.Model != "" {
+		if err := client.SetModel(ctx, nativeChild.ID, meta.Model); err != nil {
+			closeErr := closeHermesClientAfterStartupFailure(client)
+			if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+				cleanupNativeChild = false
+			}
+			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+			return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("bind Hermes fork model: %w", err), closeErr)
+		}
+	}
 
 	idmap := idmapRecord{
 		SessionID:             string(id),

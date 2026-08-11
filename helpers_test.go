@@ -128,6 +128,8 @@ type fakeHermesClient struct {
 	providers         nativehermes.ProvidersResponse
 
 	configProviderCalls int
+	setModelCalls       []fakeModelSelection
+	setModelErr         error
 
 	pendingPermissions []nativehermes.PermissionRequest
 	permissionReplies  []fakePermissionReply
@@ -182,6 +184,11 @@ type fakeHermesClient struct {
 	authDisconnected      []string
 	authDisconnectErr     error
 	providerAuthSupported *bool
+}
+
+type fakeModelSelection struct {
+	sessionID string
+	value     string
 }
 
 func (c *fakeHermesClient) ProviderAuthSupported() bool {
@@ -447,6 +454,15 @@ func (c *fakeHermesClient) ConfigProviders(context.Context) (nativehermes.Provid
 	c.mu.Unlock()
 
 	return c.providers, c.providersErr
+}
+
+func (c *fakeHermesClient) SetModel(_ context.Context, sessionID string, value string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.setModelCalls = append(c.setModelCalls, fakeModelSelection{sessionID: sessionID, value: value})
+
+	return c.setModelErr
 }
 
 // configProviderCallCount reports how many native model.options enumerations

@@ -63,6 +63,19 @@ func (s *managedHermesServer) ForkWithBaseline(
 	return forker.ForkWithBaseline(ctx, id, marker, baseline)
 }
 
+// SetModel forwards the required session-scoped mutation through the managed
+// lifecycle wrapper without widening the base native Server contract.
+func (s *managedHermesServer) SetModel(ctx context.Context, id string, value string) error {
+	setter, ok := s.Server.(interface {
+		SetModel(context.Context, string, string) error
+	})
+	if !ok {
+		return errors.New("hermes server does not expose session model selection")
+	}
+
+	return setter.SetModel(ctx, id, value)
+}
+
 func (s *managedHermesServer) Close(ctx context.Context) error {
 	s.once.Do(func() {
 		if s.processRoot != nil {

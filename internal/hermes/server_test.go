@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +64,10 @@ type fakeGatewayServer struct {
 	resumeNoLive        bool
 	resumeNoKey         bool
 	resumeKey           string
+	resumeBuildDefault  string
+	expectedPromptModel string
+	liveModels          map[string]string
+	lazyResumeBuilds    map[string]bool
 	reloadStatus        string
 	activeNoID          bool
 	activeNoKey         bool
@@ -73,10 +78,12 @@ type fakeGatewayServer struct {
 func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 	t.Helper()
 	fake := &fakeGatewayServer{
-		t:               t,
-		failMethods:     map[string]struct{}{},
-		failAfterCalls:  map[string]int{},
-		notFoundMethods: map[string]int{},
+		t:                t,
+		failMethods:      map[string]struct{}{},
+		failAfterCalls:   map[string]int{},
+		notFoundMethods:  map[string]int{},
+		liveModels:       map[string]string{},
+		lazyResumeBuilds: map[string]bool{},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.server.Close)
@@ -270,8 +277,18 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		if resumeKey == "" {
 			resumeKey = stored
 		}
+		liveID := "live-" + resumeKey
+		s.mu.Lock()
+		if s.resumeBuildDefault != "" {
+			if eager, _ := params[keyEagerBuild].(bool); eager {
+				s.liveModels[liveID] = s.resumeBuildDefault
+			} else {
+				s.lazyResumeBuilds[liveID] = true
+			}
+		}
+		s.mu.Unlock()
 		result := map[string]any{
-			"session_id":  "live-" + resumeKey,
+			"session_id":  liveID,
 			"session_key": resumeKey,
 		}
 		if resumeNoLive {
@@ -397,6 +414,19 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
+		s.mu.Lock()
+		if s.lazyResumeBuilds[live] {
+			s.liveModels[live] = s.resumeBuildDefault
+			delete(s.lazyResumeBuilds, live)
+		}
+		expectedModel := s.expectedPromptModel
+		actualModel := s.liveModels[live]
+		s.mu.Unlock()
+		if expectedModel != "" && actualModel != expectedModel {
+			s.writeError(ctx, conn, id, -32000, fmt.Sprintf("prompt used model %q, want %q", actualModel, expectedModel))
+
+			return
+		}
 		s.writeResult(ctx, conn, id, map[string]any{})
 		for _, frame := range s.promptRawFrameScript() {
 			_ = conn.Write(ctx, websocket.MessageText, []byte(frame))
@@ -416,7 +446,22 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.writeResult(ctx, conn, id, map[string]any{})
 	case "config.set":
 		value, _ := params["value"].(string)
-		raw := strings.Trim(strings.Fields(value)[0], "'")
+		fields := strings.Fields(value)
+		raw := strings.Trim(fields[0], "'")
+		qualified := raw
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] == "--provider" {
+				qualified = strings.Trim(fields[index+1], "'") + "/" + raw
+
+				break
+			}
+		}
+		live, _ := params[fieldSessionID].(string)
+		s.mu.Lock()
+		if s.resumeBuildDefault != "" && !s.lazyResumeBuilds[live] {
+			s.liveModels[live] = qualified
+		}
+		s.mu.Unlock()
 		s.writeResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
 	case "session.history":
 		s.writeResult(ctx, conn, id, map[string]any{"count": 2, "messages": []map[string]any{
@@ -2376,6 +2421,49 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 			t.Fatalf("event channel len = %d", got)
 		}
 	})
+}
+
+func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.activeEmpty = true
+	fake.resumeBuildDefault = "z-ai/glm-4.7"
+	fake.expectedPromptModel = "xai-oauth/grok-code-fast-1"
+	server := newGatewayBackedHermesServer(t, fake, "z-ai/glm-4.7")
+
+	child, err := server.GetSession(t.Context(), "stored-branch")
+	if err != nil || child.ID != "stored-branch" {
+		t.Fatalf("resume fork child = %#v err=%v", child, err)
+	}
+	if err := server.SetModel(t.Context(), child.ID, fake.expectedPromptModel); err != nil {
+		t.Fatalf("bind fork model: %v", err)
+	}
+	if _, err := server.SendMessage(t.Context(), child.ID, MessageRequest{Parts: []map[string]any{{valText: "prove model"}}}); err != nil {
+		t.Fatalf("prompt after fork model bind: %v", err)
+	}
+
+	resumeCalls := fake.callsFor("session.resume")
+	if len(resumeCalls) != 1 || resumeCalls[0].Params[keyEagerBuild] != true {
+		t.Fatalf("fork child resume calls = %#v", resumeCalls)
+	}
+	calls := fake.callMethods()
+	resumeIndex := slices.Index(calls, "session.resume")
+	modelIndex := slices.Index(calls, "config.set")
+	promptIndex := slices.Index(calls, "prompt.submit")
+	if resumeIndex < 0 || modelIndex <= resumeIndex || promptIndex <= modelIndex {
+		t.Fatalf("fork resume/model/prompt order = %#v", calls)
+	}
+
+	// Operations that obtain a live id without GetSession use the same eager
+	// rebind helper, so a model selection cannot enter the lazy-build window.
+	ensureFake := newFakeGatewayServer(t)
+	ensureServer := newGatewayBackedHermesServer(t, ensureFake, "")
+	if err := ensureServer.SetModel(t.Context(), "stored-direct", "xai-oauth/grok-code-fast-1"); err != nil {
+		t.Fatalf("ensure-live model bind: %v", err)
+	}
+	ensureResumeCalls := ensureFake.callsFor("session.resume")
+	if len(ensureResumeCalls) != 1 || ensureResumeCalls[0].Params[keyEagerBuild] != true {
+		t.Fatalf("ensure-live resume calls = %#v", ensureResumeCalls)
+	}
 }
 
 func TestHermesGatewayAuthoritativePublicationBackpressure(t *testing.T) {

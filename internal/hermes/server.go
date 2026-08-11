@@ -57,6 +57,7 @@ const (
 	keyField            = "field"
 	keySource           = "source"
 	keyQuestion         = "question"
+	keyEagerBuild       = "eager_build"
 	jsonFieldError      = "error"
 	jsonFieldCwd        = "cwd"
 	msgHermesNeedsInput = "Hermes needs input"
@@ -1274,7 +1275,7 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, erro
 			}
 		}
 
-		result, err := s.gatewayClient().ResumeSession(ctx, id, map[string]any{})
+		result, err := s.resumeGatewaySession(ctx, id)
 		if err != nil {
 			return Session{}, err
 		}
@@ -1518,7 +1519,7 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 		return live, nil
 	}
 
-	result, err := s.gatewayClient().ResumeSession(ctx, stored, map[string]any{})
+	result, err := s.resumeGatewaySession(ctx, stored)
 	if err != nil {
 		return "", err
 	}
@@ -1531,6 +1532,14 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 	s.rememberGatewaySession(resolvedStored, result.SessionID)
 
 	return result.SessionID, nil
+}
+
+// resumeGatewaySession asks official Hermes to finish constructing the native
+// agent before publishing its live id. Hermes 0.20 otherwise returns from a
+// cold resume while a background build is still pending; a config.set sent in
+// that window can report success and then be overwritten by the stale build.
+func (s *hermesServer) resumeGatewaySession(ctx context.Context, stored string) (SessionResumeResult, error) {
+	return s.gatewayClient().ResumeSession(ctx, stored, map[string]any{keyEagerBuild: true})
 }
 
 func (s *hermesServer) storedSessionIDFromResume(result SessionResumeResult) (string, error) {

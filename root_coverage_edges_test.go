@@ -33,6 +33,14 @@ func TestManagedHermesServerCapabilityEdges(t *testing.T) {
 	if _, err := managed.ForkWithBaseline(t.Context(), "parent", "marker", nil); err == nil {
 		t.Fatal("missing recoverable fork accepted")
 	}
+	if err := managed.SetModel(t.Context(), "native", "provider/model"); err == nil {
+		t.Fatal("missing model selection capability accepted")
+	}
+	wantModelErr := errors.New("set model")
+	managed.Server = modelSetterTestServer{Server: base, err: wantModelErr}
+	if err := managed.SetModel(t.Context(), "native", "provider/model"); !errors.Is(err, wantModelErr) {
+		t.Fatalf("model selection error = %v", err)
+	}
 
 	base.forkSession = testNativeSession("child")
 	managed.Server = base

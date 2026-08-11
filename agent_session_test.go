@@ -83,6 +83,155 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 	}
 }
 
+func TestForkBindsResolvedModelBeforePublishingChild(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		options       []SessionRequestOption
+		parentModel   string
+		expectedBind  string
+		expectedModel string
+	}{
+		{
+			name: "inherited", parentModel: "xai-oauth/grok-code-fast-1",
+			expectedBind: "xai-oauth/grok-code-fast-1", expectedModel: "xai-oauth/grok-code-fast-1",
+		},
+		{
+			name: "explicit", parentModel: "xai-oauth/grok-code-fast-1",
+			options: []SessionRequestOption{WithSessionHermesOptions(HermesOptions{
+				Model: "openai-codex/gpt-5.4",
+			})},
+			expectedBind: "openai-codex/gpt-5.4", expectedModel: "openai-codex/gpt-5.4",
+		},
+		{name: "native default when parent is unselected", expectedModel: "openai/gpt-test"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			parentClient := newFakeHermesClient()
+			parentClient.forkSession = testNativeSession("native-child")
+			childClient := newFakeHermesClient()
+			childClient.getSession = testNativeSession("native-child")
+			agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store), func(options *Options) {
+				options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+					childClient.xdg = start.ExistingXDG
+
+					return childClient, nil
+				}
+			})
+			t.Cleanup(func() { _ = agent.Close() })
+
+			parent := testSession(agent, parentClient)
+			parent.providerID, parent.modelID = splitModelValue(test.parentModel, "", "")
+			agent.sessions[parent.id] = parent
+			if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			response, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir(), test.options...))
+			if err != nil {
+				t.Fatalf("fork: %v", err)
+			}
+			childClient.mu.Lock()
+			setCalls := append([]fakeModelSelection(nil), childClient.setModelCalls...)
+			childClient.mu.Unlock()
+			if test.expectedBind == "" {
+				if len(setCalls) != 0 {
+					t.Fatalf("unselected parent forced native model binds = %#v", setCalls)
+				}
+			} else if len(setCalls) != 1 || setCalls[0] != (fakeModelSelection{sessionID: "native-child", value: test.expectedBind}) {
+				t.Fatalf("native model binds = %#v", setCalls)
+			}
+			published := agent.activeSession(response.SessionId)
+			if published == nil {
+				t.Fatal("fork child was not published")
+			}
+			if got := published.currentModel(); got != test.expectedModel {
+				t.Fatalf("published model = %q", got)
+			}
+			meta, _ := response.Meta[hermesMetaKey].(map[string]any)
+			if meta["modelId"] != test.expectedModel {
+				t.Fatalf("response model meta = %#v", meta)
+			}
+			summaries, err := store.ListSessions(t.Context())
+			if err != nil || len(summaries) != 1 || summaries[0].SessionID != string(response.SessionId) {
+				t.Fatalf("stored fork summaries = %#v err=%v", summaries, err)
+			}
+		})
+	}
+}
+
+func TestForkModelBindFailureCleansChildBeforePublication(t *testing.T) {
+	store := NewInMemorySessionStore()
+	parentClient := newFakeHermesClient()
+	parentClient.forkSession = testNativeSession("native-child")
+	childClient := newFakeHermesClient()
+	childClient.getSession = testNativeSession("native-child")
+	childClient.setModelErr = errors.New("model bind failed")
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store), func(options *Options) {
+		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			childClient.xdg = start.ExistingXDG
+
+			return childClient, nil
+		}
+	})
+	parent := testSession(agent, parentClient)
+	agent.sessions[parent.id] = parent
+	if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil || !strings.Contains(err.Error(), "bind Hermes fork model") {
+		t.Fatalf("fork model bind error = %v", err)
+	}
+	if !childClient.closed || len(parentClient.deleted) != 1 || parentClient.deleted[0] != "native-child" {
+		t.Fatalf("failed bind cleanup childClosed=%v parentDeleted=%#v", childClient.closed, parentClient.deleted)
+	}
+	agent.mu.Lock()
+	activeCount := len(agent.sessions)
+	agent.mu.Unlock()
+	if activeCount != 1 {
+		t.Fatalf("failed bind published child: active=%d", activeCount)
+	}
+	summaries, err := store.ListSessions(t.Context())
+	if err != nil || len(summaries) != 0 {
+		t.Fatalf("failed bind stored child: %#v err=%v", summaries, err)
+	}
+}
+
+func TestForkModelBindFailureRetainsChildWithUnprovenContainment(t *testing.T) {
+	parentClient := newFakeHermesClient()
+	parentClient.forkSession = testNativeSession("native-child")
+	childClient := newFakeHermesClient()
+	childClient.getSession = testNativeSession("native-child")
+	childClient.setModelErr = errors.New("model bind failed")
+	childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+	agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			childClient.xdg = start.ExistingXDG
+
+			return childClient, nil
+		}
+	})
+	parent := testSession(agent, parentClient)
+	agent.sessions[parent.id] = parent
+	if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		t.Fatalf("fork unproven containment error = %v", err)
+	}
+	if !childClient.closed || len(parentClient.deleted) != 0 {
+		t.Fatalf("unproven child was destructively cleaned: closed=%v deleted=%#v", childClient.closed, parentClient.deleted)
+	}
+	agent.mu.Lock()
+	activeCount := len(agent.sessions)
+	retainedCount := len(agent.incompleteRoots)
+	agent.mu.Unlock()
+	if activeCount != 1 || retainedCount != 1 {
+		t.Fatalf("unproven failed bind publication/retention = active %d retained %d", activeCount, retainedCount)
+	}
+}
+
 func (s *toggleReplaceStore) setFail(fail bool) {
 	s.mu.Lock()
 	s.fail = fail
