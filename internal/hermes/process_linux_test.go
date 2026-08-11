@@ -5,6 +5,7 @@ package hermes
 import (
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -20,6 +21,17 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 	}
 	if _, err := procStartTime("1 (hermes) S 0"); err == nil {
 		t.Fatal("short proc stat accepted")
+	}
+	if _, err := procStartTime(procStatWithStateFlagsAndStart("S", "bad", "123")); err == nil {
+		t.Fatal("malformed proc stat flags accepted")
+	}
+	for _, state := range []string{"Z", "X"} {
+		if _, err := procStartTime(procStatWithStateFlagsAndStart(state, "0", "123")); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("dead process state %q error = %v", state, err)
+		}
+	}
+	if _, err := procStartTime(procStatWithStateFlagsAndStart("R", "4", "123")); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("exiting process error = %v", err)
 	}
 
 	validStat := procStatWithStart("123")
@@ -114,11 +126,16 @@ func TestInspectHermesProcessReadBranches(t *testing.T) {
 }
 
 func procStatWithStart(start string) string {
+	return procStatWithStateFlagsAndStart("S", "0", start)
+}
+
+func procStatWithStateFlagsAndStart(state, flags, start string) string {
 	fields := make([]string, 20)
 	for i := range fields {
 		fields[i] = "0"
 	}
-	fields[0] = "S"
+	fields[0] = state
+	fields[6] = flags
 	fields[19] = start
 
 	return "1 (hermes) " + strings.Join(fields, " ")

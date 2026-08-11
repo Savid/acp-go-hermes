@@ -13,6 +13,8 @@ import (
 
 var procReadFile = os.ReadFile
 
+const linuxProcessFlagExiting = 0x00000004
+
 func configureHermesProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
@@ -71,6 +73,20 @@ func procStartTime(stat string) (string, error) {
 	fields := strings.Fields(stat[closeParen+2:])
 	if len(fields) < 20 {
 		return "", errors.New("proc stat missing start time")
+	}
+	flags, err := strconv.ParseUint(fields[6], 10, 64)
+	if err != nil {
+		return "", errors.New("proc stat contains malformed process flags")
+	}
+	// A killed child can remain visible in procfs as a zombie until PID 1
+	// reaps it. It owns no executable state or open descriptors, so it cannot
+	// drive a Hermes session and must not make a durable owner claim appear
+	// live. X is the corresponding transient dead state. PF_EXITING closes the
+	// same race just before procfs publishes Z: the task has irreversibly entered
+	// kernel exit and cannot return to userspace even if its old state is still
+	// visible for a few instructions.
+	if fields[0] == "Z" || fields[0] == "X" || flags&linuxProcessFlagExiting != 0 {
+		return "", syscall.ESRCH
 	}
 
 	return fields[19], nil
