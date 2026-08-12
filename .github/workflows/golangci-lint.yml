@@ -31,5 +31,5 @@ jobs:
           GOLANGCI_LINT_CACHE: ${{ runner.temp }}/golangci-lint-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         with:
           version: v2.12.2
-          args: --timeout=10m
+          args: --timeout=10m --allow-parallel-runners
           skip-cache: true
