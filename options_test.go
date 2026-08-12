@@ -105,6 +105,16 @@ func TestProcessIsolationOptionClonesAndFailsClosed(t *testing.T) {
 	require.Error(t, validateProcessIsolationOption(&ProcessIsolation{UID: 1, GID: 1}))
 }
 
+func TestPathCarrierEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
+	for _, agent := range []*Agent{
+		NewAgent(WithEnv(map[string]string{"BASH_ENV": "/untrusted/init"})),
+		NewAgent(WithEnv(map[string]string{"acp_go_hermes_path_dir_1": "/untrusted/bin"})),
+		NewAgent(WithProcessIsolation(ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{"ACP_GO_HERMES_PATH_DIR_COUNT": "1"}})),
+	} {
+		require.ErrorContains(t, agent.optionsErr, "reserved for the session PATH carrier")
+	}
+}
+
 func TestSharedHermesHomeRejectsProcessIsolation(t *testing.T) {
 	opts := applyOptions([]Option{
 		WithSharedHermesHome("/var/lib/hermes"),

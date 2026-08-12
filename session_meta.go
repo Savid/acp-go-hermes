@@ -15,6 +15,8 @@ const (
 	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
 	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
 	sessionPathEnvironmentKey     = "PATH"
+	sessionBashEnvironmentKey     = "BASH_ENV"
+	sessionManagedPathEnvPrefix   = "ACP_GO_HERMES_PATH_DIR_"
 	runtimePlatformWindows        = "windows"
 )
 
@@ -157,6 +159,14 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 			if sessionEnvironmentOwnsPath(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
 			}
+
+			if sessionEnvironmentOwnsBashEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
+			}
+
+			if sessionEnvironmentOwnsManagedPath(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
+			}
 		}
 
 		return cloneStringMap(typed), nil
@@ -165,6 +175,14 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 		for key, raw := range typed {
 			if sessionEnvironmentOwnsPath(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
+			}
+
+			if sessionEnvironmentOwnsBashEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
+			}
+
+			if sessionEnvironmentOwnsManagedPath(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
 			}
 
 			str, ok := raw.(string)
@@ -191,6 +209,39 @@ func sessionEnvironmentOwnsPathForPlatform(key string, platform string) bool {
 	}
 
 	return key == sessionPathEnvironmentKey
+}
+
+func sessionEnvironmentOwnsBashEnv(key string) bool {
+	return sessionEnvironmentOwnsBashEnvForPlatform(key, runtime.GOOS)
+}
+
+func sessionEnvironmentOwnsBashEnvForPlatform(key string, platform string) bool {
+	if platform == runtimePlatformWindows {
+		return strings.EqualFold(key, sessionBashEnvironmentKey)
+	}
+
+	return key == sessionBashEnvironmentKey
+}
+
+func sessionEnvironmentOwnsManagedPath(key string) bool {
+	return strings.HasPrefix(strings.ToUpper(key), sessionManagedPathEnvPrefix)
+}
+
+func validatePathCarrierOptions(options Options) error {
+	environments := []map[string]string{options.Env}
+	if options.ProcessIsolation != nil {
+		environments = append(environments, options.ProcessIsolation.BaseEnvironment)
+	}
+
+	for _, environment := range environments {
+		for key := range environment {
+			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
+				return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
+			}
+		}
+	}
+
+	return nil
 }
 
 // extraPathDirsFromMeta accepts both the direct Go builder slice and the

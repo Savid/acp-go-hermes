@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -112,6 +113,26 @@ func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
 	}
 	if sessionEnvironmentOwnsPathForPlatform("Path", "linux") {
 		t.Fatal("Unix PATH comparison was case-insensitive")
+	}
+	_, err = sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{"BASH_ENV": "/untrusted/init"}}.Meta())
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".BASH_ENV")
+	_, err = sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+		metaEnvKey: map[string]any{"BASH_ENV": "/untrusted/init"},
+	}}})
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".BASH_ENV")
+	if !sessionEnvironmentOwnsBashEnvForPlatform("bash_env", "windows") || sessionEnvironmentOwnsBashEnvForPlatform("bash_env", "linux") {
+		t.Fatal("BASH_ENV platform comparison did not match native environment semantics")
+	}
+
+	managed := "ACP_GO_HERMES_PATH_DIR_COUNT"
+	_, err = sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{managed: "1"}}.Meta())
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+"."+managed)
+	_, err = sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+		metaEnvKey: map[string]any{managed: "1"},
+	}}})
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+"."+managed)
+	if !sessionEnvironmentOwnsManagedPath(strings.ToLower(managed)) {
+		t.Fatal("adapter-managed PATH namespace comparison was case-sensitive")
 	}
 }
 

@@ -83,7 +83,7 @@ func NewAgent(opts ...Option) *Agent {
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
-		validateSharedHermesHomeOptions(options))
+		validateSharedHermesHomeOptions(options), validatePathCarrierOptions(options))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger

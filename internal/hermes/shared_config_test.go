@@ -71,6 +71,28 @@ func TestSharedHermesConfigSerializesIdenticalWritersAndRejectsMismatch(t *testi
 	}
 }
 
+func TestSharedHermesPathInitDoesNotMutateOperatorConfig(t *testing.T) {
+	home := t.TempDir()
+	config := []byte("terminal:\n  shell_init_files:\n    - /operator/init\nmodel:\n  provider: custom\n")
+	if err := os.WriteFile(filepath.Join(home, hermesConfigFileName), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := materializeSharedHermesConfig(t.Context(), home, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, hermesConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, config) {
+		t.Fatalf("shared operator config mutated: got %q, want %q", got, config)
+	}
+	if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
+		t.Fatalf("shared managed PATH init = %q err=%v", script, err)
+	}
+}
+
 func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *testing.T) {
 	home := t.TempDir()
 	executable := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)

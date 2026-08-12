@@ -113,8 +113,8 @@ Lifecycle requests accept:
 | Field | Meaning |
 |---|---|
 | `options.model` | Selects the `provider/model` pair for the session. |
-| `options.env` | Per-session environment variables injected into only that session's Hermes process. A raw `PATH` key is rejected. |
-| `options.extraPathDirs` | Ordered absolute directories placed ahead of that process's browser shim and captured native base `PATH`. |
+| `options.env` | Per-session environment variables injected into only that session's Hermes process. Raw `PATH`, `BASH_ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are rejected. |
+| `options.extraPathDirs` | Ordered absolute native directories placed first for that process and restored first in actual local terminal commands after login/profile startup. |
 | `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
 
 No other option keys are accepted; any unsupported field fails with an
@@ -126,8 +126,16 @@ deep-clones the list. A non-string, empty, relative, or path-list-separator
 entry fails closed naming the exact
 `_meta.hermes.options.extraPathDirs[i]` field. The same strict decoding applies
 to new, load, resume, and fork lifecycle requests. A raw session `env.PATH`
-fails naming `_meta.hermes.options.env.PATH`; top-level `WithEnv` remains the
-separate static native-base environment surface.
+fails naming `_meta.hermes.options.env.PATH`; `env.BASH_ENV` and the private
+`env.ACP_GO_HERMES_PATH_DIR_*` namespace fail likewise. Top-level `WithEnv`
+remains the separate static native-base environment surface, but reserves the
+latter two names because the adapter uses them only while building Hermes'
+terminal shell snapshot. They are absent from the resulting command
+environment. They may pass through an installed Bash-script `hermes` launcher
+into its immediately exec'd Python gateway so the later snapshot Bash can
+consume them; the carrier contains validated directory names and no session
+credentials. Windows native directories are converted to Git Bash form without
+executing a helper from PATH.
 
 ## Response metadata
 

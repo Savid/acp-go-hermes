@@ -255,7 +255,8 @@ func WithExecutablePath(path string) Option {
 // nonzero non-root identity with no supplementary groups, under a trusted root
 // supervisor that remains a distinct identity. BaseEnvironment is the complete
 // native environment rather than an overlay on the adapter's own; WithEnv and
-// session values overlay it.
+// session values overlay it. BASH_ENV and ACP_GO_HERMES_PATH_DIR_* are reserved
+// for the adapter's native terminal PATH carrier.
 //
 // The option fails closed. Construction or launch refuses when the platform is
 // not Linux, the supervisor is not root, the native identity is root, or the
@@ -353,6 +354,9 @@ func WithDefaultModel(model string) Option {
 	}
 }
 
+// WithEnv supplies the static Agent-scoped native environment overlay.
+// BASH_ENV and ACP_GO_HERMES_PATH_DIR_* are reserved for the adapter's native
+// terminal PATH carrier and fail Agent construction.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = cloneStringMap(env)

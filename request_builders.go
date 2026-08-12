@@ -293,8 +293,9 @@ func WithHermesEnv(env map[string]string) HermesOption {
 }
 
 // WithHermesExtraPathDirs configures absolute directories placed, in order,
-// ahead of the native base PATH for this session's Hermes process. Session Env
-// cannot carry PATH; this ordered option is the sole session PATH authority.
+// ahead of the native base PATH for this session's Hermes process and terminal
+// commands. Session Env cannot carry PATH, BASH_ENV, or the adapter's private
+// carrier namespace; this ordered option is the sole session PATH authority.
 func WithHermesExtraPathDirs(dirs ...string) HermesOption {
 	cloned := slices.Clone(dirs)
 

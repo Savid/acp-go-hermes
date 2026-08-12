@@ -2,6 +2,7 @@
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1845,7 +1846,7 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 }
 
 func TestMaterializeHermesConfig(t *testing.T) {
-	t.Run("writes non-config seeds verbatim and seeds config.yaml as-is", func(t *testing.T) {
+	t.Run("writes seeds verbatim and installs managed PATH init", func(t *testing.T) {
 		home := t.TempDir()
 		files := map[string]string{
 			"config.yaml":               "model:\n  provider: custom\n",
@@ -1870,6 +1871,9 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			if info.Mode().Perm() != 0o600 {
 				t.Fatalf("seed %q mode = %v, want 0600", relative, info.Mode().Perm())
 			}
+		}
+		if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
+			t.Fatalf("managed PATH init = %q err=%v", script, err)
 		}
 	})
 
@@ -1936,12 +1940,25 @@ func TestMaterializeHermesConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("empty is a no-op", func(t *testing.T) {
-		if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
-			t.Fatalf("nil seed files: %v", err)
+	t.Run("rejects adapter-owned PATH init seed", func(t *testing.T) {
+		err := materializeHermesConfig(t.TempDir(), nil, map[string]string{hermesPathInitFileName: "untrusted"})
+		if err == nil {
+			t.Fatal("adapter-owned PATH init seed was accepted")
 		}
-		if err := materializeHermesConfig(t.TempDir(), nil, map[string]string{}); err != nil {
-			t.Fatalf("empty seed files: %v", err)
+	})
+
+	t.Run("empty installs only PATH init without config mutation", func(t *testing.T) {
+		for _, files := range []map[string]string{nil, {}} {
+			home := t.TempDir()
+			if err := materializeHermesConfig(home, nil, files); err != nil {
+				t.Fatalf("empty seed files: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, hermesConfigFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config.yaml mutated without managed config: %v", err)
+			}
+			if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
+				t.Fatalf("managed PATH init = %q err=%v", script, err)
+			}
 		}
 	})
 
@@ -2021,7 +2038,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 			t.Fatalf("materializeHermesConfig: %v", err)
 		}
 		manifest := readHermesSeedManifest(t, home)
-		want := []string{"a/b.json", "config.yaml", "providers"}
+		want := []string{hermesPathInitFileName, "a/b.json", "config.yaml", "providers"}
 		if !reflect.DeepEqual(manifest, want) {
 			t.Fatalf("manifest = %#v, want %#v", manifest, want)
 		}
@@ -2112,7 +2129,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v2"}); err != nil {
 			t.Fatalf("second seed: %v", err)
 		}
-		if want := []string{"foo"}; !reflect.DeepEqual(readHermesSeedManifest(t, home), want) {
+		if want := []string{hermesPathInitFileName, "foo"}; !reflect.DeepEqual(readHermesSeedManifest(t, home), want) {
 			t.Fatalf("manifest = %#v, want %#v", readHermesSeedManifest(t, home), want)
 		}
 	})
@@ -2946,6 +2963,9 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{SessionEnv: map[string]string{"PATH": "/bad"}})); err == nil {
 		t.Fatal("session PATH unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Env: map[string]string{"BASH_ENV": "/bad"}})); err == nil {
+		t.Fatal("static BASH_ENV unexpectedly succeeded")
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}})); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")

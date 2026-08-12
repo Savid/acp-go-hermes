@@ -113,7 +113,8 @@ type ProcessOptions struct {
 	// AmbientEnvironment is the adapter's own environment, captured once by the
 	// host-facing Agent. Ordinary same-identity execution sanitizes it into the
 	// native environment; an explicit policy ignores it entirely, because that
-	// policy's BaseEnvironment is a replacement rather than an overlay.
+	// policy's BaseEnvironment is a replacement rather than an overlay. The
+	// final PATH carrier boundary deliberately scrubs an inherited BASH_ENV.
 	AmbientEnvironment          map[string]string
 	Timeout                     time.Duration
 	Configure                   func(*exec.Cmd)
@@ -299,6 +300,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	env = upsertProcessEnv(env, envHermesHome, home)
 	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
+	env = installHermesPathCarrier(env, home, extraPathDirs)
 	// A login runs inside this process, and hermes opens a browser for it even
 	// when told not to: --no-browser is accepted and then ignored. The shim
 	// shadows every launcher it could exec and points BROWSER at one of those
@@ -454,6 +456,14 @@ func validatedProcessCarrier(opts ProcessOptions) ([]string, error) {
 	if sessionEnvErr := validateSessionEnvironmentNoPath(opts.SessionEnv); sessionEnvErr != nil {
 		return nil, sessionEnvErr
 	}
+	if envErr := validatePathCarrierEnvironment(opts.Env); envErr != nil {
+		return nil, envErr
+	}
+	if opts.Isolation != nil {
+		if isolationEnvErr := validatePathCarrierEnvironment(opts.Isolation.BaseEnvironment); isolationEnvErr != nil {
+			return nil, isolationEnvErr
+		}
+	}
 
 	return dirs, nil
 }
@@ -507,16 +517,6 @@ func cloneAndValidateExtraPathDirs(dirs []string) ([]string, error) {
 	}
 
 	return cloned, nil
-}
-
-func validateSessionEnvironmentNoPath(env map[string]string) error {
-	for key := range env {
-		if processEnvironmentKeyMatches(key, "PATH") {
-			return errors.New("session environment must not contain PATH")
-		}
-	}
-
-	return nil
 }
 
 // prependPathDirs rewrites env with dirs ahead of its existing PATH. Caller

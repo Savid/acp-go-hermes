@@ -321,6 +321,9 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 
 	t.Run("seed pending and managed-file faults", func(t *testing.T) {
 		home := t.TempDir()
+		if err := applyHermesSeedGuard(home, nil); err != nil {
+			t.Fatalf("empty seed guard: %v", err)
+		}
 		pendingPath := filepath.Join(home, hermesSeedPendingName)
 		if err := os.WriteFile(pendingPath, []byte("null\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -357,6 +360,13 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		if err := writeManagedSeedFile(filepath.Join(home, "unreadable"), []byte("data")); err == nil {
 			t.Fatal("directory target was accepted as a managed file")
 		}
+		parentFile := filepath.Join(home, "parent-file")
+		if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeManagedSeedFile(filepath.Join(parentFile, "child"), []byte("data")); err == nil {
+			t.Fatal("managed seed ignored parent-directory creation fault")
+		}
 	})
 
 	t.Run("seed transaction faults", func(t *testing.T) {
@@ -375,6 +385,17 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		}
 		if err := applyHermesSeedGuard(home, []seedWrite{write}); err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("pending mismatch error = %v", err)
+		}
+
+		home = t.TempDir()
+		if err := applyHermesSeedGuardWithWriter(home, []seedWrite{{relative: "x", target: filepath.Join(home, "x"), bytes: []byte("x")}}, func(path string, _ []byte, _ os.FileMode) error {
+			if strings.HasSuffix(path, hermesSeedPendingName) {
+				return errors.New("pending write fault")
+			}
+
+			return nil
+		}); err == nil || !strings.Contains(err.Error(), "pending write fault") {
+			t.Fatalf("pending write error = %v", err)
 		}
 
 		home = t.TempDir()
@@ -439,6 +460,9 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		hermesMarshalIndent = func(any, string, string) ([]byte, error) { return nil, errors.New("marshal fault") }
 		if err := saveHermesSeedManifest(t.TempDir(), map[string]bool{"x": true}); err == nil {
 			t.Fatal("seed manifest marshal fault was ignored")
+		}
+		if err := saveHermesSeedPendingWithWriter(t.TempDir(), map[string]string{"x": "digest"}, os.WriteFile); err == nil {
+			t.Fatal("seed pending marshal fault was ignored")
 		}
 		hermesMarshalIndent = originalMarshal
 	})

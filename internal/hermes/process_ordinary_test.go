@@ -116,6 +116,7 @@ func TestProcessCarrierValidation(t *testing.T) {
 	require.Equal(t, []string{absolute, absolute}, cloned)
 
 	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
+	require.Error(t, validatePathCarrierEnvironment(map[string]string{"BASH_ENV": "/bad"}))
 	require.NoError(t, validateSessionEnvironmentNoPath(map[string]string{"TOKEN": "good"}))
 	require.True(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "windows"))
 	require.False(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "linux"))
@@ -123,6 +124,12 @@ func TestProcessCarrierValidation(t *testing.T) {
 	_, err = validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{"relative"}})
 	require.Error(t, err)
 	_, err = validatedProcessCarrier(ProcessOptions{SessionEnv: map[string]string{"PATH": "/bad"}})
+	require.Error(t, err)
+	_, err = validatedProcessCarrier(ProcessOptions{Env: map[string]string{"BASH_ENV": "/bad"}})
+	require.Error(t, err)
+	_, err = validatedProcessCarrier(ProcessOptions{Isolation: &ProcessIsolation{BaseEnvironment: map[string]string{
+		hermesPathInitCountEnv: "1",
+	}}})
 	require.Error(t, err)
 	carrier, err := validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{absolute}})
 	require.NoError(t, err)

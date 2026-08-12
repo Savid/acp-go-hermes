@@ -561,6 +561,10 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		return nil, sessionEnvErr
 	}
 
+	if envErr := validatePathCarrierEnvironment(options.Env); envErr != nil {
+		return nil, envErr
+	}
+
 	root := options.Root
 	if root == "" {
 		root = filepath.Join(options.ScratchParent, valACPGoHermes)
@@ -2721,6 +2725,8 @@ func materializeHermesConfigWithWriter(home string, servers []acp.McpServer, fil
 	if err != nil {
 		return err
 	}
+
+	writes = append(writes, hermesPathInitWrite(home))
 
 	// config.yaml is authored last: verbatim when only the seed owns it, or the
 	// seed deep-merged under the wrapper's managed mcp_servers block.
