@@ -1,5 +1,5 @@
 name: 'Setup Go'
-description: 'Set up Go environment with caching'
+description: 'Set up Go environment'
 
 runs:
   using: 'composite'
@@ -10,8 +10,8 @@ runs:
         go-version-file: go.mod
         check-latest: true
         # Self-hosted runners already persist GOCACHE/GOMODCACHE under /cache.
-        # Restoring the same data as an Actions tarball duplicates hundreds of
-        # megabytes in an ephemeral runner and can exhaust its writable layer.
+        # Restoring the same data as an Actions tarball duplicates large
+        # archives in an ephemeral runner and can exhaust its writable layer.
         cache: false
 
     # Node belongs to the Go suite, not to the docs job: where a wrapper ships
