@@ -97,12 +97,14 @@ asserting the native `approval.request` is converted to
 
 A native Hermes question (a `clarify.request`) can fail to surface as an ACP
 prompt, so the model appears to hang or answers on its own. The usual cause is
-that the client never advertised the elicitation capability at initialize:
-without it the adapter rejects the native question at the gateway rather than
-raising `elicitation/create`, suppressed by design so a host that cannot render
-a form is never asked to. A related cause is a clarify response that lands after
-the turn is cancelled — the pending question is rejected closed and never
-replied to, so a late answer cannot resume a dead turn.
+that the client never explicitly advertised the elicitation `form` mode at
+initialize: an omitted or null capability and a bare `elicitation: {}` support
+no modes. Without explicit form support the adapter rejects the native question
+at the gateway rather than raising `elicitation/create`, suppressed by design
+so a host that cannot render a form is never asked to. A related cause is a
+clarify response that lands after the turn is cancelled — the pending question
+is rejected closed and never replied to, so a late answer cannot resume a dead
+turn.
 
 This is distinct from the startup probe's clarify-method check above. That probe
 only verifies the clarify method exists on the gateway surface at install and

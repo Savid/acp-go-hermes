@@ -9,10 +9,12 @@ support for it.
 
 ## Capability gating
 
-The adapter records client capabilities during `initialize` and sends
-elicitation requests only when the client advertises the matching capability.
-When `hermes serve` emits `clarify.request`, the adapter maps it to ACP
-`elicitation/create` using the unstable form elicitation shape.
+The adapter records client capabilities during `initialize` and sends a form
+elicitation only when the client explicitly advertises a non-null `form` mode.
+An omitted or null elicitation capability, a bare `elicitation: {}`, and a null
+`form` field advertise no form support. When `hermes serve` emits
+`clarify.request`, the adapter maps it to stable ACP v1 `elicitation/create`
+form mode.
 
 If the client did not advertise form elicitation support, or if it declines or
 cancels the request, the adapter rejects the native Hermes question
@@ -25,8 +27,9 @@ as elicitation in v1. They are answered with deterministic empty native
 responses, and secrets are never persisted.
 
 <Note>
-Form elicitation uses an unstable ACP shape; a host must advertise the matching
-capability at `initialize` for any Hermes clarification to reach the user.
+ACP v1 form elicitation is stable. The private `_meta.hermes.elicitation`
+discovery descriptor remains unstable; a host must still advertise explicit
+form support at `initialize` for any Hermes clarification to reach the user.
 </Note>
 
 ## Route correlation

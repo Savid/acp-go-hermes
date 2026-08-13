@@ -243,6 +243,11 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 		t.Fatalf("utf32 must never be selected, got %q", got)
 	}
 
+	var bothModesNull acp.ElicitationCapabilities
+	if err := json.Unmarshal([]byte(`{"form":null,"url":null}`), &bothModesNull); err != nil {
+		t.Fatalf("decode explicit-null elicitation capabilities: %v", err)
+	}
+
 	for _, tt := range []struct {
 		name     string
 		caps     *acp.ElicitationCapabilities
@@ -250,9 +255,11 @@ func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
 		wantURL  bool
 	}{
 		{name: "nil", caps: nil, wantForm: false, wantURL: false},
-		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: true, wantURL: false},
+		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: false, wantURL: false},
+		{name: "both modes null", caps: &bothModesNull, wantForm: false, wantURL: false},
 		{name: "url only", caps: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}, wantForm: false, wantURL: true},
 		{name: "form explicit", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
+		{name: "form and url", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}, Url: &acp.ElicitationUrlCapabilities{}}, wantForm: true, wantURL: true},
 	} {
 		t.Run("elicitation "+tt.name, func(t *testing.T) {
 			agent := newTestAgent()

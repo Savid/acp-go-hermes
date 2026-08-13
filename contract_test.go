@@ -50,6 +50,10 @@ func TestInitializeCapabilitiesHardCutover(t *testing.T) {
 	if _, ok := meta["structuredOutput"]; ok {
 		t.Fatal("Hermes structured output advertised")
 	}
+	elicitationMeta, ok := meta[valElicitation].(map[string]any)
+	if !ok || elicitationMeta["unstable"] != true || elicitationMeta["tracks"] != "ACP v1 elicitation" {
+		t.Fatalf("unexpected elicitation capability: %#v", meta[valElicitation])
+	}
 	if store, _ := meta["sessionStore"].(map[string]any); store["format"] != SessionStoreFormat {
 		t.Fatalf("sessionStore meta = %#v", store)
 	}
