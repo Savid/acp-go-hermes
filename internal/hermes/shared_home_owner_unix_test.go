@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,16 +16,17 @@ import (
 	"time"
 )
 
-const sharedHomeCrashEnv = "ACP_GO_HERMES_TEST_HOME_ROOT_CRASH"
-
 // TestSharedHomeRootSurvivesAdapterDeathWhileTheNativeWriterLives proves the two
 // crash boundaries the home-root claim exists for. An adapter that dies leaves
 // the root fenced for as long as the native writer it launched still holds the
 // inherited descriptor, and only once that exact process is gone does the next
 // acquisition prove the recorded claimant dead and take the root.
 func TestSharedHomeRootSurvivesAdapterDeathWhileTheNativeWriterLives(t *testing.T) {
-	if os.Getenv(sharedHomeCrashEnv) == "1" {
-		runSharedHomeCrashHelper()
+	// The helper generation is this same test selected by -test.run, and its
+	// state rides in argv behind that selector rather than in the environment, so
+	// no test-only carrier claims a name in the product's option namespace.
+	if args := flag.Args(); len(args) == 3 {
+		runSharedHomeCrashHelper(args[0], args[1], args[2])
 
 		return
 	}
@@ -36,12 +38,9 @@ func TestSharedHomeRootSurvivesAdapterDeathWhileTheNativeWriterLives(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := exec.Command(testBinary, "-test.run=^TestSharedHomeRootSurvivesAdapterDeathWhileTheNativeWriterLives$")
-	helper.Env = append(os.Environ(),
-		sharedHomeCrashEnv+"=1",
-		"ACP_GO_HERMES_TEST_OWNER_HOME="+home,
-		"ACP_GO_HERMES_TEST_OWNER_EXECUTABLE="+executable,
-		"ACP_GO_HERMES_TEST_OWNER_IDENTITY="+identityPath,
+	helper := exec.Command(testBinary,
+		"-test.run=^TestSharedHomeRootSurvivesAdapterDeathWhileTheNativeWriterLives$",
+		home, executable, identityPath,
 	)
 	if output, err := helper.CombinedOutput(); err != nil {
 		t.Fatalf("home-root crash helper: %v\n%s", err, output)
@@ -110,10 +109,7 @@ func waitForSharedHomeRootReclaim(t *testing.T, home string) {
 	}
 }
 
-func runSharedHomeCrashHelper() {
-	home := os.Getenv("ACP_GO_HERMES_TEST_OWNER_HOME")
-	executable := os.Getenv("ACP_GO_HERMES_TEST_OWNER_EXECUTABLE")
-	identityPath := os.Getenv("ACP_GO_HERMES_TEST_OWNER_IDENTITY")
+func runSharedHomeCrashHelper(home string, executable string, identityPath string) {
 	owner, err := AcquireSharedHomeOwner(home)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -170,8 +166,7 @@ func TestSharedHomeRootRefusesAConcurrentAdapterProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := func() ([]byte, error) {
-		command := exec.Command(testBinary, "-test.run=^TestSharedHomeRootPeerAcquisition$")
-		command.Env = append(os.Environ(), "ACP_GO_HERMES_TEST_HOME_ROOT_PEER="+home)
+		command := exec.Command(testBinary, "-test.run=^TestSharedHomeRootPeerAcquisition$", home)
 
 		return command.CombinedOutput()
 	}
@@ -194,14 +189,14 @@ func TestSharedHomeRootRefusesAConcurrentAdapterProcess(t *testing.T) {
 }
 
 // TestSharedHomeRootPeerAcquisition is the peer half of the cross-process
-// exclusion fixture. It is inert unless that fixture selects it by environment.
+// exclusion fixture. It is inert unless that fixture hands it a home in argv.
 func TestSharedHomeRootPeerAcquisition(t *testing.T) {
-	home := os.Getenv("ACP_GO_HERMES_TEST_HOME_ROOT_PEER")
-	if home == "" {
+	args := flag.Args()
+	if len(args) != 1 {
 		return
 	}
 
-	owner, err := AcquireSharedHomeOwner(home)
+	owner, err := AcquireSharedHomeOwner(args[0])
 	if err != nil {
 		t.Fatal(err)
 	}

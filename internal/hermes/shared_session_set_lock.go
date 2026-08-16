@@ -126,7 +126,6 @@ func AcquireSharedSessionSetLock(ctx context.Context, home string, mode SharedSe
 	}
 }
 
-//nolint:gosec // path is the canonical sibling of a validated clean absolute shared home.
 func ensureSharedHermesAdapterControlDir(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("create shared Hermes adapter control directory: %w", err)

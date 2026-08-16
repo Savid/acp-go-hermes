@@ -531,12 +531,12 @@ func promptToHermesParts(ctx context.Context, blocks []acp.ContentBlock, limits 
 
 			parts = append(parts, part)
 		default:
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt})
+			return nil, unsupportedField(acpFieldPrompt)
 		}
 	}
 
 	if len(parts) == 0 {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt})
+		return nil, unsupportedField(acpFieldPrompt)
 	}
 
 	return parts, nil
@@ -606,7 +606,7 @@ func embeddedResourceHermesPart(resource acp.EmbeddedResourceResource, budget *i
 		}
 
 		if text == "" {
-			return nil, acp.NewInvalidParams(map[string]any{keyField: acpFieldPromptResource, jsonFieldError: "embedded resource is empty"})
+			return nil, unsupportedField(acpFieldPrompt)
 		}
 
 		return map[string]any{keyType: valText, valText: text}, nil
@@ -631,7 +631,7 @@ func embeddedResourceHermesPart(resource acp.EmbeddedResourceResource, budget *i
 		}
 	}
 
-	return nil, acp.NewInvalidParams(map[string]any{keyField: "prompt.resource", jsonFieldError: valUnsupported})
+	return nil, unsupportedField(acpFieldPrompt)
 }
 
 func (s *session) replayMessages(ctx context.Context) error {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,16 +18,17 @@ import (
 	"time"
 )
 
-const sharedOwnerPrebindCrashEnv = "ACP_GO_HERMES_TEST_OWNER_PREBIND_CRASH"
-
 type sharedOwnerCrashIdentity struct {
 	PID       int    `json:"pid"`
 	StartTime string `json:"startTime"`
 }
 
 func TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement(t *testing.T) {
-	if os.Getenv(sharedOwnerPrebindCrashEnv) == "1" {
-		runSharedOwnerPrebindCrashHelper()
+	// The helper generation is this same test selected by -test.run, and its
+	// state rides in argv behind that selector rather than in the environment, so
+	// no test-only carrier claims a name in the product's option namespace.
+	if args := flag.Args(); len(args) == 3 {
+		runSharedOwnerPrebindCrashHelper(args[0], args[1], args[2])
 
 		return
 	}
@@ -38,12 +40,9 @@ func TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := exec.Command(testBinary, "-test.run=^TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement$")
-	helper.Env = append(os.Environ(),
-		sharedOwnerPrebindCrashEnv+"=1",
-		"ACP_GO_HERMES_TEST_OWNER_HOME="+home,
-		"ACP_GO_HERMES_TEST_OWNER_EXECUTABLE="+executable,
-		"ACP_GO_HERMES_TEST_OWNER_IDENTITY="+identityPath,
+	helper := exec.Command(testBinary,
+		"-test.run=^TestSharedSessionOwnerPrebindCrashNeverOverlapsReplacement$",
+		home, executable, identityPath,
 	)
 	if output, err := helper.CombinedOutput(); err != nil {
 		t.Fatalf("prebind crash helper: %v\n%s", err, output)
@@ -155,10 +154,7 @@ func waitForSharedOwnerCrashReclaim(t *testing.T, home string) {
 	}
 }
 
-func runSharedOwnerPrebindCrashHelper() {
-	home := os.Getenv("ACP_GO_HERMES_TEST_OWNER_HOME")
-	executable := os.Getenv("ACP_GO_HERMES_TEST_OWNER_EXECUTABLE")
-	identityPath := os.Getenv("ACP_GO_HERMES_TEST_OWNER_IDENTITY")
+func runSharedOwnerPrebindCrashHelper(home string, executable string, identityPath string) {
 	owner, err := AcquireSharedNativeSessionOwner(home, "prebind-native")
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

@@ -1,4 +1,4 @@
-//nolint:gosec,govet // Paths are hash-only beneath the canonical validated adapter control root.
+//nolint:govet // Paths are hash-only beneath the canonical validated adapter control root.
 package hermes
 
 import (

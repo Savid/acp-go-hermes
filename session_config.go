@@ -13,16 +13,17 @@ import (
 
 // Session-config option vocabulary.
 const (
-	keyValue = "value"
+	keyValue    = "value"
+	keyConfigID = "configId"
 )
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if params.Boolean != nil {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyValue})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
 	}
 
 	if params.ValueId == nil {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
 	}
 
 	session, err := a.session(params.ValueId.SessionId)
@@ -36,7 +37,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 	value := string(params.ValueId.Value)
 	if value == "" {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
 	}
 
 	var options []acp.SessionConfigOption
@@ -51,7 +52,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		// which is what put a healthy harness outside a host's probe budget.
 		providers, ok := session.configProviders(ctx)
 		if !ok || !hasConfigValue(session.configOptionsFrom(providers), configModel, value) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: keyValue})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
 		}
 
 		snapshot := session.snapshot()
@@ -73,7 +74,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 		options = session.configOptionsFrom(providers)
 	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{keyField: "configId"})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyConfigID)
 	}
 
 	_ = session.emitUpdate(ctx, acp.SessionUpdate{

@@ -2935,7 +2935,6 @@ func saveHermesSeedPendingWithWriter(home string, pending map[string]string, wri
 }
 
 func clearHermesSeedPending(home string) error {
-	//nolint:gosec // home is the validated and confined Hermes configuration root.
 	err := os.Remove(filepath.Join(home, hermesSeedPendingName))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
