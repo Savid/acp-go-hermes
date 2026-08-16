@@ -63,8 +63,6 @@ if [ -z "${ACP_GO_PRIVILEGED_LOCK:-}" ]; then
 	exec "$(dirname "$0")/with-privileged-lock.sh" "$0" "$target"
 fi
 
-GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:1.26.6-bookworm}
-
 # The Go caches persist between runs for speed, but they are keyed per module
 # path and never shared across siblings. Every sibling bind-mounts its own
 # checkout at the same /src, so one cache namespace for all six gives colliding
@@ -75,6 +73,19 @@ GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:1.26.6-bookworm}
 # keeps the warm cache and removes the collision domain.
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 module_path=$(cd "$repo_root" && go list -mod=readonly -m)
+
+# The container toolchain is the checkout's own Go directive, never a second
+# literal. A hardcoded tag drifts silently the moment the pin moves, and the
+# suite would then prove coverage under a toolchain the module never compiles
+# with. go.mod is the sole in-repo copy of that pin, so read it here.
+go_directive=$(awk '$1 == "go" { print $2; exit }' "$repo_root/go.mod")
+case "$go_directive" in
+'' | *[!0-9.]*)
+	echo "privileged-suite read no numeric go directive from go.mod" >&2
+	exit 1
+	;;
+esac
+GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:$go_directive-bookworm}
 base_provider_required='TrustedSupervisor SupervisorGuardianSIGKILL SupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfterECHILD SupervisorLivenessSIGKILL GeneratedNative BorrowedIdentityAdoption BorrowedDomainAdoption BorrowedDisposition AgentIdentityLock AgentStandalone AuthorityDomain IdentityDisposition CommandCreatorThread SecurityLimits ProcessIsolationActual'
 case "$module_path" in
 github.com/savid/acp-go-amp)
