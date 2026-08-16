@@ -302,10 +302,10 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	if _, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{}, elicitationScope{}); err == nil {
 		t.Fatal("empty elicitation request accepted")
 	}
-	if requestError(context.Canceled).Code != -32800 {
+	if requestError(cancelled, context.Canceled).Code != -32800 {
 		t.Fatal("context cancellation did not map to request cancelled")
 	}
-	if requestError(errors.New("boom")).Code != -32603 {
+	if requestError(ctx, errors.New("boom")).Code != -32603 {
 		t.Fatal("generic error did not map to internal error")
 	}
 	gate := newConnectionInputGate(strings.NewReader("x"))

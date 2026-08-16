@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strconv"
@@ -191,20 +192,149 @@ func TestLocalAgentConnectionClientCallErrors(t *testing.T) {
 	<-agent.clientCalls
 }
 
-func TestRequestErrorAndCapabilityHelpers(t *testing.T) {
-	if requestError(nil) != nil {
-		t.Fatal("requestError(nil) returned non-nil")
+// TestLocalAgentConnectionHandleThreadsTheRequestContext proves every dispatch
+// path hands requestError the live request context rather than a detached one:
+// each of these failures answers with its own code on an uncancelled context
+// and with -32800 once the request has been cancelled.
+func TestLocalAgentConnectionHandleThreadsTheRequestContext(t *testing.T) {
+	closedAgent := newTestAgent()
+	if err := closedAgent.Close(); err != nil {
+		t.Fatalf("close agent: %v", err)
 	}
-	reqErr := acp.NewInvalidParams(map[string]any{"x": "y"})
-	if requestError(reqErr) != reqErr {
-		t.Fatal("requestError did not preserve request error")
+	closedConn := &localAgentConnection{agent: closedAgent}
+	closedConn.initialized.Store(true)
+
+	agent := newTestAgent()
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+
+	for name, test := range map[string]struct {
+		conn   *localAgentConnection
+		method string
+		params json.RawMessage
+	}{
+		"closed agent": {
+			conn:   closedConn,
+			method: acp.AgentMethodSessionList,
+			params: mustJSON(t, acp.ListSessionsRequest{}),
+		},
+		"extension method": {
+			conn:   conn,
+			method: ForkSessionMethod,
+			params: mustJSON(t, acp.UnstableForkSessionRequest{}),
+		},
+		"response handler": {
+			conn:   conn,
+			method: acp.AgentMethodSessionSetMode,
+			params: mustJSON(t, acp.SetSessionModeRequest{}),
+		},
+		"lifecycle handler": {
+			conn:   conn,
+			method: acp.AgentMethodSessionLoad,
+			params: mustJSON(t, acp.LoadSessionRequest{
+				SessionId:  "missing",
+				Cwd:        t.TempDir(),
+				McpServers: []acp.McpServer{},
+			}),
+		},
+		"notification handler": {
+			conn:   conn,
+			method: acp.AgentMethodSessionCancel,
+			params: mustJSON(t, acp.CancelNotification{SessionId: "missing"}),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, live := test.conn.handle(t.Context(), test.method, test.params)
+			if live == nil || live.Code == -32800 {
+				t.Fatalf("uncancelled dispatch reqErr = %#v", live)
+			}
+
+			cancelled, cancel := context.WithCancelCause(context.Background())
+			cancel(context.Canceled)
+
+			_, reqErr := test.conn.handle(cancelled, test.method, test.params)
+			if reqErr == nil || reqErr.Code != -32800 {
+				t.Fatalf("cancelled dispatch reqErr = %#v, want -32800", reqErr)
+			}
+		})
 	}
-	if got := requestError(context.Canceled); got == nil || got.Code != -32800 {
-		t.Fatalf("requestError canceled = %#v", got)
+}
+
+// TestRequestErrorCancelPrecedence pins which signal decides -32800. Only an
+// honored $/cancel_request cancels a request context with cause
+// context.Canceled, and it outranks whatever error the handler was carrying; a
+// connection teardown or an adapter deadline carries a different cause and must
+// not be reported as a cancellation even when the error itself wraps
+// context.Canceled.
+func TestRequestErrorCancelPrecedence(t *testing.T) {
+	invalidParams := acp.NewInvalidParams(map[string]any{"x": "y"})
+
+	for name, test := range map[string]struct {
+		cause    error
+		err      error
+		wantCode int
+		wantSame bool
+	}{
+		"honored cancel outranks a request error": {
+			cause:    context.Canceled,
+			err:      invalidParams,
+			wantCode: -32800,
+		},
+		"honored cancel with a plain error": {
+			cause:    context.Canceled,
+			err:      context.Canceled,
+			wantCode: -32800,
+		},
+		"connection teardown is not a cancellation": {
+			cause:    errors.New("connection closed"),
+			err:      fmt.Errorf("write update: %w", context.Canceled),
+			wantCode: -32603,
+		},
+		"live request keeps its request error": {
+			err:      invalidParams,
+			wantCode: -32602,
+			wantSame: true,
+		},
+		"live request wraps an opaque failure": {
+			err:      errors.New("plain"),
+			wantCode: -32603,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(errors.New("test cleanup"))
+
+			if test.cause != nil {
+				cancel(test.cause)
+			}
+
+			got := requestError(ctx, test.err)
+			if got == nil || got.Code != test.wantCode {
+				t.Fatalf("requestError = %#v, want code %d", got, test.wantCode)
+			}
+			if test.wantSame && got != invalidParams {
+				t.Fatalf("requestError = %#v, want the original request error", got)
+			}
+		})
 	}
-	if got := requestError(errors.New("plain")); got == nil || got.Code != -32603 {
-		t.Fatalf("requestError plain = %#v", got)
+
+	t.Run("adapter deadline is an internal failure", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		defer cancel()
+
+		<-ctx.Done()
+
+		if got := requestError(ctx, context.DeadlineExceeded); got == nil || got.Code != -32603 {
+			t.Fatalf("requestError deadline = %#v", got)
+		}
+	})
+
+	if got := requestError(context.Background(), nil); got != nil {
+		t.Fatalf("requestError(nil) = %#v", got)
 	}
+}
+
+func TestCapabilityAndElicitationHelpers(t *testing.T) {
 	lifecycle := localLifecycleResponse[acp.CloseSessionRequest, *acp.CloseSessionRequest, acp.CloseSessionResponse](
 		func(*Agent, context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 			return acp.CloseSessionResponse{}, errors.New("close failed")

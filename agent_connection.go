@@ -116,7 +116,7 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	}()
 
 	if err := c.agent.ensureOpen(); err != nil {
-		reqErr = requestError(err)
+		reqErr = requestError(ctx, err)
 
 		return nil, reqErr
 	}
@@ -132,7 +132,7 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
-		reqErr = requestError(err)
+		reqErr = requestError(ctx, err)
 
 		return result, reqErr
 	}
@@ -163,7 +163,7 @@ func localResponse[Req any, ReqPtr localAgentParams[Req], Resp any](
 
 		resp, err := call(agent, ctx, value)
 		if err != nil {
-			return nil, requestError(err)
+			return nil, requestError(ctx, err)
 		}
 
 		return resp, nil
@@ -181,7 +181,7 @@ func localLifecycleResponse[Req any, ReqPtr localAgentParams[Req], Resp any](
 
 		resp, err := call(agent, ctx, value)
 		if err != nil {
-			return nil, requestError(err)
+			return nil, requestError(ctx, err)
 		}
 
 		return resp, nil
@@ -198,7 +198,7 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 		}
 
 		if err := call(agent, ctx, value); err != nil {
-			return nil, requestError(err)
+			return nil, requestError(ctx, err)
 		}
 
 		return nil, nil
@@ -281,18 +281,31 @@ func (c *localAgentConnection) NotifyExtension(ctx context.Context, method strin
 	return c.conn.SendNotification(ctx, method, params)
 }
 
-func requestError(err error) *acp.RequestError {
+// requestError maps a handler failure onto the wire error the peer receives.
+//
+// An honored $/cancel_request is the only thing that cancels a request context
+// with cause context.Canceled: connection teardown cancels the parent with the
+// transport cause, and an adapter deadline yields context.DeadlineExceeded, so
+// neither is ever reported as cancelled and a deadline stays an internal
+// failure. The cause is therefore what identifies a cancel, and it is read
+// ahead of the error: work aborted by a cancel routinely joins a typed
+// RequestError on the way out, and reporting that instead of -32800 would
+// answer a request the peer withdrew with an error about its parameters.
+// errors.Is(err, context.Canceled) cannot make that distinction — it also
+// matches a request that merely wrapped an unrelated cancellation — so it is
+// deliberately not consulted.
+func requestError(ctx context.Context, err error) *acp.RequestError {
 	if err == nil {
 		return nil
+	}
+
+	if context.Cause(ctx) == context.Canceled {
+		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
 		return reqErr
-	}
-
-	if errors.Is(err, context.Canceled) {
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
