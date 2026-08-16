@@ -1,6 +1,6 @@
 module github.com/savid/acp-go-hermes
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/coder/acp-go-sdk v0.13.5

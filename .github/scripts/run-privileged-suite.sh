@@ -63,7 +63,7 @@ if [ -z "${ACP_GO_PRIVILEGED_LOCK:-}" ]; then
 	exec "$(dirname "$0")/with-privileged-lock.sh" "$0" "$target"
 fi
 
-GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:1.26.5-bookworm}
+GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:1.26.6-bookworm}
 
 # The Go caches persist between runs for speed, but they are keyed per module
 # path and never shared across siblings. Every sibling bind-mounts its own
