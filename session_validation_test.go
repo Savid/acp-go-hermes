@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -249,5 +250,15 @@ func requireUnsupportedField(t *testing.T, err error, field string, name string)
 	}
 	if data["error"] != "unsupported" || data["field"] != field {
 		t.Fatalf("%s: error data = %#v want field %q", name, data, field)
+	}
+}
+
+func TestValidateSharedHermesHomeOptionsRequiresACleanAbsolutePath(t *testing.T) {
+	if err := validateSharedHermesHomeOptions(Options{SharedHermesHome: "relative"}); err == nil {
+		t.Fatal("relative shared home accepted")
+	}
+	dirty := t.TempDir() + string(filepath.Separator) + "directory" + string(filepath.Separator) + ".."
+	if err := validateSharedHermesHomeOptions(Options{SharedHermesHome: dirty}); err == nil {
+		t.Fatal("unclean shared home accepted")
 	}
 }

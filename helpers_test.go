@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -800,4 +801,62 @@ func (r errorReadCloser) Read([]byte) (int, error) {
 
 func (r errorReadCloser) Close() error {
 	return nil
+}
+
+type modelSetterTestServer struct {
+	nativehermes.Server
+	err error
+}
+
+func (s modelSetterTestServer) SetModel(context.Context, string, string) error { return s.err }
+
+type sessionOperationErrorReader struct{ err error }
+
+func (r sessionOperationErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+var _ io.Reader = sessionOperationErrorReader{}
+
+type sessionOperationServerOnly struct{ nativehermes.Server }
+
+type sessionOperationFaultStore struct {
+	base           SessionStore
+	loadErrors     map[string]error
+	listSubkeysErr error
+	deleteErr      error
+}
+
+func (s sessionOperationFaultStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
+	return s.base.Append(ctx, key, entries)
+}
+
+func (s sessionOperationFaultStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	if err := s.loadErrors[key.Subpath]; err != nil {
+		return nil, err
+	}
+
+	return s.base.Load(ctx, key)
+}
+
+func (s sessionOperationFaultStore) Replace(ctx context.Context, key SessionKey, replacements []SessionStoreReplacement) error {
+	return s.base.Replace(ctx, key, replacements)
+}
+
+func (s sessionOperationFaultStore) Delete(ctx context.Context, key SessionKey) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+
+	return s.base.Delete(ctx, key)
+}
+
+func (s sessionOperationFaultStore) ListSessions(ctx context.Context) ([]SessionSummary, error) {
+	return s.base.ListSessions(ctx)
+}
+
+func (s sessionOperationFaultStore) ListSubkeys(ctx context.Context, key SessionKey) ([]string, error) {
+	if s.listSubkeysErr != nil {
+		return nil, s.listSubkeysErr
+	}
+
+	return s.base.ListSubkeys(ctx, key)
 }

@@ -3408,14 +3408,28 @@ func TestFakeHermesGatewayProcessHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-func fakeHermesGatewayExecutable(t *testing.T, mode string) string {
+// mcpEnvCapturePrefix marks the argv entry naming where the fake gateway
+// generation writes the MCP secret environment it was launched with. The
+// destination travels in argv because the adapter's governed environment
+// namespace is reserved for real options and test scaffolding must not claim a
+// name inside it.
+const mcpEnvCapturePrefix = "-capture-mcp-env="
+
+// fakeHermesGatewayExecutable writes a launcher for the fake gateway
+// generation. Anything in extraArgs reaches that generation's argv ahead of the
+// adapter's own arguments.
+func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string) string {
 	t.Helper()
 	testBinary, err := os.Executable()
 	if err != nil {
 		t.Fatalf("test executable: %v", err)
 	}
 	script := filepath.Join(t.TempDir(), "fake-hermes")
-	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_GATEWAY_HELPER=1 ACP_GO_HERMES_GATEWAY_MODE=%s exec %q -test.run=TestFakeHermesGatewayProcessHelper -- \"$@\"\n", mode, testBinary)
+	extra := ""
+	for _, arg := range extraArgs {
+		extra += fmt.Sprintf("%q ", arg)
+	}
+	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_GATEWAY_HELPER=1 ACP_GO_HERMES_GATEWAY_MODE=%s exec %q -test.run=TestFakeHermesGatewayProcessHelper -- %s\"$@\"\n", mode, testBinary, extra)
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("write fake executable: %v", err)
 	}
@@ -3431,11 +3445,15 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 			return nil
 		}
 	}
-	if capture := os.Getenv("ACP_GO_HERMES_TEST_CAPTURE_MCP_ENV"); capture != "" {
+	for _, arg := range args {
+		capture, ok := strings.CutPrefix(arg, mcpEnvCapturePrefix)
+		if !ok {
+			continue
+		}
 		values := map[string]string{}
 		for _, entry := range os.Environ() {
-			key, value, ok := strings.Cut(entry, "=")
-			if ok && strings.HasPrefix(key, sharedMCPSecretEnvPrefix) {
+			key, value, found := strings.Cut(entry, "=")
+			if found && strings.HasPrefix(key, sharedMCPSecretEnvPrefix) {
 				values[key] = value
 			}
 		}
@@ -3446,6 +3464,8 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 		if err := os.WriteFile(capture, encoded, 0o600); err != nil {
 			return err
 		}
+
+		break
 	}
 	port := ""
 	for i, arg := range args {

@@ -177,3 +177,11 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 		t.Fatalf("empty expected native id validation error = %v", err)
 	}
 }
+
+// joinModelValue is the inverse of splitModelValue and the only place a
+// provider and a model are re-qualified into one selector.
+func TestJoinModelValueQualifiesProvider(t *testing.T) {
+	if got := joinModelValue("provider", "model"); got != "provider/model" {
+		t.Fatalf("joined model=%q", got)
+	}
+}

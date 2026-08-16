@@ -128,9 +128,11 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	if options := unselected.configOptions(ctx); options != nil {
 		t.Fatalf("empty enumeration config options = %#v", options)
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{}); err == nil {
-		t.Fatal("missing value accepted")
-	}
+	// A request that carries no variant at all is missing "value", the field the
+	// value-id variant is recognized by — not "type", which names the boolean
+	// variant this agent refuses outright.
+	_, noVariantErr := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{})
+	requireUnsupportedField(t, noVariantErr, keyValue, "missing value")
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("missing", configModel, "p/m")); err == nil {
 		t.Fatal("unknown session config accepted")
 	}
@@ -294,4 +296,20 @@ func containsStringAny(value any, want string) bool {
 	}
 
 	return false
+}
+
+func TestSetSessionConfigNativeSetterFailure(t *testing.T) {
+	client := newFakeHermesClient()
+	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
+		ID: "provider", Models: map[string]nativehermes.ProviderModel{"model": {ID: "model"}},
+	}}}
+	wantErr := errors.New("set model")
+	agent := newTestAgent()
+	session := newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), modelSetterTestServer{Server: client, err: wantErr}, sessionMeta{}, idmapRecord{
+		SessionID: "session-1", NativeSessionID: "native-1", Format: SessionStoreFormat,
+	})
+	agent.sessions[session.id] = session
+	if _, err := agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest(session.id, configModel, "provider/model")); !errors.Is(err, wantErr) {
+		t.Fatalf("set model error=%v", err)
+	}
 }

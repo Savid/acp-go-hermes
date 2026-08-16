@@ -19,7 +19,10 @@ const (
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if params.Boolean != nil {
-		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
+		// Neither union variant is a wire field; the request is discriminated by
+		// "type", so "type" is the only JSON path that names the boolean variant
+		// this agent does not implement.
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyType)
 	}
 
 	if params.ValueId == nil {

@@ -1,8 +1,10 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,13 +14,16 @@ import (
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-const sessionOperationRecoveryOriginHelperEnv = "ACP_GO_HERMES_RECOVERY_ORIGIN_HELPER"
-
 func TestSessionOperationRecoveryOriginHelper(t *testing.T) {
-	identityPath := os.Getenv(sessionOperationRecoveryOriginHelperEnv)
-	if identityPath == "" {
+	// The helper generation is this same test selected by -test.run, and the
+	// destination for its recorded identity rides in argv behind that selector
+	// rather than in the environment, so no test-only carrier claims a name in
+	// the product's governed environment namespace.
+	args := flag.Args()
+	if len(args) != 1 {
 		return
 	}
+	identityPath := args[0]
 
 	origin, err := nativehermes.CurrentDurableProcessIdentity()
 	if err != nil {
@@ -385,8 +390,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 func startRecoveryOriginHelper(t *testing.T) (nativehermes.DurableProcessIdentity, func()) {
 	t.Helper()
 	identityPath := filepath.Join(t.TempDir(), "origin.json")
-	command := exec.Command(os.Args[0], "-test.run=^TestSessionOperationRecoveryOriginHelper$")
-	command.Env = append(os.Environ(), sessionOperationRecoveryOriginHelperEnv+"="+identityPath)
+	command := exec.Command(os.Args[0], "-test.run=^TestSessionOperationRecoveryOriginHelper$", identityPath)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -456,4 +460,124 @@ func newRecoveryTestJournal(
 	}
 
 	return journal
+}
+
+type sessionOperationRecoveryServer struct {
+	*fakeHermesClient
+	listCalls      int
+	secondListErr  error
+	retainOnDelete bool
+}
+
+func (s *sessionOperationRecoveryServer) PersistedSessions(ctx context.Context) ([]nativehermes.Session, error) {
+	s.listCalls++
+	if s.listCalls > 1 && s.secondListErr != nil {
+		return nil, s.secondListErr
+	}
+
+	return s.fakeHermesClient.PersistedSessions(ctx)
+}
+
+func (s *sessionOperationRecoveryServer) DeleteSession(ctx context.Context, id string) error {
+	if s.retainOnDelete {
+		return nil
+	}
+
+	return s.fakeHermesClient.DeleteSession(ctx, id)
+}
+
+func TestSessionOperationRecoveryRemainingFailures(t *testing.T) {
+	if err := newTestAgent().recoverPendingSharedSessionOperations(t.Context(), "relative", newFakeHermesClient()); err == nil {
+		t.Fatal("journal discovery failure ignored")
+	}
+
+	t.Run("pending recovery requires inventory", func(t *testing.T) {
+		home := t.TempDir()
+		_ = newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
+		client := sessionOperationServerOnly{Server: newFakeHermesClient()}
+		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); err == nil {
+			t.Fatal("pending recovery without inventory accepted")
+		}
+	})
+
+	t.Run("ambiguous store", func(t *testing.T) {
+		home := t.TempDir()
+		store := NewInMemorySessionStore()
+		agent := newTestAgent(WithSessionStore(store))
+		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
+		nativeID, liveID := "native", "live"
+		phase := sessionOperationPhaseNativeIdentified
+		if err := journal.update(sessionOperationJournalPatch{Phase: &phase, NativeSessionID: &nativeID, LiveSessionID: &liveID}); err != nil {
+			t.Fatal(err)
+		}
+		replacements := []SessionStoreReplacement{{
+			Key: SessionKey{SessionID: "logical", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{json.RawMessage(`{"main":true}`)},
+		}, {
+			Key: SessionKey{SessionID: "logical", Subpath: "idmap"}, Entries: []SessionStoreEntry{json.RawMessage(`{"id":true}`)},
+		}}
+		if err := journal.prepareReplacements(replacements); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Append(t.Context(), replacements[0].Key, []SessionStoreEntry{json.RawMessage(`{"different":true}`)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := agent.recoverPendingSharedSessionOperations(t.Context(), home, newFakeHermesClient()); !errors.Is(err, ErrSessionOperationAmbiguous) {
+			t.Fatalf("ambiguous store error=%v", err)
+		}
+	})
+
+	setupNative := func(t *testing.T) (string, *sessionOperationJournal) {
+		t.Helper()
+		home := t.TempDir()
+		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
+		nativeID, liveID := "native", "live"
+		phase := sessionOperationPhaseNativeIdentified
+		if err := journal.update(sessionOperationJournalPatch{Phase: &phase, NativeSessionID: &nativeID, LiveSessionID: &liveID}); err != nil {
+			t.Fatal(err)
+		}
+
+		return home, journal
+	}
+
+	t.Run("child owner", func(t *testing.T) {
+		home, _ := setupNative(t)
+		owner, err := nativehermes.AcquireSharedNativeSessionOwner(home, "native")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = owner.Release() }()
+		client := newFakeHermesClient()
+		client.persistedSessions = []nativehermes.Session{{ID: "native"}}
+		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); err == nil {
+			t.Fatal("held child owner did not fence recovery")
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		home, _ := setupNative(t)
+		client := newFakeHermesClient()
+		client.persistedSessions = []nativehermes.Session{{ID: "native"}}
+		client.deleteErr = errors.New("delete")
+		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); err == nil {
+			t.Fatal("delete failure ignored")
+		}
+	})
+
+	t.Run("verify inventory", func(t *testing.T) {
+		home, _ := setupNative(t)
+		client := &sessionOperationRecoveryServer{fakeHermesClient: newFakeHermesClient(), secondListErr: errors.New("verify")}
+		client.persistedSessions = []nativehermes.Session{{ID: "native"}}
+		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); err == nil {
+			t.Fatal("verification inventory failure ignored")
+		}
+	})
+
+	t.Run("native remains", func(t *testing.T) {
+		home, _ := setupNative(t)
+		client := &sessionOperationRecoveryServer{fakeHermesClient: newFakeHermesClient(), retainOnDelete: true}
+		client.persistedSessions = []nativehermes.Session{{ID: "native"}}
+		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); !errors.Is(err, ErrSessionOperationAmbiguous) {
+			t.Fatalf("remaining native error=%v", err)
+		}
+	})
 }

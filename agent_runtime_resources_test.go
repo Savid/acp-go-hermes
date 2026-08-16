@@ -669,3 +669,74 @@ func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
 	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
 	require.NoError(t, os.RemoveAll(xdg.Root))
 }
+
+func TestManagedHermesServerCapabilityEdges(t *testing.T) {
+	base := newFakeHermesClient()
+	serverOnly := sessionOperationServerOnly{Server: base}
+	managed := &managedHermesServer{Server: serverOnly}
+	if _, err := managed.CreateSessionWithDraft(t.Context(), "title", func(nativehermes.SessionDraft) error { return nil }); err == nil {
+		t.Fatal("missing draft capability accepted")
+	}
+	if _, err := managed.PersistedSessions(t.Context()); err == nil {
+		t.Fatal("missing persisted inventory accepted")
+	}
+	if _, err := managed.ForkWithBaseline(t.Context(), "parent", "marker", nil); err == nil {
+		t.Fatal("missing recoverable fork accepted")
+	}
+	if err := managed.SetModel(t.Context(), "native", "provider/model"); err == nil {
+		t.Fatal("missing model selection capability accepted")
+	}
+	wantModelErr := errors.New("set model")
+	managed.Server = modelSetterTestServer{Server: base, err: wantModelErr}
+	if err := managed.SetModel(t.Context(), "native", "provider/model"); !errors.Is(err, wantModelErr) {
+		t.Fatalf("model selection error = %v", err)
+	}
+
+	base.forkSession = testNativeSession("child")
+	managed.Server = base
+	if child, err := managed.ForkWithBaseline(t.Context(), "parent", "marker", nil); err != nil || child.ID != "child" {
+		t.Fatalf("recoverable fork=%+v err=%v", child, err)
+	}
+
+	managed.providerAuthSupported = true
+	if !managed.ProviderAuthSupported() {
+		t.Fatal("forced provider auth was not advertised")
+	}
+	managed.providerAuthSupported = false
+	supported := false
+	base.providerAuthSupported = &supported
+	if managed.ProviderAuthSupported() {
+		t.Fatal("native provider-auth result ignored")
+	}
+	managed.Server = serverOnly
+	if managed.ProviderAuthSupported() {
+		t.Fatal("missing provider-auth capability advertised")
+	}
+}
+
+func TestClaimSharedNativeSessionFailureEdges(t *testing.T) {
+	isolated := newTestAgent()
+	if err := isolated.claimSharedNativeSession(newFakeHermesClient(), "native"); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	agent := newTestAgent(WithSharedHermesHome(home))
+	if err := agent.claimSharedNativeSession(newFakeHermesClient(), "unmanaged"); err == nil {
+		t.Fatal("unmanaged server accepted a shared native claim")
+	}
+
+	managed := &managedHermesServer{Server: newFakeHermesClient()}
+	if err := agent.claimSharedNativeSession(managed, "first"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = managed.nativeSessionOwner.Release() })
+	if err := agent.claimSharedNativeSession(managed, "second"); err == nil {
+		t.Fatal("managed server accepted a second shared native claim")
+	}
+
+	unbound := &managedHermesServer{Server: sessionOperationServerOnly{Server: newFakeHermesClient()}}
+	if err := agent.claimSharedNativeSession(unbound, "third"); err == nil {
+		t.Fatal("server without process identity accepted a shared native claim")
+	}
+}

@@ -11,14 +11,11 @@ import (
 )
 
 func TestHermesTerminalCoreSessionCWDIsolation(t *testing.T) {
-	agentRoot := os.Getenv("ACP_GO_HERMES_AGENT_ROOT")
-	if agentRoot == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Fatalf("resolve home for official Hermes install: %v", err)
-		}
-		agentRoot = filepath.Join(home, ".hermes", "hermes-agent")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home for official Hermes install: %v", err)
 	}
+	agentRoot := filepath.Join(home, ".hermes", "hermes-agent")
 	python := filepath.Join(agentRoot, "venv", "bin", "python")
 	info, err := os.Stat(python)
 	if err != nil {
@@ -29,8 +26,10 @@ func TestHermesTerminalCoreSessionCWDIsolation(t *testing.T) {
 	}
 
 	root := filepath.Join(t.TempDir(), "terminal-core")
-	command := exec.CommandContext(t.Context(), python, "terminal_core_probe.py", root) // #nosec G204,G702 -- exact local official-Hermes venv selected above.
-	command.Env = append(os.Environ(), "ACP_GO_HERMES_AGENT_ROOT="+agentRoot)
+	// The probe's roots ride in argv: test-only state must not claim a name in
+	// the adapter's governed environment namespace, which is reserved for real
+	// options.
+	command := exec.CommandContext(t.Context(), python, "terminal_core_probe.py", root, agentRoot) // #nosec G204,G702 -- exact local official-Hermes venv selected above.
 
 	output, err := command.CombinedOutput()
 	if err != nil {

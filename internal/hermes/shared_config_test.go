@@ -95,7 +95,6 @@ func TestSharedHermesPathInitDoesNotMutateOperatorConfig(t *testing.T) {
 
 func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *testing.T) {
 	home := t.TempDir()
-	executable := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	type running struct {
@@ -107,6 +106,9 @@ func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *test
 	started := make([]running, 0, 2)
 	for index, secrets := range []struct{ stdio, header string }{{"stdio-one", "header-one"}, {"stdio-two", "header-two"}} {
 		capture := filepath.Join(t.TempDir(), "capture.json")
+		// Each generation gets its own launcher so its capture destination rides
+		// in that generation's argv rather than in a session environment carrier.
+		executable := fakeHermesGatewayExecutable(t, fakeGatewayModeOK, mcpEnvCapturePrefix+capture)
 		servers := []acp.McpServer{
 			stdioMCPServer("stdio", "runner", []string{"serve"}, map[string]string{"TOKEN": secrets.stdio}),
 			httpMCPServer("http", "https://example.test/mcp", map[string]string{"Authorization": secrets.header}),
@@ -118,7 +120,6 @@ func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *test
 			SharedHermesHome: home,
 			ExistingXDG:      testXDGDirs(t),
 			MCPServers:       servers,
-			SessionEnv:       map[string]string{"ACP_GO_HERMES_TEST_CAPTURE_MCP_ENV": capture},
 			Logger:           logger,
 		}))
 		if err != nil {

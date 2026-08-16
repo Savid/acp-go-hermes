@@ -11,20 +11,13 @@ import sys
 import threading
 
 
-ROOT = pathlib.Path(
-    sys.argv[1]
-    if len(sys.argv) > 1
-    else os.environ.get(
-        "ACP_GO_HERMES_TERMINAL_ROOT",
-        "/tmp/acp-go-hermes-terminal-core",
-    )
-)
-AGENT_ROOT = pathlib.Path(
-    os.environ.get(
-        "ACP_GO_HERMES_AGENT_ROOT",
-        str(pathlib.Path.home() / ".hermes/hermes-agent"),
-    )
-)
+if len(sys.argv) != 3:
+    raise SystemExit("usage: terminal_core_probe.py <scratch-root> <hermes-agent-root>")
+
+# Both roots arrive in argv so this probe claims no name in the adapter's
+# governed environment namespace, which is reserved for real options.
+ROOT = pathlib.Path(sys.argv[1])
+AGENT_ROOT = pathlib.Path(sys.argv[2])
 WORK_A = ROOT / "work-a"
 WORK_B = ROOT / "work-b"
 

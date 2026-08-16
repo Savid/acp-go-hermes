@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -657,4 +658,59 @@ func TestLedgerWriteReportsAFailedFileWrite(t *testing.T) {
 	if err := ledger.write(authLedgerRecord{ProviderID: testProviderID}); err == nil {
 		t.Fatal("a failed entry write was reported clean")
 	}
+}
+
+func TestAuthInventoryDuplicateLockAndSecondReadFailures(t *testing.T) {
+	t.Run("duplicate", func(t *testing.T) {
+		agent, _ := newAuthAgent(t)
+		record := seedConfirmedLineage(t, agent, testProviderID)
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agent.providerAuth.ledger.dir, "duplicate.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{authFieldSessionID: string(testSessionID)}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("provider lock timeout", func(t *testing.T) {
+		agent, _ := newAuthAgent(t)
+		seedConfirmedLineage(t, agent, testProviderID)
+		release, acquired := agent.providerAuth.lockProvider(t.Context(), testProviderID)
+		if !acquired {
+			t.Fatal("hold provider lock")
+		}
+		defer release()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		params, err := json.Marshal(map[string]any{authFieldSessionID: string(testSessionID)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agent.providerAuth.inventory(ctx, params); err == nil {
+			t.Fatal("provider lock timeout ignored")
+		}
+	})
+
+	t.Run("second ledger read", func(t *testing.T) {
+		agent, _ := newAuthAgent(t)
+		seedConfirmedLineage(t, agent, testProviderID)
+		previous := ledgerReadDir
+		calls := 0
+		ledgerReadDir = func(path string) ([]os.DirEntry, error) {
+			calls++
+			if calls == 2 {
+				return nil, errors.New("second list")
+			}
+
+			return os.ReadDir(path)
+		}
+		t.Cleanup(func() { ledgerReadDir = previous })
+		if _, err := callLeg(t, agent, AuthInventoryMethod, map[string]any{authFieldSessionID: string(testSessionID)}); err == nil {
+			t.Fatal("second ledger read failure ignored")
+		}
+	})
 }
