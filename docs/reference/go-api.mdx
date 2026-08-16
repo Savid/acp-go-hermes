@@ -40,7 +40,7 @@ still reach.
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
 | `WithConcurrencyLimits` | `ConcurrencyLimits{MaxActiveSessions, MaxConcurrentClientCalls}`. |
 | `WithImageLimits` | Decoded-byte limits for image prompt input; all four fields default to 6 MiB when omitted. |
-| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Requires `WithSharedHermesHome`; supplying it alone fails `initialize` with `-32602`. |
+| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Requires `WithSharedHermesHome`; supplying it alone fails `initialize` with `-32603`. |
 | `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
 | `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
@@ -88,7 +88,7 @@ A misconfiguration is not always a silent degradation. Omitting
 `-32601`; an absolute pair the agent cannot prepare logs a warning and does the
 same. A relative ledger root, a relative or unclean shared home, or
 `WithProviderAuthRoot` without a shared home is instead a construction failure
-that every `initialize` reports as `-32602`.
+that every `initialize` reports as `-32603`.
 
 Provider auth also requires the per-process browser-launcher shim.
 `_hermes/auth/authorize` refuses before any native call when the session's

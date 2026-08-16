@@ -150,12 +150,12 @@ A path that is wrong produces one of three different outcomes, not one:
 - **Missing.** With neither option set, and with only the shared home set,
   provider auth is silently not advertised and its seven methods answer
   `-32601 Method not found`. Setting only the ledger root is instead a hard
-  failure: every `initialize` returns `-32602` with
+  failure: every `initialize` returns `-32603` with
   `provider auth root requires shared Hermes home`.
 - **Relative.** A relative ledger root, a relative shared home, or a shared home
   that is not already a clean absolute path is a construction failure, not a
   degradation. The broker is never built, and every `initialize` returns
-  `-32602` carrying the validation text — for a relative home,
+  `-32603` carrying the validation text — for a relative home,
   `provider auth residence must be an absolute path` joined with
   `shared Hermes home must be an absolute path`.
 - **Cannot be prepared.** An absolute pair the adapter cannot materialize — a

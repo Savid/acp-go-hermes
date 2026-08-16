@@ -322,7 +322,7 @@ func WithInputHandoffRoot(dir string) Option {
 // every provider-auth method unadvertised and answering method-not-found: a leg
 // that cannot record what it did is never offered. A relative root, or this
 // option without WithSharedHermesHome, is a construction failure that every
-// Initialize reports as invalid-params. An absolute root the agent cannot
+// Initialize reports as an internal error. An absolute root the agent cannot
 // prepare — one it cannot create, restrict to 0700, or confirm as a writable
 // directory — is logged at warn level and leaves the surface unadvertised while
 // the rest of the agent works.

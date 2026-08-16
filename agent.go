@@ -253,13 +253,17 @@ func (a *Agent) endSessionConstruction() {
 }
 
 // optionsError reports a construction-time option failure as the uniform
-// invalid-params error, or nil when every option validated.
+// internal error, or nil when every option validated. The code is -32603
+// because the caller's params are blameless: the embedding host built an agent
+// this adapter refuses, so no request it can phrase would be served. The data
+// carries only the joined validation prose, since no wire field is at fault to
+// name.
 func (a *Agent) optionsError() error {
 	if a.optionsErr == nil {
 		return nil
 	}
 
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: a.optionsErr.Error()})
 }
 
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {

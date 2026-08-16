@@ -2343,7 +2343,8 @@ func TestAgentRejectsUnvalidatedOptionsWithoutInitialize(t *testing.T) {
 		"fork session":   forkErr,
 	} {
 		var reqErr *acp.RequestError
-		if !errors.As(err, &reqErr) || !strings.Contains(fmt.Sprint(reqErr.Data), "image limits must be non-negative") {
+		if !errors.As(err, &reqErr) || reqErr.Code != -32603 ||
+			!strings.Contains(fmt.Sprint(reqErr.Data), "image limits must be non-negative") {
 			t.Fatalf("%s error = %#v", name, err)
 		}
 	}

@@ -166,8 +166,8 @@ func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 
 	var requestErr *acp.RequestError
-	if !errors.As(err, &requestErr) || requestErr.Code != -32602 {
-		t.Fatalf("Initialize error = %#v, want invalid params", err)
+	if !errors.As(err, &requestErr) || requestErr.Code != -32603 {
+		t.Fatalf("Initialize error = %#v, want internal error", err)
 	}
 	data, _ := requestErr.Data.(map[string]any)
 	message, _ := data[jsonFieldError].(string)
