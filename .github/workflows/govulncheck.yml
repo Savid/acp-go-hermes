@@ -20,7 +20,6 @@ jobs:
     runs-on: [self-hosted]
     permissions:
       contents: read
-      security-events: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -31,16 +30,7 @@ jobs:
       # golang/govulncheck-action runs its own nested actions/checkout, which on
       # a self-hosted runner re-applies the extraheader the first checkout
       # already wrote and fails the fetch with "Duplicate header: Authorization".
-      # Its remaining steps then skip, no SARIF is produced, and the upload
-      # reports a missing path. The action also go-installs an unpinned
-      # govulncheck, which the family pins. Run the go.mod tool directive
-      # instead.
+      # The action also go-installs an unpinned govulncheck, which the family
+      # pins. Run the go.mod tool directive instead.
       - name: Run govulncheck
-        run: make vuln-sarif
-
-      - name: Upload SARIF to code scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4 # v3.35.4
-        with:
-          sarif_file: govulncheck.sarif
-          category: govulncheck
+        run: make vuln

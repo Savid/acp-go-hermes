@@ -44,6 +44,3 @@ bin/
 
 # Mintlify local cache
 .mint/
-
-# govulncheck SARIF written by `make vuln-sarif` for CI code scanning
-govulncheck.sarif
