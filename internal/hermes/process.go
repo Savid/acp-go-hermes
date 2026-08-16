@@ -98,6 +98,10 @@ type ProcessOptions struct {
 	// SharedSessionOwners are bound to the native PID/start-time immediately
 	// after spawn, before readiness or compatibility probes can run.
 	SharedSessionOwners []*SharedSessionOwner
+	// SharedHomeOwner is the exclusive claim on Home held across this and every
+	// other native writer this adapter runs against that root. Its descriptor is
+	// inherited rather than rebound, because the claim names the adapter itself.
+	SharedHomeOwner *SharedHomeOwner
 	// ScratchParent is the resolved parent directory used to materialize an
 	// isolated home when Home is empty. The internal package never consults the
 	// system temp directory itself.
@@ -337,6 +341,13 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 	configureHermesProcess(cmd)
 	ownerFiles, err := sharedSessionOwnerFiles(opts.SharedSessionOwners)
+	if err != nil {
+		cancel()
+
+		return nil, errors.Join(err, shim.remove())
+	}
+
+	ownerFiles, err = opts.SharedHomeOwner.appendLockFile(ownerFiles)
 	if err != nil {
 		cancel()
 

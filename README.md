@@ -93,7 +93,9 @@ model, environment, session storage, concurrency limits, and OpenTelemetry
 providers. `WithHome` is unsupported and rejects a non-empty value at session
 start. Use `WithScratchDir` for ephemeral
 state. `WithSharedHermesHome` explicitly opts official Hermes into one durable
-native home shared by its otherwise independent per-session processes.
+native home shared by this adapter's otherwise independent per-session
+processes; that adapter claims the home root exclusively and a second adapter
+asking for the same root is refused.
 `WithProviderAuthRoot` names the durable directory that holds the values-free
 provider-auth ledger. Provider auth is advertised only when that ledger root
 and the shared Hermes home are configured.
@@ -112,7 +114,8 @@ and the shared Hermes home are configured.
   generated isolated `HERMES_HOME`. The explicit shared-home mode keeps
   separate processes, ports, tokens, browser shims, event streams, environment,
   and wrapper control roots while official Hermes shares its native database
-  and auth residence. By default the runtime executes as the
+  and auth residence, under one exclusive home-root claim held for the whole
+  lifetime of that adapter's native writers. By default the runtime executes as the
   adapter's own identity on every supported platform and reports the
   non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
   authoritative Linux OS containment; it is Linux-only and fails closed rather

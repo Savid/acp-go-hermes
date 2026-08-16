@@ -19,7 +19,7 @@ var (
 // The file is durable before rename and the containing directory is synced
 // afterwards on platforms that expose directory fsync.
 //
-//nolint:govet // Narrow setup scope keeps the directory error adjacent to its operation.
+//nolint:govet,gosec // Narrow setup scope keeps the directory error adjacent to its operation; every caller confines path beneath an already-validated adapter-owned root.
 func atomicSharedHermesWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

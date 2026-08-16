@@ -49,7 +49,7 @@ func TestSharedHermesConfigSerializesIdenticalWritersAndRejectsMismatch(t *testi
 		}
 	}
 
-	fingerprint, err := os.ReadFile(filepath.Join(home, sharedConfigFingerprintName))
+	fingerprint, err := os.ReadFile(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName))
 	if err != nil {
 		t.Fatalf("read fingerprint: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestSharedHermesConfigLockHonorsCancellation(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- withHermesConfigLock(context.Background(), home, func() error {
+		done <- withHermesConfigLock(context.Background(), home, func(string) error {
 			close(entered)
 			<-release
 
@@ -189,7 +189,7 @@ func TestSharedHermesConfigLockHonorsCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := withHermesConfigLock(ctx, home, func() error { return nil }); err == nil {
+	if err := withHermesConfigLock(ctx, home, func(string) error { return nil }); err == nil {
 		t.Fatal("canceled config lock acquisition succeeded")
 	}
 	close(release)
@@ -303,7 +303,7 @@ func TestSharedConfigPublishesFingerprintLastAndRetries(t *testing.T) {
 	if err := materializeSharedHermesConfig(t.Context(), home, nil, files); err == nil {
 		t.Fatal("materialization accepted config commit failure")
 	}
-	if _, err := os.Stat(filepath.Join(home, sharedConfigFingerprintName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fingerprint published before config commit: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(home, "instructions.md")); err != nil || string(data) != "managed instructions\n" {
@@ -487,16 +487,7 @@ func TestSharedSessionOwnerClaimReplacementIsAtomic(t *testing.T) {
 func TestSharedSessionOwnerIsRetainedWhenStartContainmentIsUnproven(t *testing.T) {
 	restoreProcessSeams(t)
 	home := t.TempDir()
-	t.Cleanup(func() {
-		retainedSharedSessionOwners.Lock()
-		for key, owner := range retainedSharedSessionOwners.owners {
-			if strings.HasPrefix(key, home+string(os.PathSeparator)) {
-				_ = owner.Release()
-				delete(retainedSharedSessionOwners.owners, key)
-			}
-		}
-		retainedSharedSessionOwners.Unlock()
-	})
+	t.Cleanup(func() { releaseRetainedSharedOwnersUnder(t, home) })
 
 	startHermesContainedProcess = func(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
 		return nil, ErrProcessContainmentIncomplete
@@ -513,7 +504,46 @@ func TestSharedSessionOwnerIsRetainedWhenStartContainmentIsUnproven(t *testing.T
 	}
 
 	options.ExistingXDG = testXDGDirs(t)
-	if _, err := StartServer(t.Context(), options); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("second owner after unproven start error = %v", err)
+	if _, err := StartServer(t.Context(), options); err == nil || !strings.Contains(err.Error(), "home root is already claimed") {
+		t.Fatalf("second home-root claim after unproven start error = %v", err)
 	}
+	if _, err := acquireSharedACPSessionOwner(home, "failed-start"); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("second session owner after unproven start error = %v", err)
+	}
+}
+
+// releaseRetainedSharedOwnersUnder drops the deliberately process-lifetime
+// claims one unproven-containment fixture leaves behind, so a later fixture can
+// still take the same residence inside this one test binary.
+func releaseRetainedSharedOwnersUnder(t *testing.T, home string) {
+	t.Helper()
+
+	control, err := SharedHermesAdapterControlDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retainedSharedSessionOwners.Lock()
+	defer retainedSharedSessionOwners.Unlock()
+
+	for owner := range retainedSharedSessionOwners.owners {
+		if strings.HasPrefix(owner.lockPath, control+string(os.PathSeparator)) {
+			_ = owner.Release()
+
+			delete(retainedSharedSessionOwners.owners, owner)
+		}
+	}
+}
+
+// sharedTestControlDir resolves the adapter control root paired with home, the
+// residence every adapter-owned coordination artifact is written to.
+func sharedTestControlDir(t *testing.T, home string) string {
+	t.Helper()
+
+	control, err := EnsureSharedHermesAdapterControlDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return control
 }

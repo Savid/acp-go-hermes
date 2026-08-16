@@ -13,10 +13,44 @@ import (
 	"sync"
 )
 
-const sharedSessionOwnersDir = ".acp-go-hermes-session-owners"
+const (
+	sharedSessionOwnersDir = ".acp-go-hermes-session-owners"
+	// sharedOwnerClaimAttempts bounds the reopen loop that runs when a
+	// predecessor unlinks its lock file in the window between this caller's
+	// open and its own successful flock. Locking that detached inode would
+	// fence nothing, so the attempt is retired and retried against the path.
+	sharedOwnerClaimAttempts = 3
+)
+
+// errSharedOwnerLockReplaced reports that the locked inode is no longer the one
+// the lock path names. It never reaches a caller: acquisition retries.
+var errSharedOwnerLockReplaced = errors.New("shared Hermes owner lock was replaced during acquisition")
+
+// sharedOwnerClaimKind names one exclusion unit in adapter-facing text. label
+// spells the artifact pair; active and live are the refusals a second claimant
+// sees when the kernel lock is held and when the recorded claimant is proven
+// live.
+type sharedOwnerClaimKind struct {
+	label  string
+	active string
+	live   string
+}
+
+var (
+	sharedSessionOwnerKind = sharedOwnerClaimKind{
+		label:  "session-owner",
+		active: "shared Hermes session is already active",
+		live:   "shared Hermes session claimant process is still live",
+	}
+	sharedHomeOwnerKind = sharedOwnerClaimKind{
+		label:  "home-root",
+		active: "shared Hermes home root is already claimed by a live writer",
+		live:   "shared Hermes home-root claimant process is still live",
+	}
+)
 
 type SharedSessionOwner struct {
-	key       string
+	lockPath  string
 	claimPath string
 	file      *os.File
 	unlock    func() error
@@ -33,6 +67,8 @@ type sharedSessionOwnerClaim struct {
 var (
 	sharedOwnerChmod            = os.Chmod
 	sharedOwnerFileChmod        = (*os.File).Chmod
+	sharedOwnerFileStat         = (*os.File).Stat
+	sharedOwnerLstat            = os.Lstat
 	sharedOwnerTryLock          = tryLockHermesFile
 	sharedOwnerJSONMarshal      = json.Marshal
 	sharedOwnerInspectStartTime = inspectHermesProcessStartTime
@@ -41,9 +77,6 @@ var (
 // acquireSharedSessionOwner prevents two official Hermes processes from
 // resuming and mutating the same logical ACP session concurrently. The file
 // name is a fixed-size hash; raw host session identifiers never become paths.
-// The lock descriptor is inherited by the contained Hermes process/guardian,
-// so an adapter crash does not admit a replacement until that exact native
-// process has exited and released the kernel-held claim.
 func acquireSharedSessionOwner(home string, kind string, id string) (*SharedSessionOwner, error) {
 	if id == "" {
 		return nil, fmt.Errorf("shared Hermes home requires a non-empty %s session id", kind)
@@ -64,17 +97,37 @@ func acquireSharedSessionOwner(home string, kind string, id string) (*SharedSess
 	}
 
 	digest := sha256.Sum256([]byte(kind + "\x00" + id))
-	base := filepath.Join(dir, hex.EncodeToString(digest[:]))
-	path := base + ".lock"
+
+	return acquireSharedOwnerClaim(filepath.Join(dir, hex.EncodeToString(digest[:])), sharedSessionOwnerKind)
+}
+
+// acquireSharedOwnerClaim takes the exclusive kernel lock at base+".lock" and
+// admits the caller only once base+".claim" names no live process. The lock
+// descriptor is inherited by the contained Hermes process/guardian, so an
+// adapter crash does not admit a replacement until that exact native process
+// has exited and released the kernel-held claim.
+func acquireSharedOwnerClaim(base string, kind sharedOwnerClaimKind) (*SharedSessionOwner, error) {
+	lockPath := base + ".lock"
 	claimPath := base + ".claim"
 
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	for range sharedOwnerClaimAttempts {
+		owner, err := tryAcquireSharedOwnerClaim(lockPath, claimPath, kind)
+		if !errors.Is(err, errSharedOwnerLockReplaced) {
+			return owner, err
+		}
+	}
+
+	return nil, fmt.Errorf("shared Hermes %s lock was replaced during every acquisition attempt", kind.label)
+}
+
+func tryAcquireSharedOwnerClaim(lockPath string, claimPath string, kind sharedOwnerClaimKind) (*SharedSessionOwner, error) {
+	file, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open shared Hermes session-owner lock: %w", err)
+		return nil, fmt.Errorf("open shared Hermes %s lock: %w", kind.label, err)
 	}
 
 	if err := sharedOwnerFileChmod(file, 0o600); err != nil {
-		return nil, errors.Join(fmt.Errorf("protect shared Hermes session-owner lock: %w", err), file.Close())
+		return nil, errors.Join(fmt.Errorf("protect shared Hermes %s lock: %w", kind.label, err), file.Close())
 	}
 
 	unlock, acquired, err := sharedOwnerTryLock(file)
@@ -83,10 +136,14 @@ func acquireSharedSessionOwner(home string, kind string, id string) (*SharedSess
 	}
 
 	if !acquired {
-		return nil, errors.Join(errors.New("shared Hermes session is already active"), file.Close())
+		return nil, errors.Join(errors.New(kind.active), file.Close())
 	}
 
-	claim, err := readSharedSessionOwnerClaim(claimPath)
+	if err := verifySharedOwnerLockPath(file, lockPath, kind); err != nil {
+		return nil, errors.Join(err, unlock(), file.Close())
+	}
+
+	claim, err := readSharedOwnerClaim(claimPath, kind.label)
 	if err != nil {
 		return nil, errors.Join(err, unlock(), file.Close())
 	}
@@ -98,45 +155,63 @@ func acquireSharedSessionOwner(home string, kind string, id string) (*SharedSess
 		}
 
 		if !gone {
-			return nil, errors.Join(errors.New("shared Hermes session claimant process is still live"), unlock(), file.Close())
+			return nil, errors.Join(errors.New(kind.live), unlock(), file.Close())
 		}
 	}
 
-	return &SharedSessionOwner{key: path, claimPath: claimPath, file: file, unlock: unlock}, nil
+	return &SharedSessionOwner{lockPath: lockPath, claimPath: claimPath, file: file, unlock: unlock}, nil
 }
 
-func readSharedSessionOwnerClaim(path string) (sharedSessionOwnerClaim, error) {
+// verifySharedOwnerLockPath proves the locked inode is still the one this path
+// names. Release unlinks the lock file while the lock is still held, so a
+// descriptor opened just before that unlink would otherwise fence a detached
+// inode while a replacement claimed a brand-new one.
+func verifySharedOwnerLockPath(file *os.File, lockPath string, kind sharedOwnerClaimKind) error {
+	locked, err := sharedOwnerFileStat(file)
+	if err != nil {
+		return fmt.Errorf("inspect shared Hermes %s lock: %w", kind.label, err)
+	}
+
+	named, err := sharedOwnerLstat(lockPath)
+	if err != nil || !os.SameFile(locked, named) {
+		return errSharedOwnerLockReplaced
+	}
+
+	return nil
+}
+
+func readSharedOwnerClaim(path string, label string) (sharedSessionOwnerClaim, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return sharedSessionOwnerClaim{}, nil
 	}
 
 	if err != nil {
-		return sharedSessionOwnerClaim{}, fmt.Errorf("open shared Hermes session-owner claim: %w", err)
+		return sharedSessionOwnerClaim{}, fmt.Errorf("open shared Hermes %s claim: %w", label, err)
 	}
 
 	defer file.Close()
 
 	data, err := io.ReadAll(io.LimitReader(file, 4097))
 	if err != nil {
-		return sharedSessionOwnerClaim{}, fmt.Errorf("read shared Hermes session-owner claim: %w", err)
+		return sharedSessionOwnerClaim{}, fmt.Errorf("read shared Hermes %s claim: %w", label, err)
 	}
 
 	if len(data) == 0 {
-		return sharedSessionOwnerClaim{}, errors.New("shared Hermes session-owner claim is empty")
+		return sharedSessionOwnerClaim{}, fmt.Errorf("shared Hermes %s claim is empty", label)
 	}
 
 	if len(data) > 4096 {
-		return sharedSessionOwnerClaim{}, errors.New("shared Hermes session-owner claim is oversized")
+		return sharedSessionOwnerClaim{}, fmt.Errorf("shared Hermes %s claim is oversized", label)
 	}
 
 	var claim sharedSessionOwnerClaim
 	if err := json.Unmarshal(data, &claim); err != nil {
-		return sharedSessionOwnerClaim{}, fmt.Errorf("parse shared Hermes session-owner claim: %w", err)
+		return sharedSessionOwnerClaim{}, fmt.Errorf("parse shared Hermes %s claim: %w", label, err)
 	}
 
 	if claim.PID <= 0 || claim.KernelStartTime == "" {
-		return sharedSessionOwnerClaim{}, errors.New("shared Hermes session-owner claim is incomplete")
+		return sharedSessionOwnerClaim{}, fmt.Errorf("shared Hermes %s claim is incomplete", label)
 	}
 
 	return claim, nil
@@ -149,7 +224,7 @@ func sharedSessionOwnerClaimGone(claim sharedSessionOwnerClaim) (bool, error) {
 			return true, nil
 		}
 
-		return false, fmt.Errorf("verify shared Hermes session-owner claimant: %w", err)
+		return false, fmt.Errorf("verify shared Hermes claimant: %w", err)
 	}
 
 	return startTime != claim.KernelStartTime, nil
@@ -237,7 +312,11 @@ func (o *SharedSessionOwner) BindProcessIdentity(pid int, kernelStartTime string
 	return nil
 }
 
-// Release drops a proven-settled session claim.
+// Release drops a proven-settled claim and removes both durable artifacts, so
+// a long-lived residence does not accumulate one empty lock file per session
+// identity it has ever hosted. The lock file is unlinked before the lock is
+// dropped: a replacement then creates its own inode, and any descriptor opened
+// against the abandoned one fails the acquisition path check.
 func (o *SharedSessionOwner) Release() error {
 	if o == nil {
 		return nil
@@ -246,11 +325,7 @@ func (o *SharedSessionOwner) Release() error {
 	o.once.Do(func() {
 		o.mu.Lock()
 
-		clearErr := os.Remove(o.claimPath)
-		if errors.Is(clearErr, os.ErrNotExist) {
-			clearErr = nil
-		}
-
+		clearErr := errors.Join(removeSharedOwnerArtifact(o.claimPath), removeSharedOwnerArtifact(o.lockPath))
 		if clearErr == nil {
 			clearErr = syncSharedHermesDirectory(filepath.Dir(o.claimPath))
 		}
@@ -259,6 +334,14 @@ func (o *SharedSessionOwner) Release() error {
 	})
 
 	return o.err
+}
+
+func removeSharedOwnerArtifact(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return nil
 }
 
 func sharedSessionOwnerFiles(owners []*SharedSessionOwner) ([]*os.File, error) {
@@ -284,20 +367,23 @@ func sharedSessionOwnerFiles(owners []*SharedSessionOwner) ([]*os.File, error) {
 
 var retainedSharedSessionOwners = struct {
 	sync.Mutex
-	owners map[string]*SharedSessionOwner
-}{owners: make(map[string]*SharedSessionOwner)}
+	owners map[*SharedSessionOwner]struct{}
+}{owners: make(map[*SharedSessionOwner]struct{})}
 
 // retainSharedSessionOwner deliberately holds an OS lock until adapter process
 // exit when startup left native containment unproven. Releasing it would admit
 // a second owner while descendants from the failed start may still mutate the
-// same durable native session.
+// same durable native session. The set is keyed by the owner itself: keying it
+// by lock path would let one retention evict another, and an evicted owner is
+// unreachable, so its *os.File finalizer would close the descriptor and
+// silently drop the very lock this retention exists to hold.
 func retainSharedSessionOwner(owner *SharedSessionOwner) {
 	if owner == nil {
 		return
 	}
 
 	retainedSharedSessionOwners.Lock()
-	retainedSharedSessionOwners.owners[owner.key] = owner
+	retainedSharedSessionOwners.owners[owner] = struct{}{}
 	retainedSharedSessionOwners.Unlock()
 }
 

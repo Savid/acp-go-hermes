@@ -18,8 +18,9 @@
 // Hermes authentication and provider credentials remain owned by native
 // Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
 // beneath the scratch parent from [WithScratchDir]. [WithSharedHermesHome]
-// explicitly opts official Hermes into one durable native home shared by its
-// otherwise independent per-session processes. Provider OAuth additionally
+// explicitly opts official Hermes into one durable native home shared by this
+// adapter's otherwise independent per-session processes; the adapter claims
+// that home root exclusively and a second adapter is refused it. Provider OAuth additionally
 // requires [WithProviderAuthRoot] for values-free connection lineage. The
 // adapter never reads or copies credentials. [WithHome] remains unsupported.
 //

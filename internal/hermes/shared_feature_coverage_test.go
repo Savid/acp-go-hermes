@@ -595,6 +595,13 @@ func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
 	if err := owner.Release(); err != nil {
 		t.Fatal(err)
 	}
+	homeOwner, homeErr := AcquireSharedHomeOwner(home)
+	if homeErr != nil {
+		t.Fatalf("early StartServer failure retained the home root: %v", homeErr)
+	}
+	if err := homeOwner.Release(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner sidecar faults share one hashed-path fixture.
@@ -638,11 +645,8 @@ func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner side
 		if acquireErr != nil {
 			t.Fatal(acquireErr)
 		}
-		lockPath := owner.key
+		lockPath := owner.lockPath
 		if err := owner.Release(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Remove(lockPath); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Mkdir(lockPath, 0o700); err != nil {
@@ -1128,7 +1132,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 
 	t.Run("fingerprint read and publication faults", func(t *testing.T) {
 		home := t.TempDir()
-		if err := os.Mkdir(filepath.Join(home, sharedConfigFingerprintName), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := materializeSharedHermesConfig(t.Context(), home, nil, nil); err == nil || !strings.Contains(err.Error(), "read shared Hermes config fingerprint") {
@@ -1168,7 +1172,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		sharedConfigTryLock = func(*os.File) (func() error, bool, error) {
 			return nil, false, errors.New("lock fault")
 		}
-		if err := withHermesConfigLock(t.Context(), t.TempDir(), func() error { return nil }); err == nil || !strings.Contains(err.Error(), "lock fault") {
+		if err := withHermesConfigLock(t.Context(), t.TempDir(), func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "lock fault") {
 			t.Fatalf("shared config lock fault = %v", err)
 		}
 		sharedConfigTryLock = originalTryLock
@@ -1198,7 +1202,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 			t.Fatal("empty version binding was accepted")
 		}
 		home := t.TempDir()
-		if err := os.Mkdir(filepath.Join(home, sharedHermesVersionName), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, home), sharedHermesVersionName), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err == nil || !strings.Contains(err.Error(), "read") {
@@ -1214,16 +1218,27 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		sharedAtomicWriteFile = originalWriter
 	})
 
-	t.Run("config lock open and run errors", func(t *testing.T) {
+	t.Run("config lock control, open and run errors", func(t *testing.T) {
 		homeFile := filepath.Join(t.TempDir(), "home-file")
 		if err := os.WriteFile(homeFile, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := withHermesConfigLock(t.Context(), homeFile, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "open") {
+		if err := os.WriteFile(homeFile+sharedHermesControlSuffix, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := withHermesConfigLock(t.Context(), homeFile, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "control directory") {
+			t.Fatalf("config lock control directory error = %v", err)
+		}
+
+		blocked := t.TempDir()
+		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, blocked), sharedConfigLockName), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := withHermesConfigLock(t.Context(), blocked, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "open") {
 			t.Fatalf("config lock open error = %v", err)
 		}
 		want := errors.New("run fault")
-		if err := withHermesConfigLock(t.Context(), t.TempDir(), func() error { return want }); !errors.Is(err, want) {
+		if err := withHermesConfigLock(t.Context(), t.TempDir(), func(string) error { return want }); !errors.Is(err, want) {
 			t.Fatalf("config lock run error = %v", err)
 		}
 	})

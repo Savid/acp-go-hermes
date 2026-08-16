@@ -176,9 +176,10 @@ type StartOptions struct {
 	ExecutablePath string
 	DefaultModel   string
 	// SharedHermesHome is the exact durable HERMES_HOME selected by the
-	// official shared-home mode. ExistingXDG remains the
-	// unique wrapper-owned control generation; multiple Servers may use the same
-	// shared native home concurrently.
+	// official shared-home mode. ExistingXDG remains the unique wrapper-owned
+	// control generation; multiple Servers of this one adapter process share the
+	// native home under a single exclusive home-root claim, and a second adapter
+	// process is refused that root outright.
 	SharedHermesHome            string
 	SharedNativeSessionOwner    *SharedSessionOwner
 	Env                         map[string]string
@@ -228,6 +229,7 @@ type hermesServer struct {
 	defaultModel          string
 	providerAuthSupported bool
 	sharedSessionOwner    *SharedSessionOwner
+	sharedHomeOwner       *SharedHomeOwner
 
 	connMu   sync.Mutex
 	turnBusy int
@@ -604,12 +606,32 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		}
 	}
 
-	var sessionOwner *SharedSessionOwner
+	var (
+		homeOwner    *SharedHomeOwner
+		sessionOwner *SharedSessionOwner
+	)
 
-	keepSessionOwner := false
+	// keepOwners hands both claims to the started server; until it is set, every
+	// exit from here gives the home root and the session claim back.
+	keepOwners := false
 
 	if options.SharedHermesHome != "" {
 		var ownerErr error
+
+		homeOwner, ownerErr = AcquireSharedHomeOwner(nativeXDG.Root)
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+
+		defer func() {
+			if !keepOwners {
+				if errors.Is(resultErr, ErrProcessContainmentIncomplete) {
+					homeOwner.Retain()
+				} else {
+					resultErr = errors.Join(resultErr, homeOwner.Release())
+				}
+			}
+		}()
 
 		sessionOwner, ownerErr = acquireSharedACPSessionOwner(nativeXDG.Root, options.ACPSessionID)
 		if ownerErr != nil {
@@ -617,7 +639,7 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		}
 
 		defer func() {
-			if !keepSessionOwner {
+			if !keepOwners {
 				if errors.Is(resultErr, ErrProcessContainmentIncomplete) {
 					retainSharedSessionOwner(sessionOwner)
 				} else {
@@ -706,6 +728,7 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 			return materializeSharedHermesConfig(prepareCtx, home, servers, options.SeedFiles)
 		},
 		SharedSessionOwners:         []*SharedSessionOwner{sessionOwner, options.SharedNativeSessionOwner},
+		SharedHomeOwner:             homeOwner,
 		ScratchParent:               options.ScratchParent,
 		Cwd:                         options.Cwd,
 		Env:                         cloneEnvironmentMap(options.Env),
@@ -758,10 +781,11 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		defaultModel:          options.DefaultModel,
 		providerAuthSupported: options.SharedHermesHome != "",
 		sharedSessionOwner:    sessionOwner,
+		sharedHomeOwner:       homeOwner,
 	}
 	server.enableReconnect(proc.Redial)
 
-	keepSessionOwner = true
+	keepOwners = true
 
 	return server, nil
 }
@@ -820,8 +844,15 @@ func (s *hermesServer) Close(ctx context.Context) error {
 			err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
 		}
 
-		if !errors.Is(processErr, ErrProcessContainmentIncomplete) {
-			err = errors.Join(err, s.sharedSessionOwner.Release())
+		// An unproven containment result means descendants may still be writing
+		// this residence. Both claims are retained rather than merely left
+		// unreleased: an unreachable owner has its descriptor closed by the
+		// *os.File finalizer, which would drop the kernel lock silently.
+		if errors.Is(processErr, ErrProcessContainmentIncomplete) {
+			s.sharedSessionOwner.Retain()
+			s.sharedHomeOwner.Retain()
+		} else {
+			err = errors.Join(err, s.sharedSessionOwner.Release(), s.sharedHomeOwner.Release())
 		}
 	})
 

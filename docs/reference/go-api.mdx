@@ -32,7 +32,7 @@ still reach.
 | `WithProcessIsolation` | Optional. Opts into the hardened Linux identity boundary: nonzero non-root UID/GID and a complete replacement environment for native Hermes processes. The embedded supervisor stays a distinct trusted root; only `hermes serve` receives the configured identity, with supplementary groups cleared. Linux-only and fail-closed. Omitting it runs Hermes as the adapter's own identity. |
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported. Use `WithScratchDir` for isolated ephemeral state or `WithSharedHermesHome` for the explicit official-Hermes durable mode. |
-| `WithSharedHermesHome` | Absolute supported local-filesystem path used as the exact durable `HERMES_HOME` by each per-session official Hermes process. Native database/auth state is shared; processes, environments, events, and wrapper controls remain separate. |
+| `WithSharedHermesHome` | Absolute supported local-filesystem path used as the exact durable `HERMES_HOME` by each per-session official Hermes process of this adapter. The adapter claims the home root exclusively for the lifetime of those processes and refuses to start when another adapter already holds it. Native database/auth state is shared; processes, environments, events, and wrapper controls remain separate. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
 | `WithEnv` | Static Agent-scoped environment overlaid on `ProcessIsolation.BaseEnvironment`, or on the captured sanitized ambient environment in ordinary mode, for Hermes executable lookup, version probing, and each `hermes serve` process. This is the only API that may set the native base `PATH`. `BASH_ENV` and `ACP_GO_HERMES_PATH_DIR_*` are reserved for the adapter's terminal PATH carrier. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
@@ -67,7 +67,9 @@ processes receive neither capability nor descriptor.
 The adapter never exposes a public credential type and never reads, copies, or
 returns native credential bytes. Shared mode binds one exact Hermes version and
 one managed MCP/seed configuration to a durable local filesystem; mismatches
-fail before launch. It rejects `dashboard.turn_isolation=true` and
+fail before launch. Because one adapter holds the home root exclusively, the
+native `auth.json` in that residence has exactly one writing adapter at a time
+even when separate ledger roots name the same residence. It rejects `dashboard.turn_isolation=true` and
 `model.persist_switch_by_default=true` because those settings mutate
 process-global shared state.
 See [Authentication](/docs/features/authentication).

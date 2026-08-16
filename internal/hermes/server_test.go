@@ -1989,9 +1989,9 @@ func TestMaterializeHermesConfig(t *testing.T) {
 
 	t.Run("rejects reserved adapter metadata case-insensitively", func(t *testing.T) {
 		for name, relative := range map[string]string{
-			"config lock":            ".acp-go-hermes-config.lock",
-			"fingerprint nested":     "nested/.ACP-GO-HERMES-CONFIG.SHA256",
-			"version":                ".acp-go-hermes-version",
+			"path init":              hermesPathInitFileName,
+			"namespace nested":       "nested/.ACP-GO-HERMES-ANYTHING",
+			"namespace":              ".acp-go-hermes-reserved",
 			"owner subtree":          filepath.FromSlash(".acp-go-hermes-session-owners/claim"),
 			"owner subtree case":     filepath.FromSlash(".ACP-GO-HERMES-SESSION-OWNERS/claim"),
 			"manifest":               ".seed-manifest.json",

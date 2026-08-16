@@ -121,7 +121,7 @@ func TestSharedHomeVersionBindingPrecedesConfigPreparation(t *testing.T) {
 	if string(data) != "operator: unchanged\n" {
 		t.Fatalf("operator config changed: %q", data)
 	}
-	if _, err := os.Stat(filepath.Join(home, sharedConfigFingerprintName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("config fingerprint appeared before version rejection: %v", err)
 	}
 }

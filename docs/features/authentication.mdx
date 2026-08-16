@@ -40,14 +40,31 @@ home. This intentionally shares Hermes' SQLite session state, config, and
 `auth.json`; the adapter never parses, copies, returns, injects, or snapshots
 credential material.
 
-The processes remain independent: each has a distinct port, dashboard token,
-browser shim, event stream, operation environment, and wrapper control root.
-OS-held locks fence each ACP ID and native session ID, so two records cannot
-resume or mutate one native session concurrently. Shared-home config mutation
-is serialized, atomically committed, and bound to one exact Hermes version and
-one managed MCP/seed fingerprint. The home must be on the platform's durable
-local-filesystem allowlist. Network, FUSE/virtiofs, volatile, FAT/exFAT, and
-unknown filesystems fail closed.
+One adapter owns that home root exclusively. Before its first native writer
+starts, the adapter takes a home-root claim — an OS-held lock plus a record of
+its own PID and kernel start time — and holds it until its last native writer
+has settled. A second adapter asking for the same home root is refused with
+`shared Hermes home root is already claimed by a live writer`, not admitted
+beside the first. The lock descriptor is inherited by every native process the
+adapter launches, so an adapter that dies leaves the root fenced by its
+surviving harness; the next adapter is admitted only after the recorded PID and
+kernel start time prove that claimant dead. A start whose native containment
+could not be proven keeps the claim for the rest of the adapter's life rather
+than releasing a root descendants may still be writing.
+
+Inside that one adapter the per-session processes stay independent: each has a
+distinct port, dashboard token, browser shim, event stream, operation
+environment, and wrapper control root. OS-held locks fence each ACP ID and
+native session ID, so two records cannot resume or mutate one native session
+concurrently, and a session-set lock orders creation, fork, and recovery against
+in-flight turns. Shared-home config mutation is serialized, atomically
+committed, and bound to one exact Hermes version and one managed MCP/seed
+fingerprint. Every adapter-owned coordination artifact — the home-root claim,
+the session-set lock, per-session owner claims, operation journals, and the
+config lock, fingerprint, and version binding — lives in the adapter control
+root paired with the home, never beneath `HERMES_HOME` itself. The home must be
+on the platform's durable local-filesystem allowlist. Network, FUSE/virtiofs,
+volatile, FAT/exFAT, and unknown filesystems fail closed.
 
 The launch environment also sets a random
 `HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser

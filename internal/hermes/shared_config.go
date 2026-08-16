@@ -18,10 +18,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// The config transaction's own artifacts are adapter control material: official
+// Hermes never reads them, and the control root is where control material lives
+// so that none of it is placed beneath HERMES_HOME.
 const (
-	sharedConfigLockName        = ".acp-go-hermes-config.lock"
-	sharedConfigFingerprintName = ".acp-go-hermes-config.sha256"
-	sharedHermesVersionName     = ".acp-go-hermes-version"
+	sharedConfigLockName        = "config.lock"
+	sharedConfigFingerprintName = "config.sha256"
+	sharedHermesVersionName     = "version"
 	sharedMCPSecretEnvPrefix    = "ACP_GO_HERMES_MCP_"
 )
 
@@ -41,7 +44,7 @@ func materializeSharedHermesConfig(ctx context.Context, home string, servers []a
 		return err
 	}
 
-	return withHermesConfigLock(ctx, home, func() error {
+	return withHermesConfigLock(ctx, home, func(control string) error {
 		if err := validateSharedHermesConfigFile(home); err != nil {
 			return err
 		}
@@ -56,7 +59,7 @@ func materializeSharedHermesConfig(ctx context.Context, home string, servers []a
 			}
 		}
 
-		fingerprintPath := filepath.Join(home, sharedConfigFingerprintName)
+		fingerprintPath := filepath.Join(control, sharedConfigFingerprintName)
 		current, readErr := os.ReadFile(fingerprintPath)
 
 		fingerprintExists := readErr == nil
@@ -122,8 +125,8 @@ func bindSharedHermesVersion(ctx context.Context, home string, version string) e
 		return errors.New("shared Hermes home requires an exactly probed Hermes version")
 	}
 
-	return withHermesConfigLock(ctx, home, func() error {
-		path := filepath.Join(home, sharedHermesVersionName)
+	return withHermesConfigLock(ctx, home, func(control string) error {
+		path := filepath.Join(control, sharedHermesVersionName)
 
 		current, err := os.ReadFile(path)
 		if err == nil {
@@ -204,8 +207,13 @@ func sharedHermesConfigFingerprint(servers []acp.McpServer, files map[string]str
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func withHermesConfigLock(ctx context.Context, home string, run func() error) (err error) {
-	file, err := os.OpenFile(filepath.Join(home, sharedConfigLockName), os.O_RDWR|os.O_CREATE, 0o600)
+func withHermesConfigLock(ctx context.Context, home string, run func(control string) error) (err error) {
+	control, err := EnsureSharedHermesAdapterControlDir(home)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(filepath.Join(control, sharedConfigLockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("open shared Hermes config lock: %w", err)
 	}
@@ -235,5 +243,5 @@ func withHermesConfigLock(ctx context.Context, home string, run func() error) (e
 		err = errors.Join(err, unlock(), file.Close())
 	}()
 
-	return run()
+	return run(control)
 }
