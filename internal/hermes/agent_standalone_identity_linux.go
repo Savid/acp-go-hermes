@@ -1325,6 +1325,17 @@ func acquireAgentStandaloneOwnersExclusive(
 	)
 }
 
+// sortAgentStandaloneDirEntries puts a directory listing in name order.
+// File.ReadDir hands back directory order, which the filesystem chooses, and
+// both walks below refuse on the first entry they cannot account for — so an
+// unsorted listing makes the refusal reason for one authority root depend on
+// whether that root lives on tmpfs or on disk.
+func sortAgentStandaloneDirEntries(entries []os.DirEntry) {
+	slices.SortFunc(entries, func(a, b os.DirEntry) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+}
+
 func agentStandaloneAuthorityEntries(directory *os.File) ([]os.DirEntry, error) {
 	duplicate, err := agentStandaloneEntriesOpenat(
 		int(directory.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0,
@@ -1340,6 +1351,8 @@ func agentStandaloneAuthorityEntries(directory *os.File) ([]os.DirEntry, error) 
 	if readErr != nil || closeErr != nil {
 		return nil, errors.Join(readErr, closeErr)
 	}
+
+	sortAgentStandaloneDirEntries(entries)
 
 	return entries, nil
 }
@@ -2565,6 +2578,8 @@ func validateAgentStandaloneOwnerUniqueness(
 	if readErr != nil || closeErr != nil {
 		return errors.Join(readErr, closeErr)
 	}
+
+	sortAgentStandaloneDirEntries(entries)
 
 	for _, entry := range entries {
 		if checkErr := checkAgentStandaloneAcquisition(deadline, canceled, signals); checkErr != nil {
