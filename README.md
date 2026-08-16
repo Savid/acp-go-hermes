@@ -98,7 +98,10 @@ processes; that adapter claims the home root exclusively and a second adapter
 asking for the same root is refused.
 `WithProviderAuthRoot` names the durable directory that holds the values-free
 provider-auth ledger. Provider auth is advertised only when that ledger root
-and the shared Hermes home are configured.
+and the shared Hermes home are configured; naming the ledger root without a
+shared home fails `initialize` instead. Configuring both also canonicalizes the
+shared home — the adapter resolves its symlinks and uses the resolved path as
+`HERMES_HOME`.
 
 ## What It Provides
 
@@ -107,7 +110,10 @@ and the shared Hermes home are configured.
 - Provider OAuth brokered through seven session-scoped `_hermes/auth/*`
   extension methods over the `hermes serve` REST auth API. Native Hermes owns
   credential bytes in the explicit shared durable `HERMES_HOME`; the adapter
-  keeps only values-free connection lineage. Hermes returns its authorization
+  keeps only values-free connection lineage. A login has one hard precondition:
+  the authorize leg refuses before any native call unless the session's process
+  runs behind the private browser-launcher shim, because Hermes accepts
+  `--no-browser` and then ignores it. Hermes returns its authorization
   URL on this API path without executing a browser launcher; a required pinned
   Linux canary verifies that no-launch behavior through the production adapter.
 - One `hermes serve` process per session. By default each has a freshly
@@ -115,7 +121,9 @@ and the shared Hermes home are configured.
   separate processes, ports, tokens, browser shims, event streams, environment,
   and wrapper control roots while official Hermes shares its native database
   and auth residence, under one exclusive home-root claim held for the whole
-  lifetime of that adapter's native writers. By default the runtime executes as the
+  lifetime of that adapter's native writers; Windows refuses that mode outright,
+  because the inheritable lock handles fencing a shared residence do not exist
+  there. By default the runtime executes as the
   adapter's own identity on every supported platform and reports the
   non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
   authoritative Linux OS containment; it is Linux-only and fails closed rather

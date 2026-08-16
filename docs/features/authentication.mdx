@@ -64,19 +64,48 @@ the session-set lock, per-session owner claims, operation journals, and the
 config lock, fingerprint, and version binding — lives in the adapter control
 root paired with the home, never beneath `HERMES_HOME` itself. The home must be
 on the platform's durable local-filesystem allowlist. Network, FUSE/virtiofs,
-volatile, FAT/exFAT, and unknown filesystems fail closed.
+volatile, FAT/exFAT, and unknown filesystems fail closed. The adapter requires
+official Hermes 0.20.0 or newer.
 
-The launch environment also sets a random
-`HERMES_DASHBOARD_SESSION_TOKEN`, `PYTHONUNBUFFERED=1`, and a private browser
-shim as defense in depth. Hermes' dashboard auth endpoint returns the
-authorization URL to its caller, and the dashboard UI owns opening it. The
-adapter relays that returned URL. Windows rejects an explicit Unix UID/GID
-isolation policy, though ordinary same-identity launch is available there.
-Independently, a native browser launch cannot be contained on Windows.
+The launch environment also sets a random `HERMES_DASHBOARD_SESSION_TOKEN` and
+`PYTHONUNBUFFERED=1`.
 
-The adapter requires official Hermes 0.20.0 or newer. The required Linux native
-canary builds the exact official `v2026.8.3` source commit
-`3c27eb6234bf91b8ceee9e9071591b31e9b148cb` after verifying archive SHA-256
+## The browser shim is a precondition
+
+Every native process launch installs a private browser shim: a scratch
+directory of no-op executables named `open`, `xdg-open`, `x-www-browser`,
+`www-browser`, and `sensible-browser`, placed ahead of every other `PATH` entry
+with `BROWSER` pointed at one of them. Both halves are required because
+harnesses split across them — one execs a launcher by bare name, another reads
+`BROWSER` — and because Hermes accepts `--no-browser` and then ignores it, so
+shadowing the launchers is the only containment the adapter can rely on.
+
+That shim is a precondition of provider auth rather than an extra layer over
+it. `_hermes/auth/authorize` checks it before issuing any native call: a
+session whose process has no shim is refused with `hermes_auth_failed`,
+`cause: "policy"`, and `retryable: false`. Nothing is asked of Hermes, no owner
+authorization is consumed, and repeating the leg on that platform changes
+nothing. Without the shim there is no provider auth at all — every other leg of
+the same session keeps working, because none of them opens a browser.
+
+Windows has no shim: `CreateProcess` resolves `cmd.exe`, `explorer.exe`, and
+`rundll32.exe` out of the system directory ahead of every `PATH` entry, and the
+`start` that opens a URL is a `cmd.exe` builtin with no image to shadow, so a
+shim directory on `PATH` neutralizes nothing there. Windows also refuses the
+shared Hermes home outright, because the inheritable lock handles that fence a
+shared residence do not exist there, so a shared-home session cannot start on
+Windows in the first place. Ordinary same-identity launch and every non-auth
+session leg remain available; the explicit Unix UID/GID isolation policy is
+rejected there as well.
+
+Hermes' dashboard auth endpoint returns the authorization URL to its caller,
+and the dashboard UI owns opening it; the adapter relays that returned URL. The
+pinned Linux canary observes that no launcher is executed on this path, so the
+shim is a precondition the adapter enforces unconditionally rather than one it
+expects to fire.
+
+The required Linux native canary builds the exact official `v2026.8.3` source
+commit `3c27eb6234bf91b8ceee9e9071591b31e9b148cb` after verifying archive SHA-256
 `a68e96f385768ec6c466122bf21fcb697680a5f349c9a673badfbe27752b6928`.
 It uses the official lockfile with a pinned Python 3.11.15 runtime, disables
 runtime dependency downloads, and runs the production adapter against a shared
@@ -98,6 +127,17 @@ and atomic, fsynced writes. The ledger is scoped by the canonical shared-home pa
 so two native homes under one ledger root cannot observe or mutate each other's
 lineage.
 
+Enabling provider auth canonicalizes the residence. The adapter creates the
+shared home `0700` if it is absent, then resolves every symlink in the path and
+adopts that resolved path as the shared home for the rest of the agent's life.
+The resolved path — not the spelling passed to `WithSharedHermesHome` /
+`-shared-hermes-home` — is what each native process receives as `HERMES_HOME`
+and as its shared XDG root, what the exclusive home-root claim fences, and what
+the ledger's per-home key hashes. A host that names the home through a symlink
+must therefore compare against the resolved form, not the one it configured.
+Without `WithProviderAuthRoot` the canonicalization does not happen and the
+configured spelling is used verbatim.
+
 The per-provider mutation fence is keyed by the residence rather than by the
 ledger root, because the native credential file it protects lives in the shared
 home. Its lock files sit in the adapter-owned control directory beside that home
@@ -105,8 +145,26 @@ home. Its lock files sit in the adapter-owned control directory beside that home
 naming one home queue behind one fence per provider however many distinct ledger
 roots they were given, and agents naming different homes never contend.
 
-If either path is missing, relative, or cannot be prepared, provider auth is not
-advertised. There is no secondary credential residence or fallback copy path.
+A path that is wrong produces one of three different outcomes, not one:
+
+- **Missing.** With neither option set, and with only the shared home set,
+  provider auth is silently not advertised and its seven methods answer
+  `-32601 Method not found`. Setting only the ledger root is instead a hard
+  failure: every `initialize` returns `-32602` with
+  `provider auth root requires shared Hermes home`.
+- **Relative.** A relative ledger root, a relative shared home, or a shared home
+  that is not already a clean absolute path is a construction failure, not a
+  degradation. The broker is never built, and every `initialize` returns
+  `-32602` carrying the validation text — for a relative home,
+  `provider auth residence must be an absolute path` joined with
+  `shared Hermes home must be an absolute path`.
+- **Cannot be prepared.** An absolute pair the adapter cannot materialize — a
+  residence or ledger root it cannot create, restrict to `0700`, resolve, or
+  confirm as a writable directory — logs `provider auth surface is unavailable`
+  at warn level and leaves the surface unadvertised. `initialize` still
+  succeeds and every other session leg keeps working.
+
+There is no secondary credential residence or fallback copy path.
 
 ## Capability
 

@@ -6,10 +6,11 @@
 // tree per ACP session, maps ACP requests into native gateway WebSocket JSON-RPC
 // calls, streams gateway events back to the client as ACP session updates,
 // and closes its platform containment boundary on cancellation, timeout, and
-// close. Linux provides authoritative containment. Windows refuses native
-// launch because it cannot apply the mandatory Unix UID/GID isolation. Darwin
-// is available only through explicit best-effort opt-in and cannot contain
-// descendants that escape the original process group. A cancelled or timed-out session lazily resumes its exact native key
+// close. Linux provides authoritative containment. Windows runs ordinary
+// same-identity native launch; it refuses an explicit Unix UID/GID isolation
+// policy, the shared native home, and a provider-auth login.
+// Darwin is available only through explicit best-effort opt-in and
+// cannot contain descendants that escape the original process group. A cancelled or timed-out session lazily resumes its exact native key
 // from the last committed snapshot on the next prompt. Hosts must complete ACP
 // initialization before issuing session or other agent methods.
 //
@@ -21,7 +22,11 @@
 // explicitly opts official Hermes into one durable native home shared by this
 // adapter's otherwise independent per-session processes; the adapter claims
 // that home root exclusively and a second adapter is refused it. Provider OAuth additionally
-// requires [WithProviderAuthRoot] for values-free connection lineage. The
+// requires [WithProviderAuthRoot] for values-free connection lineage, and
+// enabling it canonicalizes the shared home: the adapter creates it 0700,
+// resolves its symlinks, and uses the resolved path as HERMES_HOME. A login
+// leg also requires the per-process browser-launcher shim and refuses before
+// any native call without it. The
 // adapter never reads or copies credentials. [WithHome] remains unsupported.
 //
 // Prompt images arrive either as embedded base64 or, for a co-located host that

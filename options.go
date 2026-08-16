@@ -160,7 +160,10 @@ type Options struct {
 	// SharedHermesHome selects official shared-home mode. Every native
 	// process uses this one durable home, so per-session Hermes-home isolation is
 	// intentionally disabled. Per-session processes and adapter-owned control
-	// generations remain independent.
+	// generations remain independent. When ProviderAuthRoot is also set, NewAgent
+	// replaces this field with the symlink-resolved residence it prepared, and
+	// that resolved path is what every native process and every home-keyed claim
+	// then uses.
 	SharedHermesHome string
 	DefaultModel     string
 	Env              map[string]string
@@ -310,14 +313,19 @@ func WithInputHandoffRoot(dir string) Option {
 }
 
 // WithProviderAuthRoot sets the durable directory that houses the values-free
-// provider-auth ledger. The path must be absolute; a relative path is rejected
-// at agent construction. The directory is created 0700 when missing and ledger
-// entries are written 0600. Omitting the option, or supplying a root that is
-// not a writable directory, leaves every provider-auth method unadvertised and
-// answering method-not-found: a leg that cannot record what it did is never
-// offered. Provider auth is enabled only when WithSharedHermesHome is also set.
-// The root carries no config or auth-resolution semantics and is never a
-// scratch parent.
+// provider-auth ledger. The directory is created 0700 when missing and ledger
+// entries are written 0600. Provider auth is enabled only when
+// WithSharedHermesHome is also set. The root carries no config or
+// auth-resolution semantics and is never a scratch parent.
+//
+// Three wrong configurations answer differently. Omitting this option leaves
+// every provider-auth method unadvertised and answering method-not-found: a leg
+// that cannot record what it did is never offered. A relative root, or this
+// option without WithSharedHermesHome, is a construction failure that every
+// Initialize reports as invalid-params. An absolute root the agent cannot
+// prepare — one it cannot create, restrict to 0700, or confirm as a writable
+// directory — is logged at warn level and leaves the surface unadvertised while
+// the rest of the agent works.
 func WithProviderAuthRoot(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthRoot = path
@@ -329,9 +337,17 @@ func WithProviderAuthRoot(path string) Option {
 // intentionally gives up per-session Hermes-home isolation so credentials and
 // native sessions survive adapter restarts with the official runtime.
 //
-// The path must be absolute and requires ordinary same-identity execution;
-// combining it with WithProcessIsolation is rejected. Provider-auth extension
-// methods additionally require WithProviderAuthRoot.
+// The path must be absolute and already clean, and requires ordinary
+// same-identity execution; combining it with WithProcessIsolation is rejected.
+// Provider-auth extension methods additionally require WithProviderAuthRoot,
+// and configuring both canonicalizes this path: the agent creates the directory
+// 0700 when absent, resolves its symlinks, and adopts the resolved path for the
+// rest of its life. That resolved path — not the spelling passed here — is the
+// HERMES_HOME and shared XDG root every native process receives, the root the
+// exclusive home-root claim fences, and the value the ledger's per-home key
+// hashes, so a caller that named the home through a symlink must compare
+// against the resolved form. Without WithProviderAuthRoot the path is used
+// verbatim.
 // Each ACP session retains its own native process, environment, PATH additions,
 // event stream, and adapter-owned control generation. Native database and auth
 // state are intentionally shared through path. Managed MCP configuration must

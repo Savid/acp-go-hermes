@@ -27,7 +27,7 @@ session runs its own isolated `hermes serve` process with a private
 `HERMES_HOME` (`internal/hermes/process.go`), so cross-session working-directory
 contamination cannot occur between ACP sessions.
 
-`TestHermesTerminalCoreRequiresIsolatedACPProcesses`
+`TestHermesTerminalCoreSessionCWDIsolation`
 (`integration/terminal_core_test.go`) reproduces the collapse together with
 `integration/terminal_core_probe.py`: a deterministic, provider-free probe that
 drives the native terminal core directly, forces the owner-update interleaving

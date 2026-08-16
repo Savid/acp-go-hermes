@@ -37,6 +37,19 @@ Each `hermes serve` process binds to `127.0.0.1` and gates the dashboard
 WebSocket with a per-session random `HERMES_DASHBOARD_SESSION_TOKEN`. Nothing
 listens off-host.
 
+## Browser launch containment
+
+Every native process is launched behind a private shim directory of no-op
+`open`, `xdg-open`, `x-www-browser`, `www-browser`, and `sensible-browser`
+executables, placed ahead of every other `PATH` entry with `BROWSER` pointed
+inside it. Hermes accepts `--no-browser` and then ignores it, so shadowing the
+launchers is the containment the adapter actually relies on, and it is a
+precondition of provider auth rather than a second line of defense: a login is
+refused before any native call when the session's process has no shim. Windows
+has no shim, because `CreateProcess` resolves the system launchers ahead of
+`PATH` and the `start` that opens a URL is a `cmd.exe` builtin with no image to
+shadow; a login is refused there and every other session leg is unaffected.
+
 ## Native process containment
 
 Hermes' cooperative interrupt stops its foreground command but intentionally
