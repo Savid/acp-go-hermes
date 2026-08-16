@@ -18,10 +18,15 @@
 # The runner's docker socket is the host daemon, which is how the native-browser
 # canary already reaches the host PID namespace. Use the same door: run the
 # suite in a container started with --pid=host and root, with one fresh local
-# volume per shard for its temp root and one for its authority tree. /tmp stays
-# tmpfs-backed for fixtures that name it directly; shared-home tests inherit
-# TMPDIR=/acp-go-tmp so their locking residence has local-volume semantics and
-# does not consume the runner container's writable layer or memory-backed tmpfs.
+# volume per shard for its temp root and one for its authority tree.
+#
+# This file is family-owned and byte-identical across every sibling, so the
+# strictest sibling sets the mount shape for all of them. Shared-home tests
+# inherit TMPDIR=/acp-go-tmp and refuse a tmpfs residence outright — they fail,
+# they do not degrade — so that mount is a local volume. /tmp stays tmpfs for
+# fixtures that name it directly. The entrypoint proves both properties of
+# TMPDIR before any target runs, because a volume only inherits whatever
+# filesystem and mount options the daemon's data root happens to have.
 #
 # What the container must NOT be able to do is change the checkout it is
 # testing. /src stays writable because the suites write into it — coverage-check
@@ -79,12 +84,10 @@ module_path=$(cd "$repo_root" && go list -mod=readonly -m)
 # suite would then prove coverage under a toolchain the module never compiles
 # with. go.mod is the sole in-repo copy of that pin, so read it here.
 go_directive=$(awk '$1 == "go" { print $2; exit }' "$repo_root/go.mod")
-case "$go_directive" in
-'' | *[!0-9.]*)
-	echo "privileged-suite read no numeric go directive from go.mod" >&2
+printf '%s\n' "$go_directive" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+	echo "go.mod directive $go_directive is not an exact three-component Go version" >&2
 	exit 1
-	;;
-esac
+}
 GO_IMAGE=${ACP_GO_PRIVILEGED_IMAGE:-golang:$go_directive-bookworm}
 base_provider_required='TrustedSupervisor SupervisorGuardianSIGKILL SupervisorGuardianSIGKILLBeforeNativeLaunchRefusesStartAndCompletesAfterECHILD SupervisorLivenessSIGKILL GeneratedNative BorrowedIdentityAdoption BorrowedDomainAdoption BorrowedDisposition AgentIdentityLock AgentStandalone AuthorityDomain IdentityDisposition CommandCreatorThread SecurityLimits ProcessIsolationActual'
 case "$module_path" in
@@ -208,7 +211,8 @@ cleanup() {
 		"$root_temp_volume" "$provider_temp_volume"; do
 		remove_volume "$volume_name" || cleanup_status=1
 	done
-	rm -f "$root_log" "$provider_log" "$private_log" "$repo_root/$root_coverage" "$repo_root/$provider_coverage"
+	rm -f "$root_log" "$provider_log" "$private_log" "$repo_root/$root_coverage" "$repo_root/$provider_coverage" \
+		"$repo_root/coverage.out.tmp.$$"
 	if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
 		status=$cleanup_status
 	fi
@@ -246,7 +250,20 @@ create_volume "$private_authority_volume" private-authority
 create_volume "$root_temp_volume" root-tmp
 create_volume "$provider_temp_volume" provider-tmp
 
-docker volume create "$GO_CACHE_VOLUME" >/dev/null
+# The cache outlives one run, so it takes the family label under a persistent
+# role rather than this run's name, and cleanup never touches it. It is still
+# driver-pinned: a cache on a remote driver would make every build depend on a
+# volume plugin the suite never validated.
+docker volume create \
+	--driver local \
+	--label "$resource_label=persistent" \
+	--label "com.savid.acp-go.privileged-role=go-cache" \
+	"$GO_CACHE_VOLUME" >/dev/null
+cache_driver=$(docker volume inspect --format '{{ .Driver }}' "$GO_CACHE_VOLUME")
+[ "$cache_driver" = local ] || {
+	echo "privileged-suite Go cache volume uses driver $cache_driver, want local" >&2
+	exit 1
+}
 mkdir -p "$repo_root/.tmp"
 
 module_packages=$(cd "$repo_root" && go list -mod=readonly ./...)
@@ -283,7 +300,7 @@ root_packages=${root_packages# }
 # this external proof lane. Exercise the real entrypoint without --pid=host and
 # require its namespace refusal before the requested make target can run.
 private_status=0
-docker run --rm \
+docker run \
 	--name "$private_container" \
 	--label "$resource_label=$resource_run" \
 	--user 0:0 \
@@ -326,7 +343,7 @@ run_shard() {
 	temp_volume=$6
 	container_name=$7
 
-	docker run --rm \
+	docker run \
 		--name "$container_name" \
 		--label "$resource_label=$resource_run" \
 		--pid=host \

@@ -88,6 +88,34 @@ if ! is_initial_pid_namespace_inode "$namespace"; then
 	exit 1
 fi
 
+# TMPDIR is a volume mount, and a volume inherits whatever filesystem and mount
+# options the daemon's data root happens to have — nothing about the mount flag
+# guarantees either property. The shared-home residence guard refuses tmpfs and
+# every other non-local filesystem outright, and fixtures execute scripts they
+# write under TMPDIR, so a noexec or overlay data root turns the whole shard
+# into failures with no obvious cause. Prove both here, where the message names
+# the reason. The magic numbers are the same local durable allowlist the
+# residence guard applies: ext*, XFS, btrfs, F2FS, ZFS, bcachefs.
+temp_fstype=$(stat -f -c '%t' "$TMPDIR")
+case "$temp_fstype" in
+ef53 | 58465342 | 9123683e | f2f52010 | 2fc12fc1 | ca451a4e) ;;
+*)
+	echo "privileged suite temp root $TMPDIR is filesystem type 0x$temp_fstype, which the local-residence guard refuses" >&2
+	echo "run-privileged-suite.sh must back it with a local volume on a durable filesystem" >&2
+	exit 1
+	;;
+esac
+
+temp_exec_probe=$(mktemp "$TMPDIR/acp-go-exec-probe.XXXXXX")
+printf '#!/bin/sh\nexit 0\n' >"$temp_exec_probe"
+chmod 0700 "$temp_exec_probe"
+if ! "$temp_exec_probe"; then
+	rm -f "$temp_exec_probe"
+	echo "privileged suite temp root $TMPDIR is not exec-capable" >&2
+	exit 1
+fi
+rm -f "$temp_exec_probe"
+
 exec make \
 	ACP_GO_PRIVILEGED_INTERNAL=1 \
 	"ACP_GO_PRIVILEGED_SHARD=$ACP_GO_PRIVILEGED_SHARD" \
