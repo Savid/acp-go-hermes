@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const authProviderLockDir = ".provider-locks"
@@ -17,9 +19,13 @@ const authProviderLockDir = ".provider-locks"
 var authTryProviderFileLock = tryAuthProviderFileLock
 
 // authProviderLease is the cross-Agent/process mutation fence for one provider
-// in one provider-auth residence. It lives under the host-owned ledger root,
-// never the native-writable Hermes home. OAuth flows retain it until their
-// terminal native mutation and ledger transition have both settled.
+// in one provider-auth residence. It is keyed by the residence it protects
+// rather than by the ledger root that records the outcome: the native auth.json
+// lives in the shared home, so two Agents naming that home queue behind one
+// lease however many distinct ledger roots they were configured with. The lock
+// sits in the adapter-owned control root beside the home, never inside the
+// native-writable home itself. OAuth flows retain it until their terminal
+// native mutation and ledger transition have both settled.
 type authProviderLease struct {
 	file   *os.File
 	unlock func() error
@@ -39,24 +45,34 @@ func (l *authProviderLease) Release() error {
 	return l.err
 }
 
+// providerAuthLockRoot prepares the per-residence lock root. The control root
+// derivation resolves symlinks, so two spellings of one home converge on one
+// directory and therefore on one lease per provider.
+func providerAuthLockRoot(residence string) (string, error) {
+	control, err := nativehermes.EnsureSharedHermesAdapterControlDir(residence)
+	if err != nil {
+		return "", fmt.Errorf("prepare provider auth lock control root: %w", err)
+	}
+
+	dir := filepath.Join(control, authProviderLockDir)
+	if err := ledgerMkdirAll(dir, authLedgerDirMode); err != nil {
+		return "", fmt.Errorf("create provider auth lock root: %w", err)
+	}
+
+	if err := ledgerChmod(dir, authLedgerDirMode); err != nil {
+		return "", fmt.Errorf("restrict provider auth lock root: %w", err)
+	}
+
+	return dir, nil
+}
+
 func (l *authLedger) acquireProviderLease(ctx context.Context, providerID string) (*authProviderLease, error) {
-	if l == nil || l.dir == "" {
+	if l == nil || l.providerLockDir == "" {
 		return nil, errors.New("provider auth lock root is unavailable")
 	}
 
-	lockDir := l.providerLockDir
-	if lockDir == "" {
-		// Test and embedded ledgers constructed before this field existed still
-		// derive the same host-owned child. Production construction creates and
-		// protects it eagerly.
-		lockDir = filepath.Join(l.dir, authProviderLockDir)
-		if err := os.MkdirAll(lockDir, authLedgerDirMode); err != nil {
-			return nil, fmt.Errorf("create provider auth lock root: %w", err)
-		}
-	}
-
 	digest := sha256.Sum256([]byte(providerID))
-	path := filepath.Join(lockDir, hex.EncodeToString(digest[:])+".lock")
+	path := filepath.Join(l.providerLockDir, hex.EncodeToString(digest[:])+".lock")
 
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, authLedgerFileMode)
 	if err != nil {

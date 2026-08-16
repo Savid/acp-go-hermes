@@ -98,6 +98,13 @@ and atomic, fsynced writes. The ledger is scoped by the canonical shared-home pa
 so two native homes under one ledger root cannot observe or mutate each other's
 lineage.
 
+The per-provider mutation fence is keyed by the residence rather than by the
+ledger root, because the native credential file it protects lives in the shared
+home. Its lock files sit in the adapter-owned control directory beside that home
+(`<shared-home>.acp-go-hermes-control`), never inside the home itself, so agents
+naming one home queue behind one fence per provider however many distinct ledger
+roots they were given, and agents naming different homes never contend.
+
 If either path is missing, relative, or cannot be prepared, provider auth is not
 advertised. There is no secondary credential residence or fallback copy path.
 

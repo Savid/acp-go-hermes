@@ -69,7 +69,9 @@ returns native credential bytes. Shared mode binds one exact Hermes version and
 one managed MCP/seed configuration to a durable local filesystem; mismatches
 fail before launch. Because one adapter holds the home root exclusively, the
 native `auth.json` in that residence has exactly one writing adapter at a time
-even when separate ledger roots name the same residence. It rejects `dashboard.turn_isolation=true` and
+even when separate ledger roots name the same residence, and within that adapter
+the per-provider fence is keyed by the residence too, so agents configured with
+different ledger roots and one shared home still serialize. It rejects `dashboard.turn_isolation=true` and
 `model.persist_switch_by_default=true` because those settings mutate
 process-global shared state.
 See [Authentication](/docs/features/authentication).

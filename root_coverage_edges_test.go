@@ -100,17 +100,6 @@ func TestAuthProviderLeaseEdges(t *testing.T) {
 		t.Fatal("nil ledger acquired provider lease")
 	}
 
-	t.Run("fallback lock root mkdir", func(t *testing.T) {
-		parent := filepath.Join(t.TempDir(), "file")
-		if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		ledger := &authLedger{dir: filepath.Join(parent, "ledger")}
-		if _, err := ledger.acquireProviderLease(t.Context(), "provider"); err == nil {
-			t.Fatal("invalid fallback lock root accepted")
-		}
-	})
-
 	t.Run("open lock", func(t *testing.T) {
 		ledger := &authLedger{dir: t.TempDir(), providerLockDir: filepath.Join(t.TempDir(), "missing")}
 		if _, err := ledger.acquireProviderLease(t.Context(), "provider"); err == nil {
@@ -119,7 +108,7 @@ func TestAuthProviderLeaseEdges(t *testing.T) {
 	})
 
 	t.Run("contention timeout", func(t *testing.T) {
-		ledger := &authLedger{dir: t.TempDir()}
+		ledger := &authLedger{dir: t.TempDir(), providerLockDir: t.TempDir()}
 		first, err := ledger.acquireProviderLease(t.Context(), "provider")
 		if err != nil {
 			t.Fatal(err)
@@ -289,6 +278,78 @@ func TestAuthLedgerProviderLockRootFailures(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("control root", func(t *testing.T) {
+		if _, err := newAuthLedger(Options{
+			ProviderAuthRoot: t.TempDir(), SharedHermesHome: filepath.Join(t.TempDir(), "missing"),
+		}); err == nil {
+			t.Fatal("unresolvable residence control root accepted")
+		}
+	})
+}
+
+// TestAuthProviderLeaseFollowsResidence pins the lease to the thing it fences:
+// the native credential file in the shared home, not the ledger root that only
+// records the outcome.
+func TestAuthProviderLeaseFollowsResidence(t *testing.T) {
+	t.Run("one residence under separate ledger roots contends", func(t *testing.T) {
+		home := t.TempDir()
+		first, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: home})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: home})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.dir == second.dir {
+			t.Fatal("separate ledger roots shared one record root")
+		}
+		if first.providerLockDir != second.providerLockDir {
+			t.Fatalf("lock roots %q and %q diverged for one residence", first.providerLockDir, second.providerLockDir)
+		}
+
+		lease, err := first.acquireProviderLease(t.Context(), testProviderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lease.Release() }()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := second.acquireProviderLease(ctx, testProviderID); err == nil {
+			t.Fatal("second ledger acquired a lease on a residence already fenced")
+		}
+	})
+
+	t.Run("separate residences under one ledger root do not contend", func(t *testing.T) {
+		root := t.TempDir()
+		first, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.providerLockDir == second.providerLockDir {
+			t.Fatal("separate residences shared one lock root")
+		}
+
+		held, err := first.acquireProviderLease(t.Context(), testProviderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = held.Release() }()
+
+		other, err := second.acquireProviderLease(t.Context(), testProviderID)
+		if err != nil {
+			t.Fatalf("unrelated residence blocked by another residence's lease: %v", err)
+		}
+		if err := other.Release(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestProviderAuthCrossProcessLeaseFailures(t *testing.T) {

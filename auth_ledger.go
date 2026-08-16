@@ -78,7 +78,9 @@ var ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
 }
 
 // authLedger is the durable values-free record of which connection lineage
-// owns a provider in one native credential residence.
+// owns a provider in one native credential residence. Records are keyed by the
+// host's ledger root; provider leases are keyed by the residence instead,
+// because the native credential file a lease fences lives there.
 type authLedger struct {
 	dir             string
 	providerLockDir string
@@ -141,8 +143,6 @@ func prepareProviderAuthResidence(path string) (string, error) {
 // newAuthLedger resolves and validates the configured durable root. A root that
 // does not exist and cannot be created, is not a directory, or is not writable
 // leaves the provider-auth surface unadvertised, exactly as an unset one does.
-//
-//nolint:govet // Narrow setup scopes keep each filesystem error at its operation.
 func newAuthLedger(options Options) (*authLedger, error) {
 	root := options.ProviderAuthRoot
 	if !filepath.IsAbs(root) {
@@ -182,13 +182,9 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, errors.New("provider auth ledger root is not a directory")
 	}
 
-	providerLockDir := filepath.Join(dir, authProviderLockDir)
-	if err := ledgerMkdirAll(providerLockDir, authLedgerDirMode); err != nil {
-		return nil, fmt.Errorf("create provider auth lock root: %w", err)
-	}
-
-	if err := ledgerChmod(providerLockDir, authLedgerDirMode); err != nil {
-		return nil, fmt.Errorf("restrict provider auth lock root: %w", err)
+	providerLockDir, err := providerAuthLockRoot(residence)
+	if err != nil {
+		return nil, err
 	}
 
 	probe, err := ledgerCreateTemp(dir, "writable-")
