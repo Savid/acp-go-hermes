@@ -1,0 +1,112 @@
+{
+  "name": "stale-quiescence-cannot-settle",
+  "purpose": "The snapshot's quiescence fact is invalidated by the acceptance that follows it. The turn then runs and ends with no activity ever created, so nothing is live at the boundary — and the boundary is still uncertified, because no quiescence_update arrived after the work. This is exactly the shape an activity-free settlement takes when it is wrong.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 4,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-1"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": true, "outcome": "success"}],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "closed": false
+    }
+  }
+}

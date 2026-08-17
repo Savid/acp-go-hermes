@@ -1,0 +1,91 @@
+{
+  "name": "sequence-regression",
+  "purpose": "A resumed stream opens its snapshot at the boundary it can state truthfully. A pre-snapshot sequence arriving afterwards was never reduced and is not a retransmission of anything; it is refused rather than folded in as history.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-2",
+            "sequence": 41,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-7"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 40}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-2",
+            "sequence": 42,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-9",
+              "clientNonce": "non-9",
+              "turnId": "turn-9"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-2",
+            "sequence": 12,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-3",
+              "turnId": "turn-3",
+              "cause": "submission"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "sequence_regression",
+    "atInput": 2,
+    "state": {
+      "streamId": "strm-2",
+      "reducedThrough": 42,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-7"},
+      "turns": [{"turnId": "turn-9", "origin": "submission", "terminal": false}],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false, "invalidatedAt": 42},
+      "closed": false
+    }
+  }
+}

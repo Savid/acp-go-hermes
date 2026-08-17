@@ -1,0 +1,91 @@
+{
+  "name": "stream-cycle",
+  "purpose": "A second lifecycle_snapshot on a live stream would silently restate whole-session state mid-stream and orphan everything reduced before it. A snapshot on a fenced streamId is stale_stream instead; this token is the live-stream case only.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-4"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 2}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "stream_cycle",
+    "atInput": 2,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 2,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "closed": false
+    }
+  }
+}
