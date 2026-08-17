@@ -84,6 +84,10 @@
       "invariant": "A first-sight activity whose origin turn was first seen at or before a certified watermark is refused; the settled boundary never reopens."
     },
     {
+      "file": "unknown-entity.json",
+      "invariant": "An event naming an entity the stream never introduced — a parentId with no prior first sight, an origin turn or owner the stream never opened — is refused rather than reduced as unattached state."
+    },
+    {
       "file": "background-action-keeps-foreground.json",
       "invariant": "An action that does not block the foreground cycle leaves foreground state unchanged."
     },
