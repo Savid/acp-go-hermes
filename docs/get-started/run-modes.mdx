@@ -1,0 +1,75 @@
+---
+title: Run Modes
+description: Choose between the standalone ACP subprocess and the embedded Serve entry point.
+---
+
+The adapter runs the same core two ways: as a standalone process an ACP host
+launches, or embedded in your own Go program through `Serve`. The native gateway
+behavior is identical in both.
+
+## Standalone command
+
+Standalone native mode runs on every supported platform. By default it needs no
+privilege setup at all: Hermes runs as the identity `acp-go-hermes` itself runs
+as, root or non-root alike, and the adapter reports `shared_identity`.
+
+An ACP client launches `acp-go-hermes` as a subprocess and speaks ACP over its
+stdin/stdout. Stdout carries ACP JSON-RPC only; diagnostics go to stderr.
+
+```sh
+acp-go-hermes -path /usr/bin/hermes -scratch-dir /tmp/acp-hermes
+```
+
+`-process-isolation-config=/absolute/path/process-isolation.json` is optional
+and opts into the hardened Linux identity boundary instead. It is Linux-only
+and fails closed: a supplied path that cannot be loaded, validated, or honoured
+exits before serving and never falls back to ordinary execution. The strict file
+schema, account/home checks, closed environment, and explicit
+`inheritEnvironment` behavior are documented in the
+[CLI reference](/docs/reference/cli).
+
+```sh
+acp-go-hermes -process-isolation-config /etc/acp-go/hermes-isolation.json -path /usr/bin/hermes
+```
+
+## Embedded
+
+Construct an `Agent` for full control, or call `Serve` to run the ACP loop over
+a reader/writer pair:
+
+<CodeGroup>
+```go NewAgent
+agent := hermesacp.NewAgent(
+	hermesacp.WithScratchDir(scratchDir),
+)
+```
+
+```go NewAgent (hardened)
+// Linux only, and fails closed rather than degrading.
+agent := hermesacp.NewAgent(
+	hermesacp.WithScratchDir(scratchDir),
+	hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
+		UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment,
+		StandaloneOwnerID: "hermes-deployment-1", StandaloneStateRoot: "/var/lib/acp-go-hermes",
+	}),
+)
+```
+
+```go Serve
+err := hermesacp.Serve(ctx, input, output, hermesacp.WithScratchDir(scratchDir))
+```
+</CodeGroup>
+
+See the [Go API](/docs/reference/go-api) for the full option set.
+
+## Native gateway
+
+For each ACP session, the adapter starts `hermes serve --host 127.0.0.1` with an
+isolated `HERMES_HOME` by default and connects to `/api/ws`. Explicit
+`-shared-hermes-home` mode uses that exact durable native home instead.
+`--skip-build` is passed only
+when `HERMES_WEB_DIST` is configured or the default Hermes web dist exists;
+otherwise Hermes builds or locates its web assets normally.
+
+The adapter wraps the dashboard gateway directly, not Hermes' native ACP server
+mode.

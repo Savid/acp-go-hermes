@@ -1,0 +1,122 @@
+---
+title: Troubleshooting
+description: Failure signatures an operator can hit, the native Hermes behavior behind each one, and how the adapter contains it.
+---
+
+Each isolation choice in the adapter exists because a specific Hermes behavior
+is a reproducible failure. This page maps the symptoms to their causes and to
+the tests that reproduce them.
+
+| Symptom                                                             | Likely cause                                                                 |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| A terminal command runs in another session's working directory      | Multiple sessions sharing one Hermes process (never the case in this adapter) |
+| A turn fails with a provider error                                  | Hermes reported an upstream provider failure at the gateway boundary         |
+| Startup fails with an error mentioning `hermes startup probe`       | The gateway method surface is wrong or unreachable                            |
+| A file write completes without any permission prompt                | Hermes scopes approvals to terminal commands; `write_file` is never gated — native design |
+
+## Terminal commands cross session working directories
+
+Hermes' terminal layer collapses concurrent top-level sessions onto the shared
+`default` terminal environment: session overrides that differ only by working
+directory all resolve to `default`, so under concurrent access one session's
+terminal command can run in another session's working directory. This is
+native Hermes terminal-core behavior, not an adapter defect.
+
+The adapter therefore never shares a Hermes process between sessions. Each ACP
+session runs its own isolated `hermes serve` process with a private
+`HERMES_HOME` (`internal/hermes/process.go`), so cross-session working-directory
+contamination cannot occur between ACP sessions.
+
+`TestHermesTerminalCoreSessionCWDIsolation`
+(`integration/terminal_core_test.go`) reproduces the collapse together with
+`integration/terminal_core_probe.py`: a deterministic, provider-free probe that
+drives the native terminal core directly, forces the owner-update interleaving
+on the shared `default` environment, and proves one session's `pwd` output
+lands in the other session's directory.
+
+## A turn fails with a provider error
+
+Hermes can surface an upstream provider failure inside a turn — for example an
+HTTP 402 body from the provider gateway, a rate limit, or an authentication
+rejection. When the failure occurs at the gateway boundary (a completion event
+whose finish or status is `error`, or a session error event), the adapter fails
+the turn with a provider-classified error carrying the provider's message,
+status code, and provider code. `TestTurnFailureProviderErrorAtGatewayBoundary`
+(`internal/hermes/server_test.go`) reproduces each of these shapes.
+
+The converse also holds: a turn whose assistant text merely looks like a
+provider error while the gateway reports `complete` status succeeds, and the
+text is delivered verbatim as model output. The adapter classifies turns by
+Hermes' native terminal status and structured error fields, never by matching
+response prose. `TestTurnFailureProviderTextWithCompleteStatusSucceeds`
+(`internal/hermes/server_test.go`) reproduces this with the same
+provider-looking text under a `complete` status.
+
+## Startup fails at the gateway probe
+
+At the first launch of a given `hermes` executable, once the gateway reports
+ready, the adapter probes the gateway's method surface without spending
+provider tokens (`probeGatewayMethods` in `internal/hermes/process.go`). The
+probe creates and resumes a throwaway session, lists active sessions, reads
+model options, and verifies that the prompt, image-attach, approval, and
+clarify methods exist — each checked against a deliberately missing session id
+so no prompt ever reaches a model — then closes and deletes the probe session.
+
+A startup failure whose error mentions `hermes startup probe` means the
+gateway surface is wrong or unreachable: a broken install or an unexpected
+gateway build fails fast here, before any credentialed call.
+
+<Note>
+Probe failures are independent of provider credentials. The probe makes no
+credentialed calls, so fixing an API key never clears a probe error — check
+the `hermes` install and version instead.
+</Note>
+
+## A file write never asks for permission
+
+Hermes' approval flow is architecturally scoped to terminal commands: the
+`terminal` tool is risk-classified against Hermes' dangerous-command patterns
+and, when flagged, routes to the gateway approval callback that the adapter
+converts to `session/request_permission`. The `write_file` tool is never
+approval-gated. A turn that only writes a file therefore completes without any
+native `approval.request`, so the adapter raises no permission request — there
+is simply no approval event to convert. A missing permission on a file write is
+native Hermes design, not an adapter fault; adding an adapter-side prompt for it
+would invent a permission Hermes never asked for.
+
+A terminal command that Hermes classifies as dangerous does surface a
+permission, provided `approvals.mode` is set so the command is not
+auto-approved (the default `smart` mode may auto-approve low-risk commands via
+an auxiliary LLM; `manual` always asks).
+`TestHermesACPAgentLivePromptPermissionElicitation` (`integration/acp_test.go`)
+pins `approvals.mode: manual` and drives a dangerous terminal command live,
+asserting the native `approval.request` is converted to
+`session/request_permission`.
+
+## A question never reaches the user
+
+A native Hermes question (a `clarify.request`) can fail to surface as an ACP
+prompt, so the model appears to hang or answers on its own. The usual cause is
+that the client never explicitly advertised the elicitation `form` mode at
+initialize: an omitted or null capability and a bare `elicitation: {}` support
+no modes. Without explicit form support the adapter rejects the native question
+at the gateway rather than raising `elicitation/create`, suppressed by design
+so a host that cannot render a form is never asked to. A related cause is a
+clarify response that lands after the turn is cancelled — the pending question
+is rejected closed and never replied to, so a late answer cannot resume a dead
+turn.
+
+This is distinct from the startup probe's clarify-method check above. That probe
+only verifies the clarify method exists on the gateway surface at install and
+version time, against a deliberately missing session id, and never raises a
+question. A missing question here is a live capability or lifecycle outcome, not
+a broken gateway surface.
+
+`TestQuestionToolElicitationAcceptDeclineAndNoCapability`
+(`session_prompt_test.go`) reproduces the accept and decline paths and the
+missing-capability case where no `elicitation/create` is raised, and
+`TestQuestionToolReconcileAndCancelRejectsPending` (`session_prompt_test.go`)
+reproduces a pending question being rejected closed on turn cancel.
+`TestHermesACPAgentLivePromptPermissionElicitation` (`integration/acp_test.go`)
+drives a live Hermes turn end to end and asserts the native question is
+converted to `elicitation/create`.

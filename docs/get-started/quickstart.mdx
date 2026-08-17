@@ -1,0 +1,58 @@
+---
+title: Quickstart
+description: Clone the repo and reach your first successful ACP turn against Hermes.
+---
+
+This tutorial takes you from a fresh checkout to one completed ACP prompt turn
+driven by the bundled local client.
+
+## Prerequisites
+
+- Go matching the module's `go` directive (see `go.mod`).
+- A local `hermes` CLI with `serve` support on your `PATH`.
+- Provider credentials configured for Hermes so a live prompt can complete.
+
+## Steps
+
+The example programs are repo-relative, so you run them from a checkout.
+
+<Steps>
+  <Step title="Clone the repository">
+    ```sh
+    git clone https://github.com/savid/acp-go-hermes && cd acp-go-hermes
+    ```
+  </Step>
+  <Step title="Confirm the Hermes CLI is reachable">
+    ```sh
+    command -v hermes
+    ```
+    The adapter launches this binary as `hermes serve` for each session.
+  </Step>
+  <Step title="Run one prompt through the local client">
+    ```sh
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+    The client launches the agent, opens a session, sends the prompt, and prints
+    the streamed reply.
+  </Step>
+</Steps>
+
+## Verify
+
+The command prints the model's reply to stdout and exits cleanly. If you launch
+the adapter directly instead (`go run ./cmd/acp-go-hermes -path "$(command -v hermes)"`),
+stdout carries ACP JSON-RPC frames only; add `-debug` to see diagnostic logs on
+stderr.
+
+## Troubleshooting
+
+- **No `hermes` on `PATH`:** pass an explicit path with `-path` or
+  `WithExecutablePath`.
+- **The turn fails with `hermes_turn_failed`:** check provider credentials and
+  read [Prompt streaming](/docs/core/prompt-streaming) for the failure contract.
+
+## Next steps
+
+- [Run modes](/docs/get-started/run-modes) — standalone versus embedded.
+- [Examples](/docs/get-started/examples) — the three runnable clients.
+- [Models and config](/docs/features/models-config) — point Hermes at a gateway.

@@ -1,0 +1,127 @@
+---
+title: CLI
+description: Every flag the acp-go-hermes command accepts.
+---
+
+```sh
+acp-go-hermes [flags]
+```
+
+## Optional standalone isolation policy
+
+Serve mode runs on every supported platform with no isolation policy at all.
+Omitting `-process-isolation-config` is the ordinary default, not an error:
+Hermes runs as this command's own identity, root or non-root alike, the policy
+loader is never called, and the adapter reports `shared_identity`.
+
+Supplying `-process-isolation-config=/absolute/path/process-isolation.json`
+opts into the hardened Linux identity boundary. It is Linux-only and strict:
+every read, decode, validation, account, authority, and unsupported-platform
+error exits before serving or spawning, and the command never retries without
+the policy. The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "standaloneOwnerId": "hermes-deployment-1",
+  "standaloneStateRoot": "/var/lib/acp-go-hermes",
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-hermes",
+    "USER": "acp-go-hermes",
+    "LOGNAME": "acp-go-hermes",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+`standaloneOwnerId` is the nonsecret, case-sensitive deployment identity:
+1--256 ASCII bytes, beginning alphanumeric, with remaining bytes limited to
+alphanumerics and `._:@/-`. `standaloneStateRoot` is an existing dedicated
+durable provider-state anchor. It is neither `/` nor equal to or beneath
+`/var/lib/acp-go/agent-identities`. Its clean absolute UTF-8 path is limited to
+4096 bytes with no control character. Linux resolves the path componentwise
+from `/` without following symlinks or magic links. Every ancestor is
+root-owned and not group/world writable; the final directory is owned by the
+configured UID:GID with mode `0700`. The authority permanently binds its exact
+path, device, and inode. Hermes still gives each session a separate ephemeral
+`HERMES_HOME`; this durable anchor does not become a shared session home.
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories, and every `PATH`
+entry used to resolve a bare executable name must be absolute. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+this policy rather than weakening it; they still run ordinary standalone mode
+when the flag is omitted.
+
+These absolute-`PATH` rules govern the supplied policy only. Ordinary mode
+resolves the executable the way a shell would, so a `PATH` such as
+`bin:/usr/bin` and a relative `-path` both work there.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `-path` | Hermes executable path; falls back to `hermes` on `PATH` when unset. |
+| `-process-isolation-config` | An optional absolute path to the Linux isolation policy described above. Omitting it runs Hermes as this process's own identity. |
+| `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-home` | Unsupported. Use `-scratch-dir` for isolated ephemeral state or `-shared-hermes-home` for the explicit official-Hermes durable mode. |
+| `-shared-hermes-home` | Absolute supported local-filesystem path used as the exact durable `HERMES_HOME` by all per-session official Hermes processes of this adapter. The adapter claims the home root exclusively for the lifetime of those processes and refuses to start when another adapter already holds it. Native database/auth state is shared; ports, tokens, browser shims, environment, events, and wrapper controls remain separate. With `-provider-auth-root` also set, the adapter resolves this path's symlinks and uses the resolved path everywhere instead. |
+| `-provider-auth-root` | Absolute durable directory that houses the values-free provider-auth ledger. Requires `-shared-hermes-home`; supplying it alone fails `initialize` with `-32603`. |
+| `-model` | Default model value passed as `provider/model`. |
+| `-seed-file` | Seed a file into each session's config root as `<relpath>=<hostpath>` (repeatable). |
+| `-debug` | Enable debug logging on stderr. |
+| `-version` | Print the adapter version and exit. |
+
+`-seed-file` reads the host file at startup and writes its contents to
+`<relpath>` under the isolated config root before Hermes launches. Relative paths
+are confined to that root; absolute paths, `..` segments, and empty keys are
+rejected. Keep secrets out of seeded files and reference them by env-var
+indirection (Hermes `key_env`) instead.
+
+## Example
+
+Pointing Hermes at a LiteLLM gateway:
+
+```sh
+acp-go-hermes -seed-file config.yaml=./hermes-config.yaml
+```
+
+## Darwin containment operations
+
+These commands inspect generations left by a best-effort host. Diagnosis is
+read-only and emits exactly one JSON object:
+
+```sh
+acp-go-hermes containment diagnose -scratch-dir /path/to/scratch
+```
+
+After reviewing its correlated and ambiguous PIDs, cleanup requires an exact
+128-bit lowercase hexadecimal runtime ID and explicit force:
+
+```sh
+acp-go-hermes containment cleanup \
+  -scratch-dir /path/to/scratch \
+  -runtime-id 0123456789abcdef0123456789abcdef \
+  -force
+```
+
+Cleanup signals only freshly revalidated, same-UID marker matches. PID-by-PID cleanup has a PID-reuse time-of-check/time-of-use race and can signal an unrelated reused PID; correlation is not ownership or proof of absence; inherited markers can be scrubbed. Both diagnose and cleanup include that exact risk in their JSON warning and command help. A partial cleanup emits its JSON result on stdout and an operational error on stderr.

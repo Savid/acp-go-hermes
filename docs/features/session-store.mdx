@@ -1,0 +1,120 @@
+---
+title: Session Store
+description: Wire a durable store to persist sessions and how the hermes-state-db-v1 snapshot is shaped.
+---
+
+Persist sessions across adapter restarts by wiring a `SessionStore`. Without one,
+the adapter keeps sessions in memory only; with one, completed turns are
+snapshotted so a session can be reloaded or resumed later.
+
+## Wiring a store
+
+Pass a store with `WithSessionStore`. The adapter ships an in-memory
+implementation for tests and single-process use, and the `SessionStore`
+interface lets a host supply durable backing:
+
+```go
+store := hermesacp.NewInMemorySessionStore()
+
+agent := hermesacp.NewAgent(
+	hermesacp.WithSessionStore(store),
+	hermesacp.WithSessionStoreLoadTimeout(10*time.Second),
+)
+```
+
+`WithSessionStoreLoadTimeout` bounds each store read; it defaults to 10
+seconds. Snapshot capture and commit — including native history reads through
+the atomic `Replace` — and `session/delete` tombstones run under a separate
+fixed 60-second bound, so they do not inherit the store-read budget. The
+`SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
+`ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
+
+## Snapshot shape
+
+`SessionStoreFormat` is `hermes-state-db-v1`. The store writes a complete
+snapshot after each completed turn:
+
+- the main snapshot entry
+- `idmap`
+- `state-db`
+
+The `state-db` archive contains `state.db`, `state.db-wal`, and `state.db-shm`
+when present. Its compressed tar bytes are split into ordered 256 KiB chunks;
+each `tar+zstd+base64` entry carries a zero-based sequence, a final marker, and
+the full-archive SHA-256. Restore requires a contiguous sequence, exactly one
+terminal chunk, matching size/checksum metadata, and then reassembles the
+archive into a fresh per-session `HERMES_HOME`.
+
+In explicit shared-home mode the durable official Hermes database is already
+the native authority. Snapshots contain logical metadata only: they do not
+encode or restore `state-db`. A prior per-session native archive is ignored
+during hydrate and its store entries are removed by the next snapshot.
+
+Shared New and Fork publication is fenced by a cross-process session-set lock
+and an fsynced operation journal outside `HERMES_HOME`. Recovery adopts an
+exact byte-matching Store commit, or removes only a uniquely marked native
+child after proving the originating ACP/parent process owner is vacant. A live
+or unprovable owner, partial Store state, non-exhaustive native inventory, or
+marker mismatch fails closed without deleting anything. A retained Fork
+journal whose parent gateway is still active therefore requires that parent to
+close (or the runner to restart and settle it) before recovery proceeds.
+
+The `idmap` subpath records the ACP session ID, durable Hermes session key, and
+fork lineage. Live gateway session IDs and auth tokens are not persisted.
+
+The main snapshot also carries a required terminal summary. Before any
+completed assistant turn it is empty. After a completed turn it identifies the
+latest finished assistant by its replay-stable `history-N` position; unfinished
+assistant rows and later user rows do not advance it. The summary is committed
+atomically with the main snapshot, `idmap`, and archive. A successful
+`session/prompt` response is returned only after that commit and carries the
+same identity as `_meta.hermes.messageId`.
+
+Every current-format main entry contains explicit non-null `terminal`,
+`archives`, and `wrapper` sections. Hydration and terminal inspection reject
+truncated entries, null required sections, and unknown fields.
+
+The successful turn must strictly advance the terminal `history-N` position
+beyond the committed baseline captured before native message submission. An
+equal or regressed position fails before any store replacement and returns no
+prompt-response terminal metadata. Loaded and internally resumed runtimes seed
+that baseline from the hydrated main snapshot. A required history read or
+commit failure poisons the live session and fences its native runtime, so a
+retry or later close cannot adopt native history that the failed prompt never
+committed. Prompt admission, terminal commit, and close share one lifecycle
+boundary; close cannot stop the native client while terminal capture or
+`Replace` is running. Cancellation can interrupt terminal capture. Immediately
+before `Replace`, the turn atomically claims settlement: cancellation that wins
+first fences with no write, while cancellation after that claim is a prompt
+no-op and the already-claimed commit completes.
+
+Hosts can call `InspectSessionStoreTerminalState` with the logical session ID
+and the one main-snapshot entry returned by `Load`. It strictly validates the
+current `hermes-state-db-v1` shape and returns the committed terminal identity.
+Missing summaries, noncanonical identities, and snapshots from any other
+format are rejected.
+
+## Restore
+
+Restore after native deletion hydrates `state-db` into a fresh home, calls native
+`session.resume`, and — for `session/load` — replays `session.history` to the ACP
+client.
+
+The same restore path is the recovery boundary after a turn cancellation or
+timeout whose selected containment boundary completed. The interrupted native
+runtime is closed without a fresh snapshot; the next authorized prompt hydrates
+the last completed-turn commit and resumes the exact native session key.
+Partially emitted or partially persisted native state from the interrupted turn
+is never adopted. On Darwin best effort, completion does not establish that a
+`setsid(2)` descendant outside the captured original process group exited.
+
+`session/close` captures its final eligible snapshot before stopping the native
+client, because managed client shutdown removes the isolated XDG root. Close
+still skips snapshotting while a turn, permission, elicitation, or generation
+is pending, and it always proceeds with native teardown even if the snapshot
+fails.
+
+<Note>
+Snapshots exclude credential-bearing files and scrub credential tables from the
+SQLite archive, so a store never captures provider secrets.
+</Note>

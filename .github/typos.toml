@@ -1,0 +1,24 @@
+[files]
+extend-exclude = ["go.mod", "go.sum"]
+
+[default]
+# The Makefile's banned-term guard hex-escapes one character of every term it
+# bans, so the guard line cannot match itself. Correcting those deliberate
+# fragments would disarm the guard.
+#
+# 00f067aa0ba902b7 is the span-id from the W3C Trace Context specification's
+# canonical example, quoted verbatim by the observer tests.
+extend-ignore-re = [
+  "REMOVED_PUBLIC_TERMS = .*",
+  "00f067aa0ba902b7",
+]
+
+# Fixture strings that are outputs rather than prose: cropping "twothree" to a
+# four-column screen yields "hree", a limit-2 bounded writer given "four" keeps
+# "fo", commonPrefixLength's near-miss pair is ("abc", "abd"), and ALPH is a
+# WebP RIFF FourCC that has to stay exactly four bytes.
+[default.extend-words]
+hree = "hree"
+fo = "fo"
+abd = "abd"
+ALPH = "ALPH"

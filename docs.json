@@ -1,0 +1,103 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "acp-go-hermes",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#3B82F6",
+    "dark": "#1D4ED8"
+  },
+  "icons": {
+    "library": "lucide"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Get started",
+            "icon": "rocket",
+            "pages": [
+              "docs/overview",
+              "docs/get-started/quickstart",
+              "docs/get-started/install",
+              "docs/get-started/run-modes",
+              "docs/get-started/examples"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "icon": "messages-square",
+            "pages": [
+              "docs/core/sessions",
+              "docs/core/prompt-streaming"
+            ]
+          },
+          {
+            "group": "Hermes features",
+            "icon": "terminal",
+            "pages": [
+              "docs/features/authentication",
+              "docs/features/models-config",
+              "docs/features/permissions",
+              "docs/features/elicitation",
+              "docs/features/mcp",
+              "docs/features/session-store",
+              "docs/features/raw-events"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "icon": "square-code",
+        "groups": [
+          {
+            "group": "API reference",
+            "icon": "code",
+            "pages": [
+              "docs/reference/go-api",
+              "docs/reference/cli",
+              "docs/reference/acp-methods",
+              "docs/reference/meta",
+              "docs/reference/updates"
+            ]
+          },
+          {
+            "group": "Operations",
+            "icon": "shield",
+            "pages": [
+              "docs/operations/observability",
+              "docs/operations/security",
+              "docs/operations/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "primary": {
+      "type": "button",
+      "label": "View source",
+      "href": "https://github.com/savid/acp-go-hermes"
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/savid/acp-go-hermes"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+name: Typos
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typos:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # typos discovers only typos.toml/.typos.toml/_typos.toml walking up from
+      # the scanned files, so the repository's config has to be named here or it
+      # is silently ignored and the job runs on stock defaults.
+      - name: Check for typos
+        uses: crate-ci/typos@5374cbf686e897b15713110e233094e2874de7ef # v1.46.1
+        with:
+          config: .github/typos.toml

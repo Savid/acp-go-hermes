@@ -1,0 +1,36 @@
+name: Vulnerability Check
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: [self-hosted]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      # golang/govulncheck-action runs its own nested actions/checkout, which on
+      # a self-hosted runner re-applies the extraheader the first checkout
+      # already wrote and fails the fetch with "Duplicate header: Authorization".
+      # The action also go-installs an unpinned govulncheck, which the family
+      # pins. Run the go.mod tool directive instead.
+      - name: Run govulncheck
+        run: make vuln

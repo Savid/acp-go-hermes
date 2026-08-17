@@ -1,0 +1,262 @@
+---
+title: Authentication
+description: Agent auth stays native, while provider OAuth is coordinated through seven values-free extension methods.
+---
+
+Hermes owns authentication and every provider credential byte. The adapter
+coordinates native OAuth flows and records only values-free lineage.
+
+## Standalone credential input
+
+Under an explicit `-process-isolation-config` policy the standalone root
+supervisor never forwards its ambient environment. To pass provider API-key
+variables there, name each variable explicitly in the `inheritEnvironment` array
+of the root-owned policy. The value must be set in the supervisor environment or
+startup fails; identity, path, loader, XDG/native-home, and adapter-private
+variables cannot be inherited. File-backed or provider-broker credentials must
+live only in the explicit target-owned native home described by the adapter. No
+such standalone path reads root `HOME`, root native config, or an unlisted root
+credential.
+
+In ordinary mode — the default, with no policy supplied — Hermes inherits the
+adapter's own environment, so provider API-key variables set for the adapter are
+already visible to it. The adapter still removes its private
+`ACP_GO_HERMES_INTERNAL_*` and supervisor variables, its runtime and scratch
+markers, and the Hermes state roots it manages itself (`HERMES_HOME` and
+`HERMES_DASHBOARD_SESSION_TOKEN`). Unsupported state-residence overrides are
+scrubbed from the child environment.
+
+## No ACP auth methods
+
+The agent advertises `authMethods: []`, rejects `authenticate`, and treats
+`logout` as a no-op. ACP clients do not authenticate the Hermes harness.
+
+## Native state boundaries
+
+By default every ACP session has an isolated, ephemeral `HERMES_HOME`.
+`WithSharedHermesHome` / `-shared-hermes-home` is an explicit official-Hermes
+mode that instead gives every per-session process the same exact durable native
+home. This intentionally shares Hermes' SQLite session state, config, and
+`auth.json`; the adapter never parses, copies, returns, injects, or snapshots
+credential material.
+
+One adapter owns that home root exclusively. Before its first native writer
+starts, the adapter takes a home-root claim — an OS-held lock plus a record of
+its own PID and kernel start time — and holds it until its last native writer
+has settled. A second adapter asking for the same home root is refused with
+`shared Hermes home root is already claimed by a live writer`, not admitted
+beside the first. The lock descriptor is inherited by every native process the
+adapter launches, so an adapter that dies leaves the root fenced by its
+surviving harness; the next adapter is admitted only after the recorded PID and
+kernel start time prove that claimant dead. A start whose native containment
+could not be proven keeps the claim for the rest of the adapter's life rather
+than releasing a root descendants may still be writing.
+
+Inside that one adapter the per-session processes stay independent: each has a
+distinct port, dashboard token, browser shim, event stream, operation
+environment, and wrapper control root. OS-held locks fence each ACP ID and
+native session ID, so two records cannot resume or mutate one native session
+concurrently, and a session-set lock orders creation, fork, and recovery against
+in-flight turns. Shared-home config mutation is serialized, atomically
+committed, and bound to one exact Hermes version and one managed MCP/seed
+fingerprint. Every adapter-owned coordination artifact — the home-root claim,
+the session-set lock, per-session owner claims, operation journals, and the
+config lock, fingerprint, and version binding — lives in the adapter control
+root paired with the home, never beneath `HERMES_HOME` itself. The home must be
+on the platform's durable local-filesystem allowlist. Network, FUSE/virtiofs,
+volatile, FAT/exFAT, and unknown filesystems fail closed. The adapter requires
+official Hermes 0.20.0 or newer.
+
+The launch environment also sets a random `HERMES_DASHBOARD_SESSION_TOKEN` and
+`PYTHONUNBUFFERED=1`.
+
+## The browser shim is a precondition
+
+Every native process launch installs a private browser shim: a scratch
+directory of no-op executables named `open`, `xdg-open`, `x-www-browser`,
+`www-browser`, and `sensible-browser`, placed ahead of every other `PATH` entry
+with `BROWSER` pointed at one of them. Both halves are required because
+harnesses split across them — one execs a launcher by bare name, another reads
+`BROWSER` — and because Hermes accepts `--no-browser` and then ignores it, so
+shadowing the launchers is the only containment the adapter can rely on.
+
+That shim is a precondition of provider auth rather than an extra layer over
+it. `_hermes/auth/authorize` checks it before issuing any native call: a
+session whose process has no shim is refused with `hermes_auth_failed`,
+`cause: "policy"`, and `retryable: false`. Nothing is asked of Hermes, no owner
+authorization is consumed, and repeating the leg on that platform changes
+nothing. Without the shim there is no provider auth at all — every other leg of
+the same session keeps working, because none of them opens a browser.
+
+Windows has no shim: `CreateProcess` resolves `cmd.exe`, `explorer.exe`, and
+`rundll32.exe` out of the system directory ahead of every `PATH` entry, and the
+`start` that opens a URL is a `cmd.exe` builtin with no image to shadow, so a
+shim directory on `PATH` neutralizes nothing there. Windows also refuses the
+shared Hermes home outright, because the inheritable lock handles that fence a
+shared residence do not exist there, so a shared-home session cannot start on
+Windows in the first place. Ordinary same-identity launch and every non-auth
+session leg remain available; the explicit Unix UID/GID isolation policy is
+rejected there as well.
+
+Hermes' dashboard auth endpoint returns the authorization URL to its caller,
+and the dashboard UI owns opening it; the adapter relays that returned URL. The
+pinned Linux canary observes that no launcher is executed on this path, so the
+shim is a precondition the adapter enforces unconditionally rather than one it
+expects to fire.
+
+The required Linux native canary builds the exact official `v2026.8.3` source
+commit `3c27eb6234bf91b8ceee9e9071591b31e9b148cb` after verifying archive SHA-256
+`a68e96f385768ec6c466122bf21fcb697680a5f349c9a673badfbe27752b6928`.
+It uses the official lockfile with a pinned Python 3.11.15 runtime, disables
+runtime dependency downloads, and runs the production adapter against a shared
+home on a named local volume with no container network. A passive
+`execve`/`execveat` trace requires one provider-auth pass and fails on any
+browser-launcher attempt.
+
+## Configuration
+
+Provider auth requires both:
+
+- `WithSharedHermesHome` / `-shared-hermes-home`: the absolute durable official
+  Hermes home and native credential residence.
+- `WithProviderAuthRoot` / `-provider-auth-root`: the absolute durable root for
+  the adapter's values-free ledger.
+
+The directories are created with mode `0700`; ledger entries use mode `0600`
+and atomic, fsynced writes. The ledger is scoped by the canonical shared-home path,
+so two native homes under one ledger root cannot observe or mutate each other's
+lineage.
+
+Enabling provider auth canonicalizes the residence. The adapter creates the
+shared home `0700` if it is absent, then resolves every symlink in the path and
+adopts that resolved path as the shared home for the rest of the agent's life.
+The resolved path — not the spelling passed to `WithSharedHermesHome` /
+`-shared-hermes-home` — is what each native process receives as `HERMES_HOME`
+and as its shared XDG root, what the exclusive home-root claim fences, and what
+the ledger's per-home key hashes. A host that names the home through a symlink
+must therefore compare against the resolved form, not the one it configured.
+Without `WithProviderAuthRoot` the canonicalization does not happen and the
+configured spelling is used verbatim.
+
+The per-provider mutation fence is keyed by the residence rather than by the
+ledger root, because the native credential file it protects lives in the shared
+home. Its lock files sit in the adapter-owned control directory beside that home
+(`<shared-home>.acp-go-hermes-control`), never inside the home itself, so agents
+naming one home queue behind one fence per provider however many distinct ledger
+roots they were given, and agents naming different homes never contend.
+
+A path that is wrong produces one of three different outcomes, not one:
+
+- **Missing.** With neither option set, and with only the shared home set,
+  provider auth is silently not advertised and its seven methods answer
+  `-32601 Method not found`. Setting only the ledger root is instead a hard
+  failure: every `initialize` returns `-32603` with
+  `provider auth root requires shared Hermes home`.
+- **Relative.** A relative ledger root, a relative shared home, or a shared home
+  that is not already a clean absolute path is a construction failure, not a
+  degradation. The broker is never built, and every `initialize` returns
+  `-32603` carrying the validation text — for a relative home,
+  `provider auth residence must be an absolute path` joined with
+  `shared Hermes home must be an absolute path`.
+- **Cannot be prepared.** An absolute pair the adapter cannot materialize — a
+  residence or ledger root it cannot create, restrict to `0700`, resolve, or
+  confirm as a writable directory — logs `provider auth surface is unavailable`
+  at warn level and leaves the surface unadvertised. `initialize` still
+  succeeds and every other session leg keeps working.
+
+There is no secondary credential residence or fallback copy path.
+
+## Capability
+
+When enabled, `initialize` advertises exactly:
+
+```json
+{
+  "providerAuth": {
+    "methods": [
+      "_hermes/auth/methods",
+      "_hermes/auth/authorize",
+      "_hermes/auth/callback",
+      "_hermes/auth/status",
+      "_hermes/auth/cancel",
+      "_hermes/auth/inventory",
+      "_hermes/auth/disconnect"
+    ]
+  }
+}
+```
+
+## Catalog
+
+`_hermes/auth/methods` reads Hermes' native provider catalog and publishes only
+OAuth `device_code` and `pkce` flows. External credential discovery and API-key
+entry are not provider-auth methods.
+
+The provider label is the native name, NFC-normalized, limited to 256 bytes, and
+restricted to display-safe Unicode categories. Native status objects are
+decoded through a fixed allowlist; raw provider fields do not cross the Go
+boundary.
+
+Each response carries a fresh `generation` naming that exact catalog.
+`authorize` must return it as `methodsGeneration`, so a stale selection cannot
+silently target a changed provider.
+
+## Flows
+
+`authorize` starts at most one flow for a provider and supersedes an older flow
+for that provider, including one started from another session:
+
+- `device_code` returns `interaction: "wait"`, an HTTPS verification URL, a
+  user code, and a polling hint.
+- `pkce` returns `interaction: "callback"`, an HTTPS authorization URL, and
+  `callbackInput: "code"`.
+
+The effective deadline is the earlier of the native expiry and 15 minutes.
+`status` polls no faster than the larger of the native interval and five
+seconds. Native states are closed to `pending`, `approved`, `denied`, `expired`,
+and `error`; unknown values fail closed.
+
+An approved native flow means Hermes has already persisted its credential in
+the shared official `HERMES_HOME`. The adapter records the confirmed connection revision and
+binding generation, then reports `authenticated`. It never reads the credential
+to prove completion.
+
+Repeating an `authorizeRequestId` replays the same presentation without another
+native start. `cancel` terminalizes the flow and invokes native cancellation.
+Closing a session cancels its pending flows; the durable shared home and ledger
+remain available to later sessions and process restarts.
+
+## Inventory
+
+`_hermes/auth/inventory` combines two values-free facts:
+
+1. a confirmed ledger lineage for the requested connection; and
+2. Hermes' native `status.logged_in` boolean for that provider.
+
+`proofSource` is `confirmed_present` when both agree. A false native status is
+`not_confirmed`, even with exact confirmed lineage: Hermes uses
+`logged_in=false` both when a credential is absent and when status or validation
+fails, so the adapter cannot honestly report `confirmed_absent`. Ambient native
+logins without adapter lineage are not attributed to a connection.
+
+## Disconnect
+
+`_hermes/auth/disconnect` accepts `sessionId`, `providerId`, `connectionId`,
+and `bindingGeneration`. It equality-checks the exact confirmed ledger lineage
+before invoking Hermes' native provider-specific disconnect route. The native
+route treats an already-absent or invalid credential as successful absence, so
+an owner can clean a broken binding without a valid token. A different
+connection or generation is a `binding_conflict` and never reaches native
+removal. Success records a generation-bumped removed tombstone; inventory no
+longer publishes the provider, while the next login inherits the newer fence.
+
+## Store exclusion
+
+Shared-home native state is never part of a per-session `SessionStore`
+snapshot. Shared mode persists logical metadata only, ignores prior native
+archives during hydrate, and deletes their store entries on the next snapshot.
+Credential-bearing native files and credential tables never cross the store.
+
+Every provider-auth error uses the closed `hermes_auth_failed` shape. Native
+response bodies, token previews, authorization secrets, and child stderr never
+appear in it.

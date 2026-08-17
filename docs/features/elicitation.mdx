@@ -1,0 +1,42 @@
+---
+title: Elicitation
+description: How Hermes clarification questions become capability-gated ACP elicitation requests.
+---
+
+When Hermes needs more input mid-turn, the adapter can forward the question to
+the ACP host as an elicitation request — but only when the host advertised
+support for it.
+
+## Capability gating
+
+The adapter records client capabilities during `initialize` and sends a form
+elicitation only when the client explicitly advertises a non-null `form` mode.
+An omitted or null elicitation capability, a bare `elicitation: {}`, and a null
+`form` field advertise no form support. When `hermes serve` emits
+`clarify.request`, the adapter maps it to stable ACP v1 `elicitation/create`
+form mode.
+
+If the client did not advertise form elicitation support, or if it declines or
+cancels the request, the adapter rejects the native Hermes question
+deterministically rather than hanging the turn.
+
+## Non-elicitation native questions
+
+`terminal.read.request`, `sudo.request`, and `secret.request` are not forwarded
+as elicitation in v1. They are answered with deterministic empty native
+responses, and secrets are never persisted.
+
+<Note>
+ACP v1 form elicitation is stable. The private `_meta.hermes.elicitation`
+discovery descriptor remains unstable; a host must still advertise explicit
+form support at `initialize` for any Hermes clarification to reach the user.
+</Note>
+
+## Route correlation
+
+The agent advertises route-envelope version 1 during initialize. Every
+clarification includes the owning session, the current turn nonce, and the
+native Hermes clarification request id under `_meta["acp-go.dev/route"]`.
+Hermes replies carry that same native request id back to `clarify.respond`, so
+stale or unknown questions cannot consume another request. A callback whose
+metadata already contains the reserved route key fails closed.

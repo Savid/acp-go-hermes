@@ -1,0 +1,23 @@
+---
+title: Updates
+description: The session/update notification variants the adapter emits during a turn.
+---
+
+During a turn the adapter maps native gateway events to ACP `session/update`
+notifications.
+
+## Update variants
+
+| Update | Source |
+|---|---|
+| User and agent message chunks | `message.delta` and echoed user content. |
+| Thought chunks | `thinking.delta` reasoning events. |
+| Tool calls | Native tool-call events. |
+| Plan updates | Native plan events. |
+| Config option updates | Model/config option changes. |
+| Usage updates | Token data from completion payloads. |
+
+Usage updates carry token counts and no terminal message identity. The durable
+terminal identity belongs to the successful `session/prompt` response after
+its snapshot commit. Text chunks originate from `message.delta`; reasoning
+chunks from `thinking.delta` — see [Prompt streaming](/docs/core/prompt-streaming).

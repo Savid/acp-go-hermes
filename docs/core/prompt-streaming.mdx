@@ -1,0 +1,189 @@
+---
+title: Prompt Streaming
+description: How native gateway events map to ACP updates, and how turn failures and timeouts surface.
+---
+
+Prompt turns call native `prompt.submit` over the Hermes WebSocket gateway and
+consume gateway events until the turn completes. `message.delta` events become
+ACP text chunks, `thinking.delta` events become reasoning chunks, and token data
+from completion payloads becomes `usage_update`. When Hermes supplies
+`message.complete.usage.context_max`, that exact native value becomes
+`usage_update.size`. When it is absent or invalid, the adapter falls back to an
+advertised provider-model context limit; if neither source has one, the size is
+`0`.
+
+## Prompt content
+
+The adapter advertises `promptCapabilities` with both embedded context and image
+support enabled, so a prompt may carry text, resource links, embedded resources,
+and image blocks. Text and resource content is forwarded as native text parts.
+An image carries one canonical MIME string — `image/png`, `image/jpeg`,
+`image/gif`, or `image/webp` — and its bytes in one of two transports: embedded
+base64 `data`, or the [local handoff form](#local-handoff-image-input). Embedded
+data is authoritative when a URI is also present; that URI is never fetched and
+never reaches the native request.
+
+An embedded `resource` block carrying a blob is bounded like an image whatever
+it declares: its base64 must decode, its decoded bytes answer to the per-image
+limit, and they count toward the aggregate prompt total. A blob declaring a
+raster MIME runs the full image pipeline — the declaration is compared after
+case and parameters are normalized away, so `IMAGE/PNG` and
+`image/png; charset=binary` reach the image gates and are rejected as
+non-canonical rather than degrading to a URI reference. Any other conforming
+blob still forwards as its URI.
+
+The adapter decodes and structurally validates every image before the native
+turn starts. MIME mismatches, invalid dimensions, animated GIF/WebP/APNG,
+per-image overflow, and aggregate prompt overflow fail as `invalid_params`.
+The error data carries `field: "prompt.image"`, the zero-based image `index`,
+and one of `missing_data`, `invalid_base64`, `invalid_media_type`,
+`media_type_mismatch`, `animated_not_supported`, `invalid_dimensions`,
+`too_large`, `invalid_handoff`, `path_not_allowed`, `missing_file`, or
+`handoff_digest_mismatch`. Limit errors additionally carry decoded `sizeBytes`
+and `maxBytes`; the four handoff verdicts additionally carry a human `message`
+naming the cause.
+
+The bounds the adapter enforces are advertised at initialize under
+`_meta["acp-go.dev/mediaEnvelope"]`, so a host can pre-check a send instead of
+discovering a limit through a rejection. See
+[Metadata](/docs/reference/meta#media-envelope).
+
+Hermes' 25 MiB `image.attach_bytes` cap is above the ACP ingress envelope and
+the adapter's default limits, so there is no smaller observable native image
+envelope to enforce on this transport.
+
+Validated bytes are attached in image order through Hermes'
+`image.attach_bytes`, followed by exactly one `prompt.submit`. Hermes separates
+attachments from prompt text, so arbitrary text/image interleaving cannot
+survive the second hop: image order is preserved, text order is preserved and
+joined with blank lines, and all attachments precede the one native text
+submission. The driven gateway exposes no exhaustive selected-model image
+modality field, so the internal model gate is `unknown` and valid images
+forward to Hermes.
+
+Hermes image transport is input-only. Native image artifacts are not emitted
+as typed ACP image output. A prompt with no usable parts is rejected with
+`invalid_params`.
+
+### Local handoff image input
+
+A co-located host can hand an image over as a file instead of base64, which
+keeps a multi-image prompt's ACP frame small. Set
+`WithInputHandoffRoot("/absolute/read/root")` and send an image block with empty
+`data`, a `file://` URI under that root, and the digest envelope:
+
+```json
+{
+  "type": "image",
+  "mimeType": "image/png",
+  "data": "",
+  "uri": "file:///absolute/read/root/session/turn/<digest>.png",
+  "_meta": {
+    "acp-go.dev/handoff": {
+      "version": 1,
+      "digest": "<sha256 hex>",
+      "sizeBytes": 123456
+    }
+  }
+}
+```
+
+The envelope carries exactly `version`, `digest` (64 lowercase hex characters),
+and `sizeBytes`; a missing field, an unknown field, a non-object envelope, an
+unsupported version, a non-`file` URI, a URI naming a remote host, a relative
+path, or an unset handoff root is `invalid_handoff`, each with its own message
+naming the defect. A block with empty `data` and neither a handoff envelope nor
+a `file://` URI is still `missing_data`, and non-empty `data` always wins over a
+URI.
+
+At most 64 handoff-form blocks are read per prompt; the block that crosses that
+count is rejected `too_large` reporting the count against 64. The bound is on
+the work rather than on the byte policy, so it holds even where
+`MaxInputBytesPerPrompt` is disabled, and it sits far above any conforming turn.
+
+The declaration is judged in full before the filesystem is consulted at all: the
+declared media type against the allowlist first, then the declared `sizeBytes`
+against the per-image bound. A block that fails either is `invalid_media_type` or
+`too_large` without the file it names being opened, measured, or hashed, and its
+refusal says nothing about whether that file is there.
+
+Containment comes next, and it is the kernel's: the configured root is opened
+once per prompt and every file is opened relative to that descriptor, so a
+symlink beneath the root cannot name a location outside it and there is no window
+between deciding a path is inside the root and reading it. A path outside the
+root, one that cannot be opened from the root, and one that is not a regular file
+are `path_not_allowed`; a path inside the root that does not exist is
+`missing_file` — the expected outcome when a host cleans up early. A handoff root
+that cannot be opened at all is `path_not_allowed`, because that is a deployment
+defect rather than an early cleanup.
+
+The read is capped at the declared size plus one byte. The bytes read must match
+the declared size and hash to the declared digest, failing
+`handoff_digest_mismatch` rather than falling back to anything: a file that grew,
+shrank, or was swapped after the block was written fails verification, and no
+unverified byte leaves the read. Verified bytes run the same gate chain embedded
+bytes do and count toward the same aggregate total, which text and blob resources
+are charged against as well.
+
+Files under the root stay host-owned: the adapter only reads there, and it never
+writes, moves, or removes anything. The path itself never reaches Hermes — the
+native request a handoff block builds is identical to the one the same bytes
+build embedded — and the host may delete the file as soon as the prompt call
+returns.
+
+Hermes' authoritative `message.complete` text is reconciled with the prefix
+already emitted by `message.delta`. The adapter emits only a missing completion
+suffix, accepts a completion-only response, and suppresses duplicate or
+conflicting terminal text instead of replaying it to the ACP client.
+
+## Turn failure contract
+
+A failed turn is never an ACP stop reason. After native message submission has
+started, every non-success settlement destructively fences the isolated runtime
+back to the last committed snapshot before returning one terminal
+`hermes_turn_failed` JSON-RPC error
+(`-32603`, Internal error — the adapter never uses `-32000`). The error `data`
+carries a machine-readable `cause`:
+
+| `cause` | Meaning |
+|---|---|
+| `transport` | Gateway/connection failure, including a mid-turn WebSocket disconnect and any unclassified error. |
+| `provider` | The model provider rejected or failed the turn. |
+| `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/reference/go-api). |
+
+`data.message` carries the real native cause, never a fixed placeholder;
+`data.statusCode` and `data.providerCode` appear only when the gateway supplies
+them.
+
+<Note>
+A timeout is a failure, not a user cancel, so it surfaces as
+`hermes_turn_failed` with `cause: "timeout"` — never the `cancelled` stop
+reason. A turn cancelled by the client returns the `cancelled` stop reason
+instead. Neither result settles after Hermes' cooperative interrupt alone.
+The adapter first completes the selected native containment boundary. Linux
+authoritatively empties the native tree, including background tools that Hermes
+intentionally leaves running. Windows runs the ordinary same-identity boundary
+and completes exactly the child it started; only an explicit Unix UID/GID
+isolation policy fails closed there. Darwin best effort
+only reaps the direct child and observes the captured original process group
+absent; a `setsid(2)` descendant may remain live. If the selected boundary does
+not complete, the prompt fails and the session is poisoned instead of reporting
+a normal timeout or cancellation.
+</Note>
+
+After cancellation, timeout, provider/transport failure, or outbound update
+failure whose selected containment boundary completed, the next authorized
+prompt lazily materializes a fresh isolated home from the last committed
+`hermes-state-db-v1` snapshot and resumes the exact stored native session key.
+Shared-home mode instead resumes that key from the durable official database
+and never restores a per-session native archive.
+The interrupted turn is never snapshotted. Turn nonces and adapter event
+sequences remain monotonic across the native-runtime replacement, and MCP is
+reloaded under the new turn's authorization before the model runs.
+
+## Stream death and reconnect
+
+If the WebSocket stream dies during a turn, the adapter fences that turn with the
+terminal `hermes_turn_failed` error (cause `transport`) and marks the stream
+failed. Subsequent session operations reconnect through normal session
+hydration, so a dropped gateway does not orphan the session.

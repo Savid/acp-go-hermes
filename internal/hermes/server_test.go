@@ -1,0 +1,3904 @@
+//nolint:gocyclo // Stateful gateway/config matrices intentionally enumerate protocol branches.
+package hermes
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/coder/websocket"
+)
+
+type gatewayRPCCall struct {
+	Method string
+	Params map[string]any
+}
+
+type fakeGatewayServer struct {
+	t      *testing.T
+	server *httptest.Server
+
+	mu                  sync.Mutex
+	calls               []gatewayRPCCall
+	closeAfterResult    string
+	closeNowAfterResult string
+	failMethods         map[string]struct{}
+	failAfterCalls      map[string]int
+	promptEvents        *[]Event
+	promptEventDelay    time.Duration
+	promptRawFrames     []string
+	branchNotFound      int
+	branchCreated       bool
+	branchTitle         string
+	branchWrongTitle    bool
+	branchFailAfterSave bool
+	branchNoSession     bool
+	branchNoActive      bool
+	branchNoKey         bool
+	createNoLive        bool
+	createNoStored      bool
+	titlePending        bool
+	titleMissing        bool
+	titleDoesNotPersist bool
+	durableCreated      bool
+	durableTitle        string
+	persistedCount      int
+	persistedMissingID  bool
+	deleteKeepsBranch   bool
+	requireDurable      bool
+	resumeNoLive        bool
+	resumeNoKey         bool
+	resumeKey           string
+	resumeBuildDefault  string
+	expectedPromptModel string
+	liveModels          map[string]string
+	lazyResumeBuilds    map[string]bool
+	reloadStatus        string
+	activeNoID          bool
+	activeNoKey         bool
+	activeEmpty         bool
+	notFoundMethods     map[string]int
+}
+
+func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
+	t.Helper()
+	fake := &fakeGatewayServer{
+		t:                t,
+		failMethods:      map[string]struct{}{},
+		failAfterCalls:   map[string]int{},
+		notFoundMethods:  map[string]int{},
+		liveModels:       map[string]string{},
+		lazyResumeBuilds: map[string]bool{},
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
+	t.Cleanup(fake.server.Close)
+
+	return fake
+}
+
+func TestMCPServersWithSecretEnv(t *testing.T) {
+	servers := []acp.McpServer{
+		stdioMCPServer("stdio", "tool", nil, map[string]string{"TOKEN": "stdio-secret"}),
+		{Http: &acp.McpServerHttpInline{
+			Name: "http",
+			Url:  "https://example.test/mcp",
+			Headers: []acp.HttpHeader{
+				{Name: "Authorization", Value: "Bearer secret"},
+				{Name: "X-API-Key", Value: "secret-key"},
+			},
+		}},
+	}
+
+	materialized, env, err := mcpServersWithSecretEnv(servers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := materialized[1].Http.Headers[0].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_1}" {
+		t.Fatalf("authorization placeholder = %q", got)
+	}
+	if got := materialized[0].Stdio.Env[0].Value; got != "${ACP_GO_HERMES_MCP_ENV_1_1}" {
+		t.Fatalf("stdio placeholder = %q", got)
+	}
+	if env["ACP_GO_HERMES_MCP_ENV_1_1"] != "stdio-secret" {
+		t.Fatalf("stdio secret environment = %#v", env)
+	}
+	if got := materialized[1].Http.Headers[1].Value; got != "${ACP_GO_HERMES_MCP_HEADER_2_2}" {
+		t.Fatalf("API key placeholder = %q", got)
+	}
+	if env["ACP_GO_HERMES_MCP_HEADER_2_1"] != "Bearer secret" || env["ACP_GO_HERMES_MCP_HEADER_2_2"] != "secret-key" {
+		t.Fatalf("secret environment = %#v", env)
+	}
+	if servers[1].Http.Headers[0].Value != "Bearer secret" {
+		t.Fatalf("input server was mutated: %#v", servers[1])
+	}
+	if servers[0].Stdio.Env[0].Value != "stdio-secret" {
+		t.Fatalf("input stdio server was mutated: %#v", servers[0])
+	}
+
+	_, _, err = mcpServersWithSecretEnv(servers, map[string]string{"ACP_GO_HERMES_MCP_HEADER_2_1": "occupied"})
+	if err == nil {
+		t.Fatal("reserved MCP environment collision was accepted")
+	}
+}
+
+func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
+	_, err := StartServer(t.Context(), darwinTestStartOptions(t, StartOptions{
+		ACPSessionID:  "session-1",
+		Root:          t.TempDir(),
+		ScratchParent: t.TempDir(),
+		Cwd:           t.TempDir(),
+		Env:           map[string]string{"ACP_GO_HERMES_MCP_HEADER_1_1": "occupied"},
+		MCPServers: []acp.McpServer{{Http: &acp.McpServerHttpInline{
+			Name: "http", Url: "https://example.test", Headers: []acp.HttpHeader{{Name: "Authorization", Value: "secret"}},
+		}}},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("StartServer collision error = %v", err)
+	}
+}
+
+func (s *fakeGatewayServer) dialClient(t *testing.T) *Client {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, "ws"+strings.TrimPrefix(s.server.URL, "http")+"/api/ws", nil)
+	if err != nil {
+		t.Fatalf("dial fake gateway: %v", err)
+	}
+
+	return client
+}
+
+func (s *fakeGatewayServer) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/ws" {
+		http.NotFound(w, r)
+
+		return
+	}
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		s.t.Errorf("accept websocket: %v", err)
+
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+	s.writeEvent(r.Context(), conn, Event{Type: "gateway.ready"})
+	for {
+		typ, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+		var req struct {
+			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(data, &req); err != nil {
+			s.t.Errorf("decode request: %v", err)
+
+			return
+		}
+		params := map[string]any{}
+		_ = json.Unmarshal(req.Params, &params)
+		s.mu.Lock()
+		s.calls = append(s.calls, gatewayRPCCall{Method: req.Method, Params: params})
+		closeAfterResult := s.closeAfterResult == req.Method
+		closeNowAfterResult := s.closeNowAfterResult == req.Method
+		_, fail := s.failMethods[req.Method]
+		if remaining, delayed := s.failAfterCalls[req.Method]; delayed {
+			if remaining == 0 {
+				fail = true
+			} else {
+				s.failAfterCalls[req.Method] = remaining - 1
+			}
+		}
+		notFound := s.notFoundMethods[req.Method] > 0
+		if notFound {
+			s.notFoundMethods[req.Method]--
+		}
+		s.mu.Unlock()
+		if fail {
+			s.writeError(r.Context(), conn, req.ID, -32000, req.Method+" failed")
+
+			continue
+		}
+		if notFound {
+			s.writeError(r.Context(), conn, req.ID, 4007, "session not found")
+
+			continue
+		}
+		s.respond(r.Context(), conn, req.ID, req.Method, params)
+		if closeNowAfterResult {
+			// Abrupt TCP close (no close frame): the client read loop parks the
+			// real transport error before closing its channels.
+			_ = conn.CloseNow()
+
+			return
+		}
+		if closeAfterResult {
+			_ = conn.Close(websocket.StatusNormalClosure, "forced close")
+
+			return
+		}
+	}
+}
+
+//nolint:gocyclo // The fake intentionally enumerates the complete native gateway method matrix.
+func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, id int64, method string, params map[string]any) {
+	switch method {
+	case "session.create":
+		s.mu.Lock()
+		createNoLive := s.createNoLive
+		createNoStored := s.createNoStored
+		s.mu.Unlock()
+		result := map[string]any{
+			"session_id":        "live-1",
+			"stored_session_id": "stored-1",
+		}
+		if createNoLive {
+			delete(result, "session_id")
+		}
+		if createNoStored {
+			delete(result, "stored_session_id")
+		}
+		s.writeResult(ctx, conn, id, result)
+	case "session.resume":
+		stored, _ := params["session_id"].(string)
+		s.mu.Lock()
+		resumeNoLive := s.resumeNoLive
+		resumeNoKey := s.resumeNoKey
+		resumeKey := s.resumeKey
+		requireDurable := s.requireDurable
+		durableCreated := s.durableCreated
+		s.mu.Unlock()
+		if requireDurable && !durableCreated {
+			s.writeError(ctx, conn, id, 4007, "session not found")
+
+			return
+		}
+		if resumeKey == "" {
+			resumeKey = stored
+		}
+		liveID := "live-" + resumeKey
+		s.mu.Lock()
+		if s.resumeBuildDefault != "" {
+			if eager, _ := params[keyEagerBuild].(bool); eager {
+				s.liveModels[liveID] = s.resumeBuildDefault
+			} else {
+				s.lazyResumeBuilds[liveID] = true
+			}
+		}
+		s.mu.Unlock()
+		result := map[string]any{
+			"session_id":  liveID,
+			"session_key": resumeKey,
+		}
+		if resumeNoLive {
+			delete(result, "session_id")
+		}
+		if resumeNoKey {
+			delete(result, "session_key")
+		}
+		s.writeResult(ctx, conn, id, result)
+	case "session.active_list":
+		s.mu.Lock()
+		branchCreated := s.branchCreated
+		branchNoActive := s.branchNoActive
+		branchNoKey := s.branchNoKey
+		activeNoID := s.activeNoID
+		activeNoKey := s.activeNoKey
+		activeEmpty := s.activeEmpty
+		s.mu.Unlock()
+		if activeEmpty {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{}})
+
+			return
+		}
+		sessionID := "live-1"
+		if activeNoID {
+			sessionID = ""
+		}
+		sessionKey := "stored-1"
+		if activeNoKey {
+			sessionKey = ""
+		}
+		sessions := []map[string]any{{
+			"id":          sessionID,
+			"session_key": sessionKey,
+			"title":       "Listed",
+			"cwd":         "/repo",
+		}}
+		if branchCreated && !branchNoActive {
+			sessionKey := "stored-branch"
+			if branchNoKey {
+				sessionKey = ""
+			}
+			sessions = append(sessions, map[string]any{
+				"id":          "live-branch",
+				"session_key": sessionKey,
+				"title":       "branch",
+				"cwd":         "/repo",
+			})
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
+	case "session.list":
+		s.mu.Lock()
+		durableCreated := s.durableCreated
+		durableTitle := s.durableTitle
+		branchCreated := s.branchCreated
+		branchTitle := firstNonEmpty(s.branchTitle, "branch")
+		persistedCount := s.persistedCount
+		persistedMissingID := s.persistedMissingID
+		s.mu.Unlock()
+		if persistedMissingID {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{{"title": "missing id"}}})
+
+			return
+		}
+		if persistedCount > 0 {
+			sessions := make([]map[string]any, persistedCount)
+			for index := range sessions {
+				sessions[index] = map[string]any{"id": fmt.Sprintf("stored-%d", index)}
+			}
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
+
+			return
+		}
+		sessions := make([]map[string]any, 0, 2)
+		if durableCreated {
+			sessions = append(sessions, map[string]any{"id": "stored-1", "title": durableTitle})
+		}
+		if branchCreated {
+			sessions = append(sessions, map[string]any{"id": "stored-branch", "title": branchTitle})
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
+	case "session.delete":
+		sessionID, _ := params["session_id"].(string)
+		if sessionID == "missing" {
+			s.writeError(ctx, conn, id, 4007, "not found")
+
+			return
+		}
+		s.mu.Lock()
+		deleteKeepsBranch := s.deleteKeepsBranch
+		s.mu.Unlock()
+		if sessionID == "stored-branch" && !deleteKeepsBranch {
+			s.mu.Lock()
+			s.branchCreated = false
+			s.mu.Unlock()
+		}
+		s.writeResult(ctx, conn, id, map[string]any{})
+	case "reload.mcp":
+		s.mu.Lock()
+		status := s.reloadStatus
+		s.mu.Unlock()
+		if status == "" {
+			status = "reloaded"
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"status": status})
+	case "session.title":
+		title, _ := params["title"].(string)
+		s.mu.Lock()
+		pending := s.titlePending
+		missing := s.titleMissing
+		doesNotPersist := s.titleDoesNotPersist
+		if !pending && !doesNotPersist {
+			s.durableCreated = true
+			s.durableTitle = title
+		}
+		s.mu.Unlock()
+		result := map[string]any{"pending": pending, "title": title}
+		if missing {
+			delete(result, "title")
+		}
+		s.writeResult(ctx, conn, id, result)
+	case "image.attach_bytes":
+		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
+	case "prompt.submit":
+		live, _ := params["session_id"].(string)
+		s.mu.Lock()
+		if s.lazyResumeBuilds[live] {
+			s.liveModels[live] = s.resumeBuildDefault
+			delete(s.lazyResumeBuilds, live)
+		}
+		expectedModel := s.expectedPromptModel
+		actualModel := s.liveModels[live]
+		s.mu.Unlock()
+		if expectedModel != "" && actualModel != expectedModel {
+			s.writeError(ctx, conn, id, -32000, fmt.Sprintf("prompt used model %q, want %q", actualModel, expectedModel))
+
+			return
+		}
+		s.writeResult(ctx, conn, id, map[string]any{})
+		for _, frame := range s.promptRawFrameScript() {
+			_ = conn.Write(ctx, websocket.MessageText, []byte(frame))
+		}
+		script := s.promptEventScript(live)
+		for index, event := range script {
+			// An optional inter-event gap lets a test hold back a later frame
+			// (e.g. message.complete) until the client has drained an earlier
+			// one, making streaming-vs-completion ordering deterministic.
+			if delay := s.promptEventDelayValue(); delay > 0 && index > 0 {
+				time.Sleep(delay)
+			}
+
+			s.writeEvent(ctx, conn, event)
+		}
+	case "approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond", "session.interrupt", "session.close":
+		s.writeResult(ctx, conn, id, map[string]any{})
+	case "config.set":
+		value, _ := params["value"].(string)
+		fields := strings.Fields(value)
+		raw := strings.Trim(fields[0], "'")
+		qualified := raw
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] == "--provider" {
+				qualified = strings.Trim(fields[index+1], "'") + "/" + raw
+
+				break
+			}
+		}
+		live, _ := params[fieldSessionID].(string)
+		s.mu.Lock()
+		if s.resumeBuildDefault != "" && !s.lazyResumeBuilds[live] {
+			s.liveModels[live] = qualified
+		}
+		s.mu.Unlock()
+		s.writeResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
+	case "session.history":
+		s.writeResult(ctx, conn, id, map[string]any{"count": 2, "messages": []map[string]any{
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": map[string]any{"text": "history"}},
+		}})
+	case "session.branch":
+		s.mu.Lock()
+		branchNotFound := s.branchNotFound > 0
+		if branchNotFound {
+			s.branchNotFound--
+		}
+		s.mu.Unlock()
+		if branchNotFound {
+			s.writeError(ctx, conn, id, 4007, "not found")
+
+			return
+		}
+		s.mu.Lock()
+		s.branchCreated = true
+		branchTitle, _ := params["name"].(string)
+		if branchTitle == "" {
+			branchTitle = "branch"
+		}
+		if s.branchWrongTitle {
+			branchTitle = "other"
+		}
+		s.branchTitle = branchTitle
+		branchFailAfterSave := s.branchFailAfterSave
+		branchNoSession := s.branchNoSession
+		branchNoKey := s.branchNoKey
+		s.mu.Unlock()
+		if branchFailAfterSave {
+			s.writeError(ctx, conn, id, -32000, "branch failed after save")
+
+			return
+		}
+		if branchNoSession {
+			s.writeResult(ctx, conn, id, map[string]any{
+				"title":  branchTitle,
+				"parent": "stored-1",
+			})
+
+			return
+		}
+		result := map[string]any{
+			"session_id":        "live-branch",
+			"stored_session_id": "stored-branch",
+			"title":             branchTitle,
+			"parent":            "stored-1",
+		}
+		if branchNoKey {
+			delete(result, "stored_session_id")
+		}
+		s.writeResult(ctx, conn, id, result)
+	case "model.options":
+		s.writeResult(ctx, conn, id, map[string]any{
+			"model":    "anthropic/claude-sonnet-4",
+			"provider": "",
+			"providers": []map[string]any{
+				{
+					"slug":            "openrouter",
+					"name":            "OpenRouter",
+					"authenticated":   true,
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"openai/gpt-test", "anthropic/claude-fable-5"},
+					"capabilities": map[string]any{
+						"openai/gpt-test":          map[string]any{"fast": true, "reasoning": true},
+						"anthropic/claude-fable-5": map[string]any{"fast": false, "reasoning": true},
+					},
+					"pricing": map[string]any{
+						"openai/gpt-test": map[string]any{"cache": nil, "free": false, "input": "$1.00", "output": "$2.00"},
+					},
+					"source":       "built-in",
+					"total_models": 2,
+				},
+				{
+					"auth_type":       "virtual",
+					"authenticated":   true,
+					"capabilities":    map[string]any{"default": map[string]any{"fast": false, "reasoning": true}},
+					"is_current":      false,
+					"is_user_defined": false,
+					"models":          []string{"default"},
+					"name":            "Mixture of Agents",
+					"slug":            "moa",
+					"source":          "virtual",
+					"total_models":    1,
+					"warning":         "Aggregator acts as the selected model.",
+				},
+			},
+		})
+	default:
+		s.writeError(ctx, conn, id, -32601, "missing")
+	}
+}
+
+func (s *fakeGatewayServer) promptEventScript(live string) []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.promptEvents != nil {
+		events := append([]Event(nil), (*s.promptEvents)...)
+		for index := range events {
+			if events[index].SessionID == "" {
+				events[index].SessionID = live
+			}
+		}
+
+		return events
+	}
+
+	return []Event{
+		{Type: "tool.start", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"write","args_text":"terminal(command=write)"}`)},
+		{Type: "approval.request", SessionID: live, Payload: json.RawMessage(`{"command":"write","description":"Edit file"}`)},
+		{Type: "clarify.request", SessionID: live, Payload: json.RawMessage(`{"id":"clarify-1","question":"Continue?"}`)},
+		{Type: "terminal.read.request", SessionID: live, Payload: json.RawMessage(`{}`)},
+		{Type: "sudo.request", SessionID: live, Payload: json.RawMessage(`{}`)},
+		{Type: "secret.request", SessionID: live, Payload: json.RawMessage(`{}`)},
+		{Type: "thinking.delta", SessionID: live, Payload: json.RawMessage(`{"text":"thinking"}`)},
+		{Type: "message.delta", SessionID: "other-live", Payload: json.RawMessage(`{"text":"ignored"}`)},
+		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":""}`)},
+		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"delta":"hello "}`)},
+		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`["world"]`)},
+		{Type: "tool.complete", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","args":{"command":"write"},"result":"done"}`)},
+		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1,"context_max":200000}}`)},
+	}
+}
+
+func (s *fakeGatewayServer) writeResult(ctx context.Context, conn *websocket.Conn, id int64, result any) {
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	if err != nil {
+		s.t.Errorf("marshal result: %v", err)
+
+		return
+	}
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		s.t.Errorf("write result: %v", err)
+	}
+}
+
+func (s *fakeGatewayServer) writeError(ctx context.Context, conn *websocket.Conn, id int64, code int, message string) {
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
+	if err != nil {
+		s.t.Errorf("marshal error: %v", err)
+
+		return
+	}
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		s.t.Errorf("write error: %v", err)
+	}
+}
+
+func (s *fakeGatewayServer) writeEvent(ctx context.Context, conn *websocket.Conn, event Event) {
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": event})
+	if err != nil {
+		s.t.Errorf("marshal event: %v", err)
+
+		return
+	}
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		s.t.Errorf("write event: %v", err)
+	}
+}
+
+func (s *fakeGatewayServer) callMethods() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.calls))
+	for _, call := range s.calls {
+		out = append(out, call.Method)
+	}
+
+	return out
+}
+
+func (s *fakeGatewayServer) setCloseAfterResult(method string) {
+	s.mu.Lock()
+	s.closeAfterResult = method
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setCloseNowAfterResult(method string) {
+	s.mu.Lock()
+	s.closeNowAfterResult = method
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setFail(method string) {
+	s.mu.Lock()
+	s.failMethods[method] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setFailAfter(method string, successfulCalls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failAfterCalls[method] = successfulCalls
+}
+
+func (s *fakeGatewayServer) setNotFound(method string, count int) {
+	s.mu.Lock()
+	s.notFoundMethods[method] = count
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setBranchNotFoundOnce() {
+	s.setBranchNotFoundCount(1)
+}
+
+func (s *fakeGatewayServer) setBranchNotFoundCount(count int) {
+	s.mu.Lock()
+	s.branchNotFound = count
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setCreateNoStored() {
+	s.mu.Lock()
+	s.createNoStored = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setCreateNoLive() {
+	s.mu.Lock()
+	s.createNoLive = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeNoKey() {
+	s.mu.Lock()
+	s.resumeNoKey = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeKey(key string) {
+	s.mu.Lock()
+	s.resumeKey = key
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeNoLive() {
+	s.mu.Lock()
+	s.resumeNoLive = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setActiveNoKey() {
+	s.mu.Lock()
+	s.activeNoKey = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setActiveNoID() {
+	s.mu.Lock()
+	s.activeNoID = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setPromptEvents(events ...Event) {
+	s.mu.Lock()
+	copied := append([]Event(nil), events...)
+	s.promptEvents = &copied
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) promptEventDelayValue() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.promptEventDelay
+}
+
+// setPromptRawFrames queues raw text frames written verbatim (bypassing the
+// event envelope) right after the prompt.submit result, letting a test inject a
+// malformed gateway line the internal client must skip without tearing down the
+// turn.
+func (s *fakeGatewayServer) setPromptRawFrames(frames ...string) {
+	s.mu.Lock()
+	s.promptRawFrames = append([]string(nil), frames...)
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) promptRawFrameScript() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.promptRawFrames...)
+}
+
+func (s *fakeGatewayServer) callsFor(method string) []gatewayRPCCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []gatewayRPCCall{}
+	for _, call := range s.calls {
+		if call.Method == method {
+			out = append(out, call)
+		}
+	}
+
+	return out
+}
+
+func newGatewayBackedHermesServer(t *testing.T, fake *fakeGatewayServer, defaultModel string) *hermesServer {
+	t.Helper()
+
+	return &hermesServer{
+		cmd:          &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
+		xdg:          testXDGDirs(t),
+		log:          slog.New(slog.DiscardHandler),
+		events:       make(chan TurnEvent, 32),
+		errs:         make(chan error, 16),
+		closed:       make(chan struct{}),
+		gateway:      fake.dialClient(t),
+		liveByStored: map[string]string{},
+		storedByLive: map[string]string{},
+		cwd:          "/repo",
+		defaultModel: defaultModel,
+	}
+}
+
+func TestHermesGatewayServerMethods(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	client := fake.dialClient(t)
+	server := &hermesServer{
+		cmd:          &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
+		xdg:          testXDGDirs(t),
+		log:          slog.New(slog.DiscardHandler),
+		events:       make(chan TurnEvent, 16),
+		errs:         make(chan error, 16),
+		closed:       make(chan struct{}),
+		gateway:      client,
+		liveByStored: map[string]string{},
+		storedByLive: map[string]string{},
+		cwd:          "/repo",
+		defaultModel: "openai/gpt-test",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	created, err := server.CreateSession(ctx, "Created")
+	if err != nil || created.ID != "stored-1" || created.Title != "Created" || created.Model.ProviderID != "openai" {
+		t.Fatalf("CreateSession = %#v err=%v", created, err)
+	}
+	if got, err2 := server.GetSession(ctx, "stored-1"); err2 != nil || got.ID != "stored-1" {
+		t.Fatalf("GetSession existing = %#v err=%v", got, err2)
+	}
+	if got, err3 := server.GetSession(ctx, "restored"); err3 != nil || got.ID != "restored" {
+		t.Fatalf("GetSession resume = %#v err=%v", got, err3)
+	}
+	if err3 := server.ReloadMCP(ctx, "restored"); err3 != nil {
+		t.Fatalf("ReloadMCP: %v", err3)
+	}
+	fake.mu.Lock()
+	reloadCall := fake.calls[len(fake.calls)-1]
+	fake.mu.Unlock()
+	if reloadCall.Method != "reload.mcp" || reloadCall.Params["session_id"] != "live-restored" || reloadCall.Params["confirm"] != true {
+		t.Fatalf("reload.mcp call = %#v", reloadCall)
+	}
+	list, err := server.ListSessions(ctx, "/repo")
+	if err != nil || len(list) != 1 || list[0].ID != "stored-1" {
+		t.Fatalf("ListSessions = %#v err=%v", list, err)
+	}
+	if err4 := server.DeleteSession(ctx, "missing"); err4 != nil {
+		t.Fatalf("DeleteSession missing: %v", err4)
+	}
+	if err5 := server.DeleteSession(ctx, "stored-1"); err5 != nil {
+		t.Fatalf("DeleteSession: %v", err5)
+	}
+	if live := server.liveSessionID("stored-1"); live != "" {
+		t.Fatalf("deleted session still mapped to %q", live)
+	}
+	if perms, err6 := server.PendingPermissions(ctx); err6 != nil || perms != nil {
+		t.Fatalf("PendingPermissions = %#v err=%v", perms, err6)
+	}
+	if questions, err7 := server.PendingQuestions(ctx); err7 != nil || questions != nil {
+		t.Fatalf("PendingQuestions = %#v err=%v", questions, err7)
+	}
+	if todos, err8 := server.Todos(ctx, "stored-1"); err8 != nil || todos != nil {
+		t.Fatalf("Todos = %#v err=%v", todos, err8)
+	}
+
+	testGatewayServerMessageForkAndClose(ctx, t, server, fake)
+}
+
+func TestHermesGatewayReloadMCPFailures(t *testing.T) {
+	t.Run("resume failure", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setFail("session.resume")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "session.resume failed") {
+			t.Fatalf("ReloadMCP resume error = %v", err)
+		}
+	})
+
+	t.Run("native rpc failure", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setFail("reload.mcp")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "reload.mcp failed") {
+			t.Fatalf("ReloadMCP RPC error = %v", err)
+		}
+	})
+
+	t.Run("unexpected status", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.mu.Lock()
+		fake.reloadStatus = "confirm_required"
+		fake.mu.Unlock()
+		server := newGatewayBackedHermesServer(t, fake, "")
+		if err := server.ReloadMCP(t.Context(), "stored"); err == nil || !strings.Contains(err.Error(), "confirm_required") {
+			t.Fatalf("ReloadMCP status error = %v", err)
+		}
+	})
+}
+
+func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
+	t.Helper()
+
+	assertGatewayTextMessage(ctx, t, server)
+	assertGatewayImageMessage(ctx, t, server, fake)
+	assertGatewayPermissionCorrelation(t, server.events)
+
+	for _, want := range []string{"clarify.request", "message.part.updated"} {
+		if !drainHermesEventType(server.events, want) {
+			t.Fatalf("missing forwarded event %q", want)
+		}
+	}
+	if err9 := server.ReplyPermission(ctx, PermissionRequest{SessionID: "stored-1"}, "always", "ignored"); err9 != nil {
+		t.Fatalf("ReplyPermission: %v", err9)
+	}
+	if err10 := server.ReplyPermission(ctx, PermissionRequest{SessionID: "stored-1"}, "reject", "ignored"); err10 != nil {
+		t.Fatalf("ReplyPermission reject: %v", err10)
+	}
+	if err11 := server.ReplyQuestion(ctx, QuestionRequest{ID: "question-1", SessionID: "stored-1"}, [][]string{{"yes"}}); err11 != nil {
+		t.Fatalf("ReplyQuestion: %v", err11)
+	}
+	if err12 := server.RejectQuestion(ctx, QuestionRequest{ID: "question-2", SessionID: "stored-1"}); err12 != nil {
+		t.Fatalf("RejectQuestion: %v", err12)
+	}
+	if err13 := server.Abort(ctx, "missing-live"); err13 != nil {
+		t.Fatalf("Abort missing live: %v", err13)
+	}
+	if err14 := server.Abort(ctx, "stored-1"); err14 != nil {
+		t.Fatalf("Abort: %v", err14)
+	}
+	history, err := server.Messages(ctx, "stored-1")
+	if err != nil || len(history) != 2 || history[1].Parts[0].Text != "history" {
+		t.Fatalf("Messages = %#v err=%v", history, err)
+	}
+	fork, err := server.Fork(ctx, "stored-1", "ignored-message")
+	if err != nil || fork.ID != "stored-branch" {
+		t.Fatalf("Fork = %#v err=%v", fork, err)
+	}
+	fake.setBranchNotFoundOnce()
+	retryFork, err := server.Fork(ctx, "stored-1", "")
+	if err != nil || retryFork.ID != "stored-branch" {
+		t.Fatalf("Fork retry = %#v err=%v", retryFork, err)
+	}
+	fake.setBranchNotFoundCount(2)
+	if _, err15 := server.Fork(ctx, "stored-1", ""); err15 == nil {
+		t.Fatal("Fork succeeded after repeated live session not found")
+	}
+	providers, err := server.ConfigProviders(ctx)
+	if err != nil || len(providers.Providers) != 2 || !providers.Providers[0].Models["openai/gpt-test"].Reasoning {
+		t.Fatalf("ConfigProviders = %#v err=%v", providers, err)
+	}
+	if err := server.Close(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Close: %v", err)
+	}
+
+	methods := fake.callMethods()
+	for _, want := range []string{
+		"session.create", "session.title", "session.resume", "session.active_list", "session.delete", "prompt.submit", "image.attach_bytes",
+		"approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond",
+		"session.interrupt", "session.history", "session.branch", "model.options",
+	} {
+		if !containsString(methods, want) {
+			t.Fatalf("method %q not called; methods=%v", want, methods)
+		}
+	}
+}
+
+func TestHermesGatewayForkDetachesParentRuntimeBeforePublishingChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	child, err := server.Fork(t.Context(), "stored-parent", "")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if child.ID != "stored-branch" || server.liveSessionID(child.ID) != "" {
+		t.Fatalf("published child/runtime map = %#v/%q", child, server.liveSessionID(child.ID))
+	}
+
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	branchIndex, closeIndex := -1, -1
+	for index, call := range calls {
+		switch call.Method {
+		case "session.branch":
+			branchIndex = index
+		case "session.close":
+			if call.Params[fieldSessionID] == "live-branch" {
+				closeIndex = index
+			}
+		}
+	}
+	if branchIndex < 0 || closeIndex <= branchIndex {
+		t.Fatalf("branch runtime was not detached in order: %#v", calls)
+	}
+}
+
+func TestHermesGatewayForkCloseFailureDeletesDurableChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.setFail("session.close")
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	if _, err := server.Fork(t.Context(), "stored-parent", ""); err == nil || !strings.Contains(err.Error(), "close Hermes branch runtime") {
+		t.Fatalf("Fork close failure = %v", err)
+	}
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	for _, call := range calls {
+		if call.Method == "session.delete" && call.Params[fieldSessionID] == "stored-branch" {
+			return
+		}
+	}
+	t.Fatalf("durable branch was not deleted after detach failure: %#v", calls)
+}
+
+func TestHermesGatewayCreatePublishesOnlyDurableSession(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.mu.Lock()
+	fake.requireDurable = true
+	fake.activeEmpty = true
+	fake.mu.Unlock()
+
+	creator := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	created, err := creator.CreateSession(t.Context(), "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.ID != "stored-1" || created.Title != "Hermes session" {
+		t.Fatalf("created session = %#v", created)
+	}
+
+	// A second server has no runtime-only live-id map. It can recover only if
+	// session.create forced Hermes's native DB row before returning.
+	loader := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	loaded, err := loader.GetSession(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("fresh-process GetSession: %v", err)
+	}
+	if loaded.ID != created.ID {
+		t.Fatalf("loaded session = %#v", loaded)
+	}
+
+	methods := fake.callMethods()
+	for _, want := range []string{"session.create", "session.title", "session.active_list", "session.resume"} {
+		if !containsString(methods, want) {
+			t.Fatalf("durability method %q missing from %v", want, methods)
+		}
+	}
+}
+
+func TestHermesGatewayCreateBindsDraftBeforeDurableTitle(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	creator := DraftSessionCreator(server)
+	callbackCalled := false
+	created, err := creator.CreateSessionWithDraft(t.Context(), "unique-title", func(draft SessionDraft) error {
+		callbackCalled = true
+		if draft.LiveSessionID != "live-1" || draft.StoredSessionID != "stored-1" {
+			t.Fatalf("draft = %#v", draft)
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		for _, call := range fake.calls {
+			if call.Method == "session.title" {
+				t.Fatal("session.title ran before draft recovery callback")
+			}
+		}
+
+		return nil
+	})
+	if err != nil || !callbackCalled || created.ID != "stored-1" {
+		t.Fatalf("CreateSessionWithDraft = %#v, %v callback=%t", created, err, callbackCalled)
+	}
+}
+
+func TestHermesGatewayPersistedInventoryFailsClosedAtLimit(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.persistedCount = 10000
+	server := newGatewayBackedHermesServer(t, fake, "")
+	if _, err := server.PersistedSessions(t.Context()); err == nil || !strings.Contains(err.Error(), "not exhaustive") {
+		t.Fatalf("PersistedSessions saturation error = %v", err)
+	}
+}
+
+func TestHermesGatewayFailedBranchCleansUnknownLiveDurableChild(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.branchFailAfterSave = true
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored-parent", "live-parent")
+
+	_, err := server.ForkWithBaseline(t.Context(), "stored-parent", "unique-marker", nil)
+	if err == nil || !strings.Contains(err.Error(), "branch failed after save") {
+		t.Fatalf("ForkWithBaseline error = %v", err)
+	}
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	var closed, deleted bool
+	for _, call := range calls {
+		closed = closed || call.Method == "session.close" && call.Params[fieldSessionID] == "live-branch"
+		deleted = deleted || call.Method == "session.delete" && call.Params[fieldSessionID] == "stored-branch"
+	}
+	if !closed || !deleted {
+		t.Fatalf("failed branch cleanup calls = %#v", calls)
+	}
+}
+
+func TestHermesGatewayCreateRejectsUnprovenDurability(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*fakeGatewayServer)
+		want      string
+	}{
+		{
+			name: "title rpc error",
+			configure: func(fake *fakeGatewayServer) {
+				fake.setFail("session.title")
+			},
+			want: "persist Hermes session",
+		},
+		{
+			name: "title pending",
+			configure: func(fake *fakeGatewayServer) {
+				fake.titlePending = true
+			},
+			want: "remained pending",
+		},
+		{
+			name: "title schema drift",
+			configure: func(fake *fakeGatewayServer) {
+				fake.titleMissing = true
+			},
+			want: "missing durable title",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			tc.configure(fake)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			if _, err := server.CreateSession(t.Context(), ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CreateSession error = %v, want %q", err, tc.want)
+			}
+			if live := server.liveSessionID("stored-1"); live != "" {
+				t.Fatalf("failed create retained live mapping %q", live)
+			}
+		})
+	}
+}
+
+func TestHermesGatewayRebindsStaleLiveSessionAtReloadAndPromptAdmission(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.mu.Lock()
+	fake.activeEmpty = true
+	fake.durableCreated = true
+	fake.mu.Unlock()
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+
+	if _, err := server.GetSession(t.Context(), "stored"); err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	fake.setNotFound("reload.mcp", 1)
+	if err := server.ReloadMCP(t.Context(), "stored"); err != nil {
+		t.Fatalf("ReloadMCP stale live rebind: %v", err)
+	}
+
+	fake.setNotFound("prompt.submit", 1)
+	message, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "after rebind"}}})
+	if err != nil {
+		t.Fatalf("SendMessage stale live rebind: %v", err)
+	}
+	if message.Info.SessionID != "stored" {
+		t.Fatalf("rebound message = %#v", message)
+	}
+
+	methods := fake.callMethods()
+	wantSubsequence := []string{
+		"session.active_list", "session.resume",
+		"reload.mcp", "session.resume", "reload.mcp",
+		"prompt.submit", "session.resume", "prompt.submit",
+	}
+	position := 0
+	for _, method := range methods {
+		if position < len(wantSubsequence) && method == wantSubsequence[position] {
+			position++
+		}
+	}
+	if position != len(wantSubsequence) {
+		t.Fatalf("rebind calls = %v, missing subsequence %v at %d", methods, wantSubsequence, position)
+	}
+}
+
+func assertGatewayTextMessage(ctx context.Context, t *testing.T, server *hermesServer) {
+	t.Helper()
+
+	message, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{"text": "hello"}, {"text": "world"}}})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(message.Parts) != 3 {
+		t.Fatalf("message parts = %#v, want tool start, tool completion, and text", message.Parts)
+	}
+	if got := [2]string{message.Parts[2].Text, message.Parts[2].StreamedText}; got != [2]string{"hello world", "hello world"} {
+		t.Fatalf("message and streamed text = %q", got)
+	}
+	assertGatewayNativeToolParts(t, message.Parts[:2])
+	if message.Info.Tokens.Total != 7 || message.Info.Tokens.Input != 3 || message.Info.Tokens.Output != 4 || message.Info.Tokens.Reasoning != 1 {
+		t.Fatalf("tokens = %#v", message.Info.Tokens)
+	}
+	if message.Info.ContextWindow != 200000 {
+		t.Fatalf("context window = %d, want 200000", message.Info.ContextWindow)
+	}
+}
+
+func assertGatewayPermissionCorrelation(t *testing.T, events <-chan TurnEvent) {
+	t.Helper()
+
+	var permission PermissionRequest
+	toolStartSeen := false
+	for {
+		select {
+		case event := <-events:
+			if event.Type == evtMessagePartUpdated {
+				var part Part
+				if err := json.Unmarshal(event.Properties, &part); err != nil {
+					t.Fatalf("decode tool part: %v", err)
+				}
+				if part.Type == valTool && part.CallID == "native-tool-1" {
+					toolStartSeen = true
+				}
+
+				continue
+			}
+			if event.Type != evtApprovalRequest {
+				t.Fatalf("forwarded event before approval = %q", event.Type)
+			}
+			if decodeErr := json.Unmarshal(event.Properties, &permission); decodeErr != nil {
+				t.Fatalf("decode permission: %v", decodeErr)
+			}
+		default:
+			t.Fatal("missing forwarded approval.request")
+		}
+
+		break
+	}
+	if !toolStartSeen {
+		t.Fatal("approval was not preceded by the native tool start")
+	}
+	if permission.ID != "approval:native-tool-1" || permission.Tool.CallID != "native-tool-1" || !strings.HasPrefix(permission.Tool.MessageID, "hermes-live-") {
+		t.Fatalf("permission correlation = %#v", permission)
+	}
+}
+
+func assertGatewayNativeToolParts(t *testing.T, parts []Part) {
+	t.Helper()
+
+	if len(parts) != 2 {
+		t.Fatalf("tool parts = %#v", parts)
+	}
+	if parts[0].Type != valTool || parts[0].CallID != "native-tool-1" || parts[0].Tool != "terminal" ||
+		parts[1].Type != valTool || parts[1].CallID != parts[0].CallID || parts[1].Tool != parts[0].Tool {
+		t.Fatalf("tool identity was not stable: %#v", parts)
+	}
+	if !json.Valid(parts[0].Raw) || !json.Valid(parts[1].Raw) || string(parts[0].Raw) == string(parts[1].Raw) {
+		t.Fatalf("tool part raw values = %q, %q", parts[0].Raw, parts[1].Raw)
+	}
+
+	var startState, completeState map[string]any
+	if err := json.Unmarshal(parts[0].State, &startState); err != nil {
+		t.Fatalf("decode start state: %v", err)
+	}
+	if err := json.Unmarshal(parts[1].State, &completeState); err != nil {
+		t.Fatalf("decode complete state: %v", err)
+	}
+	if startState["status"] != "running" || completeState["status"] != valCompleted {
+		t.Fatalf("tool statuses = %#v, %#v", startState, completeState)
+	}
+	if input, _ := startState["rawInput"].(map[string]any); input["context"] != "write" {
+		t.Fatalf("tool raw input = %#v", startState["rawInput"])
+	}
+	if input, _ := completeState["rawInput"].(map[string]any); input["command"] != "write" {
+		t.Fatalf("completed tool raw input = %#v", completeState["rawInput"])
+	}
+	if completeState["rawOutput"] != "done" {
+		t.Fatalf("tool raw output = %#v", completeState["rawOutput"])
+	}
+}
+
+func assertGatewayImageMessage(ctx context.Context, t *testing.T, server *hermesServer, fake *fakeGatewayServer) {
+	t.Helper()
+
+	before := len(fake.callMethods())
+	// Exactly the part shape the prompt mapper builds: a type, the validated
+	// media type, and the decoded bytes. Nothing on either input form carries a
+	// filename.
+	imageMessage, err := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{
+		{"type": "text", "text": "first"},
+		{"type": "file", "mime": "image/png", "data": []byte{0, 1}},
+		{"type": "text", "text": "second"},
+		{"type": "file", "mime": "image/webp", "data": []byte{2, 3}},
+	}})
+	if err != nil || imageMessage.Info.SessionID != "stored-1" {
+		t.Fatalf("image SendMessage = %#v err=%v", imageMessage, err)
+	}
+
+	fake.mu.Lock()
+	calls := append([]gatewayRPCCall(nil), fake.calls[before:]...)
+	fake.mu.Unlock()
+	if len(calls) < 3 || calls[0].Method != "image.attach_bytes" ||
+		calls[1].Method != "image.attach_bytes" || calls[2].Method != "prompt.submit" {
+		t.Fatalf("attach-then-submit calls = %#v", calls)
+	}
+	if calls[0].Params["content_base64"] != "AAE=" || calls[1].Params["content_base64"] != "AgM=" {
+		t.Fatalf("attachment params = %#v", calls[:2])
+	}
+	for _, call := range calls[:2] {
+		// An empty hint is not an absent one: Hermes sniffs the extension from
+		// the bytes, so the upload must not claim a name the adapter never had.
+		if _, present := call.Params["filename"]; present {
+			t.Fatalf("attachment declared a filename hint: %#v", call.Params)
+		}
+	}
+	if calls[2].Params["text"] != "first\n\nsecond" {
+		t.Fatalf("flattened prompt text = %#v", calls[2].Params)
+	}
+
+	if _, imageErr := imageAttachmentsFromHermesParts([]map[string]any{{"type": "file"}}); imageErr == nil {
+		t.Fatal("image parts accepted missing decoded data")
+	}
+	if _, imageErr := server.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
+		"type": "file",
+	}}}); imageErr == nil {
+		t.Fatal("SendMessage accepted missing decoded image data")
+	}
+
+	failing := newFakeGatewayServer(t)
+	failing.setFail("image.attach_bytes")
+	failingServer := newGatewayBackedHermesServer(t, failing, "")
+	failingServer.rememberGatewaySession("stored-1", "live-1")
+	if _, imageErr := failingServer.SendMessage(ctx, "stored-1", MessageRequest{Parts: []map[string]any{{
+		"type": "file", "data": []byte{0},
+	}}}); imageErr == nil {
+		t.Fatal("SendMessage ignored image.attach_bytes failure")
+	}
+}
+
+func drainHermesEventType(ch <-chan TurnEvent, want string) bool {
+	for {
+		select {
+		case event := <-ch:
+			if event.Type == want {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
+	if got := textFromHermesParts([]map[string]any{{"text": "one"}, {"other": "skip"}, {"text": "two"}}); got != "one\n\ntwo" {
+		t.Fatalf("textFromHermesParts = %q", got)
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`"plain"`),
+		json.RawMessage(`{"content":[{"delta":"nested"}]}`),
+		json.RawMessage(`{"missing":true}`),
+		json.RawMessage(`{`),
+	} {
+		_ = gatewayEventText(raw)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{"text":"raw","rendered":"ansi"}`)); got != "raw" {
+		t.Fatalf("complete raw text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{"rendered":"fallback"}`)); got != "fallback" {
+		t.Fatalf("complete rendered text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{"reasoning":"not final","status":"complete"}`)); got != "" {
+		t.Fatalf("complete unrelated text = %q", got)
+	}
+	if got := gatewayCompleteText(json.RawMessage(`{`)); got != "" {
+		t.Fatalf("malformed complete text = %q", got)
+	}
+	tokens := gatewayUsageTokens(json.RawMessage(`{"usage":{"total":1,"input":2,"output":3,"reasoning":4}}`))
+	if tokens.Total != 1 || tokens.Input != 2 || tokens.Output != 3 || tokens.Reasoning != 4 {
+		t.Fatalf("fallback usage tokens = %#v", tokens)
+	}
+	testGatewayContextAndToolHelpers(t)
+
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "error"}}); err == nil {
+		t.Fatal("assistant finish error accepted")
+	}
+	err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Error: &nativeError{Message: "provider failed"}}})
+	if err == nil || !strings.Contains(err.Error(), "provider failed") {
+		t.Fatalf("assistant message error = %v", err)
+	}
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Error: &nativeError{}}}); err == nil {
+		t.Fatal("empty assistant error accepted")
+	}
+	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "stop"}}); err != nil {
+		t.Fatalf("assistant stop rejected: %v", err)
+	}
+	messages := nativeMessagesFromGateway("stored", []Message{{Role: "assistant", Content: json.RawMessage(`{"text":"mapped"}`)}})
+	if messages[0].Info.SessionID != "stored" || messages[0].Parts[0].Text != "mapped" {
+		t.Fatalf("nativeMessagesFromGateway = %#v", messages)
+	}
+	if text := gatewayPayloadString(json.RawMessage(`{`), "id"); text != "" {
+		t.Fatalf("invalid payload string = %q", text)
+	}
+	if text := gatewayPayloadString(json.RawMessage(`{"id":1}`), "id"); text != "" {
+		t.Fatalf("numeric payload string = %q", text)
+	}
+	if got := numberValue("skip"); got != 0 {
+		t.Fatalf("numberValue string = %v", got)
+	}
+	if got := numberValue(int(4)); got != 4 {
+		t.Fatalf("numberValue int = %v", got)
+	}
+	if got := numberValue(json.Number("12.5")); got != 12.5 {
+		t.Fatalf("numberValue json = %v", got)
+	}
+	if got := gatewayMessageText(Message{}); got != "" {
+		t.Fatalf("empty gateway message text = %q", got)
+	}
+	if got := gatewayMessageText(Message{Content: json.RawMessage(`not-json`)}); got != "not-json" {
+		t.Fatalf("fallback gateway message text = %q", got)
+	}
+	testGatewayProvidersAndConfigHelpers(t)
+}
+
+func testGatewayContextAndToolHelpers(t *testing.T) {
+	t.Helper()
+
+	if failure := gatewayCompleteFailure(json.RawMessage(`{"finish":"error"}`)); failure == nil || failure.message != "hermes assistant error" {
+		t.Fatalf("finish-only complete failure = %#v", failure)
+	}
+
+	if got := gatewayContextWindow(json.RawMessage(`{"usage":{"context_max":200000}}`)); got != 200000 {
+		t.Fatalf("context window = %d, want 200000", got)
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"usage":{"context_max":0}}`),
+		json.RawMessage(`{"usage":{"context_max":-1}}`),
+		json.RawMessage(`{"usage":{"context_max":1.5}}`),
+		json.RawMessage(`{"usage":{"context_max":"200000"}}`),
+		json.RawMessage(`{`),
+	} {
+		if got := gatewayContextWindow(raw); got != 0 {
+			t.Fatalf("invalid context window %s = %d", raw, got)
+		}
+	}
+	if got := gatewayToolCallID(json.RawMessage(`{"tool_id":"native-tool"}`)); got != "native-tool" {
+		t.Fatalf("tool call id = %q", got)
+	}
+	if got := uniqueGatewayToolCallID(map[string]struct{}{"one": {}}); got != "one" {
+		t.Fatalf("unique tool call = %q", got)
+	}
+	if got := uniqueGatewayToolCallID(map[string]struct{}{"one": {}, "two": {}}); got != "" {
+		t.Fatalf("ambiguous tool call = %q", got)
+	}
+	testGatewayToolPartMapping(t)
+}
+
+func testGatewayToolPartMapping(t *testing.T) {
+	t.Helper()
+
+	for _, event := range []Event{
+		{Type: evtToolStart, Payload: json.RawMessage(`{`)},
+		{Type: evtToolStart, Payload: json.RawMessage(`{"name":"missing-id"}`)},
+	} {
+		if part, ok := gatewayToolPart("stored", "message", event, gatewayActiveTool{}); ok || !reflect.DeepEqual(part, Part{}) {
+			t.Fatalf("invalid gateway tool event mapped to %#v", part)
+		}
+	}
+
+	startPayload := json.RawMessage(`{"tool_id":"actual","name":"terminal","context":"preview only","args_text":"terminal(command=pwd)"}`)
+	start, ok := gatewayToolPart("stored", "message", Event{Type: evtToolStart, Payload: startPayload}, gatewayActiveTool{})
+	if !ok {
+		t.Fatal("actual Hermes tool.start was not mapped")
+	}
+	if start.Tool != "terminal" {
+		t.Fatalf("actual Hermes tool.start name = %q", start.Tool)
+	}
+
+	active := gatewayActiveTool{rawInput: startPayload, name: "terminal"}
+	complete, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","args":{"command":"pwd"},"result":{"stdout":"/repo","exit_code":0}}`),
+	}, active)
+	if !ok {
+		t.Fatal("actual Hermes tool.complete was not mapped")
+	}
+	var state map[string]any
+	if err := json.Unmarshal(complete.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if complete.Tool != "terminal" {
+		t.Fatalf("completion missing name did not preserve start name: %q", complete.Tool)
+	}
+	if input, _ := state["rawInput"].(map[string]any); input["command"] != "pwd" || input["context"] != nil {
+		t.Fatalf("completion did not prefer authoritative args: %#v", state["rawInput"])
+	}
+	if output, _ := state["rawOutput"].(map[string]any); output["stdout"] != "/repo" {
+		t.Fatalf("actual Hermes raw output = %#v", state["rawOutput"])
+	}
+
+	conflict, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","name":"read_file","args":{"command":"pwd"},"result":"done"}`),
+	}, active)
+	if !ok || conflict.Tool != "terminal" {
+		t.Fatalf("conflicting completion name changed lifecycle identity: %#v", conflict)
+	}
+
+	withoutArgs, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"actual","result":"done"}`),
+	}, active)
+	if !ok {
+		t.Fatal("completion without args was not mapped")
+	}
+	if err := json.Unmarshal(withoutArgs.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if input, _ := state["rawInput"].(map[string]any); input["context"] != "preview only" {
+		t.Fatalf("completion without args did not retain start input: %#v", state["rawInput"])
+	}
+	testGatewayToolFailureMapping(t)
+
+	noOutput, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"no-output","args":{"command":"true"}}`),
+	}, gatewayActiveTool{})
+	if !ok {
+		t.Fatal("completion without output was not mapped")
+	}
+	state = map[string]any{}
+	if err := json.Unmarshal(noOutput.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := state["rawOutput"]; exists {
+		t.Fatalf("completion envelope leaked as raw output: %#v", state["rawOutput"])
+	}
+
+	explicitOutput, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"output","output":{"text":"explicit"}}`),
+	}, gatewayActiveTool{})
+	if !ok || !strings.Contains(string(explicitOutput.State), `"text":"explicit"`) {
+		t.Fatalf("explicit output was not preserved: %#v", explicitOutput)
+	}
+
+	unnamed, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolStart,
+		Payload: json.RawMessage(`{"tool_id":"unnamed"}`),
+	}, gatewayActiveTool{})
+	if !ok || unnamed.Tool != "tool" {
+		t.Fatalf("unnamed start fallback = %#v", unnamed)
+	}
+	unnamedCompletion, ok := gatewayToolPart("stored", "message", Event{
+		Type:    evtToolComplete,
+		Payload: json.RawMessage(`{"tool_id":"unnamed","name":"terminal","result":"done"}`),
+	}, gatewayActiveTool{name: unnamed.Tool})
+	if !ok || unnamedCompletion.Tool != "tool" {
+		t.Fatalf("completion changed unnamed start identity: %#v", unnamedCompletion)
+	}
+}
+
+func testGatewayToolFailureMapping(t *testing.T) {
+	t.Helper()
+
+	for _, test := range []struct {
+		name    string
+		payload string
+		active  gatewayActiveTool
+	}{
+		{name: "canonical executor error", payload: `{"tool_id":"failed","name":"terminal","result":"Error executing tool 'terminal': boom"}`},
+		{name: "structured success false", payload: `{"tool_id":"failed","result":{"success":false}}`},
+		{name: "structured ok false", payload: `{"tool_id":"failed","result":{"ok":false}}`},
+		{name: "integer exit code", payload: `{"tool_id":"failed","result":{"exit_code":1}}`},
+		{name: "integer return code", payload: `{"tool_id":"failed","result":{"returncode":2}}`},
+		{name: "polished error", payload: `{"tool_id":"failed","name":"terminal","result":{"error":{"message":"structured"}}}`},
+		{
+			name:    "preserved polished name",
+			payload: `{"tool_id":"failed","name":"plugin_tool","result":{"error":"structured"}}`,
+			active:  gatewayActiveTool{name: "terminal"},
+		},
+		{name: "JSON string", payload: `{"tool_id":"failed","result":"{\"success\":false}"}`},
+		{
+			name:    "JSON string with appended hint",
+			payload: `{"tool_id":"failed","result":"  {\"ok\":false}\n\n[Hint: Results truncated]"}`,
+		},
+		{name: "output fallback", payload: `{"tool_id":"failed","output":{"success":false}}`},
+	} {
+		part, mapped := gatewayToolPart(
+			"stored",
+			"message",
+			Event{Type: evtToolComplete, Payload: json.RawMessage(test.payload)},
+			test.active,
+		)
+		if !mapped || !strings.Contains(string(part.State), `"status":"failed"`) {
+			t.Fatalf("%s payload %s mapped to %#v", test.name, test.payload, part)
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "successful result",
+			payload: `{"tool_id":"success","name":"terminal","result":{"success":true,"ok":true,"error":null,"exit_code":0,"returncode":1}}`,
+		},
+		{name: "generic plain error", payload: `{"tool_id":"success","name":"plugin_tool","result":"plugin error: optional diagnostic"}`},
+		{name: "generic structured error", payload: `{"tool_id":"success","name":"plugin_tool","result":{"error":"optional diagnostic"}}`},
+		{
+			name:    "polished error with content",
+			payload: `{"tool_id":"success","name":"terminal","result":{"error":"command diagnostic","content":"useful output"}}`,
+		},
+		{name: "noncanonical error string", payload: `{"tool_id":"success","name":"terminal","result":"error executing tool 'terminal': boom"}`},
+		{name: "float exit code", payload: `{"tool_id":"success","result":{"exit_code":1.0}}`},
+		{name: "result preferred to output", payload: `{"tool_id":"success","result":{"success":true},"output":{"success":false}}`},
+		{name: "is error is not classifier contract", payload: `{"tool_id":"success","result":{"is_error":true}}`},
+		{name: "nonobject JSON string", payload: `{"tool_id":"success","result":"[1,2] trailing hint"}`},
+	} {
+		part, ok := gatewayToolPart("stored", "message", Event{
+			Type:    evtToolComplete,
+			Payload: json.RawMessage(test.payload),
+		}, gatewayActiveTool{})
+		if !ok || strings.Contains(string(part.State), `"status":"failed"`) {
+			t.Fatalf("%s classified as failed: %#v", test.name, part)
+		}
+	}
+
+	testGatewayToolFailureHelpers(t)
+}
+
+func testGatewayToolFailureHelpers(t *testing.T) {
+	t.Helper()
+
+	value, ok := gatewayJSONValue([]byte(`{"value":1} trailing hint`))
+	object, isObject := value.(map[string]any)
+	if !ok || !isObject || object["value"] != json.Number("1") {
+		t.Fatalf("prefixed JSON value = %#v, %v", value, ok)
+	}
+	if value, ok := gatewayJSONValue([]byte(`not JSON`)); ok || value != nil {
+		t.Fatalf("invalid JSON value = %#v, %v", value, ok)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "nil", value: nil, want: false},
+		{name: "false", value: false, want: false},
+		{name: "true", value: true, want: true},
+		{name: "empty string", value: "", want: false},
+		{name: "string", value: "error", want: true},
+		{name: "integer zero", value: json.Number("0"), want: false},
+		{name: "decimal zero", value: json.Number("-0.0"), want: false},
+		{name: "exponent zero", value: json.Number("0e20"), want: false},
+		{name: "nonzero number", value: json.Number("1e-999"), want: true},
+		{name: "empty array", value: []any{}, want: false},
+		{name: "array", value: []any{"error"}, want: true},
+		{name: "empty object", value: map[string]any{}, want: false},
+		{name: "object", value: map[string]any{"message": "error"}, want: true},
+		{name: "other", value: struct{}{}, want: true},
+	} {
+		if got := gatewayTruthy(test.value); got != test.want {
+			t.Fatalf("%s gatewayTruthy(%#v) = %v, want %v", test.name, test.value, got, test.want)
+		}
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "not number", value: "1", want: false},
+		{name: "boolean true is a Python integer", value: true, want: true},
+		{name: "boolean false is a Python integer", value: false, want: false},
+		{name: "zero", value: json.Number("0"), want: false},
+		{name: "negative zero", value: json.Number("-0"), want: false},
+		{name: "positive", value: json.Number("1"), want: true},
+		{name: "negative", value: json.Number("-2"), want: true},
+		{name: "float", value: json.Number("1.0"), want: false},
+		{name: "exponent", value: json.Number("1e0"), want: false},
+	} {
+		if got := gatewayNonzeroInteger(test.value); got != test.want {
+			t.Fatalf("%s gatewayNonzeroInteger(%#v) = %v, want %v", test.name, test.value, got, test.want)
+		}
+	}
+
+	if gatewayToolResultFailed(nil, "terminal") {
+		t.Fatal("missing result classified as failed")
+	}
+	if gatewayToolResultFailed(json.RawMessage(`{`), "terminal") {
+		t.Fatal("malformed result classified as failed")
+	}
+	if !gatewayPolishedTool("yb_send_sticker") || gatewayPolishedTool("plugin_tool") {
+		t.Fatal("installed Hermes polished-tool set was not mirrored")
+	}
+}
+
+func TestHermesGatewayCompletionOnlyText(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(
+		Event{Type: evtThinkingDelta, Payload: json.RawMessage(`{"text":"thinking"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"final answer"}`)},
+	)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(message.Parts) != 1 || message.Parts[0].Text != "final answer" || message.Parts[0].StreamedText != "" {
+		t.Fatalf("completion-only message = %#v", message)
+	}
+}
+
+func TestHermesGatewayApprovalRequiresUniqueActiveNativeTool(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(
+		Event{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1"}`)},
+		Event{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-2"}`)},
+		Event{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"read"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"blocked"}`)},
+	)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	if _, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	for {
+		select {
+		case event := <-server.events:
+			if event.Type == evtMessagePartUpdated {
+				continue
+			}
+			var permission PermissionRequest
+			if event.Type != evtApprovalRequest {
+				t.Fatalf("forwarded event = %q, want %q", event.Type, evtApprovalRequest)
+			}
+			if err := json.Unmarshal(event.Properties, &permission); err != nil {
+				t.Fatalf("decode permission: %v", err)
+			}
+			if permission.ID != "approval-unbound" || permission.Tool.CallID != "" {
+				t.Fatalf("ambiguous permission correlation = %#v", permission)
+			}
+		default:
+			t.Fatal("missing forwarded approval.request")
+		}
+
+		break
+	}
+}
+
+func TestHermesGatewaySaturatedAuthoritativePublicationFailsTurn(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		freeSlots int
+		events    []Event
+	}{
+		{
+			name: "tool start",
+			events: []Event{
+				{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"pwd"}`)},
+			},
+		},
+		{
+			name:      "tool completion",
+			freeSlots: 1,
+			events: []Event{
+				{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","context":"pwd"}`)},
+				{Type: evtToolComplete, Payload: json.RawMessage(`{"tool_id":"native-tool-1","args":{"command":"pwd"},"result":"done"}`)},
+			},
+		},
+		{
+			name: "permission",
+			events: []Event{
+				{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"pwd"}`)},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := newFakeGatewayServer(t)
+			fake.setPromptEvents(append(test.events,
+				Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"must not complete"}`)},
+			)...)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			server.rememberGatewaySession("stored", "live-stored")
+			for range cap(server.events) - test.freeSlots {
+				server.events <- TurnEvent{Type: "saturated"}
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			if _, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("saturated authoritative publication error = %v, want deadline", err)
+			}
+			if !containsString(fake.callMethods(), "prompt.submit") {
+				t.Fatalf("saturation failed before gateway prompt submission: %v", fake.callMethods())
+			}
+		})
+	}
+}
+
+func testGatewayProvidersAndConfigHelpers(t *testing.T) {
+	t.Helper()
+
+	if got := errors.Unwrap(StreamError{epoch: 7, err: errors.New("wrapped")}); got == nil || got.Error() != "wrapped" {
+		t.Fatalf("stream error unwrap = %v", got)
+	}
+	var providers ProvidersResponse
+	if err := json.Unmarshal([]byte(`{"providers":[]}`), &providers); err != nil || len(providers.Raw) == 0 {
+		t.Fatalf("ProvidersResponse valid = %#v err=%v", providers, err)
+	}
+	mapped := providersFromGateway(ModelOptionsResult{Providers: []Provider{{
+		Slug:         "p",
+		Models:       []string{"", "named"},
+		Capabilities: map[string]ProviderModelCapability{"named": {Reasoning: true}},
+	}}})
+	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || !model.Reasoning {
+		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
+	}
+	if SafePathName(" \t ") != "session" {
+		t.Fatal("SafePathName did not default empty input")
+	}
+	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
+		t.Fatalf("empty config: %v", err)
+	}
+	originalMarshalIndent := hermesMarshalIndent
+	hermesMarshalIndent = func(any, string, string) ([]byte, error) {
+		return nil, errors.New("marshal failed")
+	}
+	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+		t.Fatal("materializeHermesConfig ignored marshal error")
+	}
+	if err := WriteLease(t.TempDir(), ServerLease{}); err == nil {
+		t.Fatal("WriteLease ignored marshal error")
+	}
+	hermesMarshalIndent = originalMarshalIndent
+	homeFile := filepath.Join(t.TempDir(), "home-file")
+	if err := os.WriteFile(homeFile, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeHermesConfig(homeFile, []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+		t.Fatal("materializeHermesConfig accepted file home")
+	}
+}
+
+func TestMaterializeHermesConfig(t *testing.T) {
+	t.Run("writes seeds verbatim and installs managed PATH init", func(t *testing.T) {
+		home := t.TempDir()
+		files := map[string]string{
+			"config.yaml":               "model:\n  provider: custom\n",
+			"providers/litellm.yaml":    "base_url: http://localhost:4000/v1\n",
+			filepath.FromSlash("a/b/c"): "nested",
+		}
+		if err := materializeHermesConfig(home, nil, files); err != nil {
+			t.Fatalf("materializeHermesConfig: %v", err)
+		}
+		for relative, want := range files {
+			got, err := os.ReadFile(filepath.Join(home, relative))
+			if err != nil {
+				t.Fatalf("read %q: %v", relative, err)
+			}
+			if string(got) != want {
+				t.Fatalf("seed %q = %q, want %q", relative, got, want)
+			}
+			info, err := os.Stat(filepath.Join(home, relative))
+			if err != nil {
+				t.Fatalf("stat %q: %v", relative, err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("seed %q mode = %v, want 0600", relative, info.Mode().Perm())
+			}
+		}
+		if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
+			t.Fatalf("managed PATH init = %q err=%v", script, err)
+		}
+	})
+
+	t.Run("merges wrapper mcp_servers on top of seeded config.yaml", func(t *testing.T) {
+		home := t.TempDir()
+		seed := "model:\n  provider: custom\n  base_url: http://localhost:4000/v1\n  key_env: LITELLM_API_KEY\n  default: gpt-4o\nmcp_servers:\n  seeded:\n    url: http://seed.example\n"
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		if err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": seed}); err != nil {
+			t.Fatalf("materializeHermesConfig merge: %v", err)
+		}
+		var config map[string]any
+		data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("merged config not valid: %v (%s)", err, data)
+		}
+		model, ok := config["model"].(map[string]any)
+		if !ok || model["provider"] != "custom" || model["default"] != "gpt-4o" || model["key_env"] != "LITELLM_API_KEY" {
+			t.Fatalf("seed model block lost after merge: %#v", config["model"])
+		}
+		mcp, ok := config["mcp_servers"].(map[string]any)
+		if !ok {
+			t.Fatalf("wrapper mcp_servers missing after merge: %#v", config)
+		}
+		if _, ok := mcp["wrapper"].(map[string]any); !ok {
+			t.Fatalf("wrapper mcp server missing after merge: %#v", mcp)
+		}
+		if _, ok := mcp["seeded"].(map[string]any); !ok {
+			t.Fatalf("seeded mcp server dropped after merge: %#v", mcp)
+		}
+	})
+
+	t.Run("writes wrapper mcp_servers without a seed", func(t *testing.T) {
+		home := t.TempDir()
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		if err := materializeHermesConfig(home, servers, nil); err != nil {
+			t.Fatalf("materializeHermesConfig mcp-only: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config map[string]any
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("mcp-only config not valid: %v", err)
+		}
+		if _, ok := config["mcp_servers"].(map[string]any); !ok {
+			t.Fatalf("mcp_servers missing: %#v", config)
+		}
+	})
+
+	t.Run("rejects invalid seeded config.yaml when merging", func(t *testing.T) {
+		home := t.TempDir()
+		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
+		err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": "model: [unterminated"})
+		if err == nil {
+			t.Fatal("invalid seeded config.yaml accepted")
+		}
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("invalid seed error = %T, want *acp.RequestError", err)
+		}
+	})
+
+	t.Run("rejects adapter-owned PATH init seed", func(t *testing.T) {
+		err := materializeHermesConfig(t.TempDir(), nil, map[string]string{hermesPathInitFileName: "untrusted"})
+		if err == nil {
+			t.Fatal("adapter-owned PATH init seed was accepted")
+		}
+	})
+
+	t.Run("empty installs only PATH init without config mutation", func(t *testing.T) {
+		for _, files := range []map[string]string{nil, {}} {
+			home := t.TempDir()
+			if err := materializeHermesConfig(home, nil, files); err != nil {
+				t.Fatalf("empty seed files: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, hermesConfigFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config.yaml mutated without managed config: %v", err)
+			}
+			if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
+				t.Fatalf("managed PATH init = %q err=%v", script, err)
+			}
+		}
+	})
+
+	t.Run("rejects confinement escapes", func(t *testing.T) {
+		absolute := filepath.Join(t.TempDir(), "abs")
+		for name, relative := range map[string]string{
+			"empty":           "",
+			"whitespace-only": "   ",
+			"absolute":        absolute,
+			"parent":          "..",
+			"parent-prefix":   filepath.FromSlash("../escape"),
+			"parent-embedded": filepath.FromSlash("nested/../../escape"),
+			"parent-trailing": filepath.FromSlash("nested/.."),
+		} {
+			t.Run(name, func(t *testing.T) {
+				home := t.TempDir()
+				err := materializeHermesConfig(home, nil, map[string]string{relative: "x"})
+				if err == nil {
+					t.Fatalf("seed path %q accepted", relative)
+				}
+				var reqErr *acp.RequestError
+				if !errors.As(err, &reqErr) {
+					t.Fatalf("seed path %q error = %T, want *acp.RequestError", relative, err)
+				}
+			})
+		}
+	})
+
+	t.Run("rejects reserved adapter metadata case-insensitively", func(t *testing.T) {
+		for name, relative := range map[string]string{
+			"path init":              hermesPathInitFileName,
+			"namespace nested":       "nested/.ACP-GO-HERMES-ANYTHING",
+			"namespace":              ".acp-go-hermes-reserved",
+			"owner subtree":          filepath.FromSlash(".acp-go-hermes-session-owners/claim"),
+			"owner subtree case":     filepath.FromSlash(".ACP-GO-HERMES-SESSION-OWNERS/claim"),
+			"manifest":               ".seed-manifest.json",
+			"pending nested":         filepath.FromSlash("nested/.SEED-PENDING.JSON"),
+			"backup suffix":          "config.yaml.seed.bak",
+			"backup suffix casefold": "nested/CONFIG.YAML.SEED.BAK",
+		} {
+			t.Run(name, func(t *testing.T) {
+				err := materializeHermesConfig(t.TempDir(), nil, map[string]string{relative: "hostile"})
+				if err == nil {
+					t.Fatalf("reserved seed path %q accepted", relative)
+				}
+				var reqErr *acp.RequestError
+				if !errors.As(err, &reqErr) {
+					t.Fatalf("reserved seed path %q error = %T, want *acp.RequestError", relative, err)
+				}
+			})
+		}
+	})
+}
+
+func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
+	t.Run("propagates mkdir errors", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("dir-block"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// "config.yaml/child" cannot create a parent dir over an existing file.
+		if err := materializeHermesConfig(home, nil, map[string]string{
+			filepath.FromSlash("config.yaml/child"): "x",
+		}); err == nil {
+			t.Fatal("materializeHermesConfig ignored mkdir error")
+		}
+	})
+
+	t.Run("seed into empty root records a sorted manifest", func(t *testing.T) {
+		home := t.TempDir()
+		files := map[string]string{
+			"config.yaml":                   "model: {}\n",
+			filepath.FromSlash("a/b.json"):  "{}",
+			filepath.FromSlash("providers"): "p",
+		}
+		if err := materializeHermesConfig(home, nil, files); err != nil {
+			t.Fatalf("materializeHermesConfig: %v", err)
+		}
+		manifest := readHermesSeedManifest(t, home)
+		want := []string{hermesPathInitFileName, "a/b.json", "config.yaml", "providers"}
+		if !reflect.DeepEqual(manifest, want) {
+			t.Fatalf("manifest = %#v, want %#v", manifest, want)
+		}
+		for relative := range files {
+			if _, err := os.Stat(filepath.Join(home, relative)); err != nil {
+				t.Fatalf("seed %q not written: %v", relative, err)
+			}
+		}
+	})
+
+	t.Run("re-seed identical content is idempotent", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "same"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "same"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, "foo"+hermesSeedBackupSuffix)); !os.IsNotExist(err) {
+			t.Fatalf("identical re-seed created a .seed.bak (err=%v)", err)
+		}
+	})
+
+	t.Run("re-seed changed content backs up prior bytes", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v2"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(home, "foo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "v2" {
+			t.Fatalf("foo = %q, want v2", got)
+		}
+		backup, err := os.ReadFile(filepath.Join(home, "foo"+hermesSeedBackupSuffix))
+		if err != nil {
+			t.Fatalf("read backup: %v", err)
+		}
+		if string(backup) != "v1" {
+			t.Fatalf("backup = %q, want v1", backup)
+		}
+	})
+
+	t.Run("fails closed on a pre-existing unmanaged file", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("operator"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := materializeHermesConfig(home, nil, map[string]string{
+			"config.yaml": "model: {}\n",
+			"other.txt":   "data",
+		})
+		if err == nil {
+			t.Fatal("seed over unmanaged config.yaml accepted")
+		}
+		var reqErr *acp.RequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("unmanaged seed error = %T, want *acp.RequestError", err)
+		}
+		if !strings.Contains(err.Error(), "config.yaml") {
+			t.Fatalf("error %q does not name config.yaml", err.Error())
+		}
+		// Nothing was written or changed: operator file intact, sibling absent,
+		// no manifest.
+		got, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+		if err != nil || string(got) != "operator" {
+			t.Fatalf("operator config.yaml mutated: got=%q err=%v", got, err)
+		}
+		if _, err := os.Stat(filepath.Join(home, "other.txt")); !os.IsNotExist(err) {
+			t.Fatalf("sibling seed written despite fail-closed (err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, hermesSeedManifestName)); !os.IsNotExist(err) {
+			t.Fatalf("manifest written despite fail-closed (err=%v)", err)
+		}
+	})
+
+	t.Run("manifest survives across passes", func(t *testing.T) {
+		home := t.TempDir()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		// A second pass loads the persisted manifest and treats foo as managed,
+		// so re-seeding does not fail closed.
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v2"}); err != nil {
+			t.Fatalf("second seed: %v", err)
+		}
+		if want := []string{hermesPathInitFileName, "foo"}; !reflect.DeepEqual(readHermesSeedManifest(t, home), want) {
+			t.Fatalf("manifest = %#v, want %#v", readHermesSeedManifest(t, home), want)
+		}
+	})
+}
+
+func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
+	t.Run("rejects a corrupt manifest", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("corrupt manifest accepted")
+		}
+	})
+
+	t.Run("propagates a manifest read error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.Mkdir(filepath.Join(home, hermesSeedManifestName), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored manifest read error")
+		}
+	})
+
+	t.Run("propagates a manifest write error", func(t *testing.T) {
+		home := t.TempDir()
+		original := hermesMarshalIndent
+		hermesMarshalIndent = func(any, string, string) ([]byte, error) {
+			return nil, errors.New("marshal failed")
+		}
+		defer func() { hermesMarshalIndent = original }()
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored manifest marshal error")
+		}
+	})
+
+	t.Run("propagates a backup write error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "foo"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte(`["foo"]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// A directory at the backup path blocks the backup copy.
+		if err := os.Mkdir(filepath.Join(home, "foo"+hermesSeedBackupSuffix), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "new"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored backup write error")
+		}
+	})
+
+	t.Run("propagates a read error for a managed directory target", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte(`["mdir"]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(home, "mdir"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// mdir is managed, so the guard proceeds and the read of a directory fails.
+		if err := materializeHermesConfig(home, nil, map[string]string{"mdir": "x"}); err == nil {
+			t.Fatal("materializeHermesConfig ignored managed-target read error")
+		}
+	})
+}
+
+// readHermesSeedManifest decodes the ownership manifest under home for tests.
+func readHermesSeedManifest(t *testing.T, home string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, hermesSeedManifestName))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var entries []string
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	return entries
+}
+
+func TestHermesGatewayServerEdgeBranches(t *testing.T) {
+	t.Run("identity schema drift", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			want  string
+			setup func(*fakeGatewayServer)
+			call  func(context.Context, *hermesServer) error
+		}{
+			{
+				name: "create missing live",
+				want: "session.create response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setCreateNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.CreateSession(ctx, "")
+
+					return err
+				},
+			},
+			{
+				name: "create missing stored",
+				want: "session.create response missing stored_session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setCreateNoStored()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.CreateSession(ctx, "")
+
+					return err
+				},
+			},
+			{
+				name: "get missing resume live",
+				want: "session.resume response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored")
+
+					return err
+				},
+			},
+			{
+				name: "get missing resume key",
+				want: "session.resume response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored")
+
+					return err
+				},
+			},
+			{
+				name: "ensure missing resume live",
+				want: "session.resume response missing session_id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoLive()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.Messages(ctx, "stored")
+
+					return err
+				},
+			},
+			{
+				name: "ensure missing resume key",
+				want: "session.resume response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setResumeNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.Messages(ctx, "stored")
+
+					return err
+				},
+			},
+			{
+				name: "get active missing id",
+				want: "active_list response missing id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoID()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored-1")
+
+					return err
+				},
+			},
+			{
+				name: "get active missing session key",
+				want: "active_list response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.GetSession(ctx, "stored-1")
+
+					return err
+				},
+			},
+			{
+				name: "list missing id",
+				want: "active_list response missing id",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoID()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.ListSessions(ctx, "")
+
+					return err
+				},
+			},
+			{
+				name: "list missing session key",
+				want: "active_list response missing session_key",
+				setup: func(fake *fakeGatewayServer) {
+					fake.setActiveNoKey()
+				},
+				call: func(ctx context.Context, server *hermesServer) error {
+					_, err := server.ListSessions(ctx, "")
+
+					return err
+				},
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				fake := newFakeGatewayServer(t)
+				tt.setup(fake)
+				server := newGatewayBackedHermesServer(t, fake, "")
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				err := tt.call(ctx, server)
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("schema drift error = %v, want %q", err, tt.want)
+				}
+			})
+		}
+	})
+}
+
+func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
+	t.Run("get session from active list mapping", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		server := newGatewayBackedHermesServer(t, fake, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		session, err := server.GetSession(ctx, "stored-1")
+		if err != nil || session.ID != "stored-1" || server.liveSessionID("stored-1") != "live-1" {
+			t.Fatalf("GetSession active mapping = %#v live=%q err=%v", session, server.liveSessionID("stored-1"), err)
+		}
+		if len(fake.callsFor("session.resume")) != 0 {
+			t.Fatalf("GetSession active mapping called resume: %#v", fake.callsFor("session.resume"))
+		}
+	})
+
+	t.Run("resume rotation uses returned session key", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setResumeKey("stored-rotated")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		session, err := server.GetSession(ctx, "stored")
+		if err != nil || session.ID != "stored-rotated" || server.liveSessionID("stored-rotated") != "live-stored-rotated" {
+			t.Fatalf("GetSession rotated resume = %#v live=%q err=%v", session, server.liveSessionID("stored-rotated"), err)
+		}
+		if live := server.liveSessionID("stored"); live != "" {
+			t.Fatalf("old session key kept live mapping %q", live)
+		}
+	})
+
+	t.Run("accessors and missing live mapping replies", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		server := newGatewayBackedHermesServer(t, fake, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if server.Events() == nil || server.EventErrors() == nil || server.XDGDirs().Root == "" {
+			t.Fatal("server accessors returned empty values")
+		}
+		if live := server.anyLiveSessionID(); live != "" {
+			t.Fatalf("unexpected live session = %q", live)
+		}
+		server.rememberGatewaySession("", "live")
+		server.rememberGatewaySession("stored", "")
+		if live := server.liveSessionID("stored"); live != "" {
+			t.Fatalf("incomplete remember stored live %q", live)
+		}
+		created, err := server.CreateSession(ctx, "")
+		if err != nil || created.ID != "stored-1" || created.Model.ProviderID != "" {
+			t.Fatalf("CreateSession no model = %#v err=%v", created, err)
+		}
+		if list, err := server.ListSessions(ctx, "/other"); err != nil || len(list) != 0 {
+			t.Fatalf("ListSessions cwd mismatch = %#v err=%v", list, err)
+		}
+		if err := server.ReplyPermission(ctx, PermissionRequest{SessionID: "unmapped"}, "once", "ignored"); err == nil {
+			t.Fatal("ReplyPermission accepted missing live mapping")
+		}
+		if err := server.ReplyQuestion(ctx, QuestionRequest{SessionID: "unmapped"}, [][]string{{"a"}}); err == nil {
+			t.Fatal("ReplyQuestion accepted missing live mapping")
+		}
+		if err := server.RejectQuestion(ctx, QuestionRequest{SessionID: "unmapped"}); err == nil {
+			t.Fatal("RejectQuestion accepted missing live mapping")
+		}
+		for _, method := range []string{"approval.respond", "clarify.respond"} {
+			calls := fake.callsFor(method)
+			if len(calls) != 0 {
+				t.Fatalf("%s calls with missing mapping = %#v", method, calls)
+			}
+		}
+	})
+
+	t.Run("non-authoritative event drops", func(t *testing.T) {
+		server := &hermesServer{events: make(chan TurnEvent, 1)}
+		server.events <- TurnEvent{Type: "filled"}
+		server.forwardGatewayPart("stored", "message", Event{Type: "message.delta"}, "text")
+		server.forwardGatewayQuestion("stored", "live", Event{Payload: json.RawMessage(`{}`)})
+		if got := len(server.events); got != 1 {
+			t.Fatalf("event channel len = %d", got)
+		}
+	})
+}
+
+func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.activeEmpty = true
+	fake.resumeBuildDefault = "z-ai/glm-4.7"
+	fake.expectedPromptModel = "xai-oauth/grok-code-fast-1"
+	server := newGatewayBackedHermesServer(t, fake, "z-ai/glm-4.7")
+
+	child, err := server.GetSession(t.Context(), "stored-branch")
+	if err != nil || child.ID != "stored-branch" {
+		t.Fatalf("resume fork child = %#v err=%v", child, err)
+	}
+	if err := server.SetModel(t.Context(), child.ID, fake.expectedPromptModel); err != nil {
+		t.Fatalf("bind fork model: %v", err)
+	}
+	if _, err := server.SendMessage(t.Context(), child.ID, MessageRequest{Parts: []map[string]any{{valText: "prove model"}}}); err != nil {
+		t.Fatalf("prompt after fork model bind: %v", err)
+	}
+
+	resumeCalls := fake.callsFor("session.resume")
+	if len(resumeCalls) != 1 || resumeCalls[0].Params[keyEagerBuild] != true {
+		t.Fatalf("fork child resume calls = %#v", resumeCalls)
+	}
+	calls := fake.callMethods()
+	resumeIndex := slices.Index(calls, "session.resume")
+	modelIndex := slices.Index(calls, "config.set")
+	promptIndex := slices.Index(calls, "prompt.submit")
+	if resumeIndex < 0 || modelIndex <= resumeIndex || promptIndex <= modelIndex {
+		t.Fatalf("fork resume/model/prompt order = %#v", calls)
+	}
+
+	// Operations that obtain a live id without GetSession use the same eager
+	// rebind helper, so a model selection cannot enter the lazy-build window.
+	ensureFake := newFakeGatewayServer(t)
+	ensureServer := newGatewayBackedHermesServer(t, ensureFake, "")
+	if err := ensureServer.SetModel(t.Context(), "stored-direct", "xai-oauth/grok-code-fast-1"); err != nil {
+		t.Fatalf("ensure-live model bind: %v", err)
+	}
+	ensureResumeCalls := ensureFake.callsFor("session.resume")
+	if len(ensureResumeCalls) != 1 || ensureResumeCalls[0].Params[keyEagerBuild] != true {
+		t.Fatalf("ensure-live resume calls = %#v", ensureResumeCalls)
+	}
+}
+
+func TestHermesGatewayAuthoritativePublicationBackpressure(t *testing.T) {
+	server := &hermesServer{events: make(chan TurnEvent, 1)}
+	server.events <- TurnEvent{Type: "filled"}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		err := server.forwardGatewayToolPart(ctx, Part{Raw: json.RawMessage(`{"type":"tool"}`)}, Event{})
+		if err == nil {
+			err = server.forwardGatewayPermission(ctx, "stored", "live", "message", "tool", Event{Payload: json.RawMessage(`{}`)})
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("authoritative publication did not backpressure: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	if event := <-server.events; event.Type != "filled" {
+		t.Fatalf("saturated sentinel = %#v", event)
+	}
+	if event := <-server.events; event.Type != evtMessagePartUpdated {
+		t.Fatalf("first authoritative event = %#v", event)
+	}
+	if event := <-server.events; event.Type != evtApprovalRequest {
+		t.Fatalf("permission was starved behind tool event: %#v", event)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("authoritative publication: %v", err)
+	}
+}
+
+func TestHermesGatewayAuthoritativePublicationCancellation(t *testing.T) {
+	server := &hermesServer{events: make(chan TurnEvent, 1)}
+	server.events <- TurnEvent{Type: "filled"}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := server.forwardGatewayToolPart(ctx, Part{}, Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("saturated tool cancellation = %v", err)
+	}
+	if err := server.forwardGatewayPermission(ctx, "stored", "live", "message", "tool", Event{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("saturated permission cancellation = %v", err)
+	}
+}
+
+func TestHermesGatewayServerFailureBranches(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		method string
+		call   func(context.Context, *hermesServer) error
+	}{
+		{
+			name:   "create",
+			method: "session.create",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.CreateSession(ctx, "title")
+
+				return err
+			},
+		},
+		{
+			name:   "get resume",
+			method: "session.resume",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.GetSession(ctx, "stored")
+
+				return err
+			},
+		},
+		{
+			name:   "list",
+			method: "session.active_list",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.ListSessions(ctx, "")
+
+				return err
+			},
+		},
+		{
+			name:   "ensure live",
+			method: "session.resume",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
+				return err
+			},
+		},
+		{
+			name:   "submit",
+			method: "prompt.submit",
+			call: func(ctx context.Context, server *hermesServer) error {
+				server.rememberGatewaySession("stored", "live-stored")
+				_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
+				return err
+			},
+		},
+		{
+			name:   "history",
+			method: "session.history",
+			call: func(ctx context.Context, server *hermesServer) error {
+				server.rememberGatewaySession("stored", "live-stored")
+				_, err := server.Messages(ctx, "stored")
+
+				return err
+			},
+		},
+		{
+			name:   "messages ensure live",
+			method: "session.resume",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.Messages(ctx, "stored")
+
+				return err
+			},
+		},
+		{
+			name:   "branch",
+			method: "session.branch",
+			call: func(ctx context.Context, server *hermesServer) error {
+				server.rememberGatewaySession("stored", "live-stored")
+				_, err := server.Fork(ctx, "stored", "")
+
+				return err
+			},
+		},
+		{
+			name:   "fork ensure live",
+			method: "session.resume",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.Fork(ctx, "stored", "")
+
+				return err
+			},
+		},
+		{
+			name:   "model options",
+			method: "model.options",
+			call: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.ConfigProviders(ctx)
+
+				return err
+			},
+		},
+	} {
+		t.Run(tt.name+" error", func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			fake.setFail(tt.method)
+			server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := tt.call(ctx, server); err == nil {
+				t.Fatalf("%s error was nil", tt.name)
+			}
+		})
+	}
+
+	t.Run("fork retry resume error", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setBranchNotFoundOnce()
+		fake.setFail("session.resume")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		server.rememberGatewaySession("stored", "live-stored")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := server.Fork(ctx, "stored", ""); err == nil {
+			t.Fatal("fork retry resume error was nil")
+		}
+	})
+
+	for _, tt := range []struct {
+		name      string
+		configure func(*fakeGatewayServer)
+	}{
+		{
+			name: "missing branch session id",
+			configure: func(fake *fakeGatewayServer) {
+				fake.branchNoSession = true
+			},
+		},
+		{
+			name: "missing branch stored key",
+			configure: func(fake *fakeGatewayServer) {
+				fake.branchNoKey = true
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			tt.configure(fake)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			server.rememberGatewaySession("stored", "live-stored")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := server.Fork(ctx, "stored", ""); err == nil {
+				t.Fatal("fork schema drift error was nil")
+			}
+		})
+	}
+
+	t.Run("event stream closed mid turn", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setPromptEvents()
+		fake.setCloseAfterResult("prompt.submit")
+		server := newGatewayBackedHermesServer(t, fake, "")
+		server.rememberGatewaySession("stored", "live-stored")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+		if !errors.Is(err, ErrGatewayDisconnected) {
+			t.Fatalf("mid-turn close error = %v", err)
+		}
+		// The disconnect is wired into the server error channel so the prompt
+		// loop can fence the turn with the uniform hermes_turn_failed error.
+		select {
+		case fed := <-server.EventErrors():
+			if fed == nil {
+				t.Fatal("mid-turn disconnect fed nil error")
+			}
+		default:
+			t.Fatal("mid-turn disconnect not fed into EventErrors")
+		}
+	})
+
+	t.Run("context deadline while waiting for events", func(t *testing.T) {
+		fake := newFakeGatewayServer(t)
+		fake.setPromptEvents()
+		server := newGatewayBackedHermesServer(t, fake, "")
+		server.rememberGatewaySession("stored", "live-stored")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("deadline error = %v", err)
+		}
+	})
+}
+
+func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
+	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
+	root := testTraversableTempDir(t)
+	cwd := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
+		ACPSessionID:   "session/one",
+		Root:           root,
+		Cwd:            cwd,
+		ExecutablePath: helper,
+		DefaultModel:   "openai/gpt-test",
+		Env:            map[string]string{"BASE_ENV": "base"},
+		SessionEnv:     map[string]string{"SESSION_ENV": "carrier"},
+		ExtraPathDirs:  []string{t.TempDir()},
+		HealthTimeout:  5 * time.Second,
+		Logger:         slog.New(slog.DiscardHandler),
+		MCPServers: []acp.McpServer{
+			stdioMCPServer("stdio", "cmd", []string{"arg"}, map[string]string{"A": "1"}),
+			httpMCPServer("http", "https://example.test/mcp", map[string]string{"Authorization": "token"}),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	server, serverOK := client.(*hermesServer)
+	if !serverOK {
+		t.Fatalf("client type = %T", client)
+	}
+	if server.xdg.Root == "" || !strings.HasPrefix(filepath.Base(server.xdg.Root), "acp-go-hermes-runtime-") {
+		t.Fatalf("xdg dirs = %#v", server.xdg)
+	}
+	leasePath := filepath.Join(ControlDirForXDG(server.xdg.Root), LeaseFileName)
+	leaseData, err := os.ReadFile(leasePath)
+	if err != nil {
+		t.Fatalf("read lease: %v", err)
+	}
+	if !strings.Contains(string(leaseData), `"tokenHash"`) || strings.Contains(string(leaseData), "PasswordHash") {
+		t.Fatalf("lease = %s", leaseData)
+	}
+	configData, err := os.ReadFile(filepath.Join(server.xdg.Root, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read mcp config: %v", err)
+	}
+	if !strings.Contains(string(configData), "mcp_servers") || !strings.Contains(string(configData), "https://example.test/mcp") {
+		t.Fatalf("mcp config = %s", configData)
+	}
+	if _, err := client.CreateSession(ctx, "Created"); err != nil {
+		t.Fatalf("CreateSession through fake executable: %v", err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease after close = %v", err)
+	}
+}
+
+func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
+	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
+	root := testTraversableTempDir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	start := func(id ACPSessionIDString) Server {
+		t.Helper()
+
+		server, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
+			ACPSessionID:   id,
+			Root:           root,
+			Cwd:            t.TempDir(),
+			ExecutablePath: helper,
+			HealthTimeout:  5 * time.Second,
+			Logger:         slog.New(slog.DiscardHandler),
+		}))
+		if err != nil {
+			t.Fatalf("StartServer(%q): %v", id, err)
+		}
+
+		return server
+	}
+
+	first := start("session-a")
+	firstClosed := false
+	defer func() {
+		if !firstClosed {
+			_ = first.Close(context.Background())
+		}
+	}()
+	if _, err := first.CreateSession(ctx, "first-before-second"); err != nil {
+		t.Fatalf("first CreateSession before second startup: %v", err)
+	}
+
+	firstLease := readServerLease(t, first.XDGDirs())
+	second := start("session-b")
+	secondClosed := false
+	defer func() {
+		if !secondClosed {
+			_ = second.Close(context.Background())
+		}
+	}()
+
+	if _, err := InspectProcess(firstLease.PID); err != nil {
+		t.Fatalf("distinct session startup reaped first process: %v", err)
+	}
+	if got := readServerLease(t, first.XDGDirs()); got.PID != firstLease.PID || got.ProcessStartTime != firstLease.ProcessStartTime {
+		t.Fatalf("first lease changed across distinct session startup: before=%#v after=%#v", firstLease, got)
+	}
+	if _, err := first.CreateSession(ctx, "first-after-second"); err != nil {
+		t.Fatalf("first CreateSession after second startup: %v", err)
+	}
+	if _, err := second.CreateSession(ctx, "second"); err != nil {
+		t.Fatalf("second CreateSession: %v", err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	secondClosed = true
+	if _, err := first.CreateSession(ctx, "first-after-second-close"); err != nil {
+		t.Fatalf("first CreateSession after second close: %v", err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	firstClosed = true
+}
+
+func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
+	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
+	root := testTraversableTempDir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	options := StartOptions{
+		ACPSessionID:   "same-session",
+		Root:           root,
+		Cwd:            t.TempDir(),
+		ExecutablePath: helper,
+		HealthTimeout:  5 * time.Second,
+		Logger:         slog.New(slog.DiscardHandler),
+	}
+	first, err := StartServer(ctx, darwinTestStartOptions(t, options))
+	if err != nil {
+		t.Fatalf("first StartServer: %v", err)
+	}
+	firstClosed := false
+	defer func() {
+		if !firstClosed {
+			_ = first.Close(context.Background())
+		}
+	}()
+	oldLease := readServerLease(t, first.XDGDirs())
+
+	replacement, err := StartServer(ctx, darwinTestStartOptions(t, options))
+	if err != nil {
+		t.Fatalf("replacement StartServer: %v", err)
+	}
+	replacementClosed := false
+	defer func() {
+		if !replacementClosed {
+			_ = replacement.Close(context.Background())
+		}
+	}()
+	newLease := readServerLease(t, replacement.XDGDirs())
+	if first.XDGDirs().Root == replacement.XDGDirs().Root {
+		t.Fatalf("same-session replacement reused generation root %q", first.XDGDirs().Root)
+	}
+
+	if newLease.PID == oldLease.PID && newLease.ProcessStartTime == oldLease.ProcessStartTime {
+		t.Fatalf("same-session replacement retained old process identity: old=%#v new=%#v", oldLease, newLease)
+	}
+	if identity, inspectErr := InspectProcess(oldLease.PID); inspectErr != nil || identity.StartTime != oldLease.ProcessStartTime {
+		t.Fatalf("fresh generation disturbed predecessor process %d: %#v, %v", oldLease.PID, identity, inspectErr)
+	}
+	if _, err := first.CreateSession(ctx, "predecessor"); err != nil {
+		t.Fatalf("independent predecessor gateway became unusable: %v", err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("predecessor Close: %v", err)
+	}
+	firstClosed = true
+	if got := readServerLease(t, replacement.XDGDirs()); got != newLease {
+		t.Fatalf("predecessor Close changed replacement lease: want=%#v got=%#v", newLease, got)
+	}
+	if _, err := replacement.CreateSession(ctx, "replacement"); err != nil {
+		t.Fatalf("replacement CreateSession: %v", err)
+	}
+	if err := replacement.Close(ctx); err != nil {
+		t.Fatalf("replacement Close: %v", err)
+	}
+	replacementClosed = true
+	if _, err := os.Stat(filepath.Join(ControlDirForXDG(replacement.XDGDirs().Root), LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement lease after owner Close = %v", err)
+	}
+}
+
+func TestStartHermesServerRequiresDiscoveryResourceCallbacks(t *testing.T) {
+	_, err := StartServer(t.Context(), StartOptions{})
+	if err == nil || !strings.Contains(err.Error(), "resource callbacks are required") {
+		t.Fatalf("StartServer missing discovery callbacks error = %v", err)
+	}
+}
+
+func readServerLease(t *testing.T, dirs XDGDirs) ServerLease {
+	t.Helper()
+
+	directory := dirs.State
+	if dirs.Root != "" {
+		directory = ControlDirForXDG(dirs.Root)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, LeaseFileName))
+	if err != nil {
+		t.Fatalf("read server lease: %v", err)
+	}
+
+	var lease ServerLease
+	if err := json.Unmarshal(data, &lease); err != nil {
+		t.Fatalf("decode server lease: %v", err)
+	}
+
+	return lease
+}
+
+func TestStartHermesServerGatewayFaults(t *testing.T) {
+	ctx := context.Background()
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")})); err == nil {
+		t.Fatal("missing executable unexpectedly started")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: string([]byte{0})})); err == nil {
+		t.Fatal("invalid root unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
+		t.Fatal("invalid session path unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExtraPathDirs: []string{"relative"}})); err == nil {
+		t.Fatal("relative extra path directory unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{SessionEnv: map[string]string{"PATH": "/bad"}})); err == nil {
+		t.Fatal("session PATH unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Env: map[string]string{"BASH_ENV": "/bad"}})); err == nil {
+		t.Fatal("static BASH_ENV unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}})); err == nil {
+		t.Fatal("incomplete existing xdg unexpectedly succeeded")
+	}
+
+	restoreHermesClientSeams(t)
+	hermesControlMkdir = func(string, os.FileMode) error { return errors.New("control mkdir") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "control mkdir") {
+		t.Fatalf("control mkdir error = %v", err)
+	}
+	hermesControlMkdir = os.MkdirAll
+	hermesControlChmod = func(string, os.FileMode) error { return errors.New("control chmod") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "control chmod") {
+		t.Fatalf("control chmod error = %v", err)
+	}
+	hermesControlChmod = os.Chmod
+	hermesNativeHandoff = func(string, *ProcessIsolation) error { return errors.New("native handoff") }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
+		!strings.Contains(err.Error(), "native handoff") {
+		t.Fatalf("native handoff error = %v", err)
+	}
+	hermesNativeHandoff = handoffGeneratedNativeTree
+
+	hermesReapLeaseFile = func(string, *slog.Logger) bool { return true }
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil || !strings.Contains(err.Error(), "remains live") {
+		t.Fatalf("retained lease error = %v", err)
+	}
+	hermesReapLeaseFile = ReapLeaseFile
+
+	hermesWriteLease = func(string, ServerLease) error {
+		return errors.New("lease failed")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
+		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeOK),
+		ExistingXDG:    testXDGDirs(t),
+		HealthTimeout:  5 * time.Second,
+	})); err == nil || !strings.Contains(err.Error(), "lease failed") {
+		t.Fatalf("lease failure error = %v", err)
+	}
+
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
+		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeStatusOnly),
+		ExistingXDG:    testXDGDirs(t),
+		HealthTimeout:  500 * time.Millisecond,
+	})); err == nil {
+		t.Fatal("gateway readiness failure unexpectedly succeeded")
+	}
+}
+
+// TestGatewaySupervisorReconnectsOnIdleDisconnect proves HW4 idle reconnect:
+// when the WebSocket drops while no turn is in progress, the supervisor redials
+// the still-running process and swaps in the new connection.
+func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	redialed := make(chan struct{}, 2)
+	server.enableReconnect(func(context.Context) (*Client, error) {
+		client := fake.dialClient(t)
+		redialed <- struct{}{}
+
+		return client, nil
+	})
+	original := server.gatewayClient()
+
+	// Simulate an idle disconnect by dropping the current connection.
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+
+	select {
+	case <-redialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not reconnect after idle disconnect")
+	}
+	swapDeadline := time.After(2 * time.Second)
+	swapPoll := time.NewTicker(5 * time.Millisecond)
+	defer swapPoll.Stop()
+	for server.gatewayClient() == original {
+		select {
+		case <-swapDeadline:
+			t.Fatal("gateway not swapped after reconnect")
+		case <-swapPoll.C:
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := server.CreateSession(ctx, ""); err != nil {
+		t.Fatalf("CreateSession after reconnect: %v", err)
+	}
+	if err := server.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	reconnies := make(chan struct{}, 4)
+	server.enableReconnect(func(context.Context) (*Client, error) {
+		client := fake.dialClient(t)
+		reconnies <- struct{}{}
+
+		return client, nil
+	})
+
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+
+	select {
+	case <-reconnies:
+		t.Fatal("reconnected while a turn was in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+	server.endGatewayTurn()
+	select {
+	case <-reconnies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not reconnect after the turn ended")
+	}
+	if err := server.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
+	reachedIdle := make(chan struct{})
+	releaseIdle := make(chan struct{})
+
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.afterTurnIdle = func() {
+		close(reachedIdle)
+		<-releaseIdle
+	}
+
+	reconnied := make(chan struct{}, 1)
+	server.enableReconnect(func(context.Context) (*Client, error) {
+		reconnied <- struct{}{}
+
+		return fake.dialClient(t), nil
+	})
+
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	_ = original.Close(websocket.StatusNormalClosure, "drop")
+	server.endGatewayTurn()
+	<-reachedIdle
+
+	// Shut down after the turn becomes idle but before the supervisor can
+	// redial; the supervisor must stop without reconnecting.
+	close(server.closed)
+	close(releaseIdle)
+	server.supervisorWG.Wait()
+
+	select {
+	case <-reconnied:
+		t.Fatal("supervisor reconnected during shutdown")
+	case <-time.After(150 * time.Millisecond):
+	}
+	_ = original.Close(websocket.StatusNormalClosure, "done")
+}
+
+func TestSuperviseGatewayStopsWhileWaitingForClosedTurn(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.enableReconnect(func(context.Context) (*Client, error) {
+		return fake.dialClient(t), nil
+	})
+	server.beginGatewayTurn()
+	original := server.gatewayClient()
+	if err := original.Close(websocket.StatusNormalClosure, "drop"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	close(server.closed)
+	server.endGatewayTurn()
+	server.supervisorWG.Wait()
+}
+
+func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
+	restoreLeaseReapSeams(t)
+	leaseReapSleep = func(time.Duration) {}
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.turnIdle = sync.NewCond(&server.connMu)
+	original := server.gatewayClient()
+	server.redial = func(context.Context) (*Client, error) {
+		return nil, errors.New("no dial")
+	}
+	// Redial error with the server still open: logs and backs off.
+	server.reconnectGateway()
+
+	// Redial succeeds but the server has since closed: the new connection is
+	// discarded instead of being installed.
+	close(server.closed)
+	server.redial = func(context.Context) (*Client, error) {
+		return fake.dialClient(t), nil
+	}
+	server.reconnectGateway()
+	if server.gatewayClient() != original {
+		t.Fatal("reconnect installed a connection after the server closed")
+	}
+	_ = original.Close(websocket.StatusNormalClosure, "done")
+
+	// endGatewayTurn is safe with no active turn and without reconnect wired.
+	plain := &hermesServer{}
+	plain.endGatewayTurn()
+}
+
+func TestXDGLeaseAndHelpers(t *testing.T) {
+	root := t.TempDir()
+	xdg, err := CreateXDGDirs(root, "")
+	if err != nil {
+		t.Fatalf("CreateXDGDirs: %v", err)
+	}
+	if filepath.Base(xdg.Root) != "session" {
+		t.Fatalf("default xdg root = %#v", xdg)
+	}
+	if err := ensureXDGDirs(XDGDirs{Root: "", Data: "x", Config: "x", Cache: "x", State: "x"}); err == nil {
+		t.Fatal("ensureXDGDirs accepted empty root")
+	}
+	if err := WriteLease(xdg.State, ServerLease{PID: 0, Port: 1, TokenHash: PasswordHash("token")}); err != nil {
+		t.Fatalf("WriteLease: %v", err)
+	}
+	zeroPIDLease := filepath.Join(xdg.State, LeaseFileName)
+	if retained := ReapLeaseFile(zeroPIDLease, nil); retained {
+		t.Fatal("zero-PID lease was retained")
+	}
+	if _, err := os.Stat(zeroPIDLease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("zero-PID lease after reap = %v", err)
+	}
+	badRoot := string([]byte{0})
+	if err := WriteLease(badRoot, ServerLease{}); err == nil {
+		t.Fatal("WriteLease accepted invalid path")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "bad", "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	malformedLease := filepath.Join(root, "bad", "state", LeaseFileName)
+	if err := os.WriteFile(malformedLease, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if retained := ReapLeaseFile(malformedLease, nil); retained {
+		t.Fatal("malformed lease was retained")
+	}
+	if _, err := os.Stat(malformedLease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed lease after reap = %v", err)
+	}
+	if got := SafePathName("../a:b"); got != "__a_b" {
+		t.Fatalf("SafePathName = %q", got)
+	}
+	for _, value := range []any{float64(-1), int(-1), json.Number("bad")} {
+		if got, ok := IntFromNumber(value); ok || got != 0 {
+			t.Fatalf("IntFromNumber(%#v) = %d, %v", value, got, ok)
+		}
+	}
+	if got, ok := IntFromNumber(json.Number("12")); !ok || got != 12 {
+		t.Fatalf("IntFromNumber json number = %d, %v", got, ok)
+	}
+}
+
+func TestRemoveLeaseFileIfOwned(t *testing.T) {
+	owner := ServerLease{
+		PID:              123,
+		Port:             456,
+		StartedAt:        789,
+		TokenHash:        PasswordHash("owner"),
+		XDGRoot:          t.TempDir(),
+		ProcessStartTime: "start",
+	}
+	state := t.TempDir()
+	leasePath := filepath.Join(state, LeaseFileName)
+
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove absent lease: %v", err)
+	}
+	if err := removeLeaseFileIfOwned(state, owner); err == nil {
+		t.Fatal("remove directory lease unexpectedly succeeded")
+	}
+	if err := os.WriteFile(leasePath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err == nil {
+		t.Fatal("remove malformed lease unexpectedly succeeded")
+	}
+
+	other := owner
+	other.TokenHash = PasswordHash("other")
+	if err := WriteLease(state, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove foreign lease: %v", err)
+	}
+	if got := readServerLease(t, XDGDirs{State: state}); got != other {
+		t.Fatalf("foreign lease changed: want=%#v got=%#v", other, got)
+	}
+
+	if err := WriteLease(state, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
+		t.Fatalf("remove owned lease: %v", err)
+	}
+	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned lease after remove = %v", err)
+	}
+}
+
+func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
+	root := t.TempDir()
+	xdg, err := CreateXDGDirs(root, "lease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leasePath := filepath.Join(xdg.State, LeaseFileName)
+	baseIdentity := ProcessIdentity{
+		StartTime: "start",
+		Cmdline:   []string{"/usr/bin/hermes", "serve"},
+		Env: map[string]string{
+			"HERMES_HOME":                    xdg.Root,
+			"HERMES_DASHBOARD_SESSION_TOKEN": "token",
+		},
+	}
+	baseLease := ServerLease{
+		PID:              999999,
+		TokenHash:        PasswordHash("token"),
+		XDGRoot:          xdg.Root,
+		ProcessStartTime: "start",
+	}
+
+	restoreHermesClientSeams(t)
+	InspectProcess = func(int) (ProcessIdentity, error) {
+		return baseIdentity, nil
+	}
+	if !leaseMatchesProcess(leasePath, baseLease) {
+		t.Fatal("matching lease did not match")
+	}
+	if !cmdlineLooksLikeHermesServe([]string{"/tmp/hermes"}) || cmdlineLooksLikeHermesServe([]string{"node"}) {
+		t.Fatal("cmdline Hermes detection mismatch")
+	}
+	if leaseMatchesProcess(leasePath, ServerLease{PID: 0, ProcessStartTime: "start"}) {
+		t.Fatal("zero pid lease matched")
+	}
+	if leaseMatchesProcess(leasePath, ServerLease{PID: 1}) {
+		t.Fatal("missing start time lease matched")
+	}
+
+	for _, tt := range []struct {
+		name     string
+		identity ProcessIdentity
+		lease    ServerLease
+		err      error
+	}{
+		{name: "inspect error", identity: baseIdentity, lease: baseLease, err: errors.New("inspect failed")},
+		{name: "start mismatch", identity: ProcessIdentity{StartTime: "other", Cmdline: baseIdentity.Cmdline, Env: baseIdentity.Env}, lease: baseLease},
+		{name: "home mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
+		{name: "token mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
+		{name: "root mismatch", identity: baseIdentity, lease: ServerLease{PID: baseLease.PID, TokenHash: baseLease.TokenHash, XDGRoot: t.TempDir(), ProcessStartTime: baseLease.ProcessStartTime}},
+		{name: "cmdline mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: []string{"node"}, Env: baseIdentity.Env}, lease: baseLease},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			InspectProcess = func(int) (ProcessIdentity, error) {
+				return tt.identity, tt.err
+			}
+			if leaseMatchesProcess(leasePath, tt.lease) {
+				t.Fatal("mismatched lease matched")
+			}
+		})
+	}
+
+	restoreLeaseReapSeams(t)
+	LeaseReapTimeout = 40 * time.Millisecond
+	LeaseReapPollInterval = time.Millisecond
+
+	// Confirmed dead: the process matches for identity but is gone when the
+	// ladder verifies it, so the lease is removed.
+	inspectCalls := 0
+	InspectProcess = func(int) (ProcessIdentity, error) {
+		inspectCalls++
+		if inspectCalls == 1 {
+			return baseIdentity, nil
+		}
+
+		return ProcessIdentity{}, os.ErrNotExist
+	}
+	if err := WriteLease(xdg.State, baseLease); err != nil {
+		t.Fatal(err)
+	}
+	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
+	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease after reap of dead process = %v", err)
+	}
+
+	// Survives termination: the process stays alive and identity-matched, so
+	// the lease is KEPT for the next startup retry.
+	InspectProcess = func(int) (ProcessIdentity, error) {
+		return baseIdentity, nil
+	}
+	if err := WriteLease(xdg.State, baseLease); err != nil {
+		t.Fatal(err)
+	}
+	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
+	if _, err := os.Stat(leasePath); err != nil {
+		t.Fatalf("lease of surviving process was removed: %v", err)
+	}
+	_ = os.Remove(leasePath)
+	ReapLeaseFile(t.TempDir(), nil)
+}
+
+func TestNativeUnmarshalErrors(t *testing.T) {
+	var part Part
+	if err := part.UnmarshalJSON([]byte("{")); err == nil {
+		t.Fatal("Part accepted malformed JSON")
+	}
+	var event TurnEvent
+	if err := event.UnmarshalJSON([]byte("{")); err == nil {
+		t.Fatal("TurnEvent accepted malformed JSON")
+	}
+	var providers ProvidersResponse
+	if err := providers.UnmarshalJSON([]byte("{")); err == nil {
+		t.Fatal("ProvidersResponse accepted malformed JSON")
+	}
+}
+
+const (
+	fakeGatewayModeOK         = "ok"
+	fakeGatewayModeStatusOnly = "status-only"
+)
+
+func TestFakeHermesGatewayProcessHelper(t *testing.T) {
+	if os.Getenv("ACP_GO_HERMES_GATEWAY_HELPER") != "1" {
+		return
+	}
+	if err := runFakeHermesGatewayProcess(os.Args, os.Getenv("ACP_GO_HERMES_GATEWAY_MODE")); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+// mcpEnvCapturePrefix marks the argv entry naming where the fake gateway
+// generation writes the MCP secret environment it was launched with. The
+// destination travels in argv because the adapter's governed environment
+// namespace is reserved for real options and test scaffolding must not claim a
+// name inside it.
+const mcpEnvCapturePrefix = "-capture-mcp-env="
+
+// fakeHermesGatewayExecutable writes a launcher for the fake gateway
+// generation. Anything in extraArgs reaches that generation's argv ahead of the
+// adapter's own arguments.
+func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string) string {
+	t.Helper()
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test executable: %v", err)
+	}
+	script := filepath.Join(t.TempDir(), "fake-hermes")
+	extra := ""
+	for _, arg := range extraArgs {
+		extra += fmt.Sprintf("%q ", arg)
+	}
+	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_GATEWAY_HELPER=1 ACP_GO_HERMES_GATEWAY_MODE=%s exec %q -test.run=TestFakeHermesGatewayProcessHelper -- %s\"$@\"\n", mode, testBinary, extra)
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatalf("write fake executable: %v", err)
+	}
+
+	return script
+}
+
+func runFakeHermesGatewayProcess(args []string, mode string) error {
+	for _, arg := range args {
+		if arg == "--version" {
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
+
+			return nil
+		}
+	}
+	for _, arg := range args {
+		capture, ok := strings.CutPrefix(arg, mcpEnvCapturePrefix)
+		if !ok {
+			continue
+		}
+		values := map[string]string{}
+		for _, entry := range os.Environ() {
+			key, value, found := strings.Cut(entry, "=")
+			if found && strings.HasPrefix(key, sharedMCPSecretEnvPrefix) {
+				values[key] = value
+			}
+		}
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(capture, encoded, 0o600); err != nil {
+			return err
+		}
+
+		break
+	}
+	port := ""
+	for i, arg := range args {
+		if arg == "--port" && i+1 < len(args) {
+			port = args[i+1]
+
+			break
+		}
+	}
+	if port == "" {
+		return fmt.Errorf("missing --port in args %q", strings.Join(args, " "))
+	}
+	_, _ = fmt.Fprintln(os.Stdout, "native stdout noise before websocket readiness")
+	_, _ = fmt.Fprintln(os.Stderr, "native stderr noise before websocket readiness")
+	handler := http.NewServeMux()
+	handler.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	if mode != fakeGatewayModeStatusOnly {
+		handler.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+			token := os.Getenv("HERMES_DASHBOARD_SESSION_TOKEN")
+			if token != "" && r.URL.Query().Get("token") != token && r.Header.Get("X-Hermes-Session-Token") != token {
+				w.WriteHeader(http.StatusUnauthorized)
+
+				return
+			}
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "done")
+			writeGatewayEvent(r.Context(), conn, Event{Type: "gateway.ready"})
+			for {
+				typ, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				if typ != websocket.MessageText {
+					continue
+				}
+				var req struct {
+					ID     int64           `json:"id"`
+					Method string          `json:"method"`
+					Params json.RawMessage `json:"params"`
+				}
+				if err := json.Unmarshal(data, &req); err != nil {
+					return
+				}
+				params := map[string]any{}
+				_ = json.Unmarshal(req.Params, &params)
+				result := gatewayProcessResult(req.Method, params)
+				if err := writeGatewayResult(r.Context(), conn, req.ID, result); err != nil {
+					return
+				}
+			}
+		})
+	}
+	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+
+	return server.ListenAndServe()
+}
+
+func gatewayProcessResult(method string, params map[string]any) any {
+	switch method {
+	case "session.create":
+		return map[string]any{"session_id": "live-fake", "stored_session_id": "stored-fake"}
+	case "session.resume":
+		stored, _ := params["session_id"].(string)
+
+		return map[string]any{"session_id": "live-" + stored, "session_key": stored}
+	case "session.title":
+		return map[string]any{"pending": false, "title": params["title"]}
+	case "session.active_list":
+		return map[string]any{"sessions": []any{}}
+	case "session.list":
+		return map[string]any{"sessions": []map[string]any{{"id": "stored-fake", "title": "Hermes session"}}}
+	case "session.history":
+		return map[string]any{"count": 0, "messages": []any{}}
+	case "model.options":
+		return map[string]any{"model": "anthropic/claude-sonnet-4", "provider": "", "providers": []any{}}
+	case "image.attach_bytes":
+		return map[string]any{"attached": true}
+	default:
+		return map[string]any{}
+	}
+}
+
+func writeGatewayResult(ctx context.Context, conn *websocket.Conn, id int64, result any) error {
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	if err != nil {
+		return err
+	}
+
+	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+func writeGatewayEvent(ctx context.Context, conn *websocket.Conn, event Event) {
+	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": event})
+	_ = conn.Write(ctx, websocket.MessageText, data)
+}
+
+func restoreHermesClientSeams(t *testing.T) {
+	t.Helper()
+	marshalIndent := hermesMarshalIndent
+	writeLease2 := hermesWriteLease
+	reapLeaseFile := hermesReapLeaseFile
+	controlMkdir := hermesControlMkdir
+	controlChmod := hermesControlChmod
+	nativeHandoff := hermesNativeHandoff
+	inspectProcess := InspectProcess
+	t.Cleanup(func() {
+		hermesMarshalIndent = marshalIndent
+		hermesWriteLease = writeLease2
+		hermesReapLeaseFile = reapLeaseFile
+		hermesControlMkdir = controlMkdir
+		hermesControlChmod = controlChmod
+		hermesNativeHandoff = nativeHandoff
+		InspectProcess = inspectProcess
+	})
+}
+
+func restoreLeaseReapSeams(t *testing.T) {
+	t.Helper()
+	timeout := LeaseReapTimeout
+	interval := LeaseReapPollInterval
+	sleep := leaseReapSleep
+	now := leaseReapNow
+	t.Cleanup(func() {
+		LeaseReapTimeout = timeout
+		LeaseReapPollInterval = interval
+		leaseReapSleep = sleep
+		leaseReapNow = now
+	})
+}
+
+// testTraversableTempDir is a scratch parent the isolated identity can enter.
+// t.TempDir cannot stand in: it nests its leaf under a 0700 directory, so every
+// generated tree beneath it is refused for an ancestry the target identity
+// cannot traverse.
+func testTraversableTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("", "acp-go-hermes-test-")
+	if err != nil {
+		t.Fatalf("create traversable test directory: %v", err)
+	}
+	if err = os.Chmod(directory, 0o711); err != nil {
+		t.Fatalf("make test directory traversable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+
+	return directory
+}
+
+func testXDGDirs(t *testing.T) XDGDirs {
+	t.Helper()
+	dirs, err := CreateGenerationXDGDirs(testTraversableTempDir(t))
+	if err != nil {
+		t.Fatalf("CreateGenerationXDGDirs: %v", err)
+	}
+
+	return dirs
+}
+
+func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
+	t.Helper()
+	options.AmbientEnvironment = testAmbientEnvironment()
+	if options.AcquireDiscoveryResources == nil {
+		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
+	}
+	if options.RetainDiscoveryRoot == nil {
+		options.RetainDiscoveryRoot = func(string, error) {}
+	}
+	if runtime.GOOS != "darwin" {
+		return options
+	}
+	options.DarwinBestEffortContainment = true
+	if strings.ContainsRune(options.Root, '\x00') {
+		return options
+	}
+	if options.ExistingXDG.Root != "" {
+		options.ScratchParent = filepath.Dir(options.ExistingXDG.Root)
+	} else if options.ScratchParent == "" {
+		options.ScratchParent = t.TempDir()
+	}
+
+	return options
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+func stdioMCPServer(name string, command string, args []string, env map[string]string) acp.McpServer {
+	variables := make([]acp.EnvVariable, 0, len(env))
+	for key, value := range env {
+		variables = append(variables, acp.EnvVariable{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Stdio: &acp.McpServerStdio{
+		Name:    name,
+		Command: command,
+		Args:    append([]string(nil), args...),
+		Env:     variables,
+	}}
+}
+
+func httpMCPServer(name string, url string, headers map[string]string) acp.McpServer {
+	values := make([]acp.HttpHeader, 0, len(headers))
+	for key, value := range headers {
+		values = append(values, acp.HttpHeader{Name: key, Value: value})
+	}
+
+	return acp.McpServer{Http: &acp.McpServerHttpInline{
+		Name:    name,
+		Url:     url,
+		Headers: values,
+	}}
+}
+
+// T1 — provider error → structured failure (native boundary = fake gateway).
+func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	for _, tt := range []struct {
+		name     string
+		events   []Event
+		message  string
+		status   int
+		provider string
+	}{
+		{
+			name: "message.complete finish error (rate limit)",
+			events: []Event{{
+				Type:    evtMessageComplete,
+				Payload: json.RawMessage(`{"finish":"error","error":{"message":"rate limited by upstream","statusCode":429,"providerCode":"rate_limit"}}`),
+			}},
+			message:  "rate limited by upstream",
+			status:   429,
+			provider: "rate_limit",
+		},
+		{
+			name: "message.complete status error (billing)",
+			events: []Event{{
+				Type:    evtMessageComplete,
+				Payload: json.RawMessage(`{"text":"HTTP 402: This request requires more credits","usage":{"total_tokens":0},"status":"error"}`),
+			}},
+			message: "HTTP 402: This request requires more credits",
+		},
+		{
+			name: "session.error event (auth)",
+			events: []Event{{
+				Type:    evtSessionError,
+				Payload: json.RawMessage(`{"error":{"message":"invalid api key","statusCode":401,"providerCode":"auth_error"}}`),
+			}},
+			message:  "invalid api key",
+			status:   401,
+			provider: "auth_error",
+		},
+		{
+			name: "session.error event (flat fields)",
+			events: []Event{{
+				Type:    evtSessionError,
+				Payload: json.RawMessage(`{"message":"gateway exploded","statusCode":500,"providerCode":"explode"}`),
+			}},
+			message:  "gateway exploded",
+			status:   500,
+			provider: "explode",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			fake.setPromptEvents(tt.events...)
+			server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+			server.rememberGatewaySession("stored", "live-stored")
+
+			_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+
+			var failure *TurnFailureError
+			if !errors.As(err, &failure) {
+				t.Fatalf("SendMessage error = %v (%T), want *TurnFailureError", err, err)
+			}
+
+			if failure.cause != CauseProvider {
+				t.Fatalf("cause = %q, want provider", failure.cause)
+			}
+
+			if !strings.Contains(failure.message, tt.message) {
+				t.Fatalf("message = %q, want substring %q", failure.message, tt.message)
+			}
+
+			if failure.statusCode != tt.status {
+				t.Fatalf("statusCode = %d, want %d", failure.statusCode, tt.status)
+			}
+
+			if failure.providerCode != tt.provider {
+				t.Fatalf("providerCode = %q, want %q", failure.providerCode, tt.provider)
+			}
+		})
+	}
+}
+
+// Provider-looking assistant text is not itself an error. Only Hermes' native
+// terminal status (or its structured finish/error fields) classifies the turn,
+// so ordinary model content can contain the same words without brittle text
+// matching in the adapter.
+func TestTurnFailureProviderTextWithCompleteStatusSucceeds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents(Event{
+		Type:    evtMessageComplete,
+		Payload: json.RawMessage(`{"text":"HTTP 402: This request requires more credits","usage":{"total_tokens":4},"status":"complete"}`),
+	})
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if err != nil {
+		t.Fatalf("complete turn failed from assistant text: %v", err)
+	}
+
+	if message.Info.Finish != valStop || message.Info.Tokens.Total != 4 || len(message.Parts) != 1 || message.Parts[0].Text != "HTTP 402: This request requires more credits" {
+		t.Fatalf("complete turn = %#v, want exact assistant text", message)
+	}
+}
+
+// reportGatewayDisconnect substitutes the stream-closed sentinel when the read
+// loop closed without a specific error (a clean close).
+func TestReportGatewayDisconnectNilCause(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+
+	err := server.reportGatewayDisconnect(nil)
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("nil-cause disconnect = %v, want transport", err)
+	}
+
+	if failure.message != errGatewayStreamClosed.Error() {
+		t.Fatalf("nil-cause message = %q, want %q", failure.message, errGatewayStreamClosed.Error())
+	}
+}
+
+// An abrupt (frameless) disconnect surfaces the real transport read error the
+// gateway read loop parked, not the clean stream-closed sentinel.
+func TestTurnFailureAbruptDisconnectRecoversRealCause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptEvents() // no completion: the turn waits, then the peer drops
+	fake.setCloseNowAfterResult("prompt.submit")
+	server := newGatewayBackedHermesServer(t, fake, "")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if !IsGatewayDisconnect(err) {
+		t.Fatalf("abrupt-close error = %v, want a disconnect", err)
+	}
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("abrupt-close failure = %v, want transport TurnFailureError", err)
+	}
+
+	if failure.message == errGatewayStreamClosed.Error() {
+		t.Fatalf("abrupt disconnect surfaced the sentinel instead of the real read error")
+	}
+}
+
+// T4 — one malformed gateway line is skipped without hanging or misreporting the
+// turn: the internal client records it and the turn completes normally.
+func TestTurnFailureMalformedLineNotFatal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	fake := newFakeGatewayServer(t)
+	fake.setPromptRawFrames("this is not json{")
+	fake.setPromptEvents(Event{
+		Type:    evtMessageComplete,
+		Payload: json.RawMessage(`{"usage":{"total_tokens":3}}`),
+	})
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+	server.rememberGatewaySession("stored", "live-stored")
+
+	message, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "hi"}}})
+	if err != nil {
+		t.Fatalf("malformed line was fatal to the turn: %v", err)
+	}
+
+	if message.Info.Finish != valStop || message.Info.Tokens.Total != 3 {
+		t.Fatalf("turn did not complete cleanly after malformed line: %#v", message.Info)
+	}
+}
+
+// TestReportGatewayDisconnectCarriesRealCause proves a transport disconnect
+// carries the real cause (never a bare EOF / generic string) at the gateway
+// boundary: reportGatewayDisconnect classifies it as a transport turn failure
+// and feeds the real cause into EventErrors.
+func TestReportGatewayDisconnectCarriesRealCause(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	server := newGatewayBackedHermesServer(t, fake, "")
+
+	err := server.reportGatewayDisconnect(errors.New("read tcp 127.0.0.1: connection reset by peer"))
+	if !IsGatewayDisconnect(err) {
+		t.Fatalf("reportGatewayDisconnect error is not a disconnect: %v", err)
+	}
+
+	var failure *TurnFailureError
+	if !errors.As(err, &failure) || failure.cause != CauseTransport {
+		t.Fatalf("disconnect failure = %v, want transport TurnFailureError", err)
+	}
+
+	if !strings.Contains(failure.message, "connection reset by peer") {
+		t.Fatalf("disconnect message = %q, want real cause", failure.message)
+	}
+
+	select {
+	case fed := <-server.EventErrors():
+		if !strings.Contains(fed.Error(), "connection reset by peer") {
+			t.Fatalf("fed error = %v, want real cause", fed)
+		}
+	default:
+		t.Fatal("disconnect cause not fed into EventErrors")
+	}
+}

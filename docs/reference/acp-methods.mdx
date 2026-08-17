@@ -1,0 +1,56 @@
+---
+title: ACP Methods
+description: The ACP methods the adapter implements and the one native extension.
+---
+
+## Stable methods
+
+| Method | Behavior |
+|---|---|
+| `initialize` | Advertises capabilities; records client capabilities. |
+| `authenticate` | Rejected — no auth methods advertised. |
+| `logout` | No-op. |
+| `session/new` | Start a session with a fresh wrapper generation and, by default, an isolated native home. |
+| `session/load` | Hydrate, resume, and replay `session.history`. |
+| `session/resume` | Hydrate and resume without replay. |
+| `session/list` | List stored sessions. |
+| `session/prompt` | Run one native turn and stream updates. |
+| `session/cancel` | Cancel the in-flight turn. |
+| `session/close` | Close the session and stop its process. |
+| `session/delete` | Tombstone the store, then best-effort native delete. |
+| `session/set_config_option` | Apply a config option such as `model`. |
+
+## Provider-auth extension methods
+
+These seven session-scoped legs broker provider OAuth through the
+`hermes serve` REST auth API. They are advertised — and answer — only while
+`-provider-auth-root` and `-shared-hermes-home` name usable durable directories;
+otherwise every one returns method-not-found.
+
+| Method | Params | Result |
+|---|---|---|
+| `_hermes/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_hermes/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url?, message, userCode?, callbackInput?, flowId, flowExpiresAt, pollIntervalMs?}` |
+| `_hermes/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_hermes/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, expiresAt?, reason?}` |
+| `_hermes/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_hermes/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_hermes/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+Every request object is closed: an unknown, duplicate, or missing field is
+rejected with `-32602` naming the field path. `connectionId` is minted by the
+host and enters durable values-free lineage, so it is bounded where it enters:
+at most 128 bytes drawn from `A-Z`, `a-z`, `0-9`, `-`, and `_`. A value outside
+that shape is `-32602` on `connectionId`. Every leg failure is
+`hermes_auth_failed` (`-32000`) with a closed `cause`, and no native message
+text ever crosses. See [Authentication](/docs/features/authentication).
+
+## Extensions and unsupported methods
+
+`session/set_mode` returns method-not-found. The only native extension method is
+`_hermes/session/fork`; the only native notification is `_hermes/rawEvent` (see
+[Raw events](/docs/features/raw-events)).
+
+Command listing is intentionally silent in v1. MCP accepts `stdio` and `http`
+server definitions; `sse` and ACP-transport definitions are rejected during
+session start.

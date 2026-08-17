@@ -1,0 +1,48 @@
+---
+title: Overview
+description: What acp-go-hermes is, the boundary between the adapter and Hermes, and where to go next.
+---
+
+`acp-go-hermes` exposes Hermes as an embeddable [Agent Client Protocol](https://agentclientprotocol.com/)
+agent. It runs one isolated loopback `hermes serve` process per ACP session and
+maps native WebSocket JSON-RPC gateway events to ACP methods and notifications.
+
+Use it either as a standalone ACP subprocess (`acp-go-hermes`) launched by an
+editor or ACP host, or as an embedded Go adapter through `hermesacp.Serve`.
+
+## What the adapter owns
+
+Hermes owns model execution, provider authentication, and native durable state.
+This adapter owns everything between the ACP host and that harness:
+
+- ACP method dispatch and the `Serve`/`Agent` public API.
+- Launching and supervising one `hermes serve` process per session. Homes are
+  isolated by default; explicit shared-home mode uses one durable official
+  Hermes residence while retaining per-session processes and wrapper controls.
+- Loopback WebSocket gateway hygiene: connect, reconnect, and terminal
+  turn-failure fencing.
+- Prompt streaming, permissions, elicitation, and usage mapping.
+- Optional durable session mirroring in the `hermes-state-db-v1` store format.
+
+## What it does not own
+
+The adapter never manages your real Hermes authentication and never persists
+credentials. Provider keys stay in the environment; native state stays inside
+per-session homes.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/docs/get-started/quickstart">
+    Clone the repo and reach your first ACP turn in a few steps.
+  </Card>
+  <Card title="Run modes" href="/docs/get-started/run-modes">
+    Standalone binary versus embedded `Serve`.
+  </Card>
+  <Card title="Sessions" href="/docs/core/sessions">
+    The session lifecycle, IDs, and resume model.
+  </Card>
+  <Card title="Go API" href="/docs/reference/go-api">
+    The public options and builders index into pkg.go.dev.
+  </Card>
+</CardGroup>

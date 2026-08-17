@@ -1,0 +1,931 @@
+//nolint:goconst // User-facing native fallback titles remain explicit at their lifecycle boundaries.
+package hermesacp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+// Turn-lifecycle reply vocabulary shared with the prompt mapping.
+const (
+	valCancelled     = "cancelled"
+	valReject        = "reject"
+	valSessionClosed = "session closed"
+)
+
+type turnSettlementState uint8
+
+const (
+	turnSettlementIdle turnSettlementState = iota
+	turnSettlementOpen
+	turnSettlementCommitting
+	turnSettlementCancelled
+)
+
+type session struct {
+	agent                 *Agent
+	id                    acp.SessionId
+	cwd                   string
+	additionalDirectories []string
+	mcpServers            []acp.McpServer
+	idmap                 idmapRecord
+	title                 string
+	updatedAt             string
+	providerID            string
+	modelID               string
+	mode                  string
+	env                   map[string]string
+	extraPathDirs         []string
+	rawMessages           rawMessageConfig
+
+	client nativehermes.Server
+	// operationJournal is non-nil only until the initial New/Fork store bundle
+	// has been durably published and the session registered in this Agent.
+	operationJournal *sessionOperationJournal
+
+	turn                chan struct{}
+	lifecycleMu         sync.Mutex
+	cancelMu            sync.Mutex
+	toolMu              sync.Mutex
+	rawEventMu          sync.Mutex
+	mu                  sync.Mutex
+	turnInFlight        bool
+	cancel              context.CancelFunc
+	turnDone            <-chan struct{}
+	cancelled           bool
+	rawSeq              int64
+	seenParts           map[string]string
+	pending             map[string]nativehermes.PermissionRequest
+	questions           map[string]nativehermes.QuestionRequest
+	processedPermission map[string]struct{}
+	processedQuestion   map[string]struct{}
+	turnEpoch           uint64
+	turnNonce           string
+	turnSettlement      turnSettlementState
+	activeMessageIDs    map[string]struct{}
+	toolStates          map[string]hermesToolState
+	failedStreamEpochs  map[uint64]struct{}
+	failedMessageIDs    map[string]struct{}
+	suppressNextBacklog bool
+	mcpReloadComplete   bool
+	runtimeNeedsResume  bool
+	fencedTurnEpoch     uint64
+	turnFenceErr        error
+	poisonCause         string
+	committedTerminal   SessionStoreTerminalState
+	closed              bool
+}
+
+// reloadMCPForAuthorizedTurn closes the gap between native process startup and
+// turn-scoped MCP authorization. The descriptor is stable across both phases,
+// but an HTTP MCP server can intentionally expose only runtime_ready until the
+// host arms the first turn. Hermes caches its startup discovery, so force one
+// bounded native reload after the authorized Prompt has begun and before the
+// model sees its tool surface.
+func (s *session) reloadMCPForAuthorizedTurn(ctx context.Context) error {
+	s.mu.Lock()
+	if s.mcpReloadComplete || len(s.mcpServers) == 0 {
+		s.mcpReloadComplete = true
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	client := s.client
+	nativeID := s.idmap.NativeSessionID
+	s.mu.Unlock()
+
+	reloadCtx, cancel := context.WithTimeout(ctx, mcpReloadTimeout)
+	err := client.ReloadMCP(reloadCtx, nativeID)
+
+	cancel()
+
+	if err == nil {
+		s.mu.Lock()
+		s.mcpReloadComplete = true
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	if errors.Is(err, context.Canceled) {
+		// No native reload remains in flight after Call observes the turn
+		// cancellation. Let a later authorized turn make the one real attempt.
+		return err
+	}
+
+	return s.poisonWithError(ctx, "hermes_mcp_reload_failed", err.Error())
+}
+
+type sessionSnapshot struct {
+	id                    acp.SessionId
+	cwd                   string
+	additionalDirectories []string
+	mcpServers            []acp.McpServer
+	idmap                 idmapRecord
+	title                 string
+	updatedAt             string
+	providerID            string
+	modelID               string
+	mode                  string
+	env                   map[string]string
+	extraPathDirs         []string
+	rawMessages           rawMessageConfig
+	client                nativehermes.Server
+}
+
+func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, native nativehermes.Session, client nativehermes.Server, meta sessionMeta, idmap idmapRecord) *session {
+	title := native.Title
+	if title == "" {
+		title = "Hermes session"
+	}
+
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	if native.Time.Updated > 0 {
+		updatedAt = time.UnixMilli(native.Time.Updated).UTC().Format(time.RFC3339)
+	}
+
+	providerID := native.Model.ProviderID
+
+	modelID := firstNonEmpty(native.Model.ModelID, native.Model.ID)
+	if meta.Model != "" {
+		providerID, modelID = splitModelValue(meta.Model, providerID, modelID)
+	}
+
+	if idmap.SessionID == "" {
+		idmap.SessionID = string(id)
+	}
+
+	if native.ID != "" {
+		idmap.NativeSessionID = native.ID
+	}
+
+	if idmap.Format == "" {
+		idmap.Format = SessionStoreFormat
+	}
+
+	now := time.Now().UnixMilli()
+	if idmap.CreatedAtUnixMilli == 0 {
+		idmap.CreatedAtUnixMilli = now
+	}
+
+	idmap.UpdatedAtUnixMilli = now
+
+	return &session{
+		agent:                 agent,
+		id:                    id,
+		cwd:                   cwd,
+		additionalDirectories: append([]string(nil), additionalDirectories...),
+		mcpServers:            cloneMCPServers(mcpServers),
+		idmap:                 idmap,
+		title:                 title,
+		updatedAt:             updatedAt,
+		providerID:            providerID,
+		modelID:               modelID,
+		mode:                  firstNonEmpty(native.Agent, "default"),
+		env:                   cloneStringMap(meta.Env),
+		extraPathDirs:         append([]string(nil), meta.ExtraPathDirs...),
+		rawMessages:           meta.RawMessages,
+		client:                client,
+		seenParts:             map[string]string{},
+		pending:               map[string]nativehermes.PermissionRequest{},
+		questions:             map[string]nativehermes.QuestionRequest{},
+		processedPermission:   map[string]struct{}{},
+		processedQuestion:     map[string]struct{}{},
+		activeMessageIDs:      map[string]struct{}{},
+		toolStates:            map[string]hermesToolState{},
+		failedStreamEpochs:    map[uint64]struct{}{},
+		failedMessageIDs:      map[string]struct{}{},
+	}
+}
+
+func (s *session) acquireTurn(ctx context.Context) (func(), error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	turn := s.turnQueue()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	if err := s.poisonedErrorLocked(); err != nil {
+		return nil, err
+	}
+
+	if s.closed {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
+	}
+
+	if len(turn) >= cap(turn) {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "session_prompt"})
+	}
+
+	turn <- struct{}{}
+
+	s.turnInFlight = true
+
+	return func() {
+		s.mu.Lock()
+		s.turnInFlight = false
+
+		<-turn
+		s.mu.Unlock()
+	}, nil
+}
+
+func (s *session) turnQueue() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.turn == nil {
+		// Hermes serializes prompts per session; admission capacity is fixed at 1.
+		s.turn = make(chan struct{}, sessionTurnCapacity)
+	}
+
+	return s.turn
+}
+
+func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Context {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	return s.beginTurnLocked(ctx, turnNonce)
+}
+
+// beginTurnLocked starts one turn while toolMu and cancelMu hold the runtime
+// generation stable. Keeping runtime installation and turn admission under the
+// same lock prevents Close from landing between a lazy resume and its first
+// routed operation.
+func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	turnCtx = withTurnRoute(turnCtx, turnNonce)
+	s.cancel = cancel
+	s.turnDone = turnCtx.Done()
+	s.cancelled = false
+	s.turnEpoch++
+	s.turnNonce = turnNonce
+	s.turnSettlement = turnSettlementOpen
+	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
+
+	return turnCtx
+}
+
+func (s *session) preparePromptTurn(ctx context.Context, turnNonce string) (context.Context, uint64, error) {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	if err := s.resumeRuntimeForTurnLocked(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	turnCtx := s.beginTurnLocked(ctx, turnNonce)
+
+	return turnCtx, s.currentTurnEpoch(), nil
+}
+
+func (s *session) currentTurnEpoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnEpoch
+}
+
+func (s *session) needsRuntimeResume() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.runtimeNeedsResume
+}
+
+func (s *session) finishTurn() {
+	s.toolMu.Lock()
+	defer s.toolMu.Unlock()
+
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.turnDone = nil
+	s.turnInFlight = false
+	s.cancelled = false
+	s.turnNonce = ""
+	s.turnSettlement = turnSettlementIdle
+	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.pending = map[string]nativehermes.PermissionRequest{}
+	s.questions = map[string]nativehermes.QuestionRequest{}
+	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *session) currentTurnNonce() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnNonce
+}
+
+func (s *session) cancelTurn() {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.cancelTurnLocked(s.client, true)
+}
+
+func (s *session) cancelTurnLocked(client nativehermes.Server, markCancelled bool) {
+	s.mu.Lock()
+
+	cancel := s.cancel
+	if cancel != nil && markCancelled {
+		s.cancelled = true
+	}
+
+	pending := make([]nativehermes.PermissionRequest, 0, len(s.pending))
+	for id := range s.pending {
+		pending = append(pending, s.pending[id])
+	}
+
+	s.pending = map[string]nativehermes.PermissionRequest{}
+
+	questions := make([]nativehermes.QuestionRequest, 0, len(s.questions))
+	for _, req := range s.questions {
+		questions = append(questions, req)
+	}
+
+	s.questions = map[string]nativehermes.QuestionRequest{}
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	ctx, done := context.WithTimeout(context.Background(), closeTimeout)
+	defer done()
+
+	if client == nil {
+		return
+	}
+
+	for i := range pending {
+		_ = client.ReplyPermission(ctx, pending[i], valReject, valCancelled)
+	}
+
+	for _, req := range questions {
+		_ = client.RejectQuestion(ctx, req)
+	}
+}
+
+// fenceTurnLocked is the single destructive turn fence. cancelMu must be held.
+// It memoizes by epoch so Cancel, the prompt context, and the deadline can all
+// race without issuing duplicate shutdowns. A normal cancellation/timeout is
+// returned only after Close completes the selected native containment boundary
+// and releases its isolated root.
+func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancelled bool) error {
+	if epoch == 0 {
+		return nil
+	}
+
+	if s.fencedTurnEpoch == epoch {
+		if markCancelled {
+			s.mu.Lock()
+			s.cancelled = true
+			s.mu.Unlock()
+		}
+
+		return s.turnFenceErr
+	}
+
+	s.mu.Lock()
+	currentEpoch := s.turnEpoch
+	client := s.client
+	nativeID := s.idmap.NativeSessionID
+	s.mu.Unlock()
+
+	if currentEpoch != epoch {
+		return routeInvalid("stale turn epoch")
+	}
+
+	s.cancelTurnLocked(client, markCancelled)
+
+	if client == nil {
+		err := s.poisonWithError(ctx, "hermes_runtime_fence_failed", "Hermes runtime is unavailable")
+		s.fencedTurnEpoch = epoch
+		s.turnFenceErr = err
+
+		return err
+	}
+
+	abortCtx, abortCancel := context.WithTimeout(context.Background(), closeTimeout)
+	_ = client.Abort(abortCtx, nativeID)
+
+	abortCancel()
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr := client.Close(closeCtx)
+
+	closeCancel()
+
+	s.fencedTurnEpoch = epoch
+
+	if closeErr != nil {
+		name := "hermes_runtime_fence_failed"
+		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+			name = "hermes_process_containment_incomplete"
+		}
+
+		err := errors.Join(s.poisonWithError(ctx, name, closeErr.Error()), closeErr)
+		s.turnFenceErr = err
+
+		return err
+	}
+
+	s.mu.Lock()
+	s.runtimeNeedsResume = !s.closed
+	s.pending = map[string]nativehermes.PermissionRequest{}
+	s.questions = map[string]nativehermes.QuestionRequest{}
+	s.processedPermission = map[string]struct{}{}
+	s.processedQuestion = map[string]struct{}{}
+	s.activeMessageIDs = map[string]struct{}{}
+	s.toolStates = map[string]hermesToolState{}
+	s.failedStreamEpochs = map[uint64]struct{}{}
+	s.failedMessageIDs = map[string]struct{}{}
+	s.suppressNextBacklog = true
+	s.mcpReloadComplete = false
+	s.mu.Unlock()
+	s.turnFenceErr = nil
+
+	return nil
+}
+
+func (s *session) fenceTurn(ctx context.Context, epoch uint64, markCancelled bool) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	return s.fenceTurnLocked(ctx, epoch, markCancelled)
+}
+
+func (s *session) wasCancelled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.cancelled
+}
+
+func (s *session) ensureNotPoisoned() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.poisonedErrorLocked()
+}
+
+func (s *session) poisonedErrorLocked() error {
+	if s.poisonCause == "" {
+		return nil
+	}
+
+	return acp.NewInvalidRequest(map[string]any{
+		jsonFieldError: "session_poisoned",
+		"cause":        s.poisonCause,
+	})
+}
+
+func (s *session) poisonNativeSessionDrift(ctx context.Context, field string, actual string) error {
+	expected := s.idmap.NativeSessionID
+	cause := fmt.Sprintf("%s native session id drift: expected %q, got %q", field, expected, actual)
+
+	return s.poison(ctx, cause)
+}
+
+func (s *session) poison(ctx context.Context, cause string) error {
+	return s.poisonWithError(ctx, "hermes_native_session_id_drift", cause)
+}
+
+func (s *session) poisonWithError(ctx context.Context, errorName string, cause string) error {
+	err := acp.NewInternalError(map[string]any{
+		jsonFieldError: errorName,
+		"cause":        cause,
+	})
+
+	s.mu.Lock()
+	if s.poisonCause != "" {
+		existing := s.poisonedErrorLocked()
+		s.mu.Unlock()
+
+		return existing
+	}
+
+	s.poisonCause = cause
+	s.mu.Unlock()
+
+	return err
+}
+
+func (s *session) poisonMissingLiveSessionMapping(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var missing nativehermes.MissingLiveSessionMappingError
+	if errors.As(err, &missing) {
+		return s.poisonWithError(ctx, "hermes_missing_live_session_mapping", missing.Error())
+	}
+
+	return err
+}
+
+func (s *session) markActiveMessageID(messageID string) {
+	if messageID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	if s.activeMessageIDs == nil {
+		s.activeMessageIDs = map[string]struct{}{}
+	}
+
+	s.activeMessageIDs[messageID] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *session) markMessageCompleted(messageID string) {
+	if messageID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	delete(s.activeMessageIDs, messageID)
+	s.mu.Unlock()
+}
+
+func (s *session) markStreamFailed(epoch uint64) {
+	s.mu.Lock()
+	if s.failedMessageIDs == nil {
+		s.failedMessageIDs = map[string]struct{}{}
+	}
+
+	for messageID := range s.activeMessageIDs {
+		s.failedMessageIDs[messageID] = struct{}{}
+	}
+
+	if epoch > 0 {
+		if s.failedStreamEpochs == nil {
+			s.failedStreamEpochs = map[uint64]struct{}{}
+		}
+
+		s.failedStreamEpochs[epoch] = struct{}{}
+	}
+
+	s.suppressNextBacklog = true
+	s.mu.Unlock()
+}
+
+func (s *session) shouldSuppressEvent(event nativehermes.TurnEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if event.StreamEpoch > 0 {
+		if _, ok := s.failedStreamEpochs[event.StreamEpoch]; ok {
+			return true
+		}
+	}
+
+	if part, ok := eventPart(event.Properties); ok && part.MessageID != "" {
+		_, ok := s.failedMessageIDs[part.MessageID]
+
+		return ok
+	}
+
+	return false
+}
+
+func (s *session) suppressBacklog() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.suppressNextBacklog
+}
+
+func (s *session) clearSuppressBacklog() {
+	s.mu.Lock()
+	s.suppressNextBacklog = false
+	s.mu.Unlock()
+}
+
+func (s *session) addPendingPermission(req nativehermes.PermissionRequest) {
+	s.mu.Lock()
+	if s.pending == nil {
+		s.pending = map[string]nativehermes.PermissionRequest{}
+	}
+
+	s.pending[req.ID] = req
+	s.mu.Unlock()
+}
+
+func (s *session) claimPermissionRequest(id string) bool {
+	if id == "" {
+		return true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.processedPermission == nil {
+		s.processedPermission = map[string]struct{}{}
+	}
+
+	if _, ok := s.processedPermission[id]; ok {
+		return false
+	}
+
+	s.processedPermission[id] = struct{}{}
+
+	return true
+}
+
+func (s *session) takePendingPermission(id string) (nativehermes.PermissionRequest, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	req, ok := s.pending[id]
+	if ok {
+		delete(s.pending, id)
+	}
+
+	return req, ok, s.cancelled
+}
+
+func (s *session) addPendingQuestion(req nativehermes.QuestionRequest) {
+	s.mu.Lock()
+	if s.questions == nil {
+		s.questions = map[string]nativehermes.QuestionRequest{}
+	}
+
+	s.questions[req.ID] = req
+	s.mu.Unlock()
+}
+
+func (s *session) claimQuestionRequest(id string) bool {
+	if id == "" {
+		return true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.processedQuestion == nil {
+		s.processedQuestion = map[string]struct{}{}
+	}
+
+	if _, ok := s.processedQuestion[id]; ok {
+		return false
+	}
+
+	s.processedQuestion[id] = struct{}{}
+
+	return true
+}
+
+func (s *session) takePendingQuestion(id string) (nativehermes.QuestionRequest, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	req, ok := s.questions[id]
+	if ok {
+		delete(s.questions, id)
+	}
+
+	return req, ok, s.cancelled
+}
+
+func (s *session) snapshot() sessionSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return sessionSnapshot{
+		id:                    s.id,
+		cwd:                   s.cwd,
+		additionalDirectories: append([]string(nil), s.additionalDirectories...),
+		mcpServers:            cloneMCPServers(s.mcpServers),
+		idmap:                 s.idmap,
+		title:                 s.title,
+		updatedAt:             s.updatedAt,
+		providerID:            s.providerID,
+		modelID:               s.modelID,
+		mode:                  s.mode,
+		env:                   cloneStringMap(s.env),
+		extraPathDirs:         append([]string(nil), s.extraPathDirs...),
+		rawMessages:           s.rawMessages,
+		client:                s.client,
+	}
+}
+
+func (s *session) setModel(value string) {
+	provider, model := splitModelValue(value, "", "")
+
+	s.mu.Lock()
+	s.providerID = provider
+	s.modelID = model
+	s.mu.Unlock()
+}
+
+func (s *session) currentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return modelSelectionValue(s.providerID, s.modelID)
+}
+
+func (s *session) modelSelector() *nativehermes.ModelSelector {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.providerID == "" || s.modelID == "" {
+		return nil
+	}
+
+	return &nativehermes.ModelSelector{ProviderID: s.providerID, ModelID: s.modelID}
+}
+
+func (s *session) currentMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.mode
+}
+
+func (s *session) markPart(part nativehermes.Part) bool {
+	if part.ID == "" {
+		return true
+	}
+
+	encoded := string(part.Raw)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if seen, ok := s.seenParts[part.ID]; ok && seen == encoded {
+		return false
+	}
+
+	s.seenParts[part.ID] = encoded
+
+	return true
+}
+
+func (s *session) Close(ctx context.Context) error {
+	return s.close(ctx, false)
+}
+
+func (s *session) DeleteNativeAndClose(ctx context.Context) error {
+	return s.close(ctx, true)
+}
+
+func (s *session) close(ctx context.Context, deleteNative bool) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	return s.closeLocked(ctx, deleteNative)
+}
+
+func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	s.closed = true
+	client := s.client
+	nativeID := s.idmap.NativeSessionID
+	epoch := s.turnEpoch
+	active := s.cancel != nil && epoch > 0
+	s.mu.Unlock()
+
+	// Pending provider-auth flows are cancelled after pending elicitation is
+	// resolved and before the native interrupt, so a flow is never abandoned to
+	// a process already being torn down.
+	if s.agent != nil && s.agent.providerAuth != nil {
+		s.agent.providerAuth.closeSession(ctx, s.id)
+	}
+
+	if active {
+		return s.fenceTurnLocked(ctx, epoch, true)
+	}
+
+	s.cancelTurnLocked(client, true)
+
+	if client == nil {
+		return nil
+	}
+
+	var deleteErr error
+
+	if deleteNative && nativeID != "" {
+		deleteCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+
+		deleteErr = client.DeleteSession(deleteCtx, nativeID)
+		if deleteErr != nil && s.agent != nil && s.agent.log != nil {
+			s.agent.log.DebugContext(deleteCtx, "delete native Hermes session failed", slog.String(jsonFieldError, deleteErr.Error()))
+		}
+
+		cancel()
+	}
+
+	if nativeID != "" {
+		abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		_ = client.Abort(abortCtx, nativeID)
+
+		cancel()
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	err := client.Close(closeCtx)
+
+	closeCancel()
+
+	return errors.Join(deleteErr, err)
+}
+
+func (s *session) info() acp.SessionInfo {
+	snapshot := s.snapshot()
+	title := snapshot.title
+	updatedAt := snapshot.updatedAt
+
+	return acp.SessionInfo{
+		SessionId:             snapshot.id,
+		Cwd:                   snapshot.cwd,
+		AdditionalDirectories: snapshot.additionalDirectories,
+		Title:                 &title,
+		UpdatedAt:             &updatedAt,
+		Meta:                  sessionInfoMeta(snapshot),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func splitModelValue(value string, fallbackProvider string, fallbackModel string) (string, string) {
+	if value == "" {
+		return fallbackProvider, fallbackModel
+	}
+
+	provider, model, ok := strings.Cut(value, "/")
+	if !ok || provider == "" || model == "" {
+		return fallbackProvider, value
+	}
+
+	return provider, model
+}
+
+func joinModelValue(provider string, model string) string {
+	if provider == "" {
+		return model
+	}
+
+	if model == "" {
+		return provider
+	}
+
+	return provider + "/" + model
+}

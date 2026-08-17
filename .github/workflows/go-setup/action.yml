@@ -1,0 +1,24 @@
+name: 'Setup Go'
+description: 'Set up Go environment'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version-file: go.mod
+        check-latest: true
+        # Self-hosted runners already persist GOCACHE/GOMODCACHE under /cache.
+        # Restoring the same data as an Actions tarball duplicates large
+        # archives in an ephemeral runner and can exhaust its writable layer.
+        cache: false
+
+    # Node belongs to the Go suite, not to the docs job: where a wrapper ships
+    # TypeScript, the Go tests drive it against a fake extension host, and a
+    # runner without node reports that proof as a skip rather than a failure.
+    - name: Set up Node
+      uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+      with:
+        node-version: 24
+        package-manager-cache: false

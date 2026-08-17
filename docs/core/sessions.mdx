@@ -1,0 +1,108 @@
+---
+title: Sessions
+description: The per-session process model, adapter-owned IDs, and the load/resume/delete semantics.
+---
+
+Each ACP session owns one supervised `hermes serve` runtime and one isolated
+`HERMES_HOME` generation materialized under the scratch parent (`WithScratchDir`, or the
+system temp directory by default). The adapter talks to the native dashboard
+gateway over loopback WebSocket JSON-RPC. Sessions are independent: one crashing
+or ending never touches another's home or process.
+
+## Lifecycle
+
+The adapter implements the full ACP session lifecycle plus a native fork
+extension:
+
+- `session/new`
+- `session/load`
+- `session/resume`
+- `session/list`
+- `session/close`
+- `session/delete`
+- `_hermes/session/fork`
+
+## Identity mapping
+
+ACP session IDs are adapter-owned and stable across restarts. The native durable
+Hermes session key is recorded in the `idmap` store subpath so a stored session
+can be rehydrated later, while live gateway session IDs are runtime-only and are
+never persisted.
+
+## Load, resume, and delete
+
+`session/load` hydrates native state, resumes the stored Hermes session, and
+replays `session.history` to the ACP client so the host rebuilds the
+conversation. `session/resume` hydrates and resumes the same way but skips the
+replay, for hosts that only need to continue the turn stream.
+
+`session/delete` tombstones the ACP store first, then best-effort deletes native
+state; a native missing-session response counts as success, so delete is
+idempotent.
+
+Durable rehydration depends on a configured store — see
+[Session store](/docs/features/session-store).
+
+On `session/close`, an idle session is snapshotted synchronously before Hermes
+shutdown removes its isolated XDG root. Sessions with a turn, permission,
+elicitation, or generation still pending are closed without a fresh snapshot.
+
+Cancellation and timeout are destructive runtime boundaries. The adapter first
+interrupts Hermes, then completes the selected platform containment boundary
+before the prompt settles. Every new, loaded, resumed, forked, or lazily rebuilt
+runtime uses a fresh physical generation root; durable continuity comes only
+from the committed snapshot. The logical ACP session remains active; its next prompt recreates the home from the last committed snapshot and resumes
+the same native durable session key. A stale cancel nonce cannot target that
+replacement runtime.
+
+## Session CLI environment and PATH
+
+Session `Env` and ordered `ExtraPathDirs` belong to the logical ACP session,
+not the Agent. They are cloned through new, load, resume, fork, snapshot,
+lazy runtime recovery, and close-then-resume rebind. Two concurrent sessions
+therefore carry independent bearers and directories; no mutable Agent field
+pins either value.
+
+The ordered directory list is lifecycle identity. An active load or resume
+whose list differs — including a pure reorder — fails with a mismatch naming
+`_meta.hermes.options.extraPathDirs`. A host rotating a bearer or operation
+directory closes the active session and resumes it with the new configuration;
+the replacement `hermes serve` process contains the new values and no old
+carrier values. A lazily reconstructed runtime uses the values already owned by
+that session.
+
+Hermes executable lookup and the `--version` probe run first against the
+captured static native environment. Only the session process then receives its
+environment and effective PATH: operation directories in caller order, the
+browser-launcher containment directory when supported, and the captured base
+PATH. Empty PATH components are omitted and ambient PATH is never reread during
+session launch. Hermes' native terminal starts a login Bash which can replace
+that PATH from profile files, so the adapter supplies a production-owned
+`BASH_ENV` hook. It runs after login startup, restores the operation directories
+at the front of the PATH Hermes snapshots, and removes `BASH_ENV` plus the
+private `ACP_GO_HERMES_PATH_DIR_*` carrier from the snapshot before commands
+execute. When the installed `hermes` launcher is itself a Bash script, those
+process-local values pass through its immediate exec into the Python gateway;
+the later terminal snapshot Bash is their consumer. They contain only validated
+directory names, never session credentials, and callers cannot supply either
+reserved namespace. The hook is stored in both isolated and shared Hermes homes
+without editing operator `config.yaml`.
+
+Raw session `PATH`, `BASH_ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are refused.
+`WithEnv` and `ProcessIsolation.BaseEnvironment` also reserve `BASH_ENV` and the
+private namespace; an inherited ambient `BASH_ENV` is deliberately scrubbed at
+the final process boundary. On Windows, validated native drive and UNC paths
+are converted directly to Git Bash path syntax without looking up or executing
+a converter from the effective PATH.
+
+On Windows, environment names are case-insensitive, so the launch environment
+is built that way rather than left to the child. The captured ambient
+environment is an ordered block, so a name an inherited block spells twice is
+resolved by that order: the last write wins, in spelling as well as value,
+exactly as the platform itself resolves it. Each later phase — `WithEnv`, then
+the session `env` — replaces the previous phase's spelling of a name instead of
+adding a second one, so a `WithEnv` `PATH` supersedes an inherited `Path` and a
+`PathExt` supersedes an inherited `PATHEXT`. Two spellings of one name inside a
+single caller-supplied map have no order to read and are rejected. Executable
+lookup reads exactly the value the launched process receives, and the effective
+PATH reaches the process as a single entry.
