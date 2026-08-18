@@ -91,7 +91,12 @@ func lifecycleParamError(refusal *lifecycle.ParamError) error {
 // it. A family literal is never foreign and never a no-op: every inbound surface
 // outside `initialize`, `session/prompt`, and `session/cancel` rejects it rather
 // than ignoring it as another namespace's business, and it does so before the
-// route's own side effects or refusal.
+// surface's own work.
+//
+// On a surface that also carries the route envelope, the route is validated
+// first: the authenticator precedes the placement rule, so a request that is
+// both unroutable and misplaced reports the route verdict rather than leaving
+// the choice of two to an implementation.
 func rejectLifecycleMeta(meta map[string]any) error {
 	if _, present := meta[lifecycle.MetaKey]; !present {
 		return nil
