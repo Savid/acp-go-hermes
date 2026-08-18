@@ -148,7 +148,7 @@ carries a machine-readable `cause`:
 | `cause` | Meaning |
 |---|---|
 | `transport` | Gateway/connection failure, including a mid-turn WebSocket disconnect and any unclassified error. |
-| `provider` | The model provider rejected or failed the turn. |
+| `provider` | The model provider rejected or failed the turn, or reported a native finish outside the closed vocabulary the adapter maps. |
 | `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/reference/go-api). |
 
 `data.message` carries the real native cause, never a fixed placeholder;

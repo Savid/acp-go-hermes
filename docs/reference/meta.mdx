@@ -13,10 +13,14 @@ extension. None of them is part of the Hermes namespace.
 Initialize advertises the reserved route capability as
 `_meta["acp-go.dev/route"] = {"versions":[1]}`.
 
-`session/prompt` and cancellation of an active turn require exactly
+`session/prompt` and `session/cancel` require exactly
 `{"version":1,"turnNonce":"..."}` under the reserved route key. The nonce is
 fresh and unguessable per turn and is at most 4096 bytes; missing, oversized,
-extra, unsupported, or stale route data fails with invalid params.
+extra, unsupported, or stale route data fails with invalid params. A cancel is
+authorized only by the nonce of the addressed session's current turn, so a
+cancel that names another turn — or arrives when no turn is in flight — fails
+closed and reaches nothing native. Being a notification, that refusal carries no
+response frame.
 
 Every live-turn `session/update` and `_hermes/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
