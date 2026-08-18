@@ -6,9 +6,9 @@ description: The _meta.hermes vocabulary accepted on requests and emitted on res
 The adapter reads and writes vendor metadata under the `_meta.hermes` namespace.
 Unknown keys under `_meta.hermes` are rejected; foreign namespaces are ignored.
 
-Initialize separately advertises three reserved `acp-go.dev/` capability keys —
-the route capability, the media envelope, and local handoff support. None of
-them is part of the Hermes namespace.
+Initialize separately advertises reserved `acp-go.dev/` capability keys — the
+route capability, the media envelope, and local handoff support. None of them
+is part of the Hermes namespace.
 
 Initialize advertises the reserved route capability as
 `_meta["acp-go.dev/route"] = {"versions":[1]}`.
