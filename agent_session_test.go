@@ -1752,7 +1752,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("delete refuses live prompt before store or native mutation", func(t *testing.T) {
+	t.Run("delete tombstones before it inspects the session", func(t *testing.T) {
 		client := newFakeHermesClient()
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSessionStore(store))
@@ -1764,17 +1764,17 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		if err := store.Replace(ctx, SessionKey{SessionID: string(session.id)}, []SessionStoreReplacement{{Key: SessionKey{SessionID: string(session.id)}, Entries: []SessionStoreEntry{entry}}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err == nil || !strings.Contains(err.Error(), "prompt is active") {
-			t.Fatalf("active delete error = %v", err)
+		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err != nil {
+			t.Fatalf("delete over a live cancel func = %v", err)
 		}
-		if len(client.deleted) != 0 {
+		if len(client.deleted) != 1 {
 			t.Fatalf("native delete attempts = %#v", client.deleted)
 		}
-		if _, ok := agent.sessions[session.id]; !ok {
-			t.Fatal("active delete removed in-memory session")
+		if _, ok := agent.sessions[session.id]; ok {
+			t.Fatal("delete left the in-memory session addressable")
 		}
-		if _, err := store.Load(ctx, SessionKey{SessionID: string(session.id)}); err != nil {
-			t.Fatalf("active delete removed store state: %v", err)
+		if entries, err := store.Load(ctx, SessionKey{SessionID: string(session.id)}); err != nil || len(entries) != 0 {
+			t.Fatalf("delete left store state behind: %d entries, err=%v", len(entries), err)
 		}
 	})
 
@@ -1826,6 +1826,110 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow pins the delete
+// order: the tombstone is durable first and the id is hidden with it, then the
+// active turn is cancelled and settled, then the runtime is torn down. An active
+// prompt is a thing delete settles, not a ground to refuse on — and the commit
+// that settlement owes lands after the tombstone, so it must publish nothing.
+func TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+	entries, err := store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "durable row missing before delete")
+
+	type promptOutcome struct {
+		resp acp.PromptResponse
+		err  error
+	}
+
+	promptDone := make(chan promptOutcome, 1)
+
+	go func() {
+		resp, promptErr := session.Prompt(context.Background(), TextPromptRequest(session.id, "delete-active", "hang"))
+		promptDone <- promptOutcome{resp: resp, err: promptErr}
+	}()
+	<-started
+
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err, "delete refused an active prompt")
+
+	out := <-promptDone
+	require.NoError(t, out.err)
+	require.Equal(t, acp.StopReasonCancelled, out.resp.StopReason, "delete did not cancel the active turn")
+
+	// The settlement's terminal commit ran after the tombstone. Nothing it wrote
+	// may clear a tombstone it did not create.
+	entries, err = store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a post-tombstone commit recreated the deleted row")
+
+	require.True(t, agent.isDeleted(session.id))
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "delete left the session addressable")
+
+	listed, err := agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.NoError(t, err)
+
+	for _, info := range listed.Sessions {
+		require.NotEqual(t, session.id, info.SessionId, "deleted session was listed")
+	}
+
+	// Deleting the same id again silently succeeds.
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err, "delete was not idempotent")
+}
+
+// TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden pins the tail of
+// the same order: a teardown that fails is reported, but only after the
+// tombstone is durable, and the session stays hidden either way.
+func TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden(t *testing.T) {
+	client := newFakeHermesClient()
+	client.closeErr = errors.New("runtime close failed")
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.ErrorIs(t, err, client.closeErr, "teardown error was not surfaced")
+
+	require.True(t, agent.isDeleted(session.id), "failed teardown left the session untombstoned")
+
+	entries, loadErr := store.Load(t.Context(), key)
+	require.NoError(t, loadErr)
+	require.Empty(t, entries, "failed teardown left the durable row behind")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "failed teardown left the session addressable")
 }
 
 func TestAgentDeletedCleanupHelperBranches(t *testing.T) {

@@ -17,7 +17,7 @@ description: The ACP methods the adapter implements and the one native extension
 | `session/prompt` | Run one native turn and stream updates. |
 | `session/cancel` | Cancel the in-flight turn. |
 | `session/close` | Close the session and stop its process. |
-| `session/delete` | Tombstone the store, then best-effort native delete. |
+| `session/delete` | Tombstone the store, cancel and settle any active turn, then best-effort native delete. |
 | `session/set_config_option` | Apply a config option such as `model`. |
 
 ## Provider-auth extension methods

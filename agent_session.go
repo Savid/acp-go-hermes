@@ -855,55 +855,39 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	session := a.sessions[params.SessionId]
 	a.mu.Unlock()
 
-	var settleErr error
-
-	if session != nil {
-		session.mu.Lock()
-		promptActive := session.cancel != nil || session.turnInFlight
-		session.mu.Unlock()
-		if promptActive {
-			return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidRequest(map[string]any{
-				jsonFieldError: "cannot delete a session while a prompt is active",
-			})
-		}
-
-		// Delete closes admission before taking the lifecycle barrier, so no prompt
-		// can race the tombstone and recreate the durable row it removes.
-		session.closeLifecycleAdmission()
-		settleErr = session.awaitSettlement(ctx)
-
-		// Hold the lifecycle barrier from here through the store tombstone and the
-		// native deletion, so no durable state is mutated beside it.
-		session.lifecycleMu.Lock()
-	}
-
 	record := a.deleteCleanupRecord(params.SessionId, session)
-	storeCtx, cancel := sessionStoreWriteContext(ctx)
-	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)})
 
-	cancel()
-
-	if err != nil {
-		if session != nil {
-			session.lifecycleMu.Unlock()
-		}
-
+	// The tombstone is the first thing this delete does. An active turn is
+	// something delete cancels and settles, never a ground to refuse on, so
+	// nothing about the session's state is inspected ahead of the durable write
+	// that makes the id unaddressable.
+	if err := a.tombstoneSession(ctx, params.SessionId, session); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
-
-	a.mu.Lock()
-	if session == nil || a.sessions[params.SessionId] == session {
-		delete(a.sessions, params.SessionId)
-	}
-
-	a.deleted[params.SessionId] = struct{}{}
-	a.mu.Unlock()
 
 	if record.SessionID != "" {
 		a.rememberDeleteCleanup(record)
 	}
 
+	var (
+		settleErr error
+		err       error
+	)
+
 	if session != nil {
+		// Delete serializes after settlement: admission closes, the turn in
+		// flight is cancelled, and the settlement it owes completes before the
+		// teardown touches the runtime that settlement is still writing through.
+		// The commit that settlement makes lands on a tombstoned id, so it
+		// publishes nothing and cannot recreate the row this delete removed.
+		if session.closeLifecycleAdmission() {
+			session.cancelTurn()
+		}
+
+		settleErr = session.awaitSettlement(ctx)
+
+		session.lifecycleMu.Lock()
+
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
 		err = session.closeLocked(closeCtx, true)
 
@@ -929,6 +913,43 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	a.forgetDeleteCleanupIfDone(record.SessionID)
 
 	return acp.UnstableDeleteSessionResponse{}, errors.Join(settleErr, err, cleanupErr)
+}
+
+// tombstoneSession makes one delete durable and hides the id with it, before
+// the delete cancels anything or tears anything down. The whole step runs under
+// the session's lifecycle barrier, which is the same barrier every durable
+// commit holds: a settlement already publishing finishes first and the tombstone
+// removes what it wrote, and a settlement that has not started yet finds the id
+// tombstoned and publishes nothing. Neither order lets a late write recreate a
+// row the tombstone cleared.
+//
+// A store that refuses the write leaves the session fully addressable. There is
+// no tombstone, so there is nothing to hide behind, and the delete's idempotence
+// is what makes a retry the right answer.
+func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session *session) error {
+	if session != nil {
+		session.lifecycleMu.Lock()
+		defer session.lifecycleMu.Unlock()
+	}
+
+	storeCtx, cancel := sessionStoreWriteContext(ctx)
+	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(id)})
+
+	cancel()
+
+	if err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	if session == nil || a.sessions[id] == session {
+		delete(a.sessions, id)
+	}
+
+	a.deleted[id] = struct{}{}
+	a.mu.Unlock()
+
+	return nil
 }
 
 //nolint:gocyclo // Fork is one ordered parent/branch/journal/store publication transaction.

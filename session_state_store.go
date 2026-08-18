@@ -427,6 +427,15 @@ func (s *session) captureSnapshotLocked(
 // durability boundary every ordering rule above it is stated against: nothing
 // that depends on the store holding this generation may happen before it returns.
 func (s *session) publishSnapshotLocked(ctx context.Context, commit *sessionStoreCommit) error {
+	// A tombstone outranks every later commit for the same id. Delete takes this
+	// same barrier to write it, so reaching here with the id tombstoned means the
+	// tombstone is already durable and this generation has nowhere to land: the
+	// row it would publish is exactly the row the delete removed. Publishing it
+	// would clear a tombstone this session did not create.
+	if s.agent.isDeleted(s.id) {
+		return nil
+	}
+
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commit.deadline)
 	defer cancel()
 

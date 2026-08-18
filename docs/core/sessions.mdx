@@ -36,9 +36,14 @@ replays `session.history` to the ACP client so the host rebuilds the
 conversation. `session/resume` hydrates and resumes the same way but skips the
 replay, for hosts that only need to continue the turn stream.
 
-`session/delete` tombstones the ACP store first, then best-effort deletes native
-state; a native missing-session response counts as success, so delete is
-idempotent.
+`session/delete` tombstones the ACP store first and hides the session id with
+that write, then cancels and settles any turn still in flight, then best-effort
+deletes native state; a native missing-session response counts as success, so
+delete is idempotent. An active prompt is something delete cancels, never a
+reason to refuse: the cancelled turn settles as `cancelled`, and the terminal
+commit it owes lands on a tombstoned id, so it publishes nothing and cannot
+recreate the deleted row. A teardown that fails is reported to the caller with
+the session already hidden and its tombstone already durable.
 
 Durable rehydration depends on a configured store — see
 [Session store](/docs/features/session-store).
