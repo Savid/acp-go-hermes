@@ -4239,7 +4239,45 @@ func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 }
 
 func TestTerminalOutcomeFromHermesMapsStopReasonAndOutcome(t *testing.T) {
-	reason, outcome := terminalOutcomeFromHermes("max_turns")
+	reason, outcome, mapped := terminalOutcomeFromHermes("max_turns")
+	require.True(t, mapped)
 	require.Equal(t, acp.StopReasonMaxTurnRequests, reason)
 	require.Equal(t, lifecycle.OutcomeLimit, outcome)
+
+	// The vocabulary is closed: an unrecognized or empty finish names no stop
+	// reason and records the failed outcome, so nothing downstream can read it
+	// as a clean end of turn.
+	for _, finish := range []string{"", "   ", "tool_calls", "who_knows"} {
+		reason, outcome, mapped = terminalOutcomeFromHermes(finish)
+		require.False(t, mapped, "finish %q was mapped", finish)
+		require.Empty(t, reason, "finish %q named a stop reason", finish)
+		require.Equal(t, lifecycle.OutcomeFailed, outcome)
+	}
+}
+
+// TestPromptFailsOnUnmappedNativeFinish pins the turn-level consequence: a
+// native terminal outside the closed finish vocabulary fails the turn with the
+// v1 error rather than reporting end_turn over a terminal this adapter cannot
+// read.
+func TestPromptFailsOnUnmappedNativeFinish(t *testing.T) {
+	client := newFakeHermesClient()
+	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID: "assistant-1", SessionID: id, Role: valAssistant, Finish: "tool_calls",
+		}}, nil
+	}
+
+	session := testSession(newTestAgent(), client)
+	resp, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "unknown-finish", "reply"))
+	require.Error(t, err)
+	require.Empty(t, resp.StopReason, "unmapped finish named an ACP v1 stop reason")
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+
+	data, _ := reqErr.Data.(map[string]any)
+	require.Equal(t, valHermesTurnFailed, data[jsonFieldError])
+	require.Equal(t, string(nativehermes.CauseProvider), data[jsonFieldCause])
+	require.Contains(t, data[jsonFieldMessage], "tool_calls")
 }

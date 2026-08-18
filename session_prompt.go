@@ -31,6 +31,7 @@ const (
 	valQuestion1  = "question_1"
 	valString     = "string"
 	valLength     = "length"
+	valStop       = "stop"
 	valPending    = "pending"
 	valCompleted  = "completed"
 	valRead       = "read"
@@ -1605,18 +1606,26 @@ func usageFromTokens(tokens nativehermes.Tokens) *acp.Usage {
 // completion always has both. A failure never reaches here: no ACP v1 stop reason
 // names a failure, so inventing one would report a turn that ended badly as a
 // turn that ended.
-func terminalOutcomeFromHermes(finish string) (acp.StopReason, lifecycle.Outcome) {
+//
+// The finish vocabulary is closed, so an unrecognized or empty value is
+// reported as unmapped rather than defaulted to a clean end of turn. Defaulting
+// would state a completed cycle over a terminal this adapter cannot read, which
+// is the one thing a settled boundary must never do; the caller fails the turn
+// and lets the v1 error carry the cause instead.
+func terminalOutcomeFromHermes(finish string) (acp.StopReason, lifecycle.Outcome, bool) {
 	switch strings.ToLower(strings.TrimSpace(finish)) {
+	case valStop, "end_turn", valCompleted, valDone:
+		return acp.StopReasonEndTurn, lifecycle.OutcomeSuccess, true
 	case valLength, "max_tokens":
-		return acp.StopReasonMaxTokens, lifecycle.OutcomeLimit
+		return acp.StopReasonMaxTokens, lifecycle.OutcomeLimit, true
 	case "max_turn_requests", "max_turns":
-		return acp.StopReasonMaxTurnRequests, lifecycle.OutcomeLimit
+		return acp.StopReasonMaxTurnRequests, lifecycle.OutcomeLimit, true
 	case valCancelled, "canceled":
-		return acp.StopReasonCancelled, lifecycle.OutcomeCancelled
+		return acp.StopReasonCancelled, lifecycle.OutcomeCancelled, true
 	case "refusal", "content_filter":
-		return acp.StopReasonRefusal, lifecycle.OutcomeRefused
+		return acp.StopReasonRefusal, lifecycle.OutcomeRefused, true
 	default:
-		return acp.StopReasonEndTurn, lifecycle.OutcomeSuccess
+		return "", lifecycle.OutcomeFailed, false
 	}
 }
 

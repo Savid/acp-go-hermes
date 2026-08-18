@@ -288,7 +288,9 @@ func (s *session) terminalMapping(run promptRun, messageID *string) (lifecycleTu
 		return lifecycleTurnOutcome{outcome: lifecycle.OutcomeFailed}, acp.PromptResponse{}
 	}
 
-	stopReason, outcome := terminalOutcomeFromHermes(run.finish)
+	// The finish was proved mappable before this run was reported, so the
+	// mapping verdict has nothing left to decide here.
+	stopReason, outcome, _ := terminalOutcomeFromHermes(run.finish)
 
 	return lifecycleTurnOutcome{stopReason: string(stopReason), outcome: outcome}, acp.PromptResponse{
 		StopReason:    stopReason,
@@ -601,6 +603,17 @@ func (s *session) nativeRun(
 
 	if s.observedCancel(turnCtx) {
 		return s.cancelledRun()
+	}
+
+	// The native terminal is read before the turn is called complete. A finish
+	// outside the closed vocabulary is a terminal this adapter cannot state, so
+	// it settles as a failure carried by the v1 turn error rather than as the
+	// clean end of turn a default arm would have invented.
+	if _, _, mapped := terminalOutcomeFromHermes(message.Info.Finish); !mapped {
+		return s.failedRun(turnCtx, mapTurnFailure(nativehermes.NewTurnFailure(
+			nativehermes.CauseProvider,
+			fmt.Sprintf("hermes reported unmapped turn finish %q", message.Info.Finish),
+		)))
 	}
 
 	if beforeCommit := s.agent.options.beforeTerminalCommit; beforeCommit != nil {

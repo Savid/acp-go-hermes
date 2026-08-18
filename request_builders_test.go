@@ -191,8 +191,8 @@ func TestPromptMappingHelpers(t *testing.T) {
 		t.Fatalf("usage = %#v", usage)
 	}
 	for _, reason := range []string{"length", "cancelled", "refusal", "stop"} {
-		stopReason, _ := terminalOutcomeFromHermes(reason)
-		if stopReason == "" {
+		stopReason, _, mapped := terminalOutcomeFromHermes(reason)
+		if !mapped || stopReason == "" {
 			t.Fatalf("empty stop reason for %q", reason)
 		}
 	}
