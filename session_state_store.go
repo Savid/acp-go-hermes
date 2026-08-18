@@ -1,4 +1,4 @@
-//nolint:tagliatelle,gocyclo,goconst // Store metadata preserves Hermes spellings and one ordered commit transaction.
+//nolint:tagliatelle,goconst // Store metadata preserves Hermes spellings and one ordered commit transaction.
 package hermesacp
 
 import (
@@ -246,6 +246,7 @@ func (s *session) captureSnapshotLocked(
 		s.mu.Lock()
 		cancelled := s.turnSettlement == turnSettlementCancelled
 		s.mu.Unlock()
+
 		if cancelled && !requirement.settlementCapture {
 			return nil, errPromptCancelled
 		}
@@ -270,6 +271,7 @@ func (s *session) captureSnapshotLocked(
 			return nil, errors.New("hermes runtime is unavailable for terminal snapshot commit")
 		}
 
+		//nolint:nilnil // A nil commit with no error is the documented "nothing to capture" answer.
 		return nil, nil
 	}
 
@@ -302,8 +304,9 @@ func (s *session) captureSnapshotLocked(
 	if err != nil {
 		return nil, err
 	}
-	if err := snapshotCtx.Err(); err != nil {
-		return nil, err
+
+	if ctxErr := snapshotCtx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 
 	nextTerminal := publicTerminalState(terminal, foreground)
@@ -367,6 +370,7 @@ func (s *session) captureSnapshotLocked(
 		}
 
 		main.Archives = cloneArchiveInfo(committed.archives)
+
 		replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey, Entries: entries})
 	default:
 		xdg := snapshot.client.XDGDirs()
@@ -593,7 +597,7 @@ func (s *session) claimTerminalCommit(turnEpoch uint64) (bool, error) {
 
 	raced := s.turnSettlement == turnSettlementCancelled
 
-	if s.turnSettlement != turnSettlementOpen && !raced {
+	if s.turnSettlement != turnSettlementOpen && s.turnSettlement != turnSettlementCapturing && !raced {
 		return false, errors.New("hermes turn terminal commit was already claimed")
 	}
 
@@ -608,8 +612,8 @@ func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID st
 
 // hydrateStateFromStoreWithoutNativeArchive loads logical metadata only. In
 // shared-home mode the durable official Hermes database is authoritative; a
-// legacy per-session archive must never be decoded into the wrapper generation
-// or copied back over the shared database.
+// per-session archive must never be decoded into the wrapper generation or
+// copied back over the shared database.
 func hydrateStateFromStoreWithoutNativeArchive(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
 	return hydrateStateFromStoreMode(ctx, store, sessionID, xdg, false)
 }

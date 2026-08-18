@@ -485,8 +485,8 @@ func TestCancelAndTerminalReplaceHaveOneSettlementBoundary(t *testing.T) {
 		if result.response.StopReason != acp.StopReasonCancelled || result.response.Meta != nil {
 			t.Fatalf("cancel-winning Prompt response = %#v", result.response)
 		}
-		if store.replaceCount() != 1 {
-			t.Fatalf("cancel-winning Replace count = %d, want 1", store.replaceCount())
+		if store.replaceCount() != 2 {
+			t.Fatalf("cancel-winning Replace count = %d, want 2", store.replaceCount())
 		}
 		if !session.needsRuntimeResume() || client.closeCount() != 1 {
 			t.Fatalf("cancel-winning fence needsResume=%v close=%d", session.needsRuntimeResume(), client.closeCount())
@@ -606,16 +606,31 @@ func TestFinalEmitFailureCannotBeAdoptedByCloseOrRetry(t *testing.T) {
 		if !session.needsRuntimeResume() || client.closeCount() != 1 {
 			t.Fatalf("final emit fence needsResume=%v close=%d", session.needsRuntimeResume(), client.closeCount())
 		}
-		if store.replaceCount() != 1 {
-			t.Fatalf("Replace count after final emit failure = %d, want 1", store.replaceCount())
+		if store.replaceCount() != 2 {
+			t.Fatalf("Replace count after final emit failure = %d, want 2", store.replaceCount())
 		}
 		assertStoredTerminal(t, store, string(session.id), "history-2")
+		entries, loadErr := store.Load(t.Context(), SessionKey{
+			SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+		})
+		if loadErr != nil || len(entries) != 1 {
+			t.Fatalf("load failed boundary: entries=%d err=%v", len(entries), loadErr)
+		}
+
+		var snapshot stateSnapshot
+		if decodeErr := json.Unmarshal(entries[0], &snapshot); decodeErr != nil {
+			t.Fatalf("decode failed boundary: %v", decodeErr)
+		}
+		if foreground := snapshot.Wrapper.Foreground; foreground == nil ||
+			foreground.Outcome != string(lifecycle.OutcomeFailed) || foreground.StopReason != "" || foreground.Text != "" {
+			t.Fatalf("stored failed foreground = %#v", foreground)
+		}
 
 		conn.updateErr = nil
 		if _, closeErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); closeErr != nil {
 			t.Fatalf("CloseSession after final emit failure: %v", closeErr)
 		}
-		if store.replaceCount() != 1 {
+		if store.replaceCount() != 2 {
 			t.Fatalf("CloseSession adopted failed history; Replace count = %d", store.replaceCount())
 		}
 		assertStoredTerminal(t, store, string(session.id), "history-2")
@@ -651,11 +666,56 @@ func TestFinalEmitFailureCannotBeAdoptedByCloseOrRetry(t *testing.T) {
 		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4"}); !reflect.DeepEqual(response.Meta, want) {
 			t.Fatalf("safe retry meta = %#v, want %#v", response.Meta, want)
 		}
-		if store.replaceCount() != 2 {
-			t.Fatalf("safe retry Replace count = %d, want 2", store.replaceCount())
+		if store.replaceCount() != 3 {
+			t.Fatalf("safe retry Replace count = %d, want 3", store.replaceCount())
 		}
 		assertStoredTerminal(t, store, string(session.id), "history-4")
 	})
+}
+
+func TestFailedTurnPersistsVisiblePrefixWithoutAdvancingNativeTerminal(t *testing.T) {
+	store := newCountingSessionStore()
+	client := newFakeHermesClient()
+	session := testSession(newTestAgent(WithSessionStore(store)), client)
+	if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "failure-seed", "reply")); err != nil {
+		t.Fatalf("seed Prompt: %v", err)
+	}
+
+	baseline := session.committedTerminalState()
+	turnCtx := session.beginTurn(t.Context(), "failed-turn")
+	session.mu.Lock()
+	session.turnInFlight = true
+	session.mu.Unlock()
+	session.recordForegroundPrefix("visible prefix")
+	wantErr := errors.New("provider failed")
+
+	_, published, err := session.settlePrompt(t.Context(), turnCtx, session.currentTurnEpoch(), baseline, promptRun{
+		settle: true, err: wantErr, endsIncarnation: true,
+	}, nil)
+	if !errors.Is(err, wantErr) || !published {
+		t.Fatalf("failed settlement published=%v err=%v", published, err)
+	}
+	if store.replaceCount() != 2 {
+		t.Fatalf("failed settlement Replace count = %d, want 2", store.replaceCount())
+	}
+	assertStoredTerminal(t, store, string(session.id), baseline.MessageID)
+
+	entries, loadErr := store.Load(t.Context(), SessionKey{
+		SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+	})
+	if loadErr != nil || len(entries) != 1 {
+		t.Fatalf("load failed boundary: entries=%d err=%v", len(entries), loadErr)
+	}
+
+	var snapshot stateSnapshot
+	if decodeErr := json.Unmarshal(entries[0], &snapshot); decodeErr != nil {
+		t.Fatalf("decode failed boundary: %v", decodeErr)
+	}
+	foreground := snapshot.Wrapper.Foreground
+	if foreground == nil || foreground.Outcome != string(lifecycle.OutcomeFailed) ||
+		foreground.StopReason != "" || foreground.Text != "visible prefix" {
+		t.Fatalf("stored failed foreground = %#v", foreground)
+	}
 }
 
 func seededTerminalFailureSession(t *testing.T) (*countingSessionStore, *session, *fakeHermesClient, *recordingAgentClient) {
@@ -957,6 +1017,60 @@ func TestTerminalCommitClaimRejectsInvalidSettlement(t *testing.T) {
 		!strings.Contains(err.Error(), "already claimed") {
 		t.Fatalf("duplicate claim error = %v", err)
 	}
+}
+
+func TestCloseLifecycleAdmissionCancelsOnlyBeforeSettlement(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		state      turnSettlementState
+		wantCancel bool
+	}{
+		{name: "admitted before native turn", state: turnSettlementIdle, wantCancel: true},
+		{name: "native turn", state: turnSettlementOpen, wantCancel: true},
+		{name: "settling", state: turnSettlementCapturing},
+		{name: "committing", state: turnSettlementCommitting},
+		{name: "already cancelled", state: turnSettlementCancelled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := testSession(newTestAgent(), newFakeHermesClient())
+			session.turnInFlight = true
+			session.turnSettlement = test.state
+
+			if got := session.closeLifecycleAdmission(); got != test.wantCancel {
+				t.Fatalf("cancel = %v, want %v", got, test.wantCancel)
+			}
+			if !session.lifecycleClosing {
+				t.Fatal("prompt admission remained open")
+			}
+
+			wantState := test.state
+			if test.wantCancel {
+				wantState = turnSettlementCancelled
+			}
+			if session.turnSettlement != wantState {
+				t.Fatalf("settlement state = %d, want %d", session.turnSettlement, wantState)
+			}
+		})
+	}
+}
+
+func TestAdmittedCloseCancellationSurvivesTurnStart(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	session.turnInFlight = true
+
+	if !session.closeLifecycleAdmission() {
+		t.Fatal("admitted turn was not cancelled")
+	}
+
+	turnCtx := session.beginTurn(t.Context(), "closing-turn")
+	if !errors.Is(turnCtx.Err(), context.Canceled) {
+		t.Fatalf("turn context error = %v, want cancellation", turnCtx.Err())
+	}
+	if !session.wasCancelled() {
+		t.Fatal("turn lost admitted close cancellation")
+	}
+
+	session.finishTurn()
 }
 
 func TestRequiredTerminalSnapshotPropagatesCancelledCommitClaim(t *testing.T) {

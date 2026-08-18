@@ -516,6 +516,121 @@ func TestReducerRefusesADeltaFromAnUnseenStream(t *testing.T) {
 	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
 }
 
+func TestReducerAdmitsOnlyValidInactiveReplacement(t *testing.T) {
+	t.Parallel()
+
+	replacement := Delivery{
+		StreamID: "replacement", Sequence: 1, Carrier: CarrierSessionInfo, Event: openSnapshot(),
+	}
+
+	t.Run("vacant", func(t *testing.T) {
+		t.Parallel()
+
+		reducer, refusal := reduceAll(t, richConfiguration(), openSnapshot())
+		require.Nil(t, refusal)
+		require.NoError(t, reducer.Reduce(replacement))
+		require.Equal(t, "replacement", reducer.State().StreamID)
+	})
+
+	t.Run("certified", func(t *testing.T) {
+		t.Parallel()
+
+		certified := openSnapshot()
+		certified.Snapshot.Quiescence = QuiescenceFact{
+			Quiescent: true, Source: ProofClassProcessContainment,
+		}
+		reducer, refusal := reduceAll(t, richConfiguration(), certified)
+		require.Nil(t, refusal)
+		require.NoError(t, reducer.Reduce(replacement))
+	})
+
+	t.Run("owned_activity", func(t *testing.T) {
+		t.Parallel()
+
+		opening := openSnapshot()
+		opening.Snapshot.Activities = []ActivityUpdate{{
+			ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
+			Cause: CauseSession, OriginTurnID: "turn", RunID: "run",
+		}}
+		reducer, refusal := reduceAll(t, richConfiguration(), opening)
+		require.Nil(t, refusal)
+		require.Error(t, reducer.Reduce(replacement))
+		require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
+	})
+
+	t.Run("owned_action", func(t *testing.T) {
+		t.Parallel()
+
+		opening := openSnapshot()
+		opening.Snapshot.Activities = []ActivityUpdate{{
+			ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
+			Cause: CauseSession, OriginTurnID: "turn",
+		}}
+		opening.Snapshot.Actions = []ActionUpdate{{
+			ActionID: "action", Kind: ActionPermission, State: ActionPending,
+			Owner: Owner{Type: OwnerActivity, ID: "activity"}, RunID: "run", BlocksForeground: stated(false),
+		}}
+		reducer, refusal := reduceAll(t, richConfiguration(), opening)
+		require.Nil(t, refusal)
+		require.Error(t, reducer.Reduce(replacement))
+		require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
+	})
+
+	t.Run("malformed_replacement", func(t *testing.T) {
+		t.Parallel()
+
+		reducer, refusal := reduceAll(t, richConfiguration(), openSnapshot())
+		require.Nil(t, refusal)
+		malformed := replacement
+		malformed.Event = Event{Type: EventSnapshot, Snapshot: &Snapshot{}}
+		require.Error(t, reducer.Reduce(malformed))
+		require.Equal(t, ViolationMalformedEnvelope, reducer.Failed().Kind)
+	})
+}
+
+func TestSnapshotRejectsDuplicateEntities(t *testing.T) {
+	t.Parallel()
+
+	activity := ActivityUpdate{
+		ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
+		Cause: CauseSession, OriginTurnID: "turn",
+	}
+	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundIdle, CycleID: "cycle"},
+			Activities: []ActivityUpdate{activity, activity},
+		}})
+
+	action := ActionUpdate{
+		ActionID: "action", Kind: ActionPermission, State: ActionPending,
+		Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: stated(false),
+	}
+	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+		Event{Type: EventSnapshot, Snapshot: &Snapshot{
+			Foreground: Foreground{State: ForegroundRunning, CycleID: "cycle", TurnID: "turn"},
+			Actions:    []ActionUpdate{action, action},
+		}})
+}
+
+func TestReducerRejectsInvalidEventVocabulary(t *testing.T) {
+	t.Parallel()
+
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		openSnapshot(), Event{Type: EventType("future"), Snapshot: openSnapshot().Snapshot})
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{TurnID: "turn"}}
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		openSnapshot(), accepted, activityEvent(ActivityUpdate{
+			ActivityID: "activity", Kind: ActivityKind("future"), State: ActivityRunning,
+			Cause: CauseSubmission, OriginTurnID: "turn",
+		}))
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		openSnapshot(), accepted, actionEvent(ActionUpdate{
+			ActionID: "action", Kind: ActionKind("future"), State: ActionPending,
+			Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: stated(false),
+		}))
+}
+
 // TestReducerRefusesAnUnopenedStreamsSnapshot pins that a snapshot this reducer
 // cannot apply leaves the stream unopened rather than half-open.
 func TestReducerRefusesAnUnopenedStreamsSnapshot(t *testing.T) {

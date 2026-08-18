@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -36,10 +37,10 @@ func TestInspectHermesProcessSelf(t *testing.T) {
 }
 
 func TestInspectHermesProcessDarwinBranches(t *testing.T) {
-	oldKinfo := darwinSysctlKinfoProc
+	oldKinfo := darwinSysctlKinfoProcs
 	oldProcArgs := darwinSysctlProcArgs
 	t.Cleanup(func() {
-		darwinSysctlKinfoProc = oldKinfo
+		darwinSysctlKinfoProcs = oldKinfo
 		darwinSysctlProcArgs = oldProcArgs
 	})
 
@@ -47,17 +48,31 @@ func TestInspectHermesProcessDarwinBranches(t *testing.T) {
 		t.Fatal("zero pid inspected successfully")
 	}
 
-	darwinSysctlKinfoProc = func(string, ...int) (*unix.KinfoProc, error) {
+	darwinSysctlKinfoProcs = func(string, ...int) ([]unix.KinfoProc, error) {
 		return nil, errors.New("kinfo failed")
 	}
 	if _, err := inspectHermesProcess(123); err == nil {
 		t.Fatal("kinfo error ignored")
 	}
 
-	kinfo := &unix.KinfoProc{}
+	darwinSysctlKinfoProcs = func(string, ...int) ([]unix.KinfoProc, error) {
+		return nil, nil
+	}
+	if _, err := inspectHermesProcessStartTime(123); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("empty lookup = %v, want ESRCH", err)
+	}
+
+	darwinSysctlKinfoProcs = func(string, ...int) ([]unix.KinfoProc, error) {
+		return make([]unix.KinfoProc, 2), nil
+	}
+	if _, err := inspectHermesProcessStartTime(123); err == nil {
+		t.Fatal("multiple KERN_PROC_PID results accepted")
+	}
+
+	kinfo := unix.KinfoProc{}
 	kinfo.Proc.P_starttime = unix.Timeval{Sec: 12, Usec: 345}
-	darwinSysctlKinfoProc = func(string, ...int) (*unix.KinfoProc, error) {
-		return kinfo, nil
+	darwinSysctlKinfoProcs = func(string, ...int) ([]unix.KinfoProc, error) {
+		return []unix.KinfoProc{kinfo}, nil
 	}
 	darwinSysctlProcArgs = func(int) ([]byte, error) {
 		return nil, errors.New("procargs failed")

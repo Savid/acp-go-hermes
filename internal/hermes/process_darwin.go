@@ -16,8 +16,8 @@ import (
 )
 
 var (
-	darwinSysctlKinfoProc = unix.SysctlKinfoProc
-	darwinSysctlProcArgs  = func(pid int) ([]byte, error) {
+	darwinSysctlKinfoProcs = unix.SysctlKinfoProcSlice
+	darwinSysctlProcArgs   = func(pid int) ([]byte, error) {
 		return unix.SysctlRaw("kern.procargs2", pid)
 	}
 )
@@ -56,12 +56,18 @@ func inspectHermesProcessStartTime(pid int) (string, error) {
 		return "", syscall.ESRCH
 	}
 
-	kinfo, err := darwinSysctlKinfoProc("kern.proc.pid", pid)
+	kinfos, err := darwinSysctlKinfoProcs("kern.proc.pid", pid)
 	if err != nil {
 		return "", err
 	}
+	if len(kinfos) == 0 {
+		return "", syscall.ESRCH
+	}
+	if len(kinfos) != 1 {
+		return "", errors.New("KERN_PROC_PID returned multiple processes")
+	}
 
-	start := kinfo.Proc.P_starttime
+	start := kinfos[0].Proc.P_starttime
 
 	return strconv.FormatInt(start.Sec, 10) + "." + strconv.FormatInt(int64(start.Usec), 10), nil
 }

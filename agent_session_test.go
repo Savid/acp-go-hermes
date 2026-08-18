@@ -936,9 +936,7 @@ func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
 	}
 }
 
-// TestSnapshotFencedAfterAcquireTurn parks a turn after acquireTurn but before
-// beginTurn and asserts no Replace happens (HW3 turn-in-flight snapshot fence).
-func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
+func TestCloseWaitsForAdmittedTurnBeforeSnapshot(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
@@ -948,7 +946,7 @@ func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
 
-	release, err := session.acquireTurn(ctx)
+	release, settlement, err := session.acquireTurn(ctx)
 	if err != nil {
 		t.Fatalf("acquireTurn: %v", err)
 	}
@@ -958,13 +956,48 @@ func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
 	if err := session.snapshotToStore(ctx); err == nil {
 		t.Fatal("snapshot ran while turn in flight")
 	}
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
-		t.Fatalf("CloseSession: %v", err)
+	closeDone := make(chan error, 1)
+	go func() {
+		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+		closeDone <- closeErr
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		session.mu.Lock()
+		closing := session.lifecycleClosing
+		session.mu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CloseSession did not close prompt admission")
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, _, prepareErr := session.preparePromptTurn(ctx, "close-admission"); prepareErr == nil ||
+		!strings.Contains(prepareErr.Error(), valSessionClosed) {
+		t.Fatalf("turn admitted after CloseSession: %v", prepareErr)
+	}
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("CloseSession did not wait for admitted turn: %v", closeErr)
+	default:
 	}
 	if got := store.replaceCount(); got != 0 {
-		t.Fatalf("Replace happened while turn in flight: %d", got)
+		t.Fatalf("Replace happened before turn settlement: %d", got)
 	}
+
 	release()
+	settlement.complete()
+	if closeErr := <-closeDone; closeErr != nil {
+		t.Fatalf("CloseSession: %v", closeErr)
+	}
+	if got := store.replaceCount(); got != 1 {
+		t.Fatalf("post-settlement Replace count = %d, want 1", got)
+	}
 	if reason := session.snapshotBlockedReason(); reason != "" {
 		t.Fatalf("fence not cleared after release: %q", reason)
 	}
@@ -1434,10 +1467,10 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	queued <- struct{}{}
 	cancelled, cancelAcquire := context.WithCancel(ctx)
 	cancelAcquire()
-	if _, err := defaultSession.acquireTurn(cancelled); !errors.Is(err, context.Canceled) {
+	if _, _, err := defaultSession.acquireTurn(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled acquireTurn error = %v", err)
 	}
-	if _, err := defaultSession.acquireTurn(ctx); err == nil {
+	if _, _, err := defaultSession.acquireTurn(ctx); err == nil {
 		t.Fatal("prompt backpressure was not enforced")
 	}
 	<-queued

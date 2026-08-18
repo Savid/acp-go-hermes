@@ -27,6 +27,10 @@ type turnSettlementState uint8
 const (
 	turnSettlementIdle turnSettlementState = iota
 	turnSettlementOpen
+	// turnSettlementCapturing marks a turn whose settlement has begun:
+	// a routed cancel still wins until the commit claim, but a close only waits
+	// for the boundary instead of cancelling the turn.
+	turnSettlementCapturing
 	turnSettlementCommitting
 	turnSettlementCancelled
 )
@@ -245,7 +249,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 	}
 }
 
-func (s *session) acquireTurn(ctx context.Context) (func(), error) {
+func (s *session) acquireTurn(ctx context.Context) (func(), *turnSettlement, error) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
@@ -255,25 +259,27 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	default:
 	}
 
 	if err := s.poisonedErrorLocked(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if s.closed || s.lifecycleClosing {
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
 
 	if len(turn) >= cap(turn) {
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "session_prompt"})
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "session_prompt"})
 	}
 
 	turn <- struct{}{}
 
+	settlement := &turnSettlement{done: make(chan struct{})}
 	s.turnInFlight = true
+	s.settlement = settlement
 
 	return func() {
 		s.mu.Lock()
@@ -281,7 +287,7 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 
 		<-turn
 		s.mu.Unlock()
-	}, nil
+	}, settlement, nil
 }
 
 func (s *session) turnQueue() chan struct{} {
@@ -312,20 +318,29 @@ func (s *session) beginTurn(ctx context.Context, turnNonce string) context.Conte
 // routed operation.
 func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context.Context {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	turnCtx, cancel := context.WithCancel(ctx)
 	turnCtx = withTurnRoute(turnCtx, turnNonce)
+	cancelled := s.turnSettlement == turnSettlementCancelled
 	s.cancel = cancel
 	s.turnDone = turnCtx.Done()
-	s.cancelled = false
+	s.cancelled = cancelled
 	s.turnEpoch++
+
 	s.turnNonce = turnNonce
-	s.turnSettlement = turnSettlementOpen
+	if !cancelled {
+		s.turnSettlement = turnSettlementOpen
+	}
+
 	s.activeMessageIDs = map[string]struct{}{}
 	s.toolStates = map[string]hermesToolState{}
 	s.actionRequests = map[string]string{}
 	s.foregroundText = nil
+	s.mu.Unlock()
+
+	if cancelled {
+		cancel()
+	}
 
 	return turnCtx
 }
@@ -454,17 +469,18 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 		return nil
 	}
 
+	s.mu.Lock()
 	if s.fencedTurnEpoch == epoch {
 		if markCancelled {
-			s.mu.Lock()
 			s.cancelled = true
-			s.mu.Unlock()
 		}
 
-		return s.turnFenceErr
+		err := s.turnFenceErr
+		s.mu.Unlock()
+
+		return err
 	}
 
-	s.mu.Lock()
 	currentEpoch := s.turnEpoch
 	client := s.client
 	nativeID := s.idmap.NativeSessionID
@@ -474,12 +490,18 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 		return routeInvalid("stale turn epoch")
 	}
 
+	s.mu.Lock()
+	s.fencedTurnEpoch = epoch
+	s.mu.Unlock()
+
 	s.cancelTurnLocked(client, markCancelled)
 
 	if client == nil {
 		err := s.poisonWithError(ctx, "hermes_runtime_fence_failed", "Hermes runtime is unavailable")
-		s.fencedTurnEpoch = epoch
+
+		s.mu.Lock()
 		s.turnFenceErr = err
+		s.mu.Unlock()
 
 		return err
 	}
@@ -494,8 +516,6 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 
 	closeCancel()
 
-	s.fencedTurnEpoch = epoch
-
 	if closeErr != nil {
 		name := "hermes_runtime_fence_failed"
 		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
@@ -503,7 +523,10 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 		}
 
 		err := errors.Join(s.poisonWithError(ctx, name, closeErr.Error()), closeErr)
+
+		s.mu.Lock()
 		s.turnFenceErr = err
+		s.mu.Unlock()
 
 		return err
 	}
@@ -520,8 +543,8 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 	s.failedMessageIDs = map[string]struct{}{}
 	s.suppressNextBacklog = true
 	s.mcpReloadComplete = false
-	s.mu.Unlock()
 	s.turnFenceErr = nil
+	s.mu.Unlock()
 
 	return nil
 }
@@ -842,18 +865,24 @@ func (s *session) markPart(part nativehermes.Part) bool {
 }
 
 func (s *session) Close(ctx context.Context) error {
-	return s.close(ctx, false)
+	return s.closeAfterTurns(ctx, false)
 }
 
 func (s *session) DeleteNativeAndClose(ctx context.Context) error {
-	return s.close(ctx, true)
+	return s.closeAfterTurns(ctx, true)
 }
 
-func (s *session) close(ctx context.Context, deleteNative bool) error {
+func (s *session) closeAfterTurns(ctx context.Context, deleteNative bool) error {
+	if s.closeLifecycleAdmission() {
+		s.cancelTurn()
+	}
+
+	waitErr := s.awaitSettlement(ctx)
+
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
-	return s.closeLocked(ctx, deleteNative)
+	return errors.Join(waitErr, s.closeLocked(ctx, deleteNative))
 }
 
 func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
@@ -870,8 +899,7 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 	s.closed = true
 	client := s.client
 	nativeID := s.idmap.NativeSessionID
-	epoch := s.turnEpoch
-	active := s.cancel != nil && epoch > 0
+	runtimeUnavailable := s.runtimeNeedsResume
 	s.mu.Unlock()
 
 	// Pending provider-auth flows are cancelled after pending elicitation is
@@ -881,13 +909,9 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 		s.agent.providerAuth.closeSession(ctx, s.id)
 	}
 
-	if active {
-		return s.fenceTurnLocked(ctx, epoch, true)
-	}
-
 	s.cancelTurnLocked(client, true)
 
-	if client == nil {
+	if client == nil || runtimeUnavailable {
 		return nil
 	}
 

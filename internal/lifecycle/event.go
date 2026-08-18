@@ -72,6 +72,7 @@ type Event struct {
 
 func (e Event) strictShape() bool {
 	payloads := 0
+
 	for _, present := range []bool{
 		e.Snapshot != nil, e.PromptAccepted != nil, e.State != nil,
 		e.Activity != nil, e.Action != nil, e.Quiescence != nil,
@@ -85,22 +86,12 @@ func (e Event) strictShape() bool {
 		return false
 	}
 
-	switch e.Type {
-	case EventSnapshot:
-		return e.Snapshot != nil
-	case EventPromptAccepted:
-		return e.PromptAccepted != nil
-	case EventStateUpdate:
-		return e.State != nil
-	case EventActivityUpdate:
-		return e.Activity != nil
-	case EventActionUpdate:
-		return e.Action != nil
-	case EventQuiescenceUpdate:
-		return e.Quiescence != nil
-	default:
-		return false
-	}
+	return e.Type == EventSnapshot && e.Snapshot != nil ||
+		e.Type == EventPromptAccepted && e.PromptAccepted != nil ||
+		e.Type == EventStateUpdate && e.State != nil ||
+		e.Type == EventActivityUpdate && e.Activity != nil ||
+		e.Type == EventActionUpdate && e.Action != nil ||
+		e.Type == EventQuiescenceUpdate && e.Quiescence != nil
 }
 
 // Snapshot opens a stream with the whole truth it can state: the foreground state

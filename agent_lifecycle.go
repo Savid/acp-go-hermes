@@ -1,3 +1,4 @@
+//nolint:tagliatelle // ACP wire member names keep their protocol spelling.
 package hermesacp
 
 import (
@@ -19,11 +20,13 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	}
 
 	answer, common := offer.Answer(a.provenLifecycleFacts())
+
+	// An omitted key and an empty intersection are the same wire fact: the
+	// response carries no lifecycle member at all.
 	if !offered || !common {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
-		// An omitted key and an empty intersection are the same wire fact: the
-		// response carries no lifecycle member at all.
+		//nolint:nilnil // No advertisement and no refusal is the documented empty-intersection answer.
 		return nil, nil
 	}
 
@@ -109,9 +112,7 @@ func rejectLifecycleRawMeta(params json.RawMessage) error {
 	}
 
 	if err := json.Unmarshal(params, &envelope); err != nil {
-		// Undecodable params are the route's own error to report against its own
-		// shape; there is no reserved member to find in them.
-		return nil
+		return nil //nolint:nilerr // The route reports malformed params against its own shape.
 	}
 
 	if _, present := envelope.Meta[lifecycle.MetaKey]; !present {

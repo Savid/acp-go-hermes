@@ -277,13 +277,12 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 		return acp.PromptResponse{}, poisonErr
 	}
 
-	release, err := s.acquireTurn(ctx)
+	release, settlement, err := s.acquireTurn(ctx)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
+	defer settlement.complete()
 	defer release()
-	settlement := s.beginSettlement()
-	defer func() { settlement.complete(returnErr) }()
 
 	turnPublished := false
 
@@ -340,14 +339,12 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 	run := s.runPromptTurn(ctx, turnCtx, turnEpoch, submission, req, params.MessageId)
 	if !run.settle {
 		s.finishTurn()
-		settlement.complete(run.err)
 
 		return run.response, run.err
 	}
 
 	response, committed, settleErr := s.settlePrompt(ctx, turnCtx, turnEpoch, baseline, run, params.MessageId)
 	turnPublished = committed
-	settlement.complete(settleErr)
 
 	return response, settleErr
 }

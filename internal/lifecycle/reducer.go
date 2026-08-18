@@ -155,6 +155,7 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
+
 	if r.activeRun() {
 		return r.fail(delivery, ViolationStaleStream, "the active run lost incarnation "+r.state.StreamID)
 	}
@@ -230,24 +231,28 @@ func (r *Reducer) fail(delivery Delivery, kind ViolationKind, detail string) err
 }
 
 func (r *Reducer) apply(delivery Delivery) error {
+	var reduce func(Delivery) error
+
+	switch delivery.Event.Type {
+	case EventPromptAccepted:
+		reduce = r.applyPromptAccepted
+	case EventStateUpdate:
+		reduce = r.applyStateUpdate
+	case EventActivityUpdate:
+		reduce = r.applyActivityUpdate
+	case EventActionUpdate:
+		reduce = r.applyActionUpdate
+	case EventQuiescenceUpdate:
+		reduce = r.applyQuiescence
+	default:
+		return r.fail(delivery, ViolationMalformedEnvelope, "unknown event type "+string(delivery.Event.Type))
+	}
+
 	if !delivery.Event.strictShape() {
 		return r.fail(delivery, ViolationMalformedEnvelope, "event payload does not match type "+string(delivery.Event.Type))
 	}
 
-	switch delivery.Event.Type {
-	case EventPromptAccepted:
-		return r.applyPromptAccepted(delivery)
-	case EventStateUpdate:
-		return r.applyStateUpdate(delivery)
-	case EventActivityUpdate:
-		return r.applyActivityUpdate(delivery)
-	case EventActionUpdate:
-		return r.applyActionUpdate(delivery)
-	case EventQuiescenceUpdate:
-		return r.applyQuiescence(delivery)
-	default:
-		return r.fail(delivery, ViolationMalformedEnvelope, "unknown event type "+string(delivery.Event.Type))
-	}
+	return reduce(delivery)
 }
 
 func (r *Reducer) activeRun() bool {
@@ -255,18 +260,20 @@ func (r *Reducer) activeRun() bool {
 		return false
 	}
 
-	for _, turn := range r.state.Turns {
-		if turn.RunID != "" {
+	for index := range r.state.Turns {
+		if r.state.Turns[index].RunID != "" {
 			return true
 		}
 	}
-	for _, activity := range r.state.Activities {
-		if activity.RunID != "" {
+
+	for index := range r.state.Activities {
+		if r.state.Activities[index].RunID != "" {
 			return true
 		}
 	}
-	for _, action := range r.state.Actions {
-		if action.RunID != "" {
+
+	for index := range r.state.Actions {
+		if r.state.Actions[index].RunID != "" {
 			return true
 		}
 	}

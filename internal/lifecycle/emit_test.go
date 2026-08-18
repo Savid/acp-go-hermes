@@ -51,6 +51,15 @@ func emitAll(t *testing.T, stream *Stream, events ...Event) []map[string]any {
 	return envelopes
 }
 
+func TestStreamRejectsUnencodableEvent(t *testing.T) {
+	t.Parallel()
+
+	stream := NewStream("strm-1", richConfiguration())
+	_, err := stream.Emit(activityEvent(ActivityUpdate{Progress: json.RawMessage(`{`)}))
+	require.Error(t, err)
+	require.Equal(t, uint64(1), stream.Sequence())
+}
+
 // TestEmittedStreamReducesThroughTheSameReducer proves the emitted bytes are
 // wire-legal by decoding them from a session/update notification and reducing
 // them through the reducer the family battery drives.

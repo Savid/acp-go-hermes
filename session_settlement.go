@@ -46,30 +46,30 @@ type promptRun struct {
 }
 
 // turnSettlement is the completion latch close and delete wait on. It is
-// published only once the prompt is wholly settled — the containment boundary,
+// released only once the prompt is wholly settled — the containment boundary,
 // the durable commit, the terminal idle, and the quiescence fact — so a close
 // response can never fence a stream this prompt is still writing to, and can
-// never return before the frames its host was shown are durable.
+// never return before the frames its host was shown are durable. The
+// settlement's own verdict belongs to the prompt that produced it: close and
+// delete wait for the boundary, they do not inherit its error.
 type turnSettlement struct {
 	done chan struct{}
 	once sync.Once
-	err  error
 }
 
-func (t *turnSettlement) complete(err error) {
+func (t *turnSettlement) complete() {
 	if t == nil {
 		return
 	}
 
 	t.once.Do(func() {
-		t.err = err
 		close(t.done)
 	})
 }
 
-// await blocks until the settlement finishes and reports its result. A caller
-// whose own context ends first reports that instead: waiting is not a licence to
-// hang a request forever.
+// await blocks until the settlement finishes. A caller whose own context ends
+// first reports that instead: waiting is not a licence to hang a request
+// forever.
 func (t *turnSettlement) await(ctx context.Context) error {
 	if t == nil {
 		return nil
@@ -77,26 +77,15 @@ func (t *turnSettlement) await(ctx context.Context) error {
 
 	select {
 	case <-t.done:
-		return t.err
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// beginSettlement installs the latch for the turn just admitted and returns it.
-func (s *session) beginSettlement() *turnSettlement {
-	settlement := &turnSettlement{done: make(chan struct{})}
-
-	s.mu.Lock()
-	s.settlement = settlement
-	s.mu.Unlock()
-
-	return settlement
-}
-
-// awaitSettlement waits for any in-flight turn to settle wholly and reports what
-// that settlement produced. Close and delete call it before touching durable
-// state, so neither races a commit or a terminal emission the prompt still owes.
+// awaitSettlement waits for any in-flight turn to settle wholly. Close and
+// delete call it before touching durable state, so neither races a commit or a
+// terminal emission the prompt still owes.
 func (s *session) awaitSettlement(ctx context.Context) error {
 	s.mu.Lock()
 	settlement := s.settlement
@@ -108,14 +97,23 @@ func (s *session) awaitSettlement(ctx context.Context) error {
 // closeLifecycleAdmission stops admitting prompts before close or delete waits
 // for the turn in flight. Without it a second prompt could be admitted in the
 // window between the wait and the teardown, and the teardown would then race a
-// turn it never waited for.
-func (s *session) closeLifecycleAdmission() {
+// turn it never waited for. A turn still running natively is marked cancelled so
+// its settlement records the close's verdict; a turn already capturing its
+// terminal commit is left alone — the commit in progress wins and close simply
+// waits for it.
+func (s *session) closeLifecycleAdmission() bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.lifecycleClosing = true
-	if s.turnInFlight && s.turnSettlement == turnSettlementOpen {
-		s.turnSettlement = turnSettlementCancelled
+
+	if !s.turnInFlight || (s.turnSettlement != turnSettlementIdle && s.turnSettlement != turnSettlementOpen) {
+		return false
 	}
-	s.mu.Unlock()
+
+	s.turnSettlement = turnSettlementCancelled
+
+	return true
 }
 
 // containmentProof is what one completed containment boundary proved about the
@@ -186,6 +184,21 @@ func (s *session) settlePrompt(
 	defer s.lifecycleMu.Unlock()
 	defer s.finishTurn()
 
+	s.mu.Lock()
+
+	cancelledBeforeSettlement := s.turnSettlement == turnSettlementCancelled
+	if s.turnSettlement == turnSettlementOpen {
+		s.turnSettlement = turnSettlementCapturing
+	}
+	s.mu.Unlock()
+
+	if cancelledBeforeSettlement {
+		run.err = nil
+		run.cancelled = true
+		run.endsIncarnation = true
+		run.markCancelled = true
+	}
+
 	// The commit claim is the settlement linearization point and the single race
 	// authority: after it, a cancel is a post-settlement no-op, and a cancel that
 	// won before it is recorded as this turn's outcome without abandoning the
@@ -216,10 +229,11 @@ func (s *session) settlePrompt(
 		return acp.PromptResponse{}, false, errors.Join(run.err, err)
 	}
 
-	raced, err := s.commitForegroundPrefix(settleCtx, baseline, turnEpoch, run, outcome)
+	raced, published, err := s.commitForegroundPrefix(settleCtx, baseline, turnEpoch, run, outcome)
 	if err != nil {
 		return acp.PromptResponse{}, false, errors.Join(run.err, err)
 	}
+
 	if raced {
 		run.cancelled = true
 		run.endsIncarnation = true
@@ -227,7 +241,7 @@ func (s *session) settlePrompt(
 	}
 
 	if err := stream.settle(settleCtx, outcome); err != nil {
-		return acp.PromptResponse{}, true, errors.Join(run.err, err)
+		return acp.PromptResponse{}, published, errors.Join(run.err, err)
 	}
 
 	if run.endsIncarnation {
@@ -236,7 +250,7 @@ func (s *session) settlePrompt(
 		// the resumable snapshot the quiescence fact stands on.
 		if proof.vacant() {
 			if err := stream.certify(settleCtx, proof.barrier); err != nil {
-				return acp.PromptResponse{}, true, errors.Join(run.err, err)
+				return acp.PromptResponse{}, published, errors.Join(run.err, err)
 			}
 		}
 
@@ -244,7 +258,7 @@ func (s *session) settlePrompt(
 	}
 
 	if run.err != nil {
-		return acp.PromptResponse{}, true, run.err
+		return acp.PromptResponse{}, published, run.err
 	}
 
 	if !run.cancelled {
@@ -287,14 +301,17 @@ func (s *session) terminalMapping(run promptRun, messageID *string) (lifecycleTu
 // exit owes. It records how the turn actually ended and the largest prefix of it
 // this wrapper can state truthfully, and it never advances the native archive's
 // completed assistant identity for a turn that completed none.
+// The results report whether the claim observed a pre-claim cancel and whether
+// this exit actually published a generation.
 func (s *session) commitForegroundPrefix(
 	ctx context.Context,
 	baseline SessionStoreTerminalState,
 	turnEpoch uint64,
 	run promptRun,
 	outcome lifecycleTurnOutcome,
-) (bool, error) {
+) (bool, bool, error) {
 	stream := s.lifecycleStream()
+
 	requirement := &terminalSnapshotRequirement{
 		baseline:  baseline,
 		turnEpoch: turnEpoch,
@@ -311,6 +328,7 @@ func (s *session) commitForegroundPrefix(
 		nativeUnavailable: run.endsIncarnation,
 		settlementCapture: true,
 	}
+
 	if s.wasCancelled() {
 		requirement.completed = false
 		requirement.nativeUnavailable = true
@@ -321,6 +339,7 @@ func (s *session) commitForegroundPrefix(
 	commit, commitErr := s.captureSnapshotLocked(ctx, requirement)
 	if commitErr == nil {
 		var raced bool
+
 		raced, commitErr = s.claimTerminalCommit(turnEpoch)
 		if commitErr == nil && raced {
 			requirement.completed = false
@@ -329,11 +348,13 @@ func (s *session) commitForegroundPrefix(
 			requirement.foreground.StopReason = lifecycle.StopReasonCancelled
 			commit, commitErr = s.captureSnapshotLocked(ctx, requirement)
 		}
+
 		if commitErr == nil {
 			commitErr = s.publishSnapshotLocked(ctx, commit)
 		}
+
 		if commitErr == nil {
-			return raced, nil
+			return raced, true, nil
 		}
 	}
 
@@ -343,9 +364,10 @@ func (s *session) commitForegroundPrefix(
 	// nobody can trust.
 	poisonErr := s.poisonWithError(ctx, "hermes_terminal_snapshot_failed", commitErr.Error())
 	fenceErr := s.fenceTurn(ctx, turnEpoch, false)
+
 	stream.fence()
 
-	return false, errors.Join(commitErr, poisonErr, fenceErr)
+	return false, false, errors.Join(commitErr, poisonErr, fenceErr)
 }
 
 // unacceptedCancel settles a cancel that won before the dispatch point. No

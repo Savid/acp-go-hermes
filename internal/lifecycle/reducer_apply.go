@@ -10,10 +10,6 @@ func (r *Reducer) applySnapshot(delivery Delivery) error {
 	}
 
 	snapshot := delivery.Event.Snapshot
-	if snapshot == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot payload is missing")
-	}
-
 	if err := r.checkSnapshot(delivery, *snapshot); err != nil {
 		return err
 	}
@@ -190,10 +186,6 @@ func (s Snapshot) vacant() bool {
 // ownership of.
 func (r *Reducer) applyPromptAccepted(delivery Delivery) error {
 	accepted := delivery.Event.PromptAccepted
-	if accepted == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the acceptance payload is missing")
-	}
-
 	index := r.turnIndex(accepted.TurnID)
 
 	switch {
@@ -220,10 +212,6 @@ func (r *Reducer) applyPromptAccepted(delivery Delivery) error {
 
 func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 	transition := delivery.Event.State
-	if transition == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the transition payload is missing")
-	}
-
 	if index := r.turnIndex(transition.TurnID); index >= 0 && r.state.Turns[index].Terminal {
 		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
 	}
@@ -298,10 +286,7 @@ func (r *Reducer) blocked(cycleID string) bool {
 func (r *Reducer) applyLive(delivery Delivery, transition StateTransition) error {
 	index := r.turnIndex(transition.TurnID)
 
-	switch {
-	case index >= 0 && r.state.Turns[index].Terminal:
-		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
-	case index < 0:
+	if index < 0 {
 		if transition.Cause != CauseActivity || transition.State != ForegroundRunning {
 			return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never opened")
 		}
@@ -333,8 +318,6 @@ func (r *Reducer) applyIdle(delivery Delivery, transition StateTransition) error
 		r.state.Foreground = &Foreground{State: ForegroundIdle, CycleID: transition.CycleID}
 
 		return nil
-	case index >= 0 && r.state.Turns[index].Terminal:
-		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
 	case index < 0:
 		return r.fail(delivery, ViolationUnknownEntity, "turn "+transition.TurnID+" was never opened")
 	}
@@ -351,10 +334,6 @@ func (r *Reducer) applyIdle(delivery Delivery, transition StateTransition) error
 
 func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 	update := delivery.Event.Activity
-	if update == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the activity payload is missing")
-	}
-
 	r.lastTransition = delivery.Sequence
 
 	if r.activityIndex(update.ActivityID) >= 0 {
@@ -542,10 +521,6 @@ func immutableActivityConflict(existing ActivityRecord, update ActivityUpdate) s
 
 func (r *Reducer) applyActionUpdate(delivery Delivery) error {
 	update := delivery.Event.Action
-	if update == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the action payload is missing")
-	}
-
 	r.lastTransition = delivery.Sequence
 
 	if r.actionIndex(update.ActionID) >= 0 {
@@ -575,6 +550,7 @@ func (r *Reducer) checkActionIdentity(delivery Delivery, update ActionUpdate) er
 		return r.fail(delivery, ViolationMalformedEnvelope,
 			"action "+update.ActionID+" states an incomplete first sight")
 	}
+
 	if !update.Kind.Valid() || !update.State.Valid() || !update.Owner.Type.Valid() {
 		return r.fail(delivery, ViolationMalformedEnvelope,
 			"action "+update.ActionID+" states an invalid vocabulary value")
@@ -671,10 +647,6 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 // authoritative absence of background work from a source that cannot observe it.
 func (r *Reducer) applyQuiescence(delivery Delivery) error {
 	fact := delivery.Event.Quiescence
-	if fact == nil {
-		return r.fail(delivery, ViolationMalformedEnvelope, "the quiescence payload is missing")
-	}
-
 	if !r.negotiated.AuthoritativeQuiescence {
 		return r.fail(delivery, ViolationUnnegotiatedFact, "the answer proved no quiescence class")
 	}

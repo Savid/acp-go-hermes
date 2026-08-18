@@ -37,6 +37,7 @@ var acquireSharedSessionSetLock = func(
 	return nativehermes.AcquireSharedSessionSetLock(ctx, home, mode)
 }
 
+//nolint:gocyclo // NewSession is one ordered launch, journal, and publication transaction.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_ acp.NewSessionResponse, returnErr error) {
 	if err := rejectLifecycleMeta(params.Meta); err != nil {
 		return acp.NewSessionResponse{}, err
@@ -282,6 +283,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}, nil
 }
 
+//nolint:gocyclo // Load/resume is one ordered hydration, ownership, launch, and publication transaction.
 func (a *Agent) loadOrResumeSession(
 	ctx context.Context,
 	id acp.SessionId,
@@ -459,7 +461,7 @@ func (a *Agent) loadOrResumeSession(
 func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr error) {
 	s.mu.Lock()
 	needsResume := s.runtimeNeedsResume
-	closed := s.closed
+	closed := s.closed || s.lifecycleClosing
 	poisonErr := s.poisonedErrorLocked()
 	id := s.id
 	cwd := s.cwd
@@ -812,12 +814,15 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	}
 
 	// Close stops admitting prompts, then waits for the turn in flight to settle
-	// wholly. That settlement's result is part of this response: a close that
-	// returned while a commit or a terminal emission was still owed would report a
-	// contained session over durable state nobody had finished writing.
-	session.closeLifecycleAdmission()
-	session.cancelTurn()
-	settleErr := session.awaitSettlement(ctx)
+	// wholly. The wait is the boundary: a close that returned while a commit or
+	// a terminal emission was still owed would report a contained session over
+	// durable state nobody had finished writing. The settlement's own verdict
+	// was already delivered to the prompt that produced it, so it is not
+	// re-reported here.
+	if session.closeLifecycleAdmission() {
+		session.cancelTurn()
+	}
+	waitErr := session.awaitSettlement(ctx)
 
 	session.lifecycleMu.Lock()
 	closeErr := session.settleClosedSession(ctx)
@@ -828,7 +833,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	return acp.CloseSessionResponse{}, errors.Join(settleErr, closeErr)
+	return acp.CloseSessionResponse{}, errors.Join(waitErr, closeErr)
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {

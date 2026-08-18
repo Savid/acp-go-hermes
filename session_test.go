@@ -154,7 +154,7 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 		!strings.Contains(err.Error(), "native drift without advertisement") {
 		t.Fatalf("second poison error = %v", err)
 	}
-	if _, err := s.acquireTurn(ctx); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+	if _, _, err := s.acquireTurn(ctx); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
 		t.Fatalf("acquire poisoned session error = %v", err)
 	}
 	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: s.id}); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
