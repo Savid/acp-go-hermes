@@ -634,6 +634,11 @@ func (s *session) nativeRun(
 // stream, then the resumable snapshot is made durable, then the quiescence fact
 // the completed proof produced is stated, and only then is the stream fenced.
 //
+// The emission rungs of that order apply only to a live incarnation. A stream a
+// cancel or an incarnation loss already fenced, and one whose opening snapshot
+// was never delivered, are skipped entirely; the containment proof and the
+// durable commit run either way, and a capture failure still fails the close.
+//
 // A close reached from an already-committed between-turn idle invents no second
 // cycle and duplicates no terminal idle: the turn that settled already emitted
 // its own, and this boundary settles the incarnation rather than a foreground
@@ -671,14 +676,16 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		return errors.Join(captureErr, closeErr)
 	}
 
-	if stream.fenced() {
-		// The incarnation's stream is terminal: the terminalize and certify rungs
-		// have nothing truthful to add, and emitting on the fenced stream would
-		// only join a stale_stream refusal into a close that succeeded. The
-		// durable rung is not a stream rung, and the fence may have landed while
-		// the containment boundary was running, so the generation this boundary
-		// already captured is still published and a capture failure it already
-		// observed is still reported.
+	if !stream.live() {
+		// There is no stream for the boundary to speak on. It is terminal, or its
+		// opening whole-state assertion was never delivered, and either way the
+		// terminalize and certify rungs have nothing truthful to add: an event on
+		// a fenced stream is a stale_stream refusal, and one on an unopened stream
+		// is a delta before the snapshot, so emitting would only join a violation
+		// into a close that succeeded. The durable rung is not a stream rung, and
+		// the fence may have landed while the containment boundary was running, so
+		// the generation this boundary already captured is still published and a
+		// capture failure it already observed is still reported.
 		var commitErr error
 		if commit != nil {
 			commitErr = s.publishSnapshotLocked(context.WithoutCancel(ctx), commit)

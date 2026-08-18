@@ -337,6 +337,22 @@ func (p *sessionStream) fence() {
 	p.stream.Fence()
 }
 
+// live reports whether there is a stream for a boundary to speak on: one whose
+// opening whole-state assertion has been delivered and which nothing has fenced
+// since. A never-opened incarnation and a fenced one are the same fact to an
+// emitter — an event on either is exactly what a conforming reducer refuses —
+// and a connection that negotiated nothing has no stream at all.
+func (p *sessionStream) live() bool {
+	if p == nil {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.opened && !p.stream.Fenced()
+}
+
 func (p *sessionStream) fenced() bool {
 	if p == nil {
 		return false

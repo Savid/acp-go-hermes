@@ -94,9 +94,158 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	}
 	agent.sessions[session.id] = session
 
+	emitted := lifecycleUpdateCount(conn)
+
 	if _, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); err != nil {
 		t.Errorf("CloseSession after a cancelled turn must not report an error: %v", err)
 	}
+	if after := lifecycleUpdateCount(conn); after != emitted {
+		t.Errorf("close emitted %d event(s) on the stream the cancel already fenced", after-emitted)
+	}
+}
+
+// A close of a session whose incarnation never opened its stream: the same
+// branch reached from the other side. No snapshot was ever delivered, so there
+// is no stream to terminalize on and nothing to certify against; the boundary
+// still runs its containment proof and answers success, and it emits nothing —
+// least of all the quiescence fact its completed proof would otherwise state,
+// which on an unopened stream would be a delta before the snapshot.
+func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions:                []int{lifecycle.Version},
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+		ActivityKinds:           []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
+	require.NoError(t, session.openLifecycleStream())
+	agent.sessions[session.id] = session
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err, "a close whose incarnation never opened must still succeed")
+	require.Zero(t, lifecycleUpdateCount(conn), "the boundary emitted on an incarnation that never opened")
+	require.Equal(t, 1, client.closeCount(), "the containment proof runs whether or not the stream opened")
+}
+
+// The live incarnation is the other half of the same branch: a stream whose
+// opening assertion was delivered and which nothing has fenced does get the
+// emission rungs. What it states there is whatever its boundary actually
+// proved — a completed whole-tree proof yields the quiescence fact, and a
+// runtime that enumerates nothing yields none — and either way the stream is
+// fenced afterwards.
+func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
+	closeLive := func(t *testing.T, enumerates bool) (*session, *recordingAgentClient) {
+		t.Helper()
+
+		agent := newTestAgent()
+		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			Versions:                []int{lifecycle.Version},
+			AuthoritativeQuiescence: true,
+			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+			ActivityKinds:           []lifecycle.ActivityKind{},
+		})
+		conn := newRecordingAgentClient()
+		agent.setAgentClient(conn)
+		client := newFakeHermesClient()
+		session := testSession(agent, client)
+
+		if enumerates {
+			session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
+		}
+
+		require.NoError(t, session.openLifecycleStream())
+		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+		require.Equal(t, 1, lifecycleUpdateCount(conn), "precondition: the incarnation opened")
+		agent.sessions[session.id] = session
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.True(t, session.lifecycleStream().fenced(), "a settled close ends the incarnation")
+
+		return session, conn
+	}
+
+	t.Run("proved vacancy", func(t *testing.T) {
+		_, conn := closeLive(t, true)
+		require.Equal(t, 2, lifecycleUpdateCount(conn), "the boundary owes the fact its completed proof produced")
+	})
+
+	t.Run("nothing to enumerate", func(t *testing.T) {
+		_, conn := closeLive(t, false)
+		require.Equal(t, 1, lifecycleUpdateCount(conn),
+			"a boundary that enumerated no tree states no quiescence fact")
+	})
+}
+
+// The durable branch's precision: an entity the incarnation loss already
+// terminalized as `failed` stays `failed`. The close terminalizes only what is
+// still nonterminal in the store, so a boundary the store already holds is never
+// rewritten to the close's own cancelled verdict.
+func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	require.NoError(t, session.openLifecycleStream())
+	turnCtx := session.beginTurn(t.Context(), "turn")
+	session.mu.Lock()
+	session.turnInFlight = true
+	session.mu.Unlock()
+	require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "nonce",
+	}))
+
+	// The incarnation is lost under the turn: the run reports its failure, the
+	// settlement records it, and the store holds `failed` from that moment on.
+	_, published, err := session.settlePrompt(
+		t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
+		promptRun{settle: true, err: errors.New("gateway connection closed"), endsIncarnation: true}, nil,
+	)
+	require.Error(t, err, "a lost incarnation settles as the failure it was")
+	require.True(t, published)
+	require.Equal(t, string(lifecycle.OutcomeFailed), session.committedTerminalState().Outcome)
+
+	agent.sessions[session.id] = session
+	_, closeErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, closeErr)
+
+	entries, loadErr := agent.sessionStore().Load(t.Context(), SessionKey{
+		SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+	})
+	require.NoError(t, loadErr)
+
+	durable, inspectErr := InspectSessionStoreTerminalState(string(session.id), entries)
+	require.NoError(t, inspectErr)
+	require.Equal(t, string(lifecycle.OutcomeFailed), durable.Outcome,
+		"the close rewrote a loss-terminalized failure as its own cancelled verdict")
+	require.Empty(t, durable.StopReason, "no stop reason names a failure")
+}
+
+// lifecycleUpdateCount counts the notifications that actually carried a
+// lifecycle envelope, which is what "emits nothing on the dead stream" is a
+// claim about.
+func lifecycleUpdateCount(conn *recordingAgentClient) int {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
+	count := 0
+
+	for _, notification := range conn.updates {
+		if _, carried := notification.Meta[lifecycle.MetaKey]; carried {
+			count++
+		}
+	}
+
+	return count
 }
 
 // A routed cancel that wins while the pre-claim capture is still reading the
