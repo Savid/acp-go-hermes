@@ -13,6 +13,7 @@ import (
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
@@ -66,6 +67,11 @@ type Agent struct {
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+	lifecycleAnswer    lifecycle.Negotiated
+
+	streamOpenMu   sync.Mutex
+	streamOpens    []*session
+	streamOpenWait sync.WaitGroup
 
 	sharedConfigMu          sync.Mutex
 	sharedConfigInitialized bool
@@ -199,6 +205,9 @@ func (a *Agent) close() error {
 	a.mu.Unlock()
 
 	a.constructions.Wait()
+	// Every released opening snapshot has finished before the connection goes
+	// away, so no lifecycle notification is still in flight at shutdown.
+	a.awaitStreamOpens()
 
 	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
@@ -271,6 +280,14 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		return acp.InitializeResponse{}, err
 	}
 
+	// The lifecycle answer is resolved before anything else this handshake
+	// records, so a malformed offer is refused before the connection adopts a
+	// client capability set it would then have to unwind.
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
@@ -312,6 +329,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	capabilityMeta[routeMetaKey] = map[string]any{keyVersions: []int{routeVersion}}
 
 	return acp.InitializeResponse{
+		Meta:            lifecycleMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
@@ -341,20 +359,47 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
+// Authenticate advertises no method, so every call is refused. The reserved
+// lifecycle literal is inspected first: a request naming a key this surface
+// never carries is malformed before it is unauthenticated.
 func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
+
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
-func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, error) {
+func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.LogoutResponse{}, err
+	}
+
 	return acp.LogoutResponse{}, nil
 }
 
-func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+// SetSessionMode carries no native mode surface, so it answers method-not-found.
+// The lifecycle refusal still precedes that answer, for the same reason
+// Authenticate's does.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	// Every extension route inspects the reserved lifecycle literal before its
+	// own side effects or its own refusal. An unconfigured provider-auth leg
+	// answers method-not-found, and a family literal is never foreign, so the
+	// refusal that names the key has to come first or a host would learn the
+	// leg is absent instead of learning its request was malformed.
+	if err := rejectLifecycleRawMeta(params); err != nil {
 		return nil, err
 	}
 

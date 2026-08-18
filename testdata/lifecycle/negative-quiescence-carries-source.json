@@ -1,6 +1,6 @@
 {
-  "name": "negative-quiescence-carries-proof",
-  "purpose": "A watermark is present exactly when the fact is positive. A negative fact carrying one states a fence for a claim it does not make, and presence rules are structural: it is malformed rather than a negative fact with a harmless leftover member.",
+  "name": "negative-quiescence-carries-source",
+  "purpose": "A proof source is present exactly when the fact is positive. A negative fact naming a proof class states the class that produced a claim it does not make, and presence rules are structural: it is malformed rather than a negative fact with a harmless leftover member.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -43,7 +43,7 @@
             "event": {
               "type": "quiescence_update",
               "quiescent": false,
-              "watermark": 1
+              "source": "process-containment"
             }
           }
         }

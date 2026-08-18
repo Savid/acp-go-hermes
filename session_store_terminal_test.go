@@ -11,6 +11,7 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -780,7 +781,7 @@ func TestCloseSessionWaitsForTerminalSnapshotCommit(t *testing.T) {
 	}
 }
 
-func TestCloseWinningBeforeTerminalCommitCannotAdoptNativeSuccess(t *testing.T) {
+func TestCloseBeforeTerminalCommitWaitsForCancelledSettlement(t *testing.T) {
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	commitReady := make(chan struct{})
@@ -809,23 +810,30 @@ func TestCloseWinningBeforeTerminalCommitCannotAdoptNativeSuccess(t *testing.T) 
 	}()
 	<-commitReady
 
-	if _, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id}); err != nil {
-		t.Fatalf("CloseSession: %v", err)
+	closeDone := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		closeDone <- err
+	}()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("CloseSession returned before settlement: %v", err)
+	case <-time.After(10 * time.Millisecond):
 	}
 	if store.replaceCount() != 0 {
-		t.Fatalf("close-winning Replace count = %d, want 0", store.replaceCount())
+		t.Fatalf("pre-settlement Replace count = %d, want 0", store.replaceCount())
 	}
 	close(releaseCommit)
 
 	result := <-promptDone
-	if result.err == nil || !strings.Contains(result.err.Error(), "closed before Hermes terminal snapshot commit") {
-		t.Fatalf("close-winning Prompt error = %v", result.err)
+	if result.err != nil || result.response.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("cancelled Prompt = %#v err=%v", result.response, result.err)
 	}
-	if result.response.Meta != nil {
-		t.Fatalf("close-winning Prompt returned terminal metadata: %#v", result.response.Meta)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("CloseSession: %v", err)
 	}
-	if store.replaceCount() != 0 {
-		t.Fatalf("post-Prompt Replace count = %d, want 0", store.replaceCount())
+	if store.replaceCount() != 1 {
+		t.Fatalf("post-settlement Replace count = %d, want 1", store.replaceCount())
 	}
 }
 
@@ -904,7 +912,7 @@ func TestRequiredTerminalSnapshotRejectsOtherPendingWork(t *testing.T) {
 			session.lifecycleMu.Lock()
 			err := session.snapshotToStoreLocked(t.Context(), &terminalSnapshotRequirement{
 				baseline: SessionStoreTerminalState{}, turnEpoch: session.turnEpoch,
-			}, t.Context())
+			})
 			session.lifecycleMu.Unlock()
 			if err == nil || !strings.Contains(err.Error(), "pending") {
 				t.Fatalf("required snapshot with %s error = %v", name, err)
@@ -917,42 +925,35 @@ func TestRequiredTerminalSnapshotRejectsOtherPendingWork(t *testing.T) {
 }
 
 func TestTerminalCommitClaimRejectsInvalidSettlement(t *testing.T) {
-	newActive := func() (*session, context.Context) {
+	newActive := func() *session {
 		session := testSession(newTestAgent(), newFakeHermesClient())
 		session.turnInFlight = true
 		session.turnEpoch = 7
 		session.turnSettlement = turnSettlementOpen
 
-		return session, t.Context()
+		return session
 	}
 
-	stale, staleCtx := newActive()
-	if err := stale.claimTerminalCommit(staleCtx, 8); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
+	stale := newActive()
+	if _, err := stale.claimTerminalCommit(8); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
 		t.Fatalf("stale claim error = %v", err)
 	}
 
-	notActive, notActiveCtx := newActive()
+	notActive := newActive()
 	notActive.turnInFlight = false
-	if err := notActive.claimTerminalCommit(notActiveCtx, 7); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
+	if _, err := notActive.claimTerminalCommit(7); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
 		t.Fatalf("inactive claim error = %v", err)
 	}
 
-	cancelled, cancelledCtx := newActive()
+	cancelled := newActive()
 	cancelled.turnSettlement = turnSettlementCancelled
-	if err := cancelled.claimTerminalCommit(cancelledCtx, 7); !errors.Is(err, errPromptCancelled) {
+	if raced, err := cancelled.claimTerminalCommit(7); err != nil || !raced {
 		t.Fatalf("cancelled claim error = %v", err)
 	}
 
-	contextCancelled, contextCancelledCtx := newActive()
-	cancelledCtxWithCancel, cancel := context.WithCancel(contextCancelledCtx)
-	cancel()
-	if err := contextCancelled.claimTerminalCommit(cancelledCtxWithCancel, 7); !errors.Is(err, errPromptCancelled) {
-		t.Fatalf("context-cancelled claim error = %v", err)
-	}
-
-	alreadyClaimed, alreadyClaimedCtx := newActive()
+	alreadyClaimed := newActive()
 	alreadyClaimed.turnSettlement = turnSettlementCommitting
-	if err := alreadyClaimed.claimTerminalCommit(alreadyClaimedCtx, 7); err == nil ||
+	if _, err := alreadyClaimed.claimTerminalCommit(7); err == nil ||
 		!strings.Contains(err.Error(), "already claimed") {
 		t.Fatalf("duplicate claim error = %v", err)
 	}
@@ -973,7 +974,7 @@ func TestRequiredTerminalSnapshotPropagatesCancelledCommitClaim(t *testing.T) {
 	session.lifecycleMu.Lock()
 	err := session.snapshotToStoreLocked(t.Context(), &terminalSnapshotRequirement{
 		baseline: SessionStoreTerminalState{}, turnEpoch: 1,
-	}, t.Context())
+	})
 	session.lifecycleMu.Unlock()
 	if !errors.Is(err, errPromptCancelled) {
 		t.Fatalf("cancelled required snapshot error = %v", err)
@@ -1002,9 +1003,9 @@ func TestRequiredTerminalSnapshotStopsAfterCaptureCancellation(t *testing.T) {
 	session.turnSettlement = turnSettlementOpen
 
 	session.lifecycleMu.Lock()
-	err := session.snapshotToStoreLocked(t.Context(), &terminalSnapshotRequirement{
+	err := session.snapshotToStoreLocked(turnCtx, &terminalSnapshotRequirement{
 		baseline: SessionStoreTerminalState{}, turnEpoch: 1,
-	}, turnCtx)
+	})
 	session.lifecycleMu.Unlock()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled capture error = %v", err)
@@ -1093,18 +1094,22 @@ func TestCommittedTerminalStateAndResponseMetaAreExact(t *testing.T) {
 	if got := session.committedTerminalState(); got != (SessionStoreTerminalState{}) {
 		t.Fatalf("empty committedTerminalState = %#v", got)
 	}
-	terminal := SessionStoreTerminalState{MessageID: "history-9"}
+	terminal := SessionStoreTerminalState{
+		MessageID: "history-9", Outcome: string(lifecycle.OutcomeSuccess), StopReason: lifecycle.StopReasonEndTurn,
+	}
 	session.mu.Lock()
-	session.committedTerminal = terminal
+	session.committed.terminal = terminal
 	session.mu.Unlock()
 	got := session.committedTerminalState()
 	if got != terminal {
 		t.Fatalf("committedTerminalState = %#v", got)
 	}
-	if want := map[string]any{hermesMetaKey: map[string]any{keyMessageID: "history-9"}}; !reflect.DeepEqual(terminalResponseMeta(got), want) {
+	if want := map[string]any{hermesMetaKey: map[string]any{
+		keyMessageID: "history-9", keyOutcome: lifecycle.OutcomeSuccess, keyStopReason: lifecycle.StopReasonEndTurn,
+	}}; !reflect.DeepEqual(terminalResponseMeta(got), want) {
 		t.Fatalf("terminalResponseMeta = %#v, want %#v", terminalResponseMeta(got), want)
 	}
-	if got := publicTerminalState(nil); got != (SessionStoreTerminalState{}) {
+	if got := publicTerminalState(nil, nil); got != (SessionStoreTerminalState{}) {
 		t.Fatalf("publicTerminalState(nil) = %#v", got)
 	}
 }

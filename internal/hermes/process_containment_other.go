@@ -21,6 +21,7 @@ type processContainment struct {
 	killFn            func() error
 	completeFn        func(time.Duration) error
 	descendantCountFn func() (int, bool)
+	treeVacantFn      func() (bool, bool)
 	closeFn           func() error
 }
 
@@ -77,6 +78,14 @@ func (c *processContainment) descendantCount() (int, bool) {
 	}
 
 	return c.descendantCountFn()
+}
+
+func (c *processContainment) treeVacant() (bool, bool) {
+	if c == nil || c.treeVacantFn == nil {
+		return false, false
+	}
+
+	return c.treeVacantFn()
 }
 
 func (c *processContainment) terminate(cmd *exec.Cmd) error {

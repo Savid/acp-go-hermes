@@ -295,6 +295,20 @@ func startUnixContainedProcess(target *exec.Cmd, spec ContainmentSpec) (*process
 			// boundary and therefore counts alongside Hermes and its tools.
 			return 1 + len(descendants), true
 		},
+		treeVacantFn: func() (bool, bool) {
+			// The subreaper stays the parent of every orphaned descendant, so
+			// this enumeration is authoritative over the whole tree rather than
+			// over one process group. A boundary whose root has exited and whose
+			// enumeration finds nothing left is proven empty; one that still
+			// holds a reparented escapee is not, and an enumeration that failed
+			// proves nothing either way.
+			descendants, err := listSupervisorDescendants(supervisor.Process.Pid)
+			if err != nil {
+				return false, false
+			}
+
+			return len(descendants) == 0 && !supervisorProcessAlive(supervisor.Process.Pid), true
+		},
 		closeFn: func() error {
 			closeOnce.Do(func() {
 				terminateOnce.Do(func() { closeErr = controlWrite.Close() })
@@ -1229,6 +1243,16 @@ func signalPIDFD(pid int, sig syscall.Signal) error {
 	}
 
 	return nil
+}
+
+// supervisorProcessAlive reports whether the supervised root is still present.
+// A recycled numeric identity reads as alive, which keeps the vacancy
+// confirmation fail-closed: the boundary's own completed teardown is the proof,
+// and this probe can only withhold a claim, never manufacture one.
+func supervisorProcessAlive(pid int) bool {
+	err := processKill(pid, 0)
+
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func supervisorDescendants(rootPID int) (map[int]byte, error) {

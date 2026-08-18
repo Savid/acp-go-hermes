@@ -54,6 +54,8 @@ type session struct {
 
 	turn                chan struct{}
 	lifecycleMu         sync.Mutex
+	streamMu            sync.Mutex
+	stream              *sessionStream
 	cancelMu            sync.Mutex
 	toolMu              sync.Mutex
 	rawEventMu          sync.Mutex
@@ -81,7 +83,11 @@ type session struct {
 	fencedTurnEpoch     uint64
 	turnFenceErr        error
 	poisonCause         string
-	committedTerminal   SessionStoreTerminalState
+	committed           committedState
+	settlement          *turnSettlement
+	actionRequests      map[string]string
+	lifecycleClosing    bool
+	foregroundText      []byte
 	closed              bool
 }
 
@@ -124,6 +130,37 @@ func (s *session) reloadMCPForAuthorizedTurn(ctx context.Context) error {
 	}
 
 	return s.poisonWithError(ctx, "hermes_mcp_reload_failed", err.Error())
+}
+
+// committedState is the last durable generation this session published. A
+// boundary that has already contained the native generation restates it rather
+// than reading a process that is gone.
+type committedState struct {
+	terminal   SessionStoreTerminalState
+	native     *stateSnapshotTerminal
+	foreground *stateSnapshotForeground
+	todos      []nativehermes.Todo
+	archives   map[string]archiveInfo
+}
+
+// nativeTerminal returns the committed native assistant identity, or the empty
+// summary where no turn has completed one. The store shape requires the section,
+// so it is never nil.
+func (c committedState) nativeTerminal() *stateSnapshotTerminal {
+	if c.native == nil {
+		return &stateSnapshotTerminal{}
+	}
+
+	record := *c.native
+
+	return &record
+}
+
+func (s *session) committedState() committedState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.committed
 }
 
 type sessionSnapshot struct {
@@ -226,7 +263,7 @@ func (s *session) acquireTurn(ctx context.Context) (func(), error) {
 		return nil, err
 	}
 
-	if s.closed {
+	if s.closed || s.lifecycleClosing {
 		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
 
@@ -287,6 +324,8 @@ func (s *session) beginTurnLocked(ctx context.Context, turnNonce string) context
 	s.turnSettlement = turnSettlementOpen
 	s.activeMessageIDs = map[string]struct{}{}
 	s.toolStates = map[string]hermesToolState{}
+	s.actionRequests = map[string]string{}
+	s.foregroundText = nil
 
 	return turnCtx
 }
@@ -928,4 +967,67 @@ func joinModelValue(provider string, model string) string {
 	}
 
 	return provider + "/" + model
+}
+
+// committedStateFromSnapshot reads the durable generation a hydrated snapshot
+// holds. It is what a later boundary restates when the native generation it
+// settles has already been contained.
+func committedStateFromSnapshot(snapshot stateSnapshot) committedState {
+	state := committedState{
+		terminal: publicTerminalState(snapshot.Terminal, foregroundOf(snapshot.Wrapper)),
+		native:   snapshot.Terminal,
+	}
+	if snapshot.Wrapper != nil {
+		state.foreground = snapshot.Wrapper.Foreground
+		state.todos = snapshot.Wrapper.Todos
+	}
+
+	state.archives = cloneArchiveInfo(snapshot.Archives)
+
+	return state
+}
+
+func foregroundOf(wrapper *stateSnapshotWrapper) *stateSnapshotForeground {
+	if wrapper == nil {
+		return nil
+	}
+
+	return wrapper.Foreground
+}
+
+// lifecycleForegroundPrefixBytes bounds the streamed foreground prefix one
+// commit records. The journal entry is a durability record rather than a
+// transcript, so the prefix is retained up to this bound and truncated beyond it
+// and a long turn cannot grow the committed generation without limit.
+const lifecycleForegroundPrefixBytes = 64 * 1024
+
+// recordForegroundPrefix accumulates the assistant text this turn actually
+// streamed to the host. An incarnation-ending boundary destroys the native
+// generation before its own commit, so this is the only prefix of a failed or
+// cancelled turn the store can hold truthfully.
+func (s *session) recordForegroundPrefix(text string) {
+	if text == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room := lifecycleForegroundPrefixBytes - len(s.foregroundText)
+	if room <= 0 {
+		return
+	}
+
+	if len(text) > room {
+		text = text[:room]
+	}
+
+	s.foregroundText = append(s.foregroundText, text...)
+}
+
+func (s *session) foregroundPrefix() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return string(s.foregroundText)
 }

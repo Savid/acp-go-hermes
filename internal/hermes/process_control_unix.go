@@ -167,6 +167,19 @@ func (c *processContainment) descendantCount() (int, bool) {
 	return 0, false
 }
 
+// treeVacant reports whether this boundary can prove that nothing it ever
+// started is still alive. Only a boundary that enumerates its whole tree can:
+// a process-group probe says the group is gone, which is not the same claim as
+// every descendant being gone. The second result is false wherever no such
+// enumeration exists, and a failed enumeration is never a positive claim.
+func (c *processContainment) treeVacant() (bool, bool) {
+	if c != nil && c.treeVacantFn != nil {
+		return c.treeVacantFn()
+	}
+
+	return false, false
+}
+
 func (c *processContainment) terminate(cmd *exec.Cmd) error {
 	if c != nil && c.terminateFn != nil {
 		return c.terminateFn()

@@ -1,6 +1,6 @@
 {
-  "name": "ending-idle-omits-outcome",
-  "purpose": "An idle transition that ends an open turn always records the outcome that settled it. This one carries its stop reason and omits the outcome: a settled turn with no recorded outcome is a boundary a consumer cannot report, so the omission is malformed rather than a turn that ended for no stated reason.",
+  "name": "false-quiescence-holds-action",
+  "purpose": "A positive quiescence fact is disproved by a single unresolved action, with nothing else live. The foreground is idle and the stream holds no activity, so a reducer that reads foreground state and activity liveness alone would certify a boundary while a pending action still keeps its owner incomplete.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -24,7 +24,7 @@
               "foreground": {"state": "idle", "cycleId": "cyc-0"},
               "activities": [],
               "actions": [],
-              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+              "quiescence": {"quiescent": false}
             }
           }
         }
@@ -61,11 +61,14 @@
             "streamId": "strm-1",
             "sequence": 3,
             "event": {
-              "type": "state_update",
-              "state": "running",
-              "cycleId": "cyc-1",
-              "turnId": "turn-1",
-              "cause": "submission"
+              "type": "action_update",
+              "action": {
+                "actionId": "act-perm-1",
+                "kind": "permission",
+                "state": "pending",
+                "owner": {"type": "turn", "id": "turn-1"},
+                "blocksForeground": false
+              }
             }
           }
         }
@@ -82,12 +85,10 @@
             "streamId": "strm-1",
             "sequence": 4,
             "event": {
-              "type": "state_update",
-              "state": "idle",
-              "cycleId": "cyc-1",
-              "turnId": "turn-1",
-              "cause": "submission",
-              "stopReason": "end_turn"
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 3
             }
           }
         }
@@ -96,17 +97,25 @@
   ],
   "expect": {
     "verdict": "fail_closed",
-    "violation": "malformed_envelope",
+    "violation": "false_quiescence",
     "atInput": 3,
     "state": {
       "streamId": "strm-1",
       "reducedThrough": 3,
       "suppressedRetransmissions": 0,
-      "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
       "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
       "activities": [],
-      "actions": [],
-      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "actions": [
+        {
+          "actionId": "act-perm-1",
+          "kind": "permission",
+          "state": "pending",
+          "owner": {"type": "turn", "id": "turn-1"},
+          "blocksForeground": false
+        }
+      ],
+      "quiescence": {"certified": false},
       "closed": false
     }
   }

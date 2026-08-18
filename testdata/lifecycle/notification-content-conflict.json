@@ -1,6 +1,6 @@
 {
   "name": "notification-content-conflict",
-  "purpose": "The dedup identity covers the whole delivered notification, carrier included, not the envelope alone. The same envelope arriving on a notification that addresses a different session reuses that identity with different content, so it is a conflicting duplicate rather than a retransmission: a consumer cannot tell which of the two the emitter meant to deliver.",
+  "purpose": "The dedup identity covers the whole delivered notification, carrier and every other member included, not the envelope alone. The same envelope arriving a second time beside notification content the first delivery did not carry — here a reserved propagation key on the same session's frame — reuses that identity with different content, so it is a conflicting duplicate rather than a suppressible retransmission: a consumer cannot tell which of the two the emitter meant to deliver.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -53,9 +53,10 @@
     {
       "method": "session/update",
       "params": {
-        "sessionId": "sess-2",
+        "sessionId": "sess-1",
         "update": {"sessionUpdate": "session_info_update"},
         "_meta": {
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
           "acp-go.dev/lifecycle": {
             "version": 1,
             "streamId": "strm-1",

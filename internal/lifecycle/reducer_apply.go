@@ -50,8 +50,14 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 // complete nonterminal one, so an entry that is already terminal asserts as
 // current a state that is over.
 func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	seen := make(map[string]bool, len(snapshot.Activities))
 	for index := range snapshot.Activities {
 		activity := &snapshot.Activities[index]
+		if seen[activity.ActivityID] {
+			return r.fail(delivery, ViolationImmutableIdentityChange,
+				"activity "+activity.ActivityID+" is listed twice")
+		}
+		seen[activity.ActivityID] = true
 
 		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
 			return err
@@ -70,7 +76,13 @@ func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, 
 }
 
 func (r *Reducer) checkSnapshotActions(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	seen := make(map[string]bool, len(snapshot.Actions))
 	for _, action := range snapshot.Actions {
+		if seen[action.ActionID] {
+			return r.fail(delivery, ViolationImmutableIdentityChange,
+				"action "+action.ActionID+" is listed twice")
+		}
+		seen[action.ActionID] = true
 		if err := r.checkActionIdentity(delivery, action); err != nil {
 			return err
 		}
@@ -440,12 +452,11 @@ func (r *Reducer) patchActivity(delivery Delivery, update ActivityUpdate) error 
 	index := r.activityIndex(update.ActivityID)
 
 	existing := r.state.Activities[index]
+	if existing.State.Terminal() {
+		return r.fail(delivery, ViolationPostTerminalMutation, "activity "+existing.ActivityID+" is terminal")
+	}
 	if detail := immutableActivityConflict(existing, update); detail != "" {
 		return r.fail(delivery, ViolationImmutableIdentityChange, detail)
-	}
-
-	if existing.State.Terminal() && update.State != existing.State {
-		return r.fail(delivery, ViolationPostTerminalMutation, "activity "+existing.ActivityID+" is terminal")
 	}
 
 	if update.State.Terminal() {
@@ -604,6 +615,8 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 	existing := r.state.Actions[index]
 
 	switch {
+	case existing.State.Terminal():
+		return r.fail(delivery, ViolationPostTerminalMutation, "action "+update.ActionID+" is terminal")
 	case update.Kind != "" && update.Kind != existing.Kind:
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed kind")
 	case update.Owner.ID != "" && update.Owner != existing.Owner:
@@ -612,8 +625,6 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed ownership root")
 	case update.BlocksForeground != nil && *update.BlocksForeground != existing.BlocksForeground:
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed what it blocks")
-	case existing.State.Terminal() && update.State != existing.State:
-		return r.fail(delivery, ViolationPostTerminalMutation, "action "+update.ActionID+" is terminal")
 	}
 
 	r.state.Actions[index].State = update.State

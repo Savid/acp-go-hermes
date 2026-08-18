@@ -1,6 +1,6 @@
 {
-  "name": "false-quiescence-while-live",
-  "purpose": "A positive quiescence fact asserts that nothing rooted at or before its watermark is live. One delivered while the foreground is running and an activity is nonterminal is disproved by the stream that carries it, and a disproved proof fails closed rather than certifying nothing: a consumer that swallowed it could not tell a lie from a loss. This is the compound case, where both conditions hold at once; each of them alone is pinned by its own vector.",
+  "name": "false-quiescence-holds-activity",
+  "purpose": "A positive quiescence fact is disproved by a single nonterminal activity, with nothing else live. The foreground has returned to idle and settled its turn, so a reducer that reads only foreground state would certify a boundary over background work the stream still holds: foreground completion proves nothing about owned activity.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -106,30 +106,13 @@
             "streamId": "strm-1",
             "sequence": 5,
             "event": {
-              "type": "quiescence_update",
-              "quiescent": true,
-              "source": "process-containment",
-              "watermark": 4
-            }
-          }
-        }
-      }
-    }
-  ],
-  "postRefusal": [
-    {
-      "method": "session/update",
-      "params": {
-        "sessionId": "sess-1",
-        "update": {"sessionUpdate": "session_info_update"},
-        "_meta": {
-          "acp-go.dev/lifecycle": {
-            "version": 1,
-            "streamId": "strm-1",
-            "sequence": 5,
-            "event": {
-              "type": "activity_update",
-              "activity": {"activityId": "act-1", "state": "completed"}
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
             }
           }
         }
@@ -146,13 +129,10 @@
             "streamId": "strm-1",
             "sequence": 6,
             "event": {
-              "type": "state_update",
-              "state": "idle",
-              "cycleId": "cyc-1",
-              "turnId": "turn-1",
-              "cause": "submission",
-              "stopReason": "end_turn",
-              "outcome": "success"
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 5
             }
           }
         }
@@ -162,13 +142,13 @@
   "expect": {
     "verdict": "fail_closed",
     "violation": "false_quiescence",
-    "atInput": 4,
+    "atInput": 5,
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 4,
+      "reducedThrough": 5,
       "suppressedRetransmissions": 0,
-      "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
-      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "foreground": {"state": "idle", "cycleId": "cyc-1"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": true, "outcome": "success"}],
       "activities": [{"activityId": "act-1", "kind": "task", "state": "running", "originTurnId": "turn-1"}],
       "actions": [],
       "quiescence": {"certified": false},

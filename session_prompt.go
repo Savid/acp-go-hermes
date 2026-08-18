@@ -9,12 +9,11 @@ import (
 	"log/slog"
 	"reflect"
 	"strings"
-	"sync"
-	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
@@ -44,12 +43,14 @@ const (
 	valFile       = "file"
 	valTerminal   = "terminal"
 
-	keyType      = "type"
-	keyTitle     = "title"
-	keyMime      = "mime"
-	keyQuestion  = "question"
-	keyRequest   = "request"
-	keyMessageID = "messageId"
+	keyType       = "type"
+	keyTitle      = "title"
+	keyMime       = "mime"
+	keyQuestion   = "question"
+	keyRequest    = "request"
+	keyMessageID  = "messageId"
+	keyOutcome    = "outcome"
+	keyStopReason = "stopReason"
 
 	jsonFieldCause        = "cause"
 	jsonFieldStatusCode   = "statusCode"
@@ -203,6 +204,13 @@ func (s *session) cancelRouted(meta map[string]any) error {
 	s.mu.Unlock()
 
 	if !active {
+		// The reserved lifecycle literal fails the cancel closed before the
+		// native interrupt, so a cancel naming a key this surface never carries
+		// never reaches the gateway.
+		if err := rejectLifecycleMeta(meta); err != nil {
+			return err
+		}
+
 		s.mu.Lock()
 		client := s.client
 		nativeID := s.idmap.NativeSessionID
@@ -218,6 +226,8 @@ func (s *session) cancelRouted(meta map[string]any) error {
 		return client.Abort(cancelCtx, nativeID)
 	}
 
+	// Route validation runs first, so a cancel that is both stale and malformed
+	// reports one verdict and never an implementation-defined choice of two.
 	route, err := parseInboundTurnRoute(meta)
 	if err != nil {
 		return err
@@ -225,6 +235,10 @@ func (s *session) cancelRouted(meta map[string]any) error {
 
 	if route.turnNonce != activeNonce {
 		return routeInvalid("stale route turnNonce")
+	}
+
+	if err := rejectLifecycleMeta(meta); err != nil {
+		return err
 	}
 
 	// The terminal store replacement is the turn's settlement linearization
@@ -244,10 +258,19 @@ func (s *session) cancelRouted(meta map[string]any) error {
 	return s.fenceTurnLocked(context.Background(), epoch, true)
 }
 
-func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.PromptResponse, returnErr error) { //nolint:gocyclo // The turn select intentionally centralizes settlement precedence.
+func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.PromptResponse, returnErr error) {
 	route, err := parseInboundTurnRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, err
+	}
+
+	// Route validation runs first: the route nonce is the anti-stale turn
+	// authenticator. The lifecycle correlation is read next and carries submission
+	// identity for the same admitted turn. Neither value is derived from the
+	// other, and both bind.
+	submission, correlationErr := lifecycle.DecodePromptCorrelation(params.Meta, s.agent.negotiatedLifecycle())
+	if correlationErr != nil {
+		return acp.PromptResponse{}, lifecycleParamError(correlationErr)
 	}
 
 	if poisonErr := s.ensureNotPoisoned(); poisonErr != nil {
@@ -310,194 +333,22 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 		return acp.PromptResponse{}, err
 	}
 
-	terminalBaseline := s.committedTerminalState()
+	baseline := s.committedTerminalState()
+	settlement := s.beginSettlement()
 
-	turnActive := true
-	defer func() {
-		if turnActive {
-			s.finishTurn()
-		}
-	}()
+	run := s.runPromptTurn(ctx, turnCtx, turnEpoch, submission, req, params.MessageId)
+	if !run.settle {
+		s.finishTurn()
+		settlement.complete(run.err)
 
-	var abortOnce sync.Once
-
-	abortTurn := func() {
-		abortOnce.Do(func() {
-			abortCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-			_ = s.client.Abort(abortCtx, s.idmap.NativeSessionID)
-
-			cancel()
-		})
+		return run.response, run.err
 	}
 
-	cancelledTurn := func() (acp.PromptResponse, error) {
-		if fenceErr := s.fenceTurn(context.Background(), turnEpoch, true); fenceErr != nil {
-			return acp.PromptResponse{}, fenceErr
-		}
+	response, committed, settleErr := s.settlePrompt(ctx, turnCtx, turnEpoch, baseline, run, params.MessageId)
+	turnPublished = committed
+	settlement.complete(settleErr)
 
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
-	}
-
-	failTurn := func(err error) (acp.PromptResponse, error) {
-		if errors.Is(err, errPromptCancelled) || s.wasCancelled() || turnCtx.Err() != nil {
-			return cancelledTurn()
-		}
-
-		abortTurn()
-
-		return acp.PromptResponse{}, err
-	}
-
-	if err := s.reconcileConnected(turnCtx); err != nil {
-		return failTurn(err)
-	}
-
-	type result struct {
-		message nativehermes.NativeMessage
-		err     error
-	}
-
-	done := make(chan result, 1)
-
-	go func() {
-		defer recoverAgentGoroutine(turnCtx, agentLogger(s.agent), "Hermes turn send")
-
-		message, err := s.client.SendMessage(turnCtx, s.idmap.NativeSessionID, req)
-		done <- result{message: message, err: err}
-	}()
-
-	failAdmittedTurn := func(err error) (acp.PromptResponse, error) {
-		if errors.Is(err, errPromptCancelled) || s.wasCancelled() || turnCtx.Err() != nil {
-			return cancelledTurn()
-		}
-
-		if fenceErr := s.fenceTurn(context.Background(), turnEpoch, false); fenceErr != nil {
-			return acp.PromptResponse{}, fenceErr
-		}
-
-		return acp.PromptResponse{}, err
-	}
-
-	turnTimeout := s.agent.turnTimeout()
-
-	var timeout <-chan time.Time
-
-	if turnTimeout > 0 {
-		newTimer := s.agent.options.newPromptTimer
-		if newTimer == nil {
-			newTimer = func(timeout time.Duration) promptTimer {
-				timer := time.NewTimer(timeout)
-
-				return promptTimer{C: timer.C, Stop: timer.Stop}
-			}
-		}
-
-		timer := newTimer(turnTimeout)
-		defer timer.Stop()
-
-		timeout = timer.C
-	}
-
-	var (
-		final nativehermes.NativeMessage
-		usage *acp.Usage
-	)
-
-	for {
-		select {
-		case event := <-s.client.Events():
-			if event.Type == evtServerConnected {
-				if err := s.reconcileConnected(turnCtx); err != nil {
-					return failAdmittedTurn(err)
-				}
-
-				continue
-			}
-
-			if err := s.handleEvent(turnCtx, event); err != nil {
-				return failAdmittedTurn(err)
-			}
-		case err := <-s.client.EventErrors():
-			// Cancel guard runs before all failure mapping: a stream error
-			// observed while the turn is cancelled stays cancelled.
-			cancelled := s.wasCancelled() || turnCtx.Err() != nil
-			s.markStreamFailed(nativehermes.StreamErrorEpoch(err))
-
-			if cancelled {
-				return cancelledTurn()
-			}
-
-			return failAdmittedTurn(mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error())))
-		case result := <-done:
-			if result.err != nil {
-				if s.wasCancelled() || turnCtx.Err() != nil {
-					return cancelledTurn()
-				}
-
-				return s.failedTurnResult(ctx, turnEpoch, result.err)
-			}
-
-			final = result.message
-			if err := s.emitMessage(turnCtx, final, false); err != nil {
-				return failAdmittedTurn(err)
-			}
-
-			s.markMessageCompleted(final.Info.ID)
-
-			usage = usageFromTokens(final.Info.Tokens)
-
-			if s.wasCancelled() || turnCtx.Err() != nil {
-				return cancelledTurn()
-			}
-
-			if beforeCommit := s.agent.options.beforeTerminalCommit; beforeCommit != nil {
-				beforeCommit()
-			}
-
-			stopReason := stopReasonFromHermes(final.Info.Finish)
-
-			if err := s.completeTurnWithSnapshot(
-				context.WithoutCancel(ctx), turnCtx, terminalBaseline, turnEpoch,
-			); err != nil {
-				if errors.Is(err, errPromptCancelled) {
-					return cancelledTurn()
-				}
-
-				turnActive = false
-
-				return acp.PromptResponse{}, err
-			}
-
-			turnActive = false
-			turnPublished = true
-
-			terminal := s.committedTerminalState()
-
-			return acp.PromptResponse{
-				Meta:          terminalResponseMeta(terminal),
-				StopReason:    stopReason,
-				Usage:         usage,
-				UserMessageId: params.MessageId,
-			}, nil
-		case <-timeout:
-			// The cancel guard runs before all failure mapping, including the
-			// turn deadline: when a user cancel and the timeout fire together the
-			// result is deterministically cancelled, never cause "timeout".
-			if s.wasCancelled() || turnCtx.Err() != nil {
-				return cancelledTurn()
-			}
-
-			// A turn deadline is a failure, not a user cancel. Settle it only
-			// after the native process boundary has been closed and proved empty.
-			if fenceErr := s.fenceTurn(context.Background(), turnEpoch, false); fenceErr != nil {
-				return acp.PromptResponse{}, fenceErr
-			}
-
-			return acp.PromptResponse{}, mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTimeout, fmt.Sprintf("hermes turn exceeded %s deadline", turnTimeout)))
-		case <-turnCtx.Done():
-			return cancelledTurn()
-		}
-	}
+	return response, settleErr
 }
 
 func promptToHermesParts(ctx context.Context, blocks []acp.ContentBlock, limits ImageLimits, handoffRoot string) ([]map[string]any, error) {
@@ -800,6 +651,13 @@ func (s *session) emitPartUpdates(ctx context.Context, role string, part nativeh
 		if err := s.emitUpdate(ctx, update); err != nil {
 			return err
 		}
+	}
+
+	if role == valAssistant && part.Type == valText {
+		// The prefix is recorded from what was actually delivered, so a settled
+		// boundary states the visible work its host was shown rather than work the
+		// native side had merely begun.
+		s.recordForegroundPrefix(part.Text)
 	}
 
 	return nil
@@ -1209,6 +1067,22 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 		return s.poisonMissingLiveSessionMapping(replyCtx, s.client.ReplyPermission(replyCtx, req, valReject, "client unavailable"))
 	}
 
+	action, owned, actionErr := s.announceBlockingAction(ctx, lifecycle.ActionPermission, req.ID)
+
+	switch {
+	case actionErr != nil:
+		_, _, _ = s.takePendingPermission(req.ID)
+
+		replyCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+
+		return errors.Join(actionErr, s.client.ReplyPermission(replyCtx, req, valReject, valCancelled))
+	case !owned:
+		_, _, _ = s.takePendingPermission(req.ID)
+
+		return s.rejectInvalidPermission(req, "permission callback arrived outside an accepted lifecycle turn", nil)
+	}
+
 	toolState := permissionHermesToolState(req)
 
 	status := acp.ToolCallStatusPending
@@ -1228,12 +1102,23 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 			{OptionId: valAlways, Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
 			{OptionId: valReject, Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
 		},
-		Meta: map[string]any{hermesMetaKey: map[string]any{routeFieldReq: req.ID, "nativeSessionId": req.SessionID}},
+		// Route metadata stays off a permission: it is correlated by its structural
+		// sessionId and toolCallId. The lifecycle correlation adds a stable action
+		// name for the same held request without replacing either.
+		Meta: actionMeta(map[string]any{
+			hermesMetaKey: map[string]any{routeFieldReq: req.ID, "nativeSessionId": req.SessionID},
+		}, action),
 	})
 	if err != nil {
+		resolveErr := s.resolveBlockingAction(ctx, action, lifecycle.ActionFailed)
+
 		_, ok, cancelled := s.takePendingPermission(req.ID)
 		if !ok {
-			return errPromptCancelled
+			return errors.Join(resolveErr, errPromptCancelled)
+		}
+
+		if resolveErr != nil {
+			return resolveErr
 		}
 
 		if cancelled || s.wasCancelled() || ctx.Err() != nil || !s.permissionTurnRouteCurrent(ctx, route) {
@@ -1268,6 +1153,12 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 
 	if resp.Outcome.Cancelled != nil {
 		reply = valReject
+	}
+
+	// The blocker terminalizes before the transition that unblocks its cycle, and
+	// the outcome is read only from the structural union the client answered with.
+	if resolveErr := s.resolveBlockingAction(ctx, action, permissionActionState(resp, reply)); resolveErr != nil {
+		return resolveErr
 	}
 
 	_, ok, cancelled := s.takePendingPermission(req.ID)
@@ -1315,7 +1206,27 @@ func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionR
 		return s.poisonMissingLiveSessionMapping(rejectCtx, s.client.RejectQuestion(rejectCtx, req))
 	}
 
+	action, owned, actionErr := s.announceBlockingAction(ctx, lifecycle.ActionElicitation, req.ID)
+
+	switch {
+	case actionErr != nil:
+		_, _, _ = s.takePendingQuestion(req.ID)
+
+		rejectCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+
+		return errors.Join(actionErr, s.client.RejectQuestion(rejectCtx, req))
+	case !owned:
+		_, _, _ = s.takePendingQuestion(req.ID)
+
+		return s.poisonMissingLiveSessionMapping(ctx, s.client.RejectQuestion(ctx, req))
+	}
+
 	request, propertyIDs := questionElicitationRequest(req)
+	// A turn-scoped elicitation carries the reserved route object and the
+	// lifecycle correlation side by side: route routes and authenticates the
+	// callback, and the correlation names the same held request as an action.
+	request.Form.Meta = actionMeta(request.Form.Meta, action)
 
 	requestID := req.ID
 
@@ -1325,6 +1236,10 @@ func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionR
 		RequestID: &requestID,
 	})
 	if err != nil {
+		if resolveErr := s.resolveBlockingAction(ctx, action, lifecycle.ActionFailed); resolveErr != nil {
+			return resolveErr
+		}
+
 		_, ok, cancelled := s.takePendingQuestion(req.ID)
 		if !ok {
 			return errPromptCancelled
@@ -1352,6 +1267,10 @@ func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionR
 	}
 
 	if resp.Accept == nil {
+		if resolveErr := s.resolveBlockingAction(ctx, action, lifecycle.ActionDeclined); resolveErr != nil {
+			return resolveErr
+		}
+
 		_, ok, cancelled := s.takePendingQuestion(req.ID)
 		if !ok {
 			return errPromptCancelled
@@ -1374,6 +1293,10 @@ func (s *session) handleQuestion(ctx context.Context, req nativehermes.QuestionR
 		}
 
 		return nil
+	}
+
+	if resolveErr := s.resolveBlockingAction(ctx, action, lifecycle.ActionAccepted); resolveErr != nil {
+		return resolveErr
 	}
 
 	_, ok, cancelled := s.takePendingQuestion(req.ID)
@@ -1695,16 +1618,23 @@ func usageFromTokens(tokens nativehermes.Tokens) *acp.Usage {
 	}
 }
 
-func stopReasonFromHermes(reason string) acp.StopReason {
-	switch strings.ToLower(reason) {
+// terminalOutcomeFromHermes maps one structured native finish to the ACP v1 stop
+// reason it names and the outcome the settled cycle recorded. A clean native
+// completion always has both. A failure never reaches here: no ACP v1 stop reason
+// names a failure, so inventing one would report a turn that ended badly as a
+// turn that ended.
+func terminalOutcomeFromHermes(finish string) (acp.StopReason, lifecycle.Outcome) {
+	switch strings.ToLower(strings.TrimSpace(finish)) {
 	case valLength, "max_tokens":
-		return acp.StopReasonMaxTokens
+		return acp.StopReasonMaxTokens, lifecycle.OutcomeLimit
+	case "max_turn_requests", "max_turns":
+		return acp.StopReasonMaxTurnRequests, lifecycle.OutcomeLimit
 	case valCancelled, "canceled":
-		return acp.StopReasonCancelled
-	case "refusal":
-		return acp.StopReasonRefusal
+		return acp.StopReasonCancelled, lifecycle.OutcomeCancelled
+	case "refusal", "content_filter":
+		return acp.StopReasonRefusal, lifecycle.OutcomeRefused
 	default:
-		return acp.StopReasonEndTurn
+		return acp.StopReasonEndTurn, lifecycle.OutcomeSuccess
 	}
 }
 

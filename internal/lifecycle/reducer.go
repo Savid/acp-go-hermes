@@ -156,9 +156,18 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
 
-	r.reset(delivery.StreamID)
+	next := &Reducer{negotiated: r.negotiated}
+	next.reset(delivery.StreamID)
+	if err := next.reduceFirst(delivery); err != nil {
+		r.failed = next.failed
 
-	return r.reduceFirst(delivery)
+		return err
+	}
+
+	next.state.Closed = r.state.Closed
+	*r = *next
+
+	return nil
 }
 
 func (r *Reducer) reset(streamID string) {

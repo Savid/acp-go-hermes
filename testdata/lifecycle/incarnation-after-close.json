@@ -1,6 +1,6 @@
 {
   "name": "incarnation-after-close",
-  "purpose": "Close fences the session and not merely the stream identity it fenced. A snapshot announcing a fresh incarnation of a session whose close containment completed is stale, because reuse of the stored conversation happens through a new load or resume — a different logical session with its own stream — and never by continuing a closed one.",
+  "purpose": "Close fences the session and not merely the stream identity it fenced. A snapshot announcing a fresh incarnation of a session whose close containment completed is stale, because reuse of the stored conversation happens through a new load or resume — a different logical session with its own stream — and never by continuing a closed one. Close lands here directly on the opening quiescent snapshot, so nothing but the fence is under test.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -25,26 +25,6 @@
               "activities": [],
               "actions": [],
               "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
-            }
-          }
-        }
-      }
-    },
-    {
-      "method": "session/update",
-      "params": {
-        "sessionId": "sess-1",
-        "update": {"sessionUpdate": "session_info_update"},
-        "_meta": {
-          "acp-go.dev/lifecycle": {
-            "version": 1,
-            "streamId": "strm-1",
-            "sequence": 2,
-            "event": {
-              "type": "prompt_accepted",
-              "submissionId": "sub-1",
-              "clientNonce": "non-1",
-              "turnId": "turn-1"
             }
           }
         }
@@ -99,16 +79,16 @@
   "expect": {
     "verdict": "fail_closed",
     "violation": "stale_stream",
-    "atInput": 3,
+    "atInput": 2,
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 2,
+      "reducedThrough": 1,
       "suppressedRetransmissions": 0,
       "foreground": {"state": "idle", "cycleId": "cyc-0"},
-      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "turns": [],
       "activities": [],
       "actions": [],
-      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 0},
       "closed": true
     }
   }

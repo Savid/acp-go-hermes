@@ -192,6 +192,19 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 	return p.tree.descendantCount()
 }
 
+// ProviderTreeVacant reports whether the native containment boundary is proven
+// to hold nothing: its supervised root has gone and its authoritative
+// enumeration finds no surviving descendant. A false second result means no
+// observation may be inferred, and a boundary that cannot enumerate its whole
+// tree never reports a positive claim.
+func (p *Process) ProviderTreeVacant() (bool, bool) {
+	if p == nil || p.tree == nil {
+		return false, false
+	}
+
+	return p.tree.treeVacant()
+}
+
 // BrowserLaunchContained reports whether this process runs with the launcher
 // shim installed. A login leg must not start a native flow without it: hermes
 // opens a browser for the login, and only the shim keeps that launch off the

@@ -373,6 +373,10 @@ func (c *fakeHermesClient) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+	if err := nativehermes.NotifyPromptDispatch(ctx); err != nil {
+		return nativehermes.NativeMessage{}, err
+	}
+
 	var (
 		message nativehermes.NativeMessage
 		err     error

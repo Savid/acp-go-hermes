@@ -1,6 +1,6 @@
 {
-  "name": "ending-idle-omits-outcome",
-  "purpose": "An idle transition that ends an open turn always records the outcome that settled it. This one carries its stop reason and omits the outcome: a settled turn with no recorded outcome is a boundary a consumer cannot report, so the omission is malformed rather than a turn that ended for no stated reason.",
+  "name": "failed-outcome-omits-stop-reason",
+  "purpose": "An ending idle whose outcome is failed carries that outcome and no stop reason. No ACP v1 stop reason names a failure — the matching v1 error carries it — so the omission is the required shape rather than a missing member, and the turn settles with the failed outcome recorded.",
   "negotiated": {
     "versions": [1],
     "updatesOutsidePrompt": true,
@@ -87,7 +87,7 @@
               "cycleId": "cyc-1",
               "turnId": "turn-1",
               "cause": "submission",
-              "stopReason": "end_turn"
+              "outcome": "failed"
             }
           }
         }
@@ -95,15 +95,13 @@
     }
   ],
   "expect": {
-    "verdict": "fail_closed",
-    "violation": "malformed_envelope",
-    "atInput": 3,
+    "verdict": "accepted",
     "state": {
       "streamId": "strm-1",
-      "reducedThrough": 3,
+      "reducedThrough": 4,
       "suppressedRetransmissions": 0,
-      "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
-      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "foreground": {"state": "idle", "cycleId": "cyc-1"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": true, "outcome": "failed"}],
       "activities": [],
       "actions": [],
       "quiescence": {"certified": false, "invalidatedAt": 2},

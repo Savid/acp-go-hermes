@@ -147,6 +147,28 @@ type stateSnapshotWrapper struct {
 	Todos              []nativehermes.Todo `json:"todos"`
 	PermissionsHistory []any               `json:"permissionsHistory"`
 	PendingInput       bool                `json:"pendingInput"`
+	// Foreground is the adapter's own record of how the last accepted turn
+	// ended. It lives in the wrapper section rather than in Terminal because
+	// Terminal is the native archive's completed assistant identity: a turn that
+	// failed or was cancelled produced no finished assistant row, and writing one
+	// there would put a conversation entry in the archive that never happened.
+	// Absent means no accepted turn has settled in this session yet.
+	Foreground *stateSnapshotForeground `json:"foreground"`
+}
+
+// stateSnapshotForeground records one settled foreground cycle truthfully: which
+// incarnation and turn it was, how it ended, and the largest prefix of it this
+// wrapper can state. Text is what actually streamed to the host, so a failed or
+// cancelled turn keeps the visible work it produced without claiming the native
+// tail behind it completed.
+type stateSnapshotForeground struct {
+	StreamID            string `json:"streamId"`
+	TurnID              string `json:"turnId"`
+	Outcome             string `json:"outcome"`
+	StopReason          string `json:"stopReason,omitempty"`
+	MessageID           string `json:"messageId,omitempty"`
+	Text                string `json:"text,omitempty"`
+	CapturedAtUnixMilli int64  `json:"capturedAtUnixMilli"`
 }
 
 type archiveEntry struct {
@@ -158,81 +180,93 @@ type archiveEntry struct {
 	Data     string `json:"data"`
 }
 
+// terminalSnapshotRequirement is the durable foreground-prefix commit one
+// accepted turn owes. Every accepted exit carries one, so the store records the
+// truthful outcome of the turn whether it completed, failed, or was cancelled.
 type terminalSnapshotRequirement struct {
-	baseline  SessionStoreTerminalState
-	turnEpoch uint64
+	baseline   SessionStoreTerminalState
+	turnEpoch  uint64
+	foreground stateSnapshotForeground
+	// completed reports that the turn produced a new finished native assistant
+	// row, so the commit must observe the native terminal identity advance. A
+	// failed or cancelled turn advances nothing and states so.
+	completed bool
+	// nativeReadable reports whether the native generation can still be read.
+	// An incarnation-ending boundary has already contained it, so the commit
+	// restates the last identity this session durably holds instead of reading a
+	// process that is gone.
+	nativeReadable bool
 }
 
 func (s *session) snapshotToStore(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
-	return s.snapshotToStoreLocked(ctx, nil, nil)
+	return s.snapshotToStoreLocked(ctx, nil)
 }
 
-func (s *session) completeTurnWithSnapshot(
-	ctx context.Context,
-	turnCtx context.Context,
-	requiredBaseline SessionStoreTerminalState,
-	turnEpoch uint64,
-) error {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-
-	snapshotErr := s.snapshotToStoreLocked(ctx, &terminalSnapshotRequirement{
-		baseline: requiredBaseline, turnEpoch: turnEpoch,
-	}, turnCtx)
-	if snapshotErr == nil {
-		s.finishTurn()
-
-		return nil
-	}
-
-	if s.terminalCommitCancelled(turnCtx, turnEpoch) {
-		return errPromptCancelled
-	}
-
-	poisonErr := s.poisonWithError(ctx, "hermes_terminal_snapshot_failed", snapshotErr.Error())
-	fenceErr := s.fenceTurn(context.WithoutCancel(ctx), turnEpoch, false)
-	s.finishTurn()
-
-	return errors.Join(snapshotErr, poisonErr, fenceErr)
-}
-
+// snapshotToStoreLocked captures one generation and publishes it in one step.
+// The two halves are separable because a close-fenced boundary must read the
+// native state before its containment proof and make it durable after it.
 func (s *session) snapshotToStoreLocked(
 	ctx context.Context,
 	requirement *terminalSnapshotRequirement,
-	turnCtx context.Context,
 ) error {
-	if err := s.ensureNotPoisoned(); err != nil {
+	commit, err := s.captureSnapshotLocked(ctx, requirement)
+	if err != nil || commit == nil {
 		return err
 	}
 
-	if requirement != nil && s.lifetimeEnded() {
-		return errors.New("session closed before Hermes terminal snapshot commit")
+	return s.publishSnapshotLocked(ctx, commit)
+}
+
+// sessionStoreCommit is one captured generation awaiting publication.
+type sessionStoreCommit struct {
+	mainKey      SessionKey
+	replacements []SessionStoreReplacement
+	terminal     SessionStoreTerminalState
+	native       *stateSnapshotTerminal
+	foreground   *stateSnapshotForeground
+	todos        []nativehermes.Todo
+	archives     map[string]archiveInfo
+	// deadline bounds the store write, carried from the capture so a captured
+	// generation cannot be published under an unbounded context.
+	deadline time.Duration
+}
+
+// captureSnapshotLocked builds the generation to publish. A nil commit with no
+// error means there was nothing to capture, which is the ordinary answer for a
+// session whose runtime is already gone and which owes no terminal boundary.
+func (s *session) captureSnapshotLocked(
+	ctx context.Context,
+	requirement *terminalSnapshotRequirement,
+) (*sessionStoreCommit, error) {
+	if err := s.ensureNotPoisoned(); err != nil {
+		return nil, err
 	}
 
-	if reason := s.snapshotBlockedReasonForTerminalCommit(requirement != nil); reason != "" {
-		return fmt.Errorf("cannot snapshot Hermes session while %s pending", reason)
+	if requirement != nil && s.lifetimeEnded() {
+		return nil, errors.New("session closed before Hermes terminal snapshot commit")
+	}
+
+	settled := requirement != nil && !requirement.nativeReadable
+	if reason := s.snapshotBlockedReasonForTerminalCommit(requirement != nil, settled); reason != "" {
+		return nil, fmt.Errorf("cannot snapshot Hermes session while %s pending", reason)
 	}
 
 	snapshot := s.snapshot()
 	if snapshot.client == nil {
 		if requirement != nil {
-			return errors.New("hermes runtime is unavailable for terminal snapshot commit")
+			return nil, errors.New("hermes runtime is unavailable for terminal snapshot commit")
 		}
 
-		return nil
+		return nil, nil
 	}
 
+	// The capture context is bounded on its own and detached from the request's:
+	// the commit an accepted turn owes is not the request's to cancel.
 	snapshotCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.agent.options.storeWriteTTL)
 	defer cancel()
-
-	var stopTurnCancellation func() bool
-	if requirement != nil {
-		stopTurnCancellation = context.AfterFunc(turnCtx, cancel)
-		defer stopTurnCancellation()
-	}
 
 	idmap := snapshot.idmap
 	now := time.Now().UnixMilli()
@@ -244,30 +278,31 @@ func (s *session) snapshotToStoreLocked(
 
 	idmap.Format = SessionStoreFormat
 
-	todos, _ := snapshot.client.Todos(snapshotCtx, idmap.NativeSessionID)
+	committed := s.committedState()
 
-	messages, err := snapshot.client.Messages(snapshotCtx, idmap.NativeSessionID)
+	todos, todosErr := snapshot.client.Todos(snapshotCtx, idmap.NativeSessionID)
+	if todosErr != nil {
+		// A contained generation cannot answer for its own plan state. Restating
+		// the last committed list keeps a settled boundary from silently dropping
+		// state the store already holds.
+		todos = committed.todos
+	}
+
+	terminal, foreground, err := s.foregroundSections(snapshotCtx, snapshot, idmap, requirement, committed)
 	if err != nil {
-		return fmt.Errorf("read Hermes session terminal history: %w", err)
+		return nil, err
 	}
 
-	terminal, err := terminalSnapshotFromMessages(idmap.NativeSessionID, messages)
-	if err != nil {
-		return err
-	}
-
-	if requirement != nil && terminal.MessageID == "" {
-		return errors.New("completed Hermes turn is missing a durable terminal assistant identity")
-	}
-
-	nextTerminal := publicTerminalState(terminal)
-	if transitionErr := validateTerminalTransition(s.committedTerminalState(), nextTerminal, false); transitionErr != nil {
-		return transitionErr
+	nextTerminal := publicTerminalState(terminal, foreground)
+	if transitionErr := validateTerminalTransition(committed.terminal, nextTerminal, false); transitionErr != nil {
+		return nil, transitionErr
 	}
 
 	if requirement != nil {
-		if transitionErr := validateTerminalTransition(requirement.baseline, nextTerminal, true); transitionErr != nil {
-			return transitionErr
+		if transitionErr := validateTerminalTransition(
+			requirement.baseline, nextTerminal, requirement.completed,
+		); transitionErr != nil {
+			return nil, transitionErr
 		}
 	}
 
@@ -292,23 +327,38 @@ func (s *session) snapshotToStoreLocked(
 		Wrapper: &stateSnapshotWrapper{
 			Todos:        todos,
 			PendingInput: false,
+			Foreground:   foreground,
 		},
 	}
 
 	replacements := []SessionStoreReplacement{}
 	mainKey := SessionKey{SessionID: string(s.id), Subpath: SessionStoreMainSubpath}
 
-	if s.agent.options.SharedHermesHome != "" {
-		// The official shared database is the native authority. An empty
-		// replacement also removes any legacy per-session archive left by an old
-		// adapter instead of leaving sensitive cross-session state unreferenced.
-		replacements = append(replacements, SessionStoreReplacement{
-			Key: SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
-		})
-	} else {
+	stateDBKey := SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath}
+
+	switch {
+	case s.agent.options.SharedHermesHome != "":
+		// The official shared database is the native authority, so the per-session
+		// archive key is listed with no entries: exactly the listed keys stay live,
+		// and an unlisted one would be tombstoned.
+		replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey})
+	case settled:
+		// The boundary that ended this incarnation removed the generation's own
+		// files before this commit could read them, so the archive the store
+		// already holds is republished unchanged. Republishing it is what keeps
+		// the committed generation resumable, because Replace tombstones every
+		// subkey it does not list.
+		entries, loadErr := s.agent.sessionStore().Load(snapshotCtx, stateDBKey)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+
+		main.Archives = cloneArchiveInfo(committed.archives)
+		replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey, Entries: entries})
+	default:
 		xdg := snapshot.client.XDGDirs()
 		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
-			return archiveErr
+			return nil, archiveErr
 		} else if ok {
 			main.Archives["state-db"] = archiveInfo{
 				Subpath: stateDBSubpath,
@@ -318,24 +368,21 @@ func (s *session) snapshotToStoreLocked(
 
 			entries, encodeErr := encodeArchiveEntries(archive, sha)
 			if encodeErr != nil {
-				return encodeErr
+				return nil, encodeErr
 			}
 
-			replacements = append(replacements, SessionStoreReplacement{
-				Key:     SessionKey{SessionID: string(s.id), Subpath: stateDBSubpath},
-				Entries: entries,
-			})
+			replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey, Entries: entries})
 		}
 	}
 
 	mainEntry, err := stateJSONMarshal(main)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	idmapEntry, err := stateJSONMarshal(idmap)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	replacements = append(replacements,
@@ -343,39 +390,48 @@ func (s *session) snapshotToStoreLocked(
 		SessionStoreReplacement{Key: SessionKey{SessionID: string(s.id), Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
 	)
 
-	if requirement != nil {
-		// Stop propagating cancellation into the capture context before claiming
-		// the commit. The state transition below then orders a racing routed or
-		// parent-context cancellation against Replace without making Cancel wait
-		// for store I/O.
-		stopTurnCancellation()
-
-		if err := snapshotCtx.Err(); err != nil {
-			return err
-		}
-
-		if err := s.claimTerminalCommit(turnCtx, requirement.turnEpoch); err != nil {
-			return err
-		}
+	if err := snapshotCtx.Err(); err != nil {
+		return nil, err
 	}
+
+	return &sessionStoreCommit{
+		mainKey:      mainKey,
+		replacements: replacements,
+		terminal:     nextTerminal,
+		native:       terminal,
+		foreground:   foreground,
+		todos:        todos,
+		archives:     main.Archives,
+		deadline:     s.agent.options.storeWriteTTL,
+	}, nil
+}
+
+// publishSnapshotLocked makes one captured generation durable. It is the
+// durability boundary every ordering rule above it is stated against: nothing
+// that depends on the store holding this generation may happen before it returns.
+func (s *session) publishSnapshotLocked(ctx context.Context, commit *sessionStoreCommit) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commit.deadline)
+	defer cancel()
 
 	journal := s.operationJournal
 	if journal != nil && journal.record.Prepared == nil {
-		if err := journal.prepareReplacements(replacements); err != nil {
+		if err := journal.prepareReplacements(commit.replacements); err != nil {
 			return fmt.Errorf("prepare Hermes session publication: %w", err)
 		}
 	}
 
-	if replaceErr := s.agent.sessionStore().Replace(snapshotCtx, mainKey, replacements); replaceErr != nil {
+	if replaceErr := s.agent.sessionStore().Replace(writeCtx, commit.mainKey, commit.replacements); replaceErr != nil {
 		reconcileCtx, reconcileCancel := s.agent.sessionStoreContext(context.Background())
-		committed, absent, reconcileErr := reconcileSessionStoreReplacement(reconcileCtx, s.agent.sessionStore(), mainKey, replacements)
+		landed, absent, reconcileErr := reconcileSessionStoreReplacement(
+			reconcileCtx, s.agent.sessionStore(), commit.mainKey, commit.replacements,
+		)
 
 		reconcileCancel()
 
 		switch {
 		case reconcileErr != nil:
 			return errors.Join(errSessionStoreCommitUnknown, replaceErr, reconcileErr)
-		case committed:
+		case landed:
 			// Replace committed and only its acknowledgement was lost.
 		case absent:
 			return replaceErr
@@ -394,10 +450,68 @@ func (s *session) snapshotToStoreLocked(
 	}
 
 	s.mu.Lock()
-	s.committedTerminal = nextTerminal
+	s.committed = committedState{
+		terminal:   commit.terminal,
+		native:     commit.native,
+		foreground: commit.foreground,
+		todos:      commit.todos,
+		archives:   commit.archives,
+	}
 	s.mu.Unlock()
 
 	return nil
+}
+
+func cloneArchiveInfo(archives map[string]archiveInfo) map[string]archiveInfo {
+	out := make(map[string]archiveInfo, len(archives))
+	for name, info := range archives {
+		out[name] = info
+	}
+
+	return out
+}
+
+// foregroundSections resolves the two sections one commit publishes about the
+// turn that just settled: the native archive's completed assistant identity and
+// the adapter's own record of how the foreground cycle ended.
+//
+// A commit whose native generation is still readable derives the terminal
+// identity from the native history, exactly as a completed turn requires. One
+// taken after an incarnation-ending boundary cannot: that boundary contained the
+// generation before the commit, so the commit restates the last identity this
+// session durably holds and records the truthful outcome beside it.
+func (s *session) foregroundSections(
+	ctx context.Context,
+	snapshot sessionSnapshot,
+	idmap idmapRecord,
+	requirement *terminalSnapshotRequirement,
+	committed committedState,
+) (*stateSnapshotTerminal, *stateSnapshotForeground, error) {
+	foreground := committed.foreground
+	if requirement != nil {
+		record := requirement.foreground
+		foreground = &record
+	}
+
+	if requirement != nil && !requirement.nativeReadable {
+		return committed.nativeTerminal(), foreground, nil
+	}
+
+	messages, err := snapshot.client.Messages(ctx, idmap.NativeSessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read Hermes session terminal history: %w", err)
+	}
+
+	terminal, err := terminalSnapshotFromMessages(idmap.NativeSessionID, messages)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if requirement != nil && requirement.completed && terminal.MessageID == "" {
+		return nil, nil, errors.New("completed Hermes turn is missing a durable terminal assistant identity")
+	}
+
+	return terminal, foreground, nil
 }
 
 // reconcileSessionStoreReplacement distinguishes an acknowledgement loss from
@@ -451,35 +565,28 @@ func reconcileSessionStoreReplacement(ctx context.Context, store SessionStore, m
 	return false, false, nil
 }
 
-func (s *session) claimTerminalCommit(turnCtx context.Context, turnEpoch uint64) error {
+// claimTerminalCommit is one turn's settlement linearization point and the only
+// race authority over it. A cancel that arrives after the claim is a
+// post-settlement no-op and must not close the runtime underneath a commit
+// already in progress; one that arrived before it is reported here so the turn
+// records the cancelled outcome without abandoning the commit it owes.
+func (s *session) claimTerminalCommit(turnEpoch uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.turnEpoch != turnEpoch || !s.turnInFlight {
-		return routeInvalid("stale turn epoch at terminal commit")
+		return false, routeInvalid("stale turn epoch at terminal commit")
 	}
 
-	if s.turnSettlement == turnSettlementCancelled || turnCtx.Err() != nil {
-		s.turnSettlement = turnSettlementCancelled
+	raced := s.turnSettlement == turnSettlementCancelled
 
-		return errPromptCancelled
-	}
-
-	if s.turnSettlement != turnSettlementOpen {
-		return errors.New("hermes turn terminal commit was already claimed")
+	if s.turnSettlement != turnSettlementOpen && !raced {
+		return false, errors.New("hermes turn terminal commit was already claimed")
 	}
 
 	s.turnSettlement = turnSettlementCommitting
 
-	return nil
-}
-
-func (s *session) terminalCommitCancelled(turnCtx context.Context, turnEpoch uint64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return !s.closed && s.turnEpoch == turnEpoch &&
-		(s.turnSettlement == turnSettlementCancelled || turnCtx.Err() != nil)
+	return raced, nil
 }
 
 func hydrateStateFromStore(ctx context.Context, store SessionStore, sessionID string, xdg nativehermes.XDGDirs) (idmapRecord, stateSnapshot, bool, error) {
@@ -627,17 +734,21 @@ func decodeArchiveEntries(entries []SessionStoreEntry, info archiveInfo) ([]byte
 }
 
 func (s *session) snapshotBlockedReason() string {
-	return s.snapshotBlockedReasonForTerminalCommit(false)
+	return s.snapshotBlockedReasonForTerminalCommit(false, false)
 }
 
-func (s *session) snapshotBlockedReasonForTerminalCommit(allowOwningTurn bool) string {
+// snapshotBlockedReasonForTerminalCommit reports why no snapshot may be taken, or
+// the empty string when one may. settledBoundary names the commit that settles an
+// incarnation-ending boundary: the pending resume is that boundary's own
+// consequence, so it is not a reason to withhold the record of what ended.
+func (s *session) snapshotBlockedReasonForTerminalCommit(allowOwningTurn bool, settledBoundary bool) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	switch {
 	case !allowOwningTurn && (s.turnInFlight || s.cancel != nil):
 		return reasonTurn
-	case s.runtimeNeedsResume:
+	case s.runtimeNeedsResume && !settledBoundary:
 		return "runtime resume"
 	case len(s.pending) > 0:
 		return reasonPermission

@@ -72,7 +72,8 @@ var (
 func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *localAgentConnection {
 	conn := &localAgentConnection{agent: agent}
 	inputGate := newConnectionInputGate(input)
-	conn.conn = acp.NewConnection(conn.handle, output, inputGate)
+	ordered := responseOrderedWriter{writer: output, written: agent.releaseStreamOpens}
+	conn.conn = acp.NewConnection(conn.handle, ordered, inputGate)
 	conn.conn.SetLogger(agent.log)
 	inputGate.open()
 

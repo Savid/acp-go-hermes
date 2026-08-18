@@ -248,6 +248,14 @@ func (s *hermesServer) ProviderDescendantCount() (int, bool) {
 	return s.process.ProviderDescendantCount()
 }
 
+func (s *hermesServer) ProviderTreeVacant() (bool, bool) {
+	if s == nil || s.process == nil {
+		return false, false
+	}
+
+	return s.process.ProviderTreeVacant()
+}
+
 // ProviderAuthSupported reports that this server's exact credential residence
 // is durable. Official shared-HERMES_HOME mode is the only supported residence.
 func (s *hermesServer) ProviderAuthSupported() bool {
@@ -1695,6 +1703,14 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 	messageID := "hermes-" + live
 	if err := gw.SubmitPrompt(ctx, live, text); err != nil {
+		return NativeMessage{}, err
+	}
+
+	// The gateway acknowledged the frame, so it owns this turn from here. The
+	// dispatch point is reported before the loop below forwards anything the
+	// frame causes, which is what lets a caller record acceptance ahead of every
+	// event attributed to it.
+	if err := NotifyPromptDispatch(ctx); err != nil {
 		return NativeMessage{}, err
 	}
 

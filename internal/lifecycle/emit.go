@@ -1,5 +1,7 @@
 package lifecycle
 
+import "encoding/json"
+
 // Stream is one incarnation's ordered emitter. It claims a sequence before
 // delivery is attempted, so a lost or refused event leaves a detectable gap
 // rather than a silently contiguous stream, and it reduces every event through
@@ -51,22 +53,29 @@ func (s *Stream) Emit(event Event) (map[string]any, error) {
 
 	s.sequence++
 
-	err := s.reducer.Reduce(Delivery{
-		StreamID: s.id,
-		Sequence: s.sequence,
-		Carrier:  CarrierSessionInfo,
-		Event:    event,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]any{
+	envelope := map[string]any{
 		fieldVersion:  Version,
 		fieldStreamID: s.id,
 		fieldSequence: s.sequence,
 		fieldEvent:    encodeEvent(event),
-	}, nil
+	}
+	params, marshalErr := json.Marshal(map[string]any{
+		updateField: map[string]any{sessionUpdateField: string(CarrierSessionInfo)},
+		metaField:   map[string]any{MetaKey: envelope},
+	})
+	if marshalErr != nil {
+		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence, marshalErr.Error())
+	}
+
+	delivery, err := DecodeSessionUpdate(params, s.reducer.negotiated)
+	if err == nil {
+		err = s.reducer.Reduce(delivery)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return envelope, nil
 }
 
 // SnapshotEvent opens a stream from the whole state this adapter can state

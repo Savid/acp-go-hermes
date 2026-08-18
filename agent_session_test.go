@@ -860,7 +860,7 @@ func installResumeRuntimeFactory(agent *Agent, client *fakeHermesClient) {
 	}
 }
 
-func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
+func TestCloseSessionWaitsForPendingTurnSettlement(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
@@ -898,8 +898,8 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("prompt did not finish after close")
 	}
-	if got := store.replaceCount(); got != 0 {
-		t.Fatalf("close wrote snapshot during blocked turn: %d", got)
+	if got := store.replaceCount(); got != 1 {
+		t.Fatalf("settlement Replace count = %d, want 1", got)
 	}
 }
 

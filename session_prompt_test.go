@@ -3595,7 +3595,13 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 			err  error
 		}{resp: resp, err: err}
 	}()
-	<-replacementStarted
+	select {
+	case <-replacementStarted:
+	case out := <-newDone:
+		t.Fatalf("replacement prompt ended before dispatch: %#v err=%v", out.resp, out.err)
+	case <-time.After(time.Second):
+		t.Fatal("replacement prompt did not dispatch")
+	}
 
 	if err := session.cancelRouted(turnRouteMeta("old-turn")); err == nil || !strings.Contains(err.Error(), "stale route turnNonce") {
 		t.Fatalf("stale old route error = %v", err)

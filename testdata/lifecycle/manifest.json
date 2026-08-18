@@ -187,7 +187,15 @@
     },
     {
       "file": "ending-idle-omits-outcome.json",
-      "invariant": "An idle transition that ends an open turn without a stop reason and an outcome is refused as malformed."
+      "invariant": "An idle transition that ends an open turn without an outcome is refused as malformed."
+    },
+    {
+      "file": "failed-outcome-omits-stop-reason.json",
+      "invariant": "An ending idle whose outcome is failed carries no stop reason: no ACP v1 stop reason names a failure, so the omission is the required shape."
+    },
+    {
+      "file": "failed-outcome-carries-stop-reason.json",
+      "invariant": "An ending idle whose outcome is failed and which carries a stop reason is refused as malformed."
     },
     {
       "file": "late-causal-parent.json",
@@ -219,7 +227,19 @@
     },
     {
       "file": "false-quiescence-while-live.json",
-      "invariant": "A positive quiescence fact delivered while the foreground is live and an activity is nonterminal is refused."
+      "invariant": "A positive quiescence fact delivered while the foreground is live and an activity is nonterminal is refused; each of its two live conditions is pinned alone by its own vector."
+    },
+    {
+      "file": "false-quiescence-foreground-live.json",
+      "invariant": "A positive quiescence fact is refused on a live foreground alone, with no activity and no action held."
+    },
+    {
+      "file": "false-quiescence-holds-activity.json",
+      "invariant": "A positive quiescence fact is refused on one nonterminal activity alone, with the foreground idle and its turn settled."
+    },
+    {
+      "file": "false-quiescence-holds-action.json",
+      "invariant": "A positive quiescence fact is refused on one unresolved action alone, with the foreground idle and no activity held."
     },
     {
       "file": "false-quiescence-uncovered-transition.json",
@@ -227,7 +247,11 @@
     },
     {
       "file": "negative-quiescence-carries-proof.json",
-      "invariant": "A proof source and a watermark are present exactly when the fact is positive; a negative fact carrying either is refused."
+      "invariant": "A watermark is present exactly when the fact is positive; a negative fact carrying one is refused."
+    },
+    {
+      "file": "negative-quiescence-carries-source.json",
+      "invariant": "A proof source is present exactly when the fact is positive; a negative fact naming one is refused."
     },
     {
       "file": "unnegotiated-negative-quiescence.json",
@@ -263,7 +287,7 @@
     },
     {
       "file": "notification-content-conflict.json",
-      "invariant": "The dedup identity covers the whole notification, so the same envelope beside different carrier content is a conflicting duplicate."
+      "invariant": "The dedup identity covers the whole notification, so the same envelope beside a member the first delivery did not carry is a conflicting duplicate."
     },
     {
       "file": "snapshot-on-fenced-stream.json",
