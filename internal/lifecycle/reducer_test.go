@@ -429,6 +429,50 @@ func TestActionRules(t *testing.T) {
 			actionEvent(ActionUpdate{ActionID: "req-1", State: ActionDeclined}))...)
 }
 
+// TestTerminalActionAdmitsOnlyNoOpRestatement pins the action half of the
+// terminal-restatement rule. An update naming a resolved action is judged
+// member-wise against the reduced terminal record: one that restates the record
+// is a no-op and is suppressed, consuming its sequence and leaving the
+// projection alone, while any carried difference — a later state, or an
+// immutable restated at other than its first-sight value — is refused under the
+// terminal token, because a token naming a terminal entity always wins.
+func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
+	t.Parallel()
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+	}}
+	opening := []Event{
+		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
+		actionEvent(ActionUpdate{
+			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		}),
+		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted}),
+	}
+
+	reducer, refusal := reduceAll(t, richConfiguration(),
+		append(append([]Event{}, opening...), actionEvent(ActionUpdate{
+			ActionID: "req-1", Kind: ActionPermission, State: ActionAccepted,
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		}))...)
+	require.Nil(t, refusal, "a restatement carrying no difference says nothing new")
+	require.Equal(t, uint64(6), reducer.State().ReducedThrough, "a suppressed no-op still consumes its sequence")
+	require.Zero(t, reducer.State().SuppressedRetransmissions,
+		"the count is of reused identities, and this restatement arrived at its own sequence")
+
+	for _, restatement := range []ActionUpdate{
+		{ActionID: "req-1", State: ActionDeclined},
+		{ActionID: "req-1", Kind: ActionElicitation, State: ActionAccepted},
+		{ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-9"}},
+		{ActionID: "req-1", State: ActionAccepted, RunID: "run-9"},
+		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
+	} {
+		requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
+			append(append([]Event{}, opening...), actionEvent(restatement))...)
+	}
+}
+
 // TestTerminalActionOnFirstSightNeverBlocks pins that an action already resolved
 // when a delta first sees it holds nothing: it is recorded, and the cycle it
 // would otherwise have blocked owes no transition.
@@ -606,6 +650,10 @@ func TestReducerAdmitsOnlyValidInactiveReplacement(t *testing.T) {
 	})
 }
 
+// TestSnapshotRejectsDuplicateEntities pins the per-set uniqueness rule: a
+// snapshot is a whole-state assertion, so an id listed twice within one set is
+// malformed however well the entries agree, and the two sets are distinct id
+// spaces, so the same string once in each is a legal pair of entities.
 func TestSnapshotRejectsDuplicateEntities(t *testing.T) {
 	t.Parallel()
 
@@ -613,7 +661,7 @@ func TestSnapshotRejectsDuplicateEntities(t *testing.T) {
 		ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
 		Cause: CauseSession, OriginTurnID: "turn",
 	}
-	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
 			Foreground: Foreground{State: ForegroundIdle, CycleID: "cycle"},
 			Activities: []ActivityUpdate{activity, activity},
@@ -623,7 +671,7 @@ func TestSnapshotRejectsDuplicateEntities(t *testing.T) {
 		ActionID: "action", Kind: ActionPermission, State: ActionPending,
 		Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: stated(false),
 	}
-	requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
 			Foreground: Foreground{State: ForegroundRunning, CycleID: "cycle", TurnID: "turn", Origin: CauseSubmission},
 			Actions:    []ActionUpdate{action, action},

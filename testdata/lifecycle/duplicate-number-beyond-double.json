@@ -1,0 +1,141 @@
+{
+  "name": "duplicate-number-beyond-double",
+  "purpose": "Value equality is exact, and exactness is what a binary float cannot give. Two deliveries at the same identity carry nineteen-digit integers differing only in the last digit; both are far above the range where a float64 keeps every integer, so a reducer that decodes numbers through a double sees one value twice and suppresses a frame that changed its content. The contract's predicate compares the mathematical values, finds them different, and refuses the reused identity as a conflicting duplicate. Lossless comparison is the certifying consumer's obligation, not an optimization.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "activity_update",
+              "activity": {
+                "activityId": "act-1",
+                "kind": "task",
+                "state": "running",
+                "cause": "submission",
+                "originTurnId": "turn-1",
+                "progress": {"cursor": 1234567890123456788}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "activity_update",
+              "activity": {
+                "activityId": "act-1",
+                "kind": "task",
+                "state": "running",
+                "cause": "submission",
+                "originTurnId": "turn-1",
+                "progress": {"cursor": 1234567890123456789}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "conflicting_duplicate",
+    "atInput": 4,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 4,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "activities": [{"activityId": "act-1", "kind": "task", "state": "running", "originTurnId": "turn-1"}],
+      "actions": [],
+      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "closed": false
+    }
+  }
+}

@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 )
 
 // Options configures a reducer.
@@ -225,8 +224,11 @@ func (r *Reducer) reduceFirst(delivery Delivery) error {
 	return nil
 }
 
+// reduceDuplicate judges a reused identity on the whole-notification basis:
+// envelope and carrier together, compared under lifecycle value equality. A
+// frame that says the same thing in a different spelling is the same frame.
 func (r *Reducer) reduceDuplicate(delivery Delivery) error {
-	if recorded, known := r.frames[delivery.Sequence]; known && reflect.DeepEqual(recorded, delivery.Frame) {
+	if recorded, known := r.frames[delivery.Sequence]; known && valueEqual(recorded, delivery.Frame) {
 		r.state.SuppressedRetransmissions++
 
 		return nil

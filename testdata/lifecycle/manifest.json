@@ -328,6 +328,54 @@
     {
       "file": "activity-first-sight-missing-identity.json",
       "invariant": "A first-sight activity_update missing an immutable identity field is refused as an identity change, not as an unknown origin."
+    },
+    {
+      "file": "terminal-restatement-suppressed.json",
+      "invariant": "An update restating a terminal activity with no carried difference is a suppressed no-op: it consumes its sequence, leaves the projection untouched, and does not raise the floor a positive quiescence fact must clear."
+    },
+    {
+      "file": "terminal-progress-change-refused.json",
+      "invariant": "A restatement holding the terminal state while carrying a different progress is a carried difference from the reduced terminal record and is refused."
+    },
+    {
+      "file": "terminal-restatement-identical-progress.json",
+      "invariant": "A restatement carrying the terminal state and an identical progress carries no difference and is suppressed."
+    },
+    {
+      "file": "terminal-minimal-patch-redelivery.json",
+      "invariant": "The terminal comparison basis is the patch, so a minimal terminal patch redelivered at the next sequence is a no-op and the members it omits are not differences."
+    },
+    {
+      "file": "terminal-immutable-change-refused.json",
+      "invariant": "A delivery that both names a terminal entity and changes an immutable field reports post_terminal_mutation; the terminal token wins."
+    },
+    {
+      "file": "duplicate-number-value-equal.json",
+      "invariant": "Numbers compare as exact mathematical values, so a duplicate differing only in writing 1 as 1.0 is an exact retransmission and is suppressed."
+    },
+    {
+      "file": "duplicate-number-beyond-double.json",
+      "invariant": "A duplicate whose numbers differ only beyond float64 precision is a conflicting duplicate; a certifying consumer compares losslessly."
+    },
+    {
+      "file": "duplicate-number-huge-exponent.json",
+      "invariant": "A huge-exponent literal is decodable and equal to itself: the duplicate is suppressed without the value ever being materialized."
+    },
+    {
+      "file": "fractional-sequence-malformed.json",
+      "invariant": "Integer-typed members are lexically integral, so a sequence written 2.0 is malformed however its value reads."
+    },
+    {
+      "file": "snapshot-duplicate-activity.json",
+      "invariant": "A snapshot listing one activityId twice is malformed, identical entries included; a whole-state set is judged whole rather than deduplicated."
+    },
+    {
+      "file": "snapshot-duplicate-action.json",
+      "invariant": "A snapshot listing one actionId twice is malformed; uniqueness binds within each set."
+    },
+    {
+      "file": "snapshot-cross-set-id-legal.json",
+      "invariant": "Activities and actions are distinct id spaces, so the same string naming one of each reduces and the two never conflate."
     }
   ]
 }
