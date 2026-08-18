@@ -112,6 +112,9 @@ func (s *session) awaitSettlement(ctx context.Context) error {
 func (s *session) closeLifecycleAdmission() {
 	s.mu.Lock()
 	s.lifecycleClosing = true
+	if s.turnSettlement == turnSettlementOpen {
+		s.turnSettlement = turnSettlementCancelled
+	}
 	s.mu.Unlock()
 }
 

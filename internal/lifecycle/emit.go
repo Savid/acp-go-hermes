@@ -59,6 +59,7 @@ func (s *Stream) Emit(event Event) (map[string]any, error) {
 		fieldSequence: s.sequence,
 		fieldEvent:    encodeEvent(event),
 	}
+
 	params, marshalErr := json.Marshal(map[string]any{
 		updateField: map[string]any{sessionUpdateField: string(CarrierSessionInfo)},
 		metaField:   map[string]any{MetaKey: envelope},
@@ -71,6 +72,7 @@ func (s *Stream) Emit(event Event) (map[string]any, error) {
 	if err == nil {
 		err = s.reducer.Reduce(delivery)
 	}
+
 	if err != nil {
 		return nil, err
 	}

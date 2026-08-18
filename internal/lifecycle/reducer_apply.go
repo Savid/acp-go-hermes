@@ -57,6 +57,7 @@ func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, 
 			return r.fail(delivery, ViolationImmutableIdentityChange,
 				"activity "+activity.ActivityID+" is listed twice")
 		}
+
 		seen[activity.ActivityID] = true
 
 		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
@@ -82,6 +83,7 @@ func (r *Reducer) checkSnapshotActions(delivery Delivery, snapshot Snapshot, int
 			return r.fail(delivery, ViolationImmutableIdentityChange,
 				"action "+action.ActionID+" is listed twice")
 		}
+
 		seen[action.ActionID] = true
 		if err := r.checkActionIdentity(delivery, action); err != nil {
 			return err
@@ -455,6 +457,7 @@ func (r *Reducer) patchActivity(delivery Delivery, update ActivityUpdate) error 
 	if existing.State.Terminal() {
 		return r.fail(delivery, ViolationPostTerminalMutation, "activity "+existing.ActivityID+" is terminal")
 	}
+
 	if detail := immutableActivityConflict(existing, update); detail != "" {
 		return r.fail(delivery, ViolationImmutableIdentityChange, detail)
 	}

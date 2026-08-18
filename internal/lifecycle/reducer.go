@@ -158,6 +158,7 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 
 	next := &Reducer{negotiated: r.negotiated}
 	next.reset(delivery.StreamID)
+
 	if err := next.reduceFirst(delivery); err != nil {
 		r.failed = next.failed
 
