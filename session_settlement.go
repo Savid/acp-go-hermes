@@ -659,11 +659,19 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 	}
 
 	if stream.fenced() {
-		// The incarnation already settled and its stream is terminal: the
-		// terminalize and certify rungs have nothing truthful to add, and
-		// emitting on the fenced stream would only join a stale_stream refusal
-		// into a close that succeeded.
-		return nil
+		// The incarnation's stream is terminal: the terminalize and certify rungs
+		// have nothing truthful to add, and emitting on the fenced stream would
+		// only join a stale_stream refusal into a close that succeeded. The
+		// durable rung is not a stream rung, and the fence may have landed while
+		// the containment boundary was running, so the generation this boundary
+		// already captured is still published and a capture failure it already
+		// observed is still reported.
+		var commitErr error
+		if commit != nil {
+			commitErr = s.publishSnapshotLocked(context.WithoutCancel(ctx), commit)
+		}
+
+		return errors.Join(captureErr, commitErr)
 	}
 
 	proof := s.closedContainmentProof()

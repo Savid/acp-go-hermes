@@ -350,3 +350,127 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		}))
 	})
 }
+
+// The fence that ends an incarnation can land while the close boundary is
+// running: the owed opening snapshot is delivered off the write barrier, and an
+// undeliverable one fences the stream from that background goroutine. The
+// generation the boundary captured before its containment proof is durable state,
+// not a stream event, so it must still be published rather than dropped because a
+// stream the close never needed went terminal underneath it.
+func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	conn.updateErr = errors.New("opening failed")
+	agent.setAgentClient(conn)
+
+	client := newFakeHermesClient()
+	inClose := make(chan struct{})
+	releaseClose := make(chan struct{})
+	client.closeFunc = func(context.Context) error {
+		close(inClose)
+		<-releaseClose
+
+		return nil
+	}
+
+	session := testSession(agent, client)
+	require.NoError(t, session.openLifecycleStream())
+	// A first durable generation, so the assertion reads a store that changed
+	// rather than one that was never written.
+	require.NoError(t, session.snapshotToStore(t.Context()))
+	agent.sessions[session.id] = session
+	agent.deferStreamOpen(session)
+
+	session.mu.Lock()
+	session.title = "renamed-before-close"
+	session.mu.Unlock()
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		closed <- err
+	}()
+
+	select {
+	case <-inClose:
+	case <-time.After(10 * time.Second):
+		t.Fatal("close never reached the native containment boundary")
+	}
+	// The write barrier fires here: the owed snapshot cannot be delivered, so the
+	// deferred open fences the incarnation while the close boundary is mid-flight.
+	agent.releaseStreamOpens()
+	agent.awaitStreamOpens()
+	close(releaseClose)
+
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("close hung")
+	}
+	require.True(t, session.lifecycleStream().fenced(), "precondition: the deferred open did not fence the stream")
+
+	entries, err := agent.sessionStore().Load(t.Context(), SessionKey{
+		SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	require.Contains(t, string(entries[0]), "renamed-before-close",
+		"the generation captured before the containment boundary was never published")
+}
+
+// The same window with a capture that failed: the close boundary observed the
+// failure before the fence landed, so the close must report it rather than answer
+// success over a generation it never made durable.
+func TestCloseSessionReportsCaptureFailureWhenDeferredOpenFences(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	conn.updateErr = errors.New("opening failed")
+	agent.setAgentClient(conn)
+
+	client := newFakeHermesClient()
+	client.messagesErr = errors.New("native history read failed")
+	inClose := make(chan struct{})
+	releaseClose := make(chan struct{})
+	client.closeFunc = func(context.Context) error {
+		close(inClose)
+		<-releaseClose
+
+		return nil
+	}
+
+	session := testSession(agent, client)
+	require.NoError(t, session.openLifecycleStream())
+	agent.sessions[session.id] = session
+	agent.deferStreamOpen(session)
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		closed <- err
+	}()
+
+	select {
+	case <-inClose:
+	case <-time.After(10 * time.Second):
+		t.Fatal("close never reached the native containment boundary")
+	}
+	agent.releaseStreamOpens()
+	agent.awaitStreamOpens()
+	close(releaseClose)
+
+	select {
+	case err := <-closed:
+		require.ErrorContains(t, err, "native history read failed",
+			"a capture failure the close boundary observed was swallowed by the fenced path")
+	case <-time.After(10 * time.Second):
+		t.Fatal("close hung")
+	}
+	require.True(t, session.lifecycleStream().fenced(), "precondition: the deferred open did not fence the stream")
+}
