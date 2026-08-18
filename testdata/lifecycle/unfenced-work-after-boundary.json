@@ -1,0 +1,243 @@
+{
+  "name": "unfenced-work-after-boundary",
+  "purpose": "A certified boundary fences causal work rooted at or before its watermark and nothing else. New session-owned work may begin later: an agent-origin turn opened after the boundary, and an activity rooted in it, reduce normally and settle at a second certified boundary. Accepted shapes that resemble violations are exactly where independent reducers diverge.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 5,
+            "event": {
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 4,
+              "barrier": "vacancy-proof-5"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 6,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-2",
+              "turnId": "turn-2",
+              "cause": "activity"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 7,
+            "event": {
+              "type": "activity_update",
+              "activity": {
+                "activityId": "act-1",
+                "kind": "task",
+                "state": "running",
+                "cause": "activity",
+                "originTurnId": "turn-2"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 8,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "act-1", "state": "completed"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 9,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-2",
+              "turnId": "turn-2",
+              "cause": "activity",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 10,
+            "event": {
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 9,
+              "barrier": "vacancy-proof-6"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 10,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-2"},
+      "turns": [
+        {"turnId": "turn-1", "origin": "submission", "terminal": true, "outcome": "success"},
+        {"turnId": "turn-2", "origin": "activity", "terminal": true, "outcome": "success"}
+      ],
+      "activities": [{"activityId": "act-1", "kind": "task", "state": "completed", "originTurnId": "turn-2"}],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 9, "barrier": "vacancy-proof-6"},
+      "closed": false
+    }
+  }
+}

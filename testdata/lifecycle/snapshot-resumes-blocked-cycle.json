@@ -1,0 +1,120 @@
+{
+  "name": "snapshot-resumes-blocked-cycle",
+  "purpose": "A snapshot may resume a cycle a blocking action stopped, carrying both the requires_action foreground and the action blocking it. The blocker blocks the cycle current at its first sight, so the cycle returns to running only after that action terminalizes.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 5,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "requires_action", "cycleId": "cyc-2", "turnId": "turn-3", "origin": "submission"},
+              "activities": [],
+              "actions": [
+                {
+                  "actionId": "act-perm-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "turn", "id": "turn-3"},
+                  "blocksForeground": true
+                }
+              ],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 6,
+            "event": {
+              "type": "action_update",
+              "action": {"actionId": "act-perm-1", "state": "accepted"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 7,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-2",
+              "turnId": "turn-3",
+              "cause": "submission"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 8,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-2",
+              "turnId": "turn-3",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 8,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-2"},
+      "turns": [{"turnId": "turn-3", "origin": "submission", "terminal": true, "outcome": "success"}],
+      "activities": [],
+      "actions": [
+        {"actionId": "act-perm-1", "kind": "permission", "state": "accepted", "owner": {"type": "turn", "id": "turn-3"}, "blocksForeground": true}
+      ],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

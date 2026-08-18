@@ -1,0 +1,71 @@
+{
+  "name": "empty-identifier",
+  "purpose": "Every opaque identifier is a non-empty string. A member present carrying the empty string is not an absent member: read as absence it would make an omitted correlation handle and a stated-but-empty one indistinguishable, so it is malformed wherever it appears, optional members included.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1",
+              "runId": ""
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 1,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 1,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 0},
+      "closed": false
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "snapshot-idle-names-turn",
+  "purpose": "A foreground turn is present only while a turn is open, so an idle snapshot reports no turn at all. Presence is a rule rather than a preference: an idle foreground carrying a turn is malformed, not an idle foreground with a hint about the turn that just ended.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0", "turnId": "turn-1", "origin": "submission"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

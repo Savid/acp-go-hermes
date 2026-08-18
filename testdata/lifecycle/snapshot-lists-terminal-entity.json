@@ -1,0 +1,50 @@
+{
+  "name": "snapshot-lists-terminal-entity",
+  "purpose": "A snapshot states the complete nonterminal sets. An entry that is already terminal asserts as current a state that is over, so it is malformed rather than reduced as history a consumer could not act on.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [{"activityId": "act-1", "kind": "task", "state": "completed", "cause": "submission", "originTurnId": "turn-1"}],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "name": "snapshot-false-quiescence",
+  "purpose": "A positive quiescence fact must be true of the stream that carries it. A snapshot asserting quiescence while its own sets list live work disproves its own proof, and a false proof fails closed rather than certifying nothing: a swallowed lie is indistinguishable from a loss.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 9,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-2", "turnId": "turn-5", "origin": "submission"},
+              "activities": [{"activityId": "act-1", "kind": "task", "state": "running", "cause": "submission", "originTurnId": "turn-5"}],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 8}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "postRefusal": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 10,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "act-1", "state": "completed"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 11,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-2",
+              "turnId": "turn-5",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "false_quiescence",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

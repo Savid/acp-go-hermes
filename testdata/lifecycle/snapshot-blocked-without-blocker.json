@@ -1,0 +1,58 @@
+{
+  "name": "snapshot-blocked-without-blocker",
+  "purpose": "A snapshot's foreground answers to the same rule as a transition's: requires_action is a state a blocking action puts the cycle in, and the snapshot states the complete nonterminal sets, so a blocker it does not list does not exist. A resumed requires_action whose only action does not block the foreground asserts a state nothing in the snapshot can explain, and a refused snapshot opens nothing, so the projection is untouched.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "requires_action", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [],
+              "actions": [
+                {
+                  "actionId": "act-perm-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "turn", "id": "turn-1"},
+                  "blocksForeground": false
+                }
+              ],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "inconsistent_foreground",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

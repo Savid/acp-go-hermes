@@ -1,0 +1,155 @@
+{
+  "name": "snapshot-introduces-entities",
+  "purpose": "A resumed stream's snapshot introduces exactly what it names: the turn its foreground reports, the turns its activities name as origin, and its own nonterminal activities and actions. Later patches resolve against those introductions, which is why a consumer must be installed before the stream opens rather than at prompt time.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 41,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-7", "turnId": "turn-9", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-9",
+                  "runId": "run-1"
+                },
+                {
+                  "activityId": "act-2",
+                  "kind": "subagent",
+                  "state": "pending",
+                  "parentId": "act-1",
+                  "cause": "activity",
+                  "originTurnId": "turn-9"
+                }
+              ],
+              "actions": [
+                {
+                  "actionId": "act-perm-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "activity", "id": "act-2"},
+                  "blocksForeground": false
+                }
+              ],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 42,
+            "event": {
+              "type": "action_update",
+              "action": {"actionId": "act-perm-1", "state": "accepted"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 43,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "act-2", "state": "completed"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 44,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "act-1", "state": "completed"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 45,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-7",
+              "turnId": "turn-9",
+              "cause": "submission",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 45,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-7"},
+      "turns": [{"turnId": "turn-9", "origin": "submission", "terminal": true, "outcome": "success"}],
+      "activities": [
+        {"activityId": "act-1", "kind": "task", "state": "completed", "originTurnId": "turn-9", "runId": "run-1"},
+        {"activityId": "act-2", "kind": "subagent", "state": "completed", "parentId": "act-1", "originTurnId": "turn-9"}
+      ],
+      "actions": [
+        {"actionId": "act-perm-1", "kind": "permission", "state": "accepted", "owner": {"type": "activity", "id": "act-2"}, "blocksForeground": false}
+      ],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

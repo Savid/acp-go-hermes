@@ -1,0 +1,110 @@
+{
+  "name": "snapshot-resumes-mid-turn",
+  "purpose": "A snapshot reporting running names the turn holding the foreground and that turn's origin, and the consumer projects it as an open turn. Without the origin member a resumed turn would have no recorded provenance, and without the projected record every later reference to it would be unresolvable.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-3", "turnId": "turn-4", "origin": "activity"},
+              "activities": [{"activityId": "act-1", "kind": "task", "state": "running", "cause": "activity", "originTurnId": "turn-4"}],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 13,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "act-1", "state": "completed"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 14,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-3",
+              "turnId": "turn-4",
+              "cause": "activity",
+              "stopReason": "end_turn",
+              "outcome": "success"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 15,
+            "event": {
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 14,
+              "barrier": "vacancy-proof-7"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 15,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-3"},
+      "turns": [{"turnId": "turn-4", "origin": "activity", "terminal": true, "outcome": "success"}],
+      "activities": [{"activityId": "act-1", "kind": "task", "state": "completed", "originTurnId": "turn-4"}],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 14, "barrier": "vacancy-proof-7"},
+      "closed": false
+    }
+  }
+}
