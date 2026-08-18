@@ -1775,6 +1775,18 @@ func TestHermesGatewaySaturatedAuthoritativePublicationFailsTurn(t *testing.T) {
 				{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"pwd"}`)},
 			},
 		},
+		{
+			name: "assistant delta",
+			events: []Event{
+				{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"chunk"}`)},
+			},
+		},
+		{
+			name: "clarify request",
+			events: []Event{
+				{Type: evtClarifyRequest, Payload: json.RawMessage(`{"id":"clarify-1","question":"which one?"}`)},
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -2428,7 +2440,6 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 			}
 		}
 	})
-
 }
 
 // TestHermesGatewayDeltaAndQuestionPublicationBackpressure pins the two event
