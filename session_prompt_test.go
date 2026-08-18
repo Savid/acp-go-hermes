@@ -15,8 +15,10 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 type strictHermesPermissionClient struct {
@@ -4055,4 +4057,149 @@ func TestSharedHomePromptSessionSetLock(t *testing.T) {
 	if _, err := session.Prompt(ctx, TextPromptRequest(session.id, "blocked-lock", "blocked")); err == nil {
 		t.Fatal("contended shared-home turn lock succeeded")
 	}
+}
+
+func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	session := testSession(agent, newFakeHermesClient())
+	require.NoError(t, session.openLifecycleStream())
+	turnCtx := session.beginTurn(t.Context(), "turn")
+	require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "nonce",
+	}))
+
+	require.NoError(t, session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool")))
+	require.NoError(t, session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}))
+
+	conn.mu.Lock()
+	permissionMeta := conn.permissions[0].Meta
+	elicitationMeta := conn.elicitations[0].Form.Meta
+	conn.mu.Unlock()
+	require.Contains(t, permissionMeta, lifecycle.MetaKey)
+	require.Contains(t, elicitationMeta, lifecycle.MetaKey)
+	require.Empty(t, session.actionRequests)
+}
+
+func TestLifecycleActionAdmissionFailuresRejectNativeRequests(t *testing.T) {
+	t.Run("permission without owner", func(t *testing.T) {
+		session, _, turnCtx := newLifecycleActionSession(t, false)
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		require.ErrorContains(t, err, "outside an accepted lifecycle turn")
+	})
+
+	t.Run("question without owner", func(t *testing.T) {
+		session, _, turnCtx := newLifecycleActionSession(t, false)
+		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+		require.NoError(t, err)
+		client, ok := session.client.(*fakeHermesClient)
+		require.True(t, ok)
+		require.Equal(t, 1, client.questionRejectCount())
+	})
+
+	t.Run("permission announcement", func(t *testing.T) {
+		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		session.agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: conn, failAt: 1})
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+
+	t.Run("question announcement", func(t *testing.T) {
+		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		session.agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: conn, failAt: 1})
+		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+}
+
+func TestLifecycleResolutionFailureDominatesCallbackResult(t *testing.T) {
+	runPermission := func(t *testing.T, callbackErr error) {
+		t.Helper()
+		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		conn.permErr = callbackErr
+		conn.permissionStarted = make(chan struct{}, 1)
+		conn.permissionRelease = make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		}()
+		<-conn.permissionStarted
+		setLifecycleDeliveryError(conn)
+		close(conn.permissionRelease)
+		require.ErrorContains(t, <-done, "lifecycle delivery failed")
+	}
+
+	t.Run("permission callback error", func(t *testing.T) {
+		runPermission(t, errors.New("permission callback failed"))
+	})
+	t.Run("permission answer", func(t *testing.T) {
+		runPermission(t, nil)
+	})
+
+	runQuestion := func(t *testing.T, response acp.UnstableCreateElicitationResponse, callbackErr error) {
+		t.Helper()
+		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		conn.elicitation = response
+		conn.elicitErr = callbackErr
+		conn.elicitationStarted = make(chan struct{}, 1)
+		conn.elicitationRelease = make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+		}()
+		<-conn.elicitationStarted
+		setLifecycleDeliveryError(conn)
+		close(conn.elicitationRelease)
+		require.ErrorContains(t, <-done, "lifecycle delivery failed")
+	}
+
+	t.Run("question callback error", func(t *testing.T) {
+		runQuestion(t, acp.UnstableCreateElicitationResponse{}, errors.New("question callback failed"))
+	})
+	t.Run("question decline", func(t *testing.T) {
+		runQuestion(t, acp.NewUnstableCreateElicitationResponseDecline(), nil)
+	})
+	t.Run("question answer", func(t *testing.T) {
+		runQuestion(t, acp.UnstableCreateElicitationResponse{
+			Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{}},
+		}, nil)
+	})
+}
+
+func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
+	reserved := map[string]any{lifecycle.MetaKey: map[string]any{}}
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	require.Error(t, session.cancelRouted(reserved))
+
+	turnCtx := session.beginTurn(t.Context(), "turn")
+	_ = turnCtx
+	session.mu.Lock()
+	session.turnInFlight = true
+	session.mu.Unlock()
+	activeMeta := turnRouteMeta("turn")
+	activeMeta[lifecycle.MetaKey] = map[string]any{}
+	require.Error(t, session.cancelRouted(activeMeta))
+
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	negotiatedSession := testSession(agent, newFakeHermesClient())
+	_, err := negotiatedSession.Prompt(t.Context(), acp.PromptRequest{
+		SessionId: negotiatedSession.id,
+		Meta:      turnRouteMeta("turn"),
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	require.Error(t, err)
+}
+
+func TestTerminalOutcomeFromHermesMapsStopReasonAndOutcome(t *testing.T) {
+	reason, outcome := terminalOutcomeFromHermes("max_turns")
+	require.Equal(t, acp.StopReasonMaxTurnRequests, reason)
+	require.Equal(t, lifecycle.OutcomeLimit, outcome)
 }

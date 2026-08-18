@@ -14,6 +14,7 @@ import (
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTerminalSnapshotFromMessagesSelectsLatestFinishedAssistant(t *testing.T) {
@@ -1262,4 +1263,43 @@ type alwaysFailReader struct {
 
 func (r *alwaysFailReader) Read([]byte) (int, error) {
 	return 0, r.err
+}
+
+func TestStoredLifecycleBoundaryValidation(t *testing.T) {
+	valid := func() stateSnapshot {
+		return stateSnapshot{
+			Archives: map[string]archiveInfo{},
+			Terminal: &stateSnapshotTerminal{},
+			Wrapper: &stateSnapshotWrapper{Foreground: &stateSnapshotForeground{
+				StreamID: "stream", TurnID: "turn", CapturedAtUnixMilli: 1,
+				Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn),
+			}},
+		}
+	}
+
+	for name, mutate := range map[string]func(*stateSnapshot){
+		"identity": func(snapshot *stateSnapshot) {
+			snapshot.Wrapper.Foreground.TurnID = ""
+		},
+		"outcome": func(snapshot *stateSnapshot) {
+			snapshot.Wrapper.Foreground.Outcome = "future"
+		},
+		"failed stop reason": func(snapshot *stateSnapshot) {
+			snapshot.Wrapper.Foreground.Outcome = string(lifecycle.OutcomeFailed)
+		},
+		"missing stop reason": func(snapshot *stateSnapshot) {
+			snapshot.Wrapper.Foreground.StopReason = ""
+		},
+		"unsupported stop reason": func(snapshot *stateSnapshot) {
+			snapshot.Wrapper.Foreground.StopReason = "future"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := valid()
+			mutate(&snapshot)
+			require.Error(t, validateStateSnapshotRequiredSections(snapshot))
+		})
+	}
+
+	require.NoError(t, validateStateSnapshotRequiredSections(valid()))
 }

@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTurnFenceHelperBranches(t *testing.T) {
@@ -184,4 +186,21 @@ func TestJoinModelValueQualifiesProvider(t *testing.T) {
 	if got := joinModelValue("provider", "model"); got != "provider/model" {
 		t.Fatalf("joined model=%q", got)
 	}
+}
+
+func TestCommittedStateAndForegroundPrefixBoundaries(t *testing.T) {
+	native := &stateSnapshotTerminal{MessageID: "message"}
+	require.Empty(t, (committedState{}).nativeTerminal().MessageID)
+	require.Equal(t, "message", (committedState{native: native}).nativeTerminal().MessageID)
+
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	session.recordForegroundPrefix("")
+	session.recordForegroundPrefix("prefix")
+	session.recordForegroundPrefix(string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes)))
+	session.recordForegroundPrefix("ignored")
+	require.Len(t, session.foregroundPrefix(), lifecycleForegroundPrefixBytes)
+
+	require.Nil(t, foregroundOf(nil))
+	foreground := &stateSnapshotForeground{TurnID: "turn"}
+	require.Same(t, foreground, foregroundOf(&stateSnapshotWrapper{Foreground: foreground}))
 }

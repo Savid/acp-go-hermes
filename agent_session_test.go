@@ -16,8 +16,10 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 // toggleReplaceStore wraps InMemorySessionStore and can be switched to fail all
@@ -3168,4 +3170,104 @@ func TestAdmitSharedHermesConfigSurfacesRedactionFailure(t *testing.T) {
 	if err := agent.admitSharedHermesConfig(nil); !errors.Is(err, wantErr) {
 		t.Fatalf("redaction error = %v", err)
 	}
+}
+
+type failNthIDReader struct {
+	reads  int
+	failAt int
+}
+
+func (r *failNthIDReader) Read(buffer []byte) (int, error) {
+	r.reads++
+	if r.reads == r.failAt {
+		return 0, errors.New("lifecycle stream id failed")
+	}
+
+	for index := range buffer {
+		buffer[index] = byte(r.reads + index)
+	}
+
+	return len(buffer), nil
+}
+
+func installFailingLifecycleIDReader(t *testing.T, failAt int) {
+	t.Helper()
+
+	original := sessionIDRandReader
+	t.Cleanup(func() { sessionIDRandReader = original })
+	sessionIDRandReader = &failNthIDReader{failAt: failAt}
+}
+
+func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
+	negotiated := lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	}
+
+	t.Run("new", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.createSession = testNativeSession("native-new")
+		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				if err != nil {
+					return nil, err
+				}
+				client.xdg = xdg
+
+				return client, nil
+			}
+		})
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 2)
+
+		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.True(t, client.closed)
+	})
+
+	t.Run("load", func(t *testing.T) {
+		store := NewInMemorySessionStore()
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				client.xdg = opts.ExistingXDG
+
+				return client, nil
+			}
+		})
+		seed := testSession(agent, newFakeHermesClient())
+		require.NoError(t, seed.snapshotToStore(t.Context()))
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 1)
+
+		_, err := agent.loadOrResumeSession(t.Context(), seed.id, seed.cwd, nil, nil, nil)
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.True(t, client.closed)
+	})
+
+	t.Run("fork with incomplete cleanup", func(t *testing.T) {
+		parentClient := newFakeHermesClient()
+		parentClient.forkSession = testNativeSession("native-child")
+		childClient := newFakeHermesClient()
+		childClient.getSession = testNativeSession("native-child")
+		childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				childClient.xdg = opts.ExistingXDG
+
+				return childClient, nil
+			}
+		})
+		parent := testSession(agent, parentClient)
+		agent.sessions[parent.id] = parent
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 2)
+
+		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{
+			SessionId: parent.id, Cwd: t.TempDir(),
+		})
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
+	})
 }

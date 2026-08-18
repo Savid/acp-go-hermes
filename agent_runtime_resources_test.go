@@ -740,3 +740,10 @@ func TestClaimSharedNativeSessionFailureEdges(t *testing.T) {
 		t.Fatal("server without process identity accepted a shared native claim")
 	}
 }
+
+func TestManagedProviderTreeVacantReportsServerInventory(t *testing.T) {
+	managed := &managedHermesServer{Server: treeInventoryServer{fakeHermesClient: newFakeHermesClient(), vacant: true}}
+	vacant, proved := managed.ProviderTreeVacant()
+	require.True(t, vacant)
+	require.True(t, proved)
+}

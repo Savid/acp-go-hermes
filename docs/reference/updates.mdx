@@ -21,3 +21,24 @@ Usage updates carry token counts and no terminal message identity. The durable
 terminal identity belongs to the successful `session/prompt` response after
 its snapshot commit. Text chunks originate from `message.delta`; reasoning
 chunks from `thinking.delta` — see [Prompt streaming](/docs/core/prompt-streaming).
+
+## Lifecycle envelopes
+
+When the `acp-go.dev/lifecycle` extension is negotiated at initialize (see
+[Metadata](/docs/reference/meta#lifecycle-extension)), lifecycle envelopes
+ride only identity-only `session_info_update` notifications. Each envelope
+names one stream incarnation and a contiguous sequence. The first event is a
+complete `lifecycle_snapshot`; later events are `prompt_accepted`,
+`state_update`, `action_update`, and, after a proven containment boundary,
+`quiescence_update`. Hermes emits no `activity_update`.
+
+Sequence numbers are claimed before delivery. A delivery failure fences that
+incarnation rather than reusing its sequence. Exact retransmission is
+idempotent; gaps, conflicting duplicates, stale incarnations, malformed event
+shapes, and post-terminal mutation fail closed.
+
+Prompt completion proves only foreground `idle`. A workflow can rely on
+quiescence only when the initialize answer advertises authoritative quiescence
+and a later `quiescence_update` covers the final lifecycle watermark. Cancel,
+close, runtime loss, and timeout end the native incarnation; active work is
+contained before its stream is fenced.

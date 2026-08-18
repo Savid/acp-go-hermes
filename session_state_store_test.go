@@ -20,8 +20,10 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
@@ -1893,4 +1895,59 @@ func TestSnapshotJournalAndStoreReconciliationEdges(t *testing.T) {
 	if err == nil {
 		t.Fatal("replacement subkey listing failure ignored")
 	}
+}
+
+func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
+	t.Run("closed turn", func(t *testing.T) {
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		session.closed = true
+		_, err := session.captureSnapshotLocked(t.Context(), &terminalSnapshotRequirement{})
+		require.ErrorContains(t, err, "closed")
+	})
+
+	t.Run("todo fallback", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.todosErr = errors.New("todos unavailable")
+		session := testSession(newTestAgent(), client)
+		session.committed.todos = []nativehermes.Todo{{Content: "committed"}}
+		commit, err := session.captureSnapshotLocked(t.Context(), nil)
+		require.NoError(t, err)
+		require.Equal(t, session.committed.todos, commit.todos)
+	})
+
+	t.Run("settled archive read", func(t *testing.T) {
+		storeErr := errors.New("archive unavailable")
+		agent := newTestAgent(WithSessionStore(&errorSessionStore{err: storeErr}))
+		session := testSession(agent, newFakeHermesClient())
+		requirement := &terminalSnapshotRequirement{
+			nativeUnavailable: true,
+			settlementCapture: true,
+			foreground: stateSnapshotForeground{
+				StreamID: "stream", TurnID: "turn", CapturedAtUnixMilli: 1,
+				Outcome: string(lifecycle.OutcomeFailed),
+			},
+		}
+		_, err := session.captureSnapshotLocked(t.Context(), requirement)
+		require.ErrorIs(t, err, storeErr)
+	})
+
+	t.Run("cancel after serialization", func(t *testing.T) {
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		ctx, cancel := context.WithCancel(t.Context())
+		originalMarshal := stateJSONMarshal
+		t.Cleanup(func() { stateJSONMarshal = originalMarshal })
+		calls := 0
+		stateJSONMarshal = func(value any) ([]byte, error) {
+			calls++
+			encoded, err := json.Marshal(value)
+			if calls == 2 {
+				cancel()
+			}
+
+			return encoded, err
+		}
+
+		_, err := session.captureSnapshotLocked(ctx, nil)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }

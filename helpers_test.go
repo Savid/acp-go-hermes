@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -863,4 +865,77 @@ func (s sessionOperationFaultStore) ListSubkeys(ctx context.Context, key Session
 	}
 
 	return s.base.ListSubkeys(ctx, key)
+}
+
+// lifecycleFailingAgentClient fails the failAt-th lifecycle envelope delivery,
+// exercising the fence path a stream takes when one event cannot be delivered.
+type lifecycleFailingAgentClient struct {
+	*recordingAgentClient
+	failAt int
+	seen   int
+}
+
+func (c *lifecycleFailingAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if _, lifecycleUpdate := notification.Meta[lifecycle.MetaKey]; lifecycleUpdate {
+		c.seen++
+		if c.seen == c.failAt {
+			return errors.New("lifecycle delivery failed")
+		}
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+// treeInventoryServer reports a configurable provider-tree vacancy verdict so
+// quiescence certification can be tested against both proved and unproved
+// vacancy.
+type treeInventoryServer struct {
+	*fakeHermesClient
+	vacant bool
+}
+
+func (s treeInventoryServer) ProviderTreeVacant() (bool, bool) { return s.vacant, true }
+
+// newLifecycleActionSession opens a negotiated lifecycle stream inside an
+// in-flight turn, accepting the submission only when accepted is true.
+func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordingAgentClient, context.Context) {
+	t.Helper()
+
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	session := testSession(agent, newFakeHermesClient())
+	if err := session.openLifecycleStream(); err != nil {
+		t.Fatalf("open lifecycle stream: %v", err)
+	}
+	turnCtx := session.beginTurn(t.Context(), "turn")
+	session.mu.Lock()
+	session.turnInFlight = true
+	session.mu.Unlock()
+	if accepted {
+		if err := session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
+			SubmissionID: "submission", ClientNonce: "nonce",
+		}); err != nil {
+			t.Fatalf("accept lifecycle submission: %v", err)
+		}
+	}
+
+	return session, conn, turnCtx
+}
+
+func setLifecycleDeliveryError(conn *recordingAgentClient) {
+	conn.mu.Lock()
+	conn.updateErr = errors.New("lifecycle delivery failed")
+	conn.mu.Unlock()
+}
+
+func sessionTurnEpoch(session *session) uint64 {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	return session.turnEpoch
 }
