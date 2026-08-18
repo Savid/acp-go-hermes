@@ -24,8 +24,17 @@ func (r *Reducer) applySnapshot(delivery Delivery) error {
 // origin, and its own activities — and every reference it makes resolves inside
 // that set: an action owner is a reference rather than an introduction.
 func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
-	if !snapshot.Foreground.State.Valid() || snapshot.Foreground.CycleID == "" {
+	foreground := snapshot.Foreground
+
+	switch {
+	case !foreground.State.Valid() || foreground.CycleID == "":
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot's foreground is incomplete")
+	case foreground.State == ForegroundIdle && foreground.TurnID != "":
+		return r.fail(delivery, ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case (foreground.TurnID == "") != (foreground.Origin == ""):
+		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
+	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
+		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin "+string(foreground.Origin))
 	}
 
 	introduced := snapshot.introduces()
