@@ -18,6 +18,15 @@ const (
 )
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	// The reserved lifecycle literal is refused before this surface's own
+	// handling, variant refusal included: `session/set_session_config_option`
+	// never carries the key, and a family literal is never foreign and never a
+	// no-op. Either union variant can carry `_meta`, so the refusal reads
+	// whichever one the host actually sent.
+	if err := rejectLifecycleMeta(sessionConfigOptionMeta(params)); err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+
 	if params.Boolean != nil {
 		// Neither union variant is a wire field; the request is discriminated by
 		// "type", so "type" is the only JSON path that names the boolean variant
@@ -85,6 +94,20 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	})
 
 	return acp.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
+}
+
+// sessionConfigOptionMeta reads the request `_meta` from whichever union
+// variant carries it. The variant is not a wire field, so a request that
+// deserialized into neither carries no metadata at all.
+func sessionConfigOptionMeta(params acp.SetSessionConfigOptionRequest) map[string]any {
+	switch {
+	case params.Boolean != nil:
+		return params.Boolean.Meta
+	case params.ValueId != nil:
+		return params.ValueId.Meta
+	default:
+		return nil
+	}
 }
 
 // hasConfigValue reports whether an already-read option list publishes value

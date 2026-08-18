@@ -85,7 +85,7 @@ func TestStrictEventRoutingAndRunOwnership(t *testing.T) {
 	require.Nil(t, refusal)
 	record, found := reducer.State().Activity("act-1")
 	require.True(t, found)
-	require.Equal(t, "run-1", record.RunID)
+	require.Empty(t, record.RunID, "an activity carries a runId exactly when its own first sight supplied one")
 
 	err := reducer.Reduce(Delivery{
 		StreamID: "replacement", Sequence: 1, Carrier: CarrierSessionInfo, Event: openSnapshot(),

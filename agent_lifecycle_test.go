@@ -13,6 +13,21 @@ func lifecycleOffer(versions ...any) map[string]any {
 	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": versions}}
 }
 
+// requireLifecycleKeyRefusal asserts the surface refused with invalid params
+// naming the reserved literal itself, rather than with whatever the surface
+// would have answered had it handled the request.
+func requireLifecycleKeyRefusal(t *testing.T, err error) {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnsupported,
+		keyField:       lifecycle.MetaPath,
+	}), reqErr)
+}
+
 func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	weak := newTestAgent()
 	response, err := weak.Initialize(t.Context(), acp.InitializeRequest{})
@@ -55,6 +70,19 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.Error(t, err)
 	_, err = weak.SetSessionMode(t.Context(), acp.SetSessionModeRequest{Meta: reserved})
 	require.Error(t, err)
+
+	// Either union variant of the config surface can carry `_meta`, and the
+	// refusal precedes the surface's own variant handling: the boolean variant
+	// is one this agent does not implement, so an unrefused key would answer
+	// "unsupported variant" instead of naming the reserved literal.
+	_, err = weak.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
+		Boolean: &acp.SetSessionConfigOptionBoolean{Meta: reserved, Type: "boolean"},
+	})
+	requireLifecycleKeyRefusal(t, err)
+	_, err = weak.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{Meta: reserved, ConfigId: configModel, Value: "provider/model"},
+	})
+	requireLifecycleKeyRefusal(t, err)
 
 	_, err = weak.HandleExtensionMethod(t.Context(), "unknown", json.RawMessage(`{"_meta":{"acp-go.dev/lifecycle":{}}}`))
 	require.Error(t, err)

@@ -357,8 +357,6 @@ func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 		return err
 	}
 
-	r.inheritActivityRun(update)
-
 	if err := r.checkCausalFence(delivery, *update); err != nil {
 		return err
 	}
@@ -370,16 +368,6 @@ func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 	r.recordActivity(delivery, *update)
 
 	return nil
-}
-
-func (r *Reducer) inheritActivityRun(update *ActivityUpdate) {
-	if update.RunID != "" {
-		return
-	}
-
-	if index := r.turnIndex(update.OriginTurnID); index >= 0 {
-		update.RunID = r.state.Turns[index].RunID
-	}
 }
 
 // checkActivityReferences resolves a first sight's references. A parent with no
