@@ -203,29 +203,6 @@ func (s *session) cancelRouted(meta map[string]any) error {
 	epoch := s.turnEpoch
 	s.mu.Unlock()
 
-	if !active {
-		// The reserved lifecycle literal fails the cancel closed before the
-		// native interrupt, so a cancel naming a key this surface never carries
-		// never reaches the gateway.
-		if err := rejectLifecycleMeta(meta); err != nil {
-			return err
-		}
-
-		s.mu.Lock()
-		client := s.client
-		nativeID := s.idmap.NativeSessionID
-		s.mu.Unlock()
-
-		if client == nil || nativeID == "" {
-			return nil
-		}
-
-		cancelCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		defer cancel()
-
-		return client.Abort(cancelCtx, nativeID)
-	}
-
 	// Route validation runs first, so a cancel that is both stale and malformed
 	// reports one verdict and never an implementation-defined choice of two.
 	route, err := parseInboundTurnRoute(meta)
@@ -233,10 +210,19 @@ func (s *session) cancelRouted(meta map[string]any) error {
 		return err
 	}
 
-	if route.turnNonce != activeNonce {
+	// No native side effect happens without a nonce that authenticates the
+	// addressed session's current turn. A missing or stale nonce fails closed
+	// before the native interrupt, and with no turn in flight there is nothing
+	// for a cancel to authorize at all, so nothing native runs: an abort issued
+	// on an unvalidated envelope would tear into whatever the session is doing
+	// between turns on the word of a caller that proved nothing.
+	if !active || route.turnNonce != activeNonce {
 		return routeInvalid("stale route turnNonce")
 	}
 
+	// The reserved lifecycle literal fails the cancel closed too, and likewise
+	// before the native interrupt: a cancel naming a key this surface never
+	// carries never reaches the gateway.
 	if err := rejectLifecycleMeta(meta); err != nil {
 		return err
 	}

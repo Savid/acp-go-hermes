@@ -155,7 +155,19 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 	agent.mu.Lock()
 	agent.sessions[fakeSession.id] = fakeSession
 	agent.mu.Unlock()
-	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionCancel, mustJSON(t, acp.CancelNotification{SessionId: fakeSession.id})); reqErr != nil {
+	// A cancel carrying no route envelope fails closed at the agent method; the
+	// notification has no response frame, so the refusal is wire-silent and the
+	// connection surfaces it for the SDK to log.
+	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionCancel, mustJSON(t, acp.CancelNotification{SessionId: fakeSession.id})); reqErr == nil {
+		t.Fatal("unrouted cancel notification was applied")
+	}
+	fakeSession.mu.Lock()
+	fakeSession.turnNonce = "conn-turn"
+	fakeSession.turnEpoch = 1
+	fakeSession.turnInFlight = true
+	fakeSession.mu.Unlock()
+	routed := mustJSON(t, map[string]any{"sessionId": fakeSession.id, "_meta": turnRouteMeta("conn-turn")})
+	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionCancel, routed); reqErr != nil {
 		t.Fatalf("cancel notification reqErr = %#v", reqErr)
 	}
 	if _, reqErr := conn.handle(ctx, acp.AgentMethodSessionSetMode, mustJSON(t, acp.SetSessionModeRequest{})); reqErr == nil || reqErr.Code != -32601 {

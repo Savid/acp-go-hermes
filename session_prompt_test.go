@@ -3455,15 +3455,55 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 	}
 }
 
-func TestPromptFenceRemainingFailureBranches(t *testing.T) {
-	t.Run("idle cancel without runtime", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
-		session.client = nil
-		if err := session.cancelRouted(nil); err != nil {
-			t.Fatalf("idle cancel: %v", err)
-		}
-	})
+// TestCancelWithoutValidatedNonceHasNoNativeSideEffect pins Cancel Determinism
+// rule 2: the native interrupt is downstream of a nonce that authenticates the
+// addressed session's current turn, so an unauthenticated cancel — no envelope,
+// a stale nonce, or no turn to authorize at all — reaches neither the gateway
+// nor the session's pending interactions.
+func TestCancelWithoutValidatedNonceHasNoNativeSideEffect(t *testing.T) {
+	pendingPermission := nativehermes.PermissionRequest{ID: "approval-1", SessionID: "native-1"}
+	pendingQuestion := nativehermes.QuestionRequest{ID: "clarify-1", SessionID: "native-1"}
 
+	for _, testCase := range []struct {
+		name   string
+		meta   map[string]any
+		active bool
+	}{
+		{name: "no route envelope", meta: nil, active: true},
+		{name: "stale nonce", meta: turnRouteMeta("someone-elses-turn"), active: true},
+		{name: "no active turn", meta: turnRouteMeta("turn"), active: false},
+		{name: "no active turn and no envelope", meta: nil, active: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			client := newFakeHermesClient()
+			session := testSession(newTestAgent(), client)
+			session.mu.Lock()
+			session.turnNonce = "turn"
+			session.turnEpoch = 1
+			session.turnInFlight = testCase.active
+			session.cancel = func() { t.Error("unauthenticated cancel fenced the turn") }
+			session.pending = map[string]nativehermes.PermissionRequest{pendingPermission.ID: pendingPermission}
+			session.questions = map[string]nativehermes.QuestionRequest{pendingQuestion.ID: pendingQuestion}
+			session.mu.Unlock()
+
+			err := session.cancelRouted(testCase.meta)
+
+			require.Zero(t, client.abortCount(), "unauthenticated cancel reached native abort")
+			require.Zero(t, client.closeCount(), "unauthenticated cancel closed the runtime")
+
+			client.mu.Lock()
+			replies := len(client.permissionReplies)
+			rejects := len(client.questionRejects)
+			client.mu.Unlock()
+			require.Zero(t, replies, "unauthenticated cancel cancelled a pending permission")
+			require.Zero(t, rejects, "unauthenticated cancel cancelled a pending question")
+
+			require.Error(t, err, "unauthenticated cancel was applied")
+		})
+	}
+}
+
+func TestPromptFenceRemainingFailureBranches(t *testing.T) {
 	t.Run("prompt resume admission failure", func(t *testing.T) {
 		wantErr := errors.New("resume denied")
 		agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{

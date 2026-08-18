@@ -410,7 +410,20 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{}); err == nil {
 		t.Fatal("SetSessionMode accepted")
 	}
-	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id}); err != nil {
+	// An unrouted cancel authorizes nothing, so it neither cancels the session
+	// nor reaches the gateway.
+	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id}); err == nil {
+		t.Fatal("unrouted Cancel was applied")
+	}
+	if session.wasCancelled() || client.abortCount() != 0 {
+		t.Fatal("unrouted Cancel touched session/client")
+	}
+	session.mu.Lock()
+	session.turnNonce = "builder-turn"
+	session.turnEpoch = 1
+	session.turnInFlight = true
+	session.mu.Unlock()
+	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id, Meta: turnRouteMeta("builder-turn")}); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
 	if !session.wasCancelled() && client.abortCount() == 0 {
