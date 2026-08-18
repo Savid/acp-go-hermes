@@ -853,11 +853,17 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	var settleErr error
 
 	if session != nil {
-		// Delete stops admitting prompts and then serializes after the turn in
-		// flight has settled wholly. Refusing an active prompt would make deletion
-		// depend on the host cancelling first; waiting makes the tombstone land
-		// after the last commit that turn owed, so no late write can recreate the
-		// row this delete removes.
+		session.mu.Lock()
+		promptActive := session.cancel != nil || session.turnInFlight
+		session.mu.Unlock()
+		if promptActive {
+			return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidRequest(map[string]any{
+				jsonFieldError: "cannot delete a session while a prompt is active",
+			})
+		}
+
+		// Delete closes admission before taking the lifecycle barrier, so no prompt
+		// can race the tombstone and recreate the durable row it removes.
 		session.closeLifecycleAdmission()
 		settleErr = session.awaitSettlement(ctx)
 

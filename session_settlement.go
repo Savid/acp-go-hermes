@@ -112,7 +112,7 @@ func (s *session) awaitSettlement(ctx context.Context) error {
 func (s *session) closeLifecycleAdmission() {
 	s.mu.Lock()
 	s.lifecycleClosing = true
-	if s.turnSettlement == turnSettlementOpen {
+	if s.turnInFlight && s.turnSettlement == turnSettlementOpen {
 		s.turnSettlement = turnSettlementCancelled
 	}
 	s.mu.Unlock()
@@ -190,19 +190,6 @@ func (s *session) settlePrompt(
 	// authority: after it, a cancel is a post-settlement no-op, and a cancel that
 	// won before it is recorded as this turn's outcome without abandoning the
 	// commit the accepted turn owes.
-	raced, claimErr := s.claimTerminalCommit(turnEpoch)
-	if claimErr != nil {
-		s.lifecycleStream().fence()
-
-		return acp.PromptResponse{}, false, errors.Join(run.err, claimErr)
-	}
-
-	if raced {
-		run.cancelled = true
-		run.endsIncarnation = true
-		run.markCancelled = true
-	}
-
 	stream := s.lifecycleStream()
 	proof := containmentProof{}
 
@@ -229,8 +216,14 @@ func (s *session) settlePrompt(
 		return acp.PromptResponse{}, false, errors.Join(run.err, err)
 	}
 
-	if err := s.commitForegroundPrefix(settleCtx, baseline, turnEpoch, run, outcome); err != nil {
+	raced, err := s.commitForegroundPrefix(settleCtx, baseline, turnEpoch, run, outcome)
+	if err != nil {
 		return acp.PromptResponse{}, false, errors.Join(run.err, err)
+	}
+	if raced {
+		run.cancelled = true
+		run.endsIncarnation = true
+		outcome, response = s.terminalMapping(run, messageID)
 	}
 
 	if err := stream.settle(settleCtx, outcome); err != nil {
@@ -252,6 +245,13 @@ func (s *session) settlePrompt(
 
 	if run.err != nil {
 		return acp.PromptResponse{}, true, run.err
+	}
+
+	if !run.cancelled {
+		terminal := s.committedTerminalState()
+		terminal.Outcome = ""
+		terminal.StopReason = ""
+		response.Meta = terminalResponseMeta(terminal)
 	}
 
 	return response, true, nil
@@ -293,7 +293,7 @@ func (s *session) commitForegroundPrefix(
 	turnEpoch uint64,
 	run promptRun,
 	outcome lifecycleTurnOutcome,
-) error {
+) (bool, error) {
 	stream := s.lifecycleStream()
 	requirement := &terminalSnapshotRequirement{
 		baseline:  baseline,
@@ -307,13 +307,34 @@ func (s *session) commitForegroundPrefix(
 			Text:                s.foregroundPrefix(),
 			CapturedAtUnixMilli: time.Now().UnixMilli(),
 		},
-		completed:      run.err == nil && !run.cancelled,
-		nativeReadable: !run.endsIncarnation,
+		completed:         run.err == nil && !run.cancelled,
+		nativeUnavailable: run.endsIncarnation,
+		settlementCapture: true,
+	}
+	if s.wasCancelled() {
+		requirement.completed = false
+		requirement.nativeUnavailable = true
+		requirement.foreground.Outcome = string(lifecycle.OutcomeCancelled)
+		requirement.foreground.StopReason = lifecycle.StopReasonCancelled
 	}
 
-	commitErr := s.snapshotToStoreLocked(ctx, requirement)
+	commit, commitErr := s.captureSnapshotLocked(ctx, requirement)
 	if commitErr == nil {
-		return nil
+		var raced bool
+		raced, commitErr = s.claimTerminalCommit(turnEpoch)
+		if commitErr == nil && raced {
+			requirement.completed = false
+			requirement.nativeUnavailable = true
+			requirement.foreground.Outcome = string(lifecycle.OutcomeCancelled)
+			requirement.foreground.StopReason = lifecycle.StopReasonCancelled
+			commit, commitErr = s.captureSnapshotLocked(ctx, requirement)
+		}
+		if commitErr == nil {
+			commitErr = s.publishSnapshotLocked(ctx, commit)
+		}
+		if commitErr == nil {
+			return raced, nil
+		}
 	}
 
 	// A commit this session cannot complete is a wrapper-invariant break: the
@@ -324,7 +345,7 @@ func (s *session) commitForegroundPrefix(
 	fenceErr := s.fenceTurn(ctx, turnEpoch, false)
 	stream.fence()
 
-	return errors.Join(commitErr, poisonErr, fenceErr)
+	return false, errors.Join(commitErr, poisonErr, fenceErr)
 }
 
 // unacceptedCancel settles a cancel that won before the dispatch point. No
@@ -569,7 +590,8 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		captureErr error
 	)
 
-	if s.snapshotBlockedReason() == "" {
+	committed := s.committedState()
+	if s.snapshotBlockedReason() == "" && s.ensureNotPoisoned() == nil && !stream.fenced() && committed.foreground == nil {
 		commit, captureErr = s.captureSnapshotLocked(context.WithoutCancel(ctx), nil)
 	}
 

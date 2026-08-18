@@ -286,7 +286,7 @@ func (s *session) committedTerminalState() SessionStoreTerminalState {
 func terminalResponseMeta(terminal SessionStoreTerminalState) map[string]any {
 	hermes := map[string]any{
 		keyMessageID:  terminal.MessageID,
-		keyOutcome:    terminal.Outcome,
+		keyOutcome:    lifecycle.Outcome(terminal.Outcome),
 		keyStopReason: terminal.StopReason,
 	}
 	if terminal.StopReason == "" {

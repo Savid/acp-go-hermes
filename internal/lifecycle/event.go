@@ -70,6 +70,39 @@ type Event struct {
 	Quiescence     *QuiescenceFact
 }
 
+func (e Event) strictShape() bool {
+	payloads := 0
+	for _, present := range []bool{
+		e.Snapshot != nil, e.PromptAccepted != nil, e.State != nil,
+		e.Activity != nil, e.Action != nil, e.Quiescence != nil,
+	} {
+		if present {
+			payloads++
+		}
+	}
+
+	if payloads != 1 {
+		return false
+	}
+
+	switch e.Type {
+	case EventSnapshot:
+		return e.Snapshot != nil
+	case EventPromptAccepted:
+		return e.PromptAccepted != nil
+	case EventStateUpdate:
+		return e.State != nil
+	case EventActivityUpdate:
+		return e.Activity != nil
+	case EventActionUpdate:
+		return e.Action != nil
+	case EventQuiescenceUpdate:
+		return e.Quiescence != nil
+	default:
+		return false
+	}
+}
+
 // Snapshot opens a stream with the whole truth it can state: the foreground state
 // and cycle, the complete nonterminal activity and action sets, and the current
 // quiescence fact with its proof source.

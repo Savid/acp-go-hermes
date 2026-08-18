@@ -191,11 +191,12 @@ type terminalSnapshotRequirement struct {
 	// row, so the commit must observe the native terminal identity advance. A
 	// failed or cancelled turn advances nothing and states so.
 	completed bool
-	// nativeReadable reports whether the native generation can still be read.
-	// An incarnation-ending boundary has already contained it, so the commit
+	// nativeUnavailable reports that an incarnation-ending boundary already
+	// contained the generation, so the commit
 	// restates the last identity this session durably holds instead of reading a
-	// process that is gone.
-	nativeReadable bool
+	// process that is gone. The zero value keeps ordinary captures readable.
+	nativeUnavailable bool
+	settlementCapture bool
 }
 
 func (s *session) snapshotToStore(ctx context.Context) error {
@@ -241,6 +242,15 @@ func (s *session) captureSnapshotLocked(
 	ctx context.Context,
 	requirement *terminalSnapshotRequirement,
 ) (*sessionStoreCommit, error) {
+	if requirement != nil {
+		s.mu.Lock()
+		cancelled := s.turnSettlement == turnSettlementCancelled
+		s.mu.Unlock()
+		if cancelled && !requirement.settlementCapture {
+			return nil, errPromptCancelled
+		}
+	}
+
 	if err := s.ensureNotPoisoned(); err != nil {
 		return nil, err
 	}
@@ -249,7 +259,7 @@ func (s *session) captureSnapshotLocked(
 		return nil, errors.New("session closed before Hermes terminal snapshot commit")
 	}
 
-	settled := requirement != nil && !requirement.nativeReadable
+	settled := requirement != nil && requirement.nativeUnavailable
 	if reason := s.snapshotBlockedReasonForTerminalCommit(requirement != nil, settled); reason != "" {
 		return nil, fmt.Errorf("cannot snapshot Hermes session while %s pending", reason)
 	}
@@ -263,9 +273,9 @@ func (s *session) captureSnapshotLocked(
 		return nil, nil
 	}
 
-	// The capture context is bounded on its own and detached from the request's:
-	// the commit an accepted turn owes is not the request's to cancel.
-	snapshotCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.agent.options.storeWriteTTL)
+	// Settlement already supplies a detached context. Keeping the caller's
+	// cancellation here lets direct snapshot callers stop before publication.
+	snapshotCtx, cancel := context.WithTimeout(ctx, s.agent.options.storeWriteTTL)
 	defer cancel()
 
 	idmap := snapshot.idmap
@@ -290,6 +300,9 @@ func (s *session) captureSnapshotLocked(
 
 	terminal, foreground, err := s.foregroundSections(snapshotCtx, snapshot, idmap, requirement, committed)
 	if err != nil {
+		return nil, err
+	}
+	if err := snapshotCtx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -493,7 +506,7 @@ func (s *session) foregroundSections(
 		foreground = &record
 	}
 
-	if requirement != nil && !requirement.nativeReadable {
+	if requirement != nil && requirement.nativeUnavailable {
 		return committed.nativeTerminal(), foreground, nil
 	}
 

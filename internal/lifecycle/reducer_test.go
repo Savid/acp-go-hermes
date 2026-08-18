@@ -67,6 +67,34 @@ func actionEvent(update ActionUpdate) Event {
 // the difference an omitted member may not be read as.
 func stated(blocks bool) *bool { return &blocks }
 
+func TestStrictEventRoutingAndRunOwnership(t *testing.T) {
+	t.Parallel()
+
+	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+		Event{Type: EventSnapshot, Snapshot: openSnapshot().Snapshot, Quiescence: &QuiescenceFact{}})
+
+	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+		SubmissionID: "sub-1", ClientNonce: "nonce-1", TurnID: "turn-1", RunID: "run-1",
+	}}
+	activity := activityEvent(ActivityUpdate{
+		ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
+		Cause: CauseSubmission, OriginTurnID: "turn-1",
+	})
+	reducer, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
+		RunningEvent("cyc-1", "turn-1"), activity)
+	require.Nil(t, refusal)
+	record, found := reducer.State().Activity("act-1")
+	require.True(t, found)
+	require.Equal(t, "run-1", record.RunID)
+
+	err := reducer.Reduce(Delivery{
+		StreamID: "replacement", Sequence: 1, Carrier: CarrierSessionInfo, Event: openSnapshot(),
+	})
+	var stale *ViolationError
+	require.ErrorAs(t, err, &stale)
+	require.Equal(t, ViolationStaleStream, stale.Kind)
+}
+
 // TestReducerRefusesAnEventWithNoPayload pins that a discriminant without its
 // payload is malformed rather than reduced as an empty event. Only an emitter can
 // produce one: the decoder never yields a discriminant it could not read.

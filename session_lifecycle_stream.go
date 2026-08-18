@@ -337,6 +337,17 @@ func (p *sessionStream) fence() {
 	p.stream.Fence()
 }
 
+func (p *sessionStream) fenced() bool {
+	if p == nil {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.stream.Fenced()
+}
+
 // emitLocked claims the next sequence, validates the event through the same
 // reducer the canonical vectors drive, and delivers it on its own identity-only
 // carrier. An event this adapter cannot state truthfully fails here rather than

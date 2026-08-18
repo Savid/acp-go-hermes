@@ -62,7 +62,8 @@
               "docs/reference/cli",
               "docs/reference/acp-methods",
               "docs/reference/meta",
-              "docs/reference/updates"
+              "docs/reference/updates",
+              "docs/reference/lifecycle"
             ]
           },
           {

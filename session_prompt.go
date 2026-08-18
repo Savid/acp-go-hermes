@@ -282,6 +282,8 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 		return acp.PromptResponse{}, err
 	}
 	defer release()
+	settlement := s.beginSettlement()
+	defer func() { settlement.complete(returnErr) }()
 
 	turnPublished := false
 
@@ -334,7 +336,6 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 	}
 
 	baseline := s.committedTerminalState()
-	settlement := s.beginSettlement()
 
 	run := s.runPromptTurn(ctx, turnCtx, turnEpoch, submission, req, params.MessageId)
 	if !run.settle {

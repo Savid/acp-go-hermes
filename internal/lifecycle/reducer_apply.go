@@ -5,6 +5,10 @@ package lifecycle
 // projected, so a refused snapshot opens nothing and leaves no half-built
 // projection behind.
 func (r *Reducer) applySnapshot(delivery Delivery) error {
+	if !delivery.Event.strictShape() {
+		return r.fail(delivery, ViolationMalformedEnvelope, "event payload does not match type "+string(delivery.Event.Type))
+	}
+
 	snapshot := delivery.Event.Snapshot
 	if snapshot == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot payload is missing")
@@ -220,6 +224,10 @@ func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the transition payload is missing")
 	}
 
+	if index := r.turnIndex(transition.TurnID); index >= 0 && r.state.Turns[index].Terminal {
+		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
+	}
+
 	if detail := endingIdleDefect(*transition); detail != "" {
 		return r.fail(delivery, ViolationMalformedEnvelope, detail)
 	}
@@ -361,6 +369,8 @@ func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 		return err
 	}
 
+	r.inheritActivityRun(update)
+
 	if err := r.checkCausalFence(delivery, *update); err != nil {
 		return err
 	}
@@ -372,6 +382,16 @@ func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 	r.recordActivity(delivery, *update)
 
 	return nil
+}
+
+func (r *Reducer) inheritActivityRun(update *ActivityUpdate) {
+	if update.RunID != "" {
+		return
+	}
+
+	if index := r.turnIndex(update.OriginTurnID); index >= 0 {
+		update.RunID = r.state.Turns[index].RunID
+	}
 }
 
 // checkActivityReferences resolves a first sight's references. A parent with no
@@ -413,9 +433,11 @@ func (r *Reducer) checkCausalFence(delivery Delivery, update ActivityUpdate) err
 // identity field must be present and the kind must be one the answer proved.
 func (r *Reducer) checkActivityIdentity(delivery Delivery, update ActivityUpdate) error {
 	switch {
-	case update.Kind == "" || update.Cause == "" || update.OriginTurnID == "":
+	case update.ActivityID == "" || update.Kind == "" || update.Cause == "" || update.OriginTurnID == "":
 		return r.fail(delivery, ViolationImmutableIdentityChange,
 			"activity "+update.ActivityID+" states an incomplete identity")
+	case !update.Kind.Valid() || !update.State.Valid() || !update.Cause.Valid():
+		return r.fail(delivery, ViolationMalformedEnvelope, "activity "+update.ActivityID+" states an invalid vocabulary value")
 	case !r.negotiated.DeclaresActivityKind(update.Kind):
 		return r.fail(delivery, ViolationUnnegotiatedFact, "activity kind "+string(update.Kind))
 	}
@@ -549,9 +571,13 @@ func (r *Reducer) applyActionUpdate(delivery Delivery) error {
 // the difference between a foreground a host renders as waiting and one it
 // renders as working.
 func (r *Reducer) checkActionIdentity(delivery Delivery, update ActionUpdate) error {
-	if update.Kind == "" || update.Owner.ID == "" || update.BlocksForeground == nil {
+	if update.ActionID == "" || update.Kind == "" || update.Owner.ID == "" || update.BlocksForeground == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope,
 			"action "+update.ActionID+" states an incomplete first sight")
+	}
+	if !update.Kind.Valid() || !update.State.Valid() || !update.Owner.Type.Valid() {
+		return r.fail(delivery, ViolationMalformedEnvelope,
+			"action "+update.ActionID+" states an invalid vocabulary value")
 	}
 
 	return nil
