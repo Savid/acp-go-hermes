@@ -2429,15 +2429,66 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("non-authoritative event drops", func(t *testing.T) {
-		server := &hermesServer{events: make(chan TurnEvent, 1)}
-		server.events <- TurnEvent{Type: "filled"}
-		server.forwardGatewayPart("stored", "message", Event{Type: "message.delta"}, "text")
-		server.forwardGatewayQuestion("stored", "live", Event{Payload: json.RawMessage(`{}`)})
-		if got := len(server.events); got != 1 {
-			t.Fatalf("event channel len = %d", got)
-		}
-	})
+}
+
+// TestHermesGatewayDeltaAndQuestionPublicationBackpressure pins the two event
+// paths that used to discard on a full buffer. Assistant deltas and clarify
+// requests are part of the session stream this adapter advertises as dropping
+// nothing, so a saturated channel backpressures the gateway reader and the
+// event is delivered — it is never silently thrown away.
+func TestHermesGatewayDeltaAndQuestionPublicationBackpressure(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		forward func(context.Context, *hermesServer) error
+		want    string
+	}{
+		{
+			name: "assistant delta",
+			forward: func(ctx context.Context, server *hermesServer) error {
+				return server.forwardGatewayPart(ctx, "stored", "message", Event{Type: "message.delta"}, "text")
+			},
+			want: evtMessagePartUpdated,
+		},
+		{
+			name: "clarify request",
+			forward: func(ctx context.Context, server *hermesServer) error {
+				return server.forwardGatewayQuestion(ctx, "stored", "live", Event{Payload: json.RawMessage(`{}`)})
+			},
+			want: evtClarifyRequest,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := &hermesServer{events: make(chan TurnEvent, 1)}
+			server.events <- TurnEvent{Type: "filled"}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+
+			done := make(chan error, 1)
+			go func() { done <- testCase.forward(ctx, server) }()
+
+			select {
+			case err := <-done:
+				t.Fatalf("saturated publication did not backpressure: %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+			if event := <-server.events; event.Type != "filled" {
+				t.Fatalf("saturated sentinel = %#v", event)
+			}
+			if event := <-server.events; event.Type != testCase.want {
+				t.Fatalf("published event = %#v, want %s", event, testCase.want)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("saturated publication: %v", err)
+			}
+
+			cancelled, cancelPublication := context.WithCancel(t.Context())
+			cancelPublication()
+			server.events <- TurnEvent{Type: "filled"}
+			if err := testCase.forward(cancelled, server); !errors.Is(err, context.Canceled) {
+				t.Fatalf("saturated publication cancellation = %v", err)
+			}
+		})
+	}
 }
 
 func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {

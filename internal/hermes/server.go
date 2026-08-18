@@ -1740,7 +1740,9 @@ func (s *hermesServer) submitGatewayTextForLive(
 					return NativeMessage{}, err
 				}
 			case evtClarifyRequest:
-				s.forwardGatewayQuestion(stored, live, event)
+				if err := s.forwardGatewayQuestion(ctx, stored, live, event); err != nil {
+					return NativeMessage{}, err
+				}
 			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
 				s.declineGatewayQuestion(ctx, live, event.Type)
 			case evtSessionError:
@@ -1780,7 +1782,9 @@ func (s *hermesServer) submitGatewayTextForLive(
 					textBuilder.WriteString(chunk)
 				}
 
-				s.forwardGatewayPart(stored, messageID, event, chunk)
+				if err := s.forwardGatewayPart(ctx, stored, messageID, event, chunk); err != nil {
+					return NativeMessage{}, err
+				}
 			case evtMessageComplete:
 				if failure := gatewayCompleteFailure(event.Payload); failure != nil {
 					return NativeMessage{}, failure
@@ -1840,7 +1844,12 @@ func (s *hermesServer) reportGatewayDisconnect(cause error) error {
 	return &TurnFailureError{cause: CauseTransport, message: cause.Error(), wrapped: ErrGatewayDisconnected}
 }
 
-func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event Event, text string) {
+// forwardGatewayPart hands one assistant text or thinking delta to the turn
+// event channel. It blocks on the caller's context rather than discarding the
+// delta when the buffer is full: this session's stream advertises delivery
+// between prompts and drops nothing, and a silently discarded delta would
+// falsify that with no error and no gap for a consumer to notice.
+func (s *hermesServer) forwardGatewayPart(ctx context.Context, stored string, messageID string, event Event, text string) error {
 	partType := valText
 	if event.Type == evtThinkingDelta {
 		partType = valReasoning
@@ -1858,7 +1867,9 @@ func (s *hermesServer) forwardGatewayPart(stored string, messageID string, event
 	data, _ := json.Marshal(part)
 	select {
 	case s.events <- TurnEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
-	default:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -2137,7 +2148,12 @@ func uniqueGatewayToolCallID(active map[string]struct{}) string {
 	return unique
 }
 
-func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event Event) {
+// forwardGatewayQuestion hands one clarify request to the turn event channel,
+// where it becomes an elicitation the host must answer. It blocks on the
+// caller's context for the same reason forwardGatewayPart does, and with a
+// sharper consequence: a discarded question leaves the native side waiting on
+// an answer no host was ever asked for.
+func (s *hermesServer) forwardGatewayQuestion(ctx context.Context, stored string, live string, event Event) error {
 	question := firstNonEmpty(gatewayPayloadString(event.Payload, keyQuestion), gatewayPayloadString(event.Payload, "prompt"), msgHermesNeedsInput)
 	req := QuestionRequest{
 		ID:        firstNonEmpty(gatewayPayloadString(event.Payload, "id"), gatewayPayloadString(event.Payload, "request_id"), "clarify"),
@@ -2151,12 +2167,15 @@ func (s *hermesServer) forwardGatewayQuestion(stored string, live string, event 
 	}
 
 	data, _ := json.Marshal(req)
-	select {
-	case s.events <- TurnEvent{Type: evtClarifyRequest, Properties: data, Raw: event.Raw}:
-	default:
-	}
 
 	_ = live
+
+	select {
+	case s.events <- TurnEvent{Type: evtClarifyRequest, Properties: data, Raw: event.Raw}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *hermesServer) declineGatewayQuestion(ctx context.Context, live string, eventType string) {
