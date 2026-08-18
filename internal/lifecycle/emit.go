@@ -46,9 +46,15 @@ func (s *Stream) Fenced() bool { return s.fenced }
 // Emit claims the next sequence, reduces the event, and renders the envelope for
 // the notification's `_meta`. A refused event is never rendered and its sequence
 // stays consumed, which is exactly the detectable gap the ordering rule wants.
+// An event whose payload does not match its type is refused before anything is
+// claimed: it is a caller defect, not a delivery the stream ever carried.
 func (s *Stream) Emit(event Event) (map[string]any, error) {
 	if s.fenced {
 		return nil, violation(ViolationStaleStream, s.id, s.sequence, "the incarnation is fenced")
+	}
+
+	if !event.strictShape() {
+		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence, "event payload does not match type "+string(event.Type))
 	}
 
 	s.sequence++

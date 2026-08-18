@@ -54,6 +54,11 @@ type Reducer struct {
 	// a blocker blocks the cycle current at its first sight, and that cycle may
 	// not move again until the blocker terminalizes.
 	actionCycle map[string]string
+	// retired names every stream identity an incarnation replacement superseded.
+	// Supersession fences an incarnation the same way close does: a delivery
+	// naming a retired identity is stale however it is shaped, because an
+	// opening snapshot admits only an incarnation this reducer has never seen.
+	retired map[string]struct{}
 }
 
 // NewReducer builds a reducer for one session.
@@ -152,6 +157,10 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // and adopts nothing from the one it supersedes. A closed session admits no
 // incarnation at all, which is why the fence is judged before this.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
+	if _, superseded := r.retired[delivery.StreamID]; superseded {
+		return r.fail(delivery, ViolationStaleStream, "incarnation "+delivery.StreamID+" was superseded")
+	}
+
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
@@ -170,6 +179,13 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 	}
 
 	next.state.Closed = r.state.Closed
+	next.retired = r.retired
+
+	if next.retired == nil {
+		next.retired = make(map[string]struct{}, 1)
+	}
+
+	next.retired[r.state.StreamID] = struct{}{}
 	*r = *next
 
 	return nil

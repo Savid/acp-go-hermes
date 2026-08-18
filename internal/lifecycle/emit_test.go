@@ -60,6 +60,50 @@ func TestStreamRejectsUnencodableEvent(t *testing.T) {
 	require.Equal(t, uint64(1), stream.Sequence())
 }
 
+// TestStreamRejectsShapeMismatchedEvent proves every event form is validated
+// before encoding: a discriminant without its payload is a caller defect the
+// stream refuses as malformed_envelope rather than dereferencing, and the
+// refusal claims no sequence because nothing was ever delivered.
+func TestStreamRejectsShapeMismatchedEvent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		event Event
+	}{
+		{"snapshot without payload", Event{Type: EventSnapshot}},
+		{"prompt_accepted without payload", Event{Type: EventPromptAccepted}},
+		{"state_update without payload", Event{Type: EventStateUpdate}},
+		{"activity_update without payload", Event{Type: EventActivityUpdate}},
+		{"action_update without payload", Event{Type: EventActionUpdate}},
+		{"quiescence_update without payload", Event{Type: EventQuiescenceUpdate}},
+		{"snapshot with a transition payload", Event{Type: EventSnapshot, State: &StateTransition{}}},
+		{"quiescence_update with an action payload", Event{Type: EventQuiescenceUpdate, Action: &ActionUpdate{}}},
+		{"no type with a payload", Event{State: &StateTransition{}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stream := NewStream("strm-1", containedConfiguration())
+
+			envelope, err := stream.Emit(tc.event)
+			require.Nil(t, envelope)
+
+			var refusal *ViolationError
+
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
+			require.Equal(t, uint64(0), stream.Sequence())
+			require.False(t, stream.Fenced())
+
+			_, err = stream.Emit(SnapshotEvent("cyc-0", QuiescenceFact{}))
+			require.NoError(t, err, "a caller defect must not end the incarnation")
+		})
+	}
+}
+
 // TestEmittedStreamReducesThroughTheSameReducer proves the emitted bytes are
 // wire-legal by decoding them from a session/update notification and reducing
 // them through the reducer the family battery drives.

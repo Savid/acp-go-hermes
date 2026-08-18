@@ -298,6 +298,10 @@
       "invariant": "Close fences the session, so a snapshot announcing a fresh incarnation of a closed session is stale."
     },
     {
+      "file": "snapshot-on-superseded-stream.json",
+      "invariant": "A superseded incarnation never resurrects: once a later incarnation's snapshot reduces, a snapshot bearing the prior streamId is stale and the standing projection is untouched."
+    },
+    {
       "file": "carrier-precedes-ordering.json",
       "invariant": "Carrier legality is structural, so an illegal carrier is reported ahead of the ordering failure the same frame carries."
     },

@@ -337,7 +337,33 @@ func (s *session) commitForegroundPrefix(
 	}
 
 	commit, commitErr := s.captureSnapshotLocked(ctx, requirement)
-	if commitErr == nil {
+	if commitErr != nil && s.wasCancelled() {
+		// A cancel that won during the pre-claim capture fenced the native
+		// runtime the capture was reading, so the capture failed underneath a
+		// turn whose truthful outcome is cancelled. Rebuild the requirement in
+		// the cancelled shape — restating the last durable native identity
+		// rather than reading the fenced generation — then claim, re-capture,
+		// and publish; the session is poisoned only when that retry also fails.
+		requirement.completed = false
+		requirement.nativeUnavailable = true
+		requirement.foreground.Outcome = string(lifecycle.OutcomeCancelled)
+		requirement.foreground.StopReason = lifecycle.StopReasonCancelled
+
+		var raced bool
+
+		raced, commitErr = s.claimTerminalCommit(turnEpoch)
+		if commitErr == nil {
+			commit, commitErr = s.captureSnapshotLocked(ctx, requirement)
+		}
+
+		if commitErr == nil {
+			commitErr = s.publishSnapshotLocked(ctx, commit)
+		}
+
+		if commitErr == nil {
+			return raced, true, nil
+		}
+	} else if commitErr == nil {
 		var raced bool
 
 		raced, commitErr = s.claimTerminalCommit(turnEpoch)
@@ -630,6 +656,14 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		stream.fence()
 
 		return errors.Join(captureErr, closeErr)
+	}
+
+	if stream.fenced() {
+		// The incarnation already settled and its stream is terminal: the
+		// terminalize and certify rungs have nothing truthful to add, and
+		// emitting on the fenced stream would only join a stale_stream refusal
+		// into a close that succeeded.
+		return nil
 	}
 
 	proof := s.closedContainmentProof()
