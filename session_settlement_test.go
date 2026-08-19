@@ -132,6 +132,42 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 	require.Equal(t, 1, client.closeCount(), "the containment proof runs whether or not the stream opened")
 }
 
+// A never-opened incarnation still ends at the close boundary. The owed opening
+// snapshot is delivered from a detached goroutine the close never joins, so a
+// close that returned success while leaving the stream unfenced would let that
+// snapshot reach the host afterwards — a frame on a session the host was told is
+// gone. The fence makes the late open a local stale_stream refusal instead.
+func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions:                []int{lifecycle.Version},
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+		ActivityKinds:           []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
+	require.NoError(t, session.openLifecycleStream())
+	agent.sessions[session.id] = session
+	// The establishing response queues the owed snapshot; the release goroutine
+	// that delivers it is detached, and CloseSession never joins it.
+	agent.deferStreamOpen(session)
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.Zero(t, lifecycleUpdateCount(conn), "the boundary emitted on an incarnation that never opened")
+	require.True(t, session.lifecycleStream().fenced(),
+		"the close left a never-opened incarnation able to speak after it answered success")
+
+	// The detached open now runs, after the close already returned.
+	agent.openDeferredStream(session)
+	require.Zero(t, lifecycleUpdateCount(conn),
+		"the owed opening snapshot reached the host after the session was closed")
+}
+
 // The live incarnation is the other half of the same branch: a stream whose
 // opening assertion was delivered and which nothing has fenced does get the
 // emission rungs. What it states there is whatever its boundary actually

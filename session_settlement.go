@@ -638,6 +638,8 @@ func (s *session) nativeRun(
 // cancel or an incarnation loss already fenced, and one whose opening snapshot
 // was never delivered, are skipped entirely; the containment proof and the
 // durable commit run either way, and a capture failure still fails the close.
+// Every exit fences, so no path leaves a close behind with an incarnation still
+// able to speak.
 //
 // A close reached from an already-committed between-turn idle invents no second
 // cycle and duplicates no terminal idle: the turn that settled already emitted
@@ -686,6 +688,15 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		// the fence may have landed while the containment boundary was running, so
 		// the generation this boundary already captured is still published and a
 		// capture failure it already observed is still reported.
+		//
+		// The incarnation still ends here, exactly as it does on the other two
+		// exits. A never-opened stream is not yet terminal, and the owed opening
+		// snapshot is delivered from a detached goroutine this close never joins,
+		// so leaving it unfenced would let that snapshot reach the host after the
+		// close answered success. Fencing is idempotent, so the already-fenced half
+		// of this branch is unchanged.
+		stream.fence()
+
 		var commitErr error
 		if commit != nil {
 			commitErr = s.publishSnapshotLocked(context.WithoutCancel(ctx), commit)
