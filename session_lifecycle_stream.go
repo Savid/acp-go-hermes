@@ -35,8 +35,12 @@ type sessionStream struct {
 	negotiated lifecycle.Negotiated
 	session    *session
 	// opened records that the whole-state assertion that opens the stream has
-	// been delivered. It is emitted once, by whichever of the ordered release and
-	// the next prompt reaches it first.
+	// been stated: reduced into the stream and, where a connection was there to
+	// take it, delivered on it. A connection the host has already dropped takes
+	// nothing, and the stream is open all the same — the sequence is claimed and
+	// the snapshot is the state every later delta is a delta against. It is
+	// stated once, by whichever of the ordered release and the next prompt
+	// reaches it first.
 	opened bool
 	// openCycleID is the idle cycle the snapshot reports; cycleID is the one an
 	// accepted submission runs in. They are distinct because a snapshot's
@@ -116,10 +120,10 @@ func (s *session) lifecycleStream() *sessionStream {
 	return s.stream
 }
 
-// ensureLifecycleOpened delivers the incarnation's opening whole-state
-// assertion exactly once. Both the ordered post-response release and the next
-// prompt call it, and the first one to arrive opens the stream; the other
-// observes an already-open stream and emits nothing.
+// ensureLifecycleOpened states the incarnation's opening whole-state assertion
+// exactly once. Both the ordered post-response release and the next prompt call
+// it, and the first one to arrive opens the stream; the other observes an
+// already-open stream and emits nothing.
 //
 // The fact it carries is always negative. This configuration's only proof class
 // is whole-tree vacancy, and the generation this stream speaks for is running,
@@ -338,7 +342,7 @@ func (p *sessionStream) fence() {
 }
 
 // live reports whether there is a stream for a boundary to speak on: one whose
-// opening whole-state assertion has been delivered and which nothing has fenced
+// opening whole-state assertion has been stated and which nothing has fenced
 // since. A never-opened incarnation and a fenced one are the same fact to an
 // emitter — an event on either is exactly what a conforming reducer refuses —
 // and a connection that negotiated nothing has no stream at all.

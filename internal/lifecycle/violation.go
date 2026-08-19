@@ -44,8 +44,11 @@ const (
 	// ViolationStaleStream refuses an event from an incarnation already fenced or
 	// superseded.
 	ViolationStaleStream ViolationKind = "stale_stream"
-	// ViolationPostTerminalMutation refuses a state change on an activity,
-	// action, or turn already terminal.
+	// ViolationPostTerminalMutation refuses an update carrying any difference
+	// from the reduced terminal record of an activity, action, or turn already
+	// terminal — a changed state, a changed carried member such as progress, or
+	// a restated immutable at other than its first-sight value. A member-wise
+	// no-op restatement is suppressed instead.
 	ViolationPostTerminalMutation ViolationKind = "post_terminal_mutation"
 	// ViolationImmutableIdentityChange refuses an activity update that changes an
 	// immutable identity field, and a first sight missing one.
