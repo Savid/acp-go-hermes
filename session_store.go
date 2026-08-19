@@ -139,11 +139,23 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	}
 
 	mainCount := 0
+	listed := make(map[SessionKey]struct{}, len(replacements))
 
 	for _, replacement := range replacements {
 		if replacement.Key.SessionID != main.SessionID {
 			return fmt.Errorf("replacement key does not match main session")
 		}
+
+		// One Replace states each key's whole content exactly once. A key listed
+		// twice states two contents for it, and nothing in the call says which one
+		// the caller meant, so the write is refused rather than settled by
+		// position: silently keeping the last one would commit a generation the
+		// caller never asked for.
+		if _, duplicate := listed[replacement.Key]; duplicate {
+			return fmt.Errorf("replacement key %q is listed more than once", replacement.Key.Subpath)
+		}
+
+		listed[replacement.Key] = struct{}{}
 
 		if replacement.Key.Subpath == SessionStoreMainSubpath {
 			mainCount++

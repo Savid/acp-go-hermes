@@ -354,6 +354,55 @@ func TestInMemoryStoreReplaceValidation(t *testing.T) {
 	}
 }
 
+// TestInMemoryStoreReplaceRefusesDuplicateKeys pins the store's answer to a
+// generation that states one key twice. The two entry lists are two different
+// contents for the same key and the call carries no rule for choosing between
+// them, so the whole write is refused and the refusal names the key. Keeping the
+// last one would commit a generation the caller never asked for, and the caller
+// would never learn its write was ambiguous.
+func TestInMemoryStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	idmap := SessionKey{SessionID: "s1", Subpath: "idmap"}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":1}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":1}`)}},
+	}); err != nil {
+		t.Fatalf("seed replace: %v", err)
+	}
+
+	err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":2}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":2}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":3}`)}},
+	})
+	if err == nil {
+		t.Fatal("replace accepted a key listed more than once")
+	}
+	if !strings.Contains(err.Error(), `"idmap"`) {
+		t.Fatalf("duplicate-key refusal = %v, want the duplicated key named", err)
+	}
+
+	// The refusal is the whole write's: no part of the ambiguous generation
+	// reached the store.
+	entries, loadErr := store.Load(ctx, idmap)
+	if loadErr != nil {
+		t.Fatalf("load subkey: %v", loadErr)
+	}
+	if len(entries) != 1 || string(entries[0]) != `{"idmap":1}` {
+		t.Fatalf("subkey entries = %s, want the seeded generation", entries)
+	}
+	mainEntries, loadErr := store.Load(ctx, main)
+	if loadErr != nil {
+		t.Fatalf("load main: %v", loadErr)
+	}
+	if len(mainEntries) != 1 || string(mainEntries[0]) != `{"generation":1}` {
+		t.Fatalf("main entries = %s, want the seeded generation", mainEntries)
+	}
+}
+
 func TestInMemoryStoreEmptySessionIDKeys(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()

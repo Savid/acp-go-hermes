@@ -28,9 +28,11 @@ the atomic `Replace` — and `session/delete` tombstones run under a separate
 fixed 60-second bound, so they do not inherit the store-read budget. A commit
 that would land on an already-tombstoned session id publishes nothing, so a
 turn settling behind a `session/delete` never issues a `Replace` that clears a
-tombstone it did not create. The `SessionStore` interface (`Append`, `Load`,
-`Replace`, `Delete`, `ListSessions`, `ListSubkeys`) is indexed in the
-[Go API](/docs/reference/go-api).
+tombstone it did not create. One `Replace` states each key's whole content
+exactly once: a replacement list naming the same key twice is refused with an
+error naming that key, never settled by list position. The `SessionStore`
+interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
+`ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
 
 ## Snapshot shape
 
