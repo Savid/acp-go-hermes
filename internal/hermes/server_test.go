@@ -3280,14 +3280,6 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	if got := SafePathName("../a:b"); got != "__a_b" {
 		t.Fatalf("SafePathName = %q", got)
 	}
-	for _, value := range []any{float64(-1), int(-1), json.Number("bad")} {
-		if got, ok := IntFromNumber(value); ok || got != 0 {
-			t.Fatalf("IntFromNumber(%#v) = %d, %v", value, got, ok)
-		}
-	}
-	if got, ok := IntFromNumber(json.Number("12")); !ok || got != 12 {
-		t.Fatalf("IntFromNumber json number = %d, %v", got, ok)
-	}
 }
 
 func TestRemoveLeaseFileIfOwned(t *testing.T) {

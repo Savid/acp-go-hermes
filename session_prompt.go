@@ -499,19 +499,9 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 		return nil
 	}
 
-	// Resolve the context window at most once per message, and only when a
-	// usage update is actually emitted.
-	window := -1
-	resolveWindow := func() int {
-		if window < 0 {
-			window = message.Info.ContextWindow
-			if window <= 0 {
-				window = s.contextWindow(ctx)
-			}
-		}
-
-		return window
-	}
+	// The context window rides on the usage the gateway reports with the
+	// message; the model catalogue advertises no limits of its own.
+	window := message.Info.ContextWindow
 
 	for i := range message.Parts {
 		part := &message.Parts[i]
@@ -524,7 +514,7 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 		}
 
 		if part.Type == valStepFinish {
-			if update := usageUpdateFromTokens(part.Tokens, resolveWindow()); update != nil {
+			if update := usageUpdateFromTokens(part.Tokens, window); update != nil {
 				if err := s.emitUpdate(ctx, *update); err != nil {
 					return err
 				}
@@ -533,7 +523,7 @@ func (s *session) emitMessage(ctx context.Context, message nativehermes.NativeMe
 	}
 
 	if message.Info.Tokens.Total > 0 {
-		if update := usageUpdateFromTokens(message.Info.Tokens, resolveWindow()); update != nil {
+		if update := usageUpdateFromTokens(message.Info.Tokens, window); update != nil {
 			return s.emitUpdate(ctx, *update)
 		}
 	}

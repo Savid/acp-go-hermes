@@ -165,10 +165,12 @@ executing a helper from PATH.
 
 ## Response metadata
 
-Advertised model config options carry per-model `_meta.hermes` metadata:
-`modelId`, `contextWindow`, `maxOutputTokens`, and `supportedEffortLevels`
-where the model exposes them. They carry no generic `capabilities` list and no
-modality or generator fields.
+Advertised model config options carry exactly one per-model `_meta.hermes`
+field, `modelId`, holding the qualified `provider/model` selection value.
+Hermes' model catalogue answers an id and a display name per model and
+advertises no limits, effort levels, modalities, or capability list, so nothing
+else is published there. The context window a session reports in its usage
+updates comes from the completion Hermes returns, not from this catalogue.
 
 A successful `session/prompt` response carries `_meta.hermes.messageId` and
 `_meta.hermes.outcome` under the Hermes namespace, plus `_meta.hermes.stopReason`

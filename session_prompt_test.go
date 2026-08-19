@@ -946,51 +946,24 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 	}
 }
 
+// TestUsageUpdateSizeIsContextWindow pins where the usage size comes from: the
+// context window the gateway reports with the completion, and nowhere else. The
+// model catalogue advertises no limits, so a message that reports no window
+// leaves the size at zero rather than borrowing a number from elsewhere.
 func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("completion context window wins over provider listing", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
-			ID: "openai",
-			Models: map[string]nativehermes.ProviderModel{
-				"gpt-test": {ID: "gpt-test", Limit: map[string]any{"context": float64(100000)}},
-			},
-		}}}
+	t.Run("reported context window populates size", func(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(agent, newFakeHermesClient())
 
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
 			Info: nativehermes.NativeMessageInfo{
 				ID: "message-1", SessionID: "native-1", Role: "assistant",
 				Tokens: nativehermes.Tokens{Total: 1000}, ContextWindow: 200000,
 			},
-		}, false); err != nil {
-			t.Fatalf("emitMessage: %v", err)
-		}
-		usage := conn.updates[0].Update.UsageUpdate
-		if usage == nil || usage.Size != 200000 {
-			t.Fatalf("usage = %#v, want size 200000", usage)
-		}
-	})
-
-	t.Run("advertised context window populates size", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
-			ID: "openai",
-			Models: map[string]nativehermes.ProviderModel{
-				"gpt-test": {ID: "gpt-test", Limit: map[string]any{"context": float64(200000)}},
-			},
-		}}}
-		conn := newRecordingAgentClient()
-		agent := newTestAgent()
-		agent.setAgentClient(conn)
-		session := testSession(agent, client)
-
-		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
-			Info: nativehermes.NativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: "assistant", Tokens: nativehermes.Tokens{Total: 1000}},
 		}, false); err != nil {
 			t.Fatalf("emitMessage: %v", err)
 		}
@@ -1006,16 +979,11 @@ func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown context window emits size zero", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
-			ID:     "openai",
-			Models: map[string]nativehermes.ProviderModel{"gpt-test": {ID: "gpt-test"}},
-		}}}
+	t.Run("unreported context window emits size zero", func(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(agent, newFakeHermesClient())
 
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
 			Info: nativehermes.NativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: "assistant", Tokens: nativehermes.Tokens{Total: 1000}},
@@ -1030,29 +998,6 @@ func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 			t.Fatalf("usage used=%d size=%d, want used=1000 size=0", usage.Used, usage.Size)
 		}
 	})
-}
-
-func TestSessionContextWindowFallbacks(t *testing.T) {
-	ctx := context.Background()
-
-	if got := (&session{}).contextWindow(ctx); got != 0 {
-		t.Fatalf("nil client window = %d, want 0", got)
-	}
-
-	errClient := newFakeHermesClient()
-	errClient.providersErr = errors.New("boom")
-	if got := testSession(newTestAgent(), errClient).contextWindow(ctx); got != 0 {
-		t.Fatalf("provider error window = %d, want 0", got)
-	}
-
-	mismatchClient := newFakeHermesClient()
-	mismatchClient.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{
-		{ID: "other", Models: map[string]nativehermes.ProviderModel{"x": {ID: "x", Limit: map[string]any{"context": float64(10)}}}},
-		{ID: "openai", Models: map[string]nativehermes.ProviderModel{"different": {ID: "different", Limit: map[string]any{"context": float64(20)}}}},
-	}}
-	if got := testSession(newTestAgent(), mismatchClient).contextWindow(ctx); got != 0 {
-		t.Fatalf("provider/model mismatch window = %d, want 0", got)
-	}
 }
 
 func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {

@@ -2,7 +2,6 @@ package hermesacp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -17,18 +16,9 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 		Name: "OpenAI",
 		Models: map[string]nativehermes.ProviderModel{
 			"gpt-test": {
-				ID:   "gpt-test",
-				Name: "GPT Test",
-				Limit: map[string]any{
-					"context": float64(1000),
-					"output":  float64(200),
-				},
-				Reasoning:  true,
-				ToolCall:   true,
-				Modalities: nativehermes.ProviderModelModalities{Input: []string{"image", "pdf"}},
-				Options: map[string]any{
-					"reasoningEffort": map[string]any{"options": []any{"low", "medium"}},
-				},
+				ID:        "gpt-test",
+				Name:      "GPT Test",
+				Reasoning: true,
 			},
 		},
 	}}}
@@ -47,21 +37,11 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 	if value.Value != "openai/gpt-test" {
 		t.Fatalf("value = %s", value.Value)
 	}
+	// The model catalogue answers an id and a name and nothing else, so the
+	// published metadata is exactly the qualified model id.
 	meta, metaOK := value.Meta[hermesMetaKey].(map[string]any)
-	if !metaOK || meta["contextWindow"] != 1000 || meta["maxOutputTokens"] != 200 {
-		t.Fatalf("limits meta = %#v", value.Meta)
-	}
-	if got := meta["modelId"]; got != "openai/gpt-test" {
-		t.Fatalf("modelId = %#v", got)
-	}
-	if _, exists := meta["capabilities"]; exists {
-		t.Fatalf("capabilities metadata survived hard cutover: %#v", meta)
-	}
-	if got := meta["supportedEffortLevels"]; !containsStringAny(got, "low") || !containsStringAny(got, "medium") {
-		t.Fatalf("effort meta = %#v", got)
-	}
-	if len(meta) != 4 {
-		t.Fatalf("model metadata schema = %#v", meta)
+	if !metaOK || len(meta) != 1 || meta["modelId"] != "openai/gpt-test" {
+		t.Fatalf("model metadata schema = %#v", value.Meta)
 	}
 }
 
@@ -102,13 +82,7 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	client := newFakeHermesClient()
 	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{
 		{ID: "", Models: map[string]nativehermes.ProviderModel{"skip": {}}},
-		{ID: "p", Models: map[string]nativehermes.ProviderModel{
-			"m": {
-				Limit:      map[string]any{"context": int(42), "output": json.Number("7")},
-				Modalities: nativehermes.ProviderModelModalities{Input: []string{"audio", "video"}},
-				Options:    map[string]any{"reasoningEffort": []any{"medium"}},
-			},
-		}},
+		{ID: "p", Models: map[string]nativehermes.ProviderModel{"m": {}}},
 	}}
 	agent := newTestAgent()
 	conn := newRecordingAgentClient()
@@ -161,24 +135,6 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	}
 	if empty := modelConfigOption(sessionSnapshot{}, nativehermes.ProvidersResponse{}); empty.Select != nil {
 		t.Fatalf("empty model option = %#v", empty)
-	}
-	efforts := supportedEfforts(client.providers.Providers[1].Models["m"])
-	if len(efforts) != 1 || efforts[0] != "medium" {
-		t.Fatalf("supportedEfforts = %#v", efforts)
-	}
-	efforts = supportedEfforts(nativehermes.ProviderModel{Options: map[string]any{
-		"temperature":     []any{"ignored"},
-		"reasoningEffort": []string{"low", "", "high"},
-		"effortOptions":   map[string]any{"values": []any{"medium"}},
-	}})
-	if len(efforts) != 3 || efforts[0] != "high" || efforts[1] != "low" || efforts[2] != "medium" {
-		t.Fatalf("normalized efforts = %#v", efforts)
-	}
-	if values := optionStringValues(map[string]any{"unknown": []any{"x"}}); values != nil {
-		t.Fatalf("unknown option values = %#v", values)
-	}
-	if values := optionStringValues(42); values != nil {
-		t.Fatalf("numeric option values = %#v", values)
 	}
 	if unstableConfigOptions(nil) != nil {
 		t.Fatal("empty unstable config options returned non-nil")
@@ -279,23 +235,6 @@ func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
 	if hasConfigValue(options, acp.SessionConfigId("mode"), "anything") {
 		t.Fatal("non-model config id matched")
 	}
-}
-
-func containsStringAny(value any, want string) bool {
-	values, _ := value.([]string)
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	anyValues, _ := value.([]any)
-	for _, value := range anyValues {
-		if value == want {
-			return true
-		}
-	}
-
-	return false
 }
 
 func TestSetSessionConfigNativeSetterFailure(t *testing.T) {

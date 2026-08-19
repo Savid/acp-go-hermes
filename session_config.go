@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"strings"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
@@ -179,39 +178,6 @@ func (s *session) configOptionsFrom(providers nativehermes.ProvidersResponse) []
 	return []acp.SessionConfigOption{model}
 }
 
-// contextWindow resolves the true context-window size in tokens for the
-// session's current model, or 0 when the harness does not advertise it.
-func (s *session) contextWindow(ctx context.Context) int {
-	snapshot := s.snapshot()
-	if snapshot.client == nil {
-		return 0
-	}
-
-	providers, err := snapshot.client.ConfigProviders(ctx)
-	if err != nil {
-		return 0
-	}
-
-	for _, provider := range providers.Providers {
-		if provider.ID != snapshot.providerID {
-			continue
-		}
-
-		for key := range provider.Models {
-			model := provider.Models[key]
-			if modelSelectionValue(provider.ID, firstNonEmpty(model.ID, key)) != snapshot.modelValue() {
-				continue
-			}
-
-			if n, ok := nativehermes.IntFromNumber(model.Limit["context"]); ok {
-				return n
-			}
-		}
-	}
-
-	return 0
-}
-
 func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.ProvidersResponse) acp.SessionConfigOption {
 	category := acp.SessionConfigOptionCategoryModel
 	current := snapshot.modelValue()
@@ -245,7 +211,7 @@ func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.Provider
 			group.Options = append(group.Options, acp.SessionConfigSelectOption{
 				Name:  firstNonEmpty(model.Name, value),
 				Value: acp.SessionConfigValueId(value),
-				Meta:  map[string]any{hermesMetaKey: modelMeta(provider.ID, modelID, model)},
+				Meta:  map[string]any{hermesMetaKey: map[string]any{"modelId": value}},
 			})
 		}
 
@@ -287,85 +253,6 @@ func modelSelectionValue(providerID string, modelID string) string {
 
 func (snapshot sessionSnapshot) modelValue() string {
 	return modelSelectionValue(snapshot.providerID, snapshot.modelID)
-}
-
-func modelMeta(providerID string, modelID string, model nativehermes.ProviderModel) map[string]any {
-	meta := map[string]any{"modelId": modelSelectionValue(providerID, modelID)}
-	if n, ok := nativehermes.IntFromNumber(model.Limit["context"]); ok {
-		meta["contextWindow"] = n
-	}
-
-	if n, ok := nativehermes.IntFromNumber(model.Limit["output"]); ok {
-		meta["maxOutputTokens"] = n
-	}
-
-	efforts := supportedEfforts(model)
-	if len(efforts) > 0 {
-		meta["supportedEffortLevels"] = efforts
-	}
-
-	return meta
-}
-
-func supportedEfforts(model nativehermes.ProviderModel) []string {
-	seen := map[string]struct{}{}
-
-	for key, raw := range model.Options {
-		if !strings.Contains(strings.ToLower(key), "effort") {
-			continue
-		}
-
-		for _, value := range optionStringValues(raw) {
-			seen[value] = struct{}{}
-		}
-	}
-
-	out := make([]string, 0, len(seen))
-	for value := range seen {
-		out = append(out, value)
-	}
-
-	slices.Sort(out)
-
-	return out
-}
-
-func optionStringValues(raw any) []string {
-	switch value := raw.(type) {
-	case []string:
-		return compactNonEmptyStrings(value)
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			if str, _ := item.(string); str != "" {
-				out = append(out, str)
-			}
-		}
-
-		return compactNonEmptyStrings(out)
-	case map[string]any:
-		for _, key := range []string{metaOptionsKey, "values", "enum"} {
-			if values := optionStringValues(value[key]); len(values) > 0 {
-				return values
-			}
-		}
-	}
-
-	return nil
-}
-
-func compactNonEmptyStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-
-	slices.Sort(out)
-
-	return slices.Compact(out)
 }
 
 func unstableConfigOptions(options []acp.SessionConfigOption) []acp.UnstableSessionConfigOption {

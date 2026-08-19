@@ -475,9 +475,8 @@ type ModelSelector struct {
 }
 
 type ProvidersResponse struct {
-	Providers []ProviderInfo    `json:"providers"`
-	Default   map[string]string `json:"default"`
-	Raw       json.RawMessage   `json:"-"`
+	Providers []ProviderInfo  `json:"providers"`
+	Raw       json.RawMessage `json:"-"`
 }
 
 func (p *ProvidersResponse) UnmarshalJSON(data []byte) error {
@@ -501,17 +500,9 @@ type ProviderInfo struct {
 }
 
 type ProviderModel struct {
-	ID         string                  `json:"id"`
-	Name       string                  `json:"name"`
-	Limit      map[string]any          `json:"limit"`
-	Reasoning  bool                    `json:"reasoning"`
-	ToolCall   bool                    `json:"tool_call"`
-	Modalities ProviderModelModalities `json:"modalities"`
-	Options    map[string]any          `json:"options"`
-}
-
-type ProviderModelModalities struct {
-	Input []string `json:"input"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Reasoning bool   `json:"reasoning"`
 }
 
 type ProcessIdentity struct {
@@ -3458,24 +3449,4 @@ func SafePathName(value string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_")
 
 	return replacer.Replace(value)
-}
-
-func IntFromNumber(value any) (int, bool) {
-	switch typed := value.(type) {
-	case float64:
-		if typed > 0 && typed <= math.MaxInt {
-			return int(typed), true
-		}
-	case int:
-		if typed > 0 {
-			return typed, true
-		}
-	case json.Number:
-		n, err := typed.Int64()
-		if err == nil && n > 0 && n <= int64(math.MaxInt) {
-			return int(n), true
-		}
-	}
-
-	return 0, false
 }

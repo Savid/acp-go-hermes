@@ -2,9 +2,7 @@ package hermes
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"math"
 	"path/filepath"
 	"testing"
 )
@@ -68,29 +66,6 @@ func TestStreamErrorHelpers(t *testing.T) {
 	}
 	if got := StreamErrorEpoch(errors.New("plain")); got != 0 {
 		t.Fatalf("non-stream epoch = %d, want 0", got)
-	}
-}
-
-func TestIntFromNumberBranches(t *testing.T) {
-	for _, tc := range []struct {
-		value any
-		want  int
-		ok    bool
-	}{
-		{float64(12), 12, true},
-		{float64(0), 0, false},
-		{math.MaxFloat64, 0, false},
-		{int(7), 7, true},
-		{int(-1), 0, false},
-		{json.Number("21"), 21, true},
-		{json.Number("nope"), 0, false},
-		{json.Number("-3"), 0, false},
-		{"string", 0, false},
-	} {
-		got, ok := IntFromNumber(tc.value)
-		if got != tc.want || ok != tc.ok {
-			t.Fatalf("IntFromNumber(%#v) = %d,%v want %d,%v", tc.value, got, ok, tc.want, tc.ok)
-		}
 	}
 }
 
