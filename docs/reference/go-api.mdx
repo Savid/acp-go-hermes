@@ -164,6 +164,13 @@ Session requests take options such as `WithSessionMCPServers`,
 `WithSessionAdditionalDirectories`, `WithSessionMeta`, `WithSessionHermesOptions`,
 and `WithSessionRawEvents`.
 
+`WithSessionMeta` and `WithListSessionsMeta` carry host-supplied `_meta` maps.
+The `acp-go.dev/*` namespace is reserved: its envelopes are stamped by this
+package and read by every consumer, so a caller key inside it is refused rather
+than merged or overwritten. Neither builder returns an error, so the refusal is
+a panic — passing a reserved key is a program naming a namespace that is not its
+own. Host namespaces and `_meta.hermes` merge as before.
+
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
 nonce of at most 4096 bytes for every turn. `CancelRequest(sessionID,

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -450,4 +451,55 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	if _, err := io.Copy(io.Discard, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestBuildersRejectReservedCallerMeta pins the one place a family-global
+// reserved literal can reach a request this package builds. `acp-go.dev/*` is
+// stamped by this package and read by every sibling, so a host key inside it is
+// refused rather than merged (which would put a host value where a reader
+// expects a family envelope) or overwritten (which would silently discard what
+// the host asked for).
+func TestBuildersRejectReservedCallerMeta(t *testing.T) {
+	reserved := []string{
+		routeMetaKey,
+		handoffMetaKey,
+		mediaEnvelopeMetaKey,
+		lifecycle.MetaKey,
+		"acp-go.dev/notYetInvented",
+	}
+
+	for _, key := range reserved {
+		meta := map[string]any{key: map[string]any{"version": 1}}
+
+		requireBuilderRejection(t, key, func() { WithSessionMeta(meta) })
+		requireBuilderRejection(t, key, func() { WithListSessionsMeta(meta) })
+	}
+
+	// A host's own namespace, and this adapter's, are merged as before.
+	allowed := map[string]any{"host.example/trace": "t", hermesMetaKey: map[string]any{"options": map[string]any{}}}
+	request := NewSessionRequest("/tmp/project", WithSessionMeta(allowed))
+	if request.Meta["host.example/trace"] != "t" {
+		t.Fatalf("caller meta was not merged: %#v", request.Meta)
+	}
+	listed := ListSessionsRequest(WithListSessionsMeta(allowed))
+	if listed.Meta["host.example/trace"] != "t" {
+		t.Fatalf("caller list meta was not merged: %#v", listed.Meta)
+	}
+}
+
+func requireBuilderRejection(t *testing.T, key string, build func()) {
+	t.Helper()
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("builder accepted the reserved caller meta key %q", key)
+		}
+		message, ok := recovered.(string)
+		if !ok || !strings.Contains(message, key) {
+			t.Fatalf("builder rejection did not name %q: %#v", key, recovered)
+		}
+	}()
+
+	build()
 }
