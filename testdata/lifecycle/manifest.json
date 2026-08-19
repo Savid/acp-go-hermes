@@ -399,6 +399,22 @@
     {
       "file": "snapshot-duplicate-with-unnegotiated-kind.json",
       "invariant": "The same ordering holds when the repeated entry's own defect is an unnegotiated kind: the set's verdict is reported, not the entry's."
+    },
+    {
+      "file": "false-quiescence-uncovered-turnless-idle.json",
+      "invariant": "Every reduced delivery raises the floor a positive quiescence fact must clear, a session-caused transition naming no turn included, so a proof stopping one sequence short of one is disproved."
+    },
+    {
+      "file": "session-running-omits-turn.json",
+      "invariant": "A session-caused running transition naming no turn is malformed_envelope: no update may assert a running foreground with no turn, and an event carrying no name never reports unknown_entity."
+    },
+    {
+      "file": "snapshot-running-omits-turn.json",
+      "invariant": "The same rule binds the snapshot: a running foreground carrying neither turnId nor origin asserts a live cycle no turn owns, and the whole assertion is malformed_envelope."
+    },
+    {
+      "file": "session-requires-action-omits-turn.json",
+      "invariant": "A live foreground names its turn in both states: a session-caused requires_action naming no turn is malformed_envelope on a properly blocked cycle, judged before entity resolution and before the blocked-cycle rule, so neither unknown_entity nor inconsistent_foreground is reachable."
     }
   ]
 }
