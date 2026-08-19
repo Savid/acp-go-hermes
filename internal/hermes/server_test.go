@@ -140,7 +140,6 @@ func TestMCPServersWithSecretEnv(t *testing.T) {
 func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
 	_, err := StartServer(t.Context(), darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:  "session-1",
-		Root:          t.TempDir(),
 		ScratchParent: t.TempDir(),
 		Cwd:           t.TempDir(),
 		Env:           map[string]string{"ACP_GO_HERMES_MCP_HEADER_1_1": "occupied"},
@@ -1342,13 +1341,11 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	} {
 		_ = gatewayEventText(raw)
 	}
+	// The ANSI-rendered copy is for terminal display, never the message text.
 	if got := gatewayCompleteText(json.RawMessage(`{"text":"raw","rendered":"ansi"}`)); got != "raw" {
 		t.Fatalf("complete raw text = %q", got)
 	}
-	if got := gatewayCompleteText(json.RawMessage(`{"rendered":"fallback"}`)); got != "fallback" {
-		t.Fatalf("complete rendered text = %q", got)
-	}
-	if got := gatewayCompleteText(json.RawMessage(`{"reasoning":"not final","status":"complete"}`)); got != "" {
+	if got := gatewayCompleteText(json.RawMessage(`{"rendered":"ansi","reasoning":"not final","status":"complete"}`)); got != "" {
 		t.Fatalf("complete unrelated text = %q", got)
 	}
 	if got := gatewayCompleteText(json.RawMessage(`{`)); got != "" {
@@ -2781,7 +2778,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 
 	client, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:   "session/one",
-		Root:           root,
+		ScratchParent:  root,
 		Cwd:            cwd,
 		ExecutablePath: helper,
 		DefaultModel:   "openai/gpt-test",
@@ -2842,7 +2839,7 @@ func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
 
 		server, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 			ACPSessionID:   id,
-			Root:           root,
+			ScratchParent:  root,
 			Cwd:            t.TempDir(),
 			ExecutablePath: helper,
 			HealthTimeout:  5 * time.Second,
@@ -2908,7 +2905,7 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 
 	options := StartOptions{
 		ACPSessionID:   "same-session",
-		Root:           root,
+		ScratchParent:  root,
 		Cwd:            t.TempDir(),
 		ExecutablePath: helper,
 		HealthTimeout:  5 * time.Second,
@@ -3001,10 +2998,16 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")})); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: string([]byte{0})})); err == nil {
-		t.Fatal("invalid root unexpectedly succeeded")
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ScratchParent: string([]byte{0})})); err == nil {
+		t.Fatal("invalid scratch parent unexpectedly succeeded")
 	}
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Root: t.TempDir(), ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
+	if _, err := StartServer(ctx, StartOptions{
+		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
+		RetainDiscoveryRoot:       func(string, error) {},
+	}); err == nil {
+		t.Fatal("missing scratch parent unexpectedly succeeded")
+	}
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
 		t.Fatal("invalid session path unexpectedly succeeded")
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExtraPathDirs: []string{"relative"}})); err == nil {
@@ -3337,16 +3340,16 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	InspectProcess = func(int) (ProcessIdentity, error) {
 		return baseIdentity, nil
 	}
-	if !leaseMatchesProcess(leasePath, baseLease) {
+	if !leaseMatchesProcess(baseLease) {
 		t.Fatal("matching lease did not match")
 	}
 	if !cmdlineLooksLikeHermesServe([]string{"/tmp/hermes"}) || cmdlineLooksLikeHermesServe([]string{"node"}) {
 		t.Fatal("cmdline Hermes detection mismatch")
 	}
-	if leaseMatchesProcess(leasePath, ServerLease{PID: 0, ProcessStartTime: "start"}) {
+	if leaseMatchesProcess(ServerLease{PID: 0, ProcessStartTime: "start"}) {
 		t.Fatal("zero pid lease matched")
 	}
-	if leaseMatchesProcess(leasePath, ServerLease{PID: 1}) {
+	if leaseMatchesProcess(ServerLease{PID: 1}) {
 		t.Fatal("missing start time lease matched")
 	}
 
@@ -3367,7 +3370,7 @@ func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 			InspectProcess = func(int) (ProcessIdentity, error) {
 				return tt.identity, tt.err
 			}
-			if leaseMatchesProcess(leasePath, tt.lease) {
+			if leaseMatchesProcess(tt.lease) {
 				t.Fatal("mismatched lease matched")
 			}
 		})
@@ -3694,11 +3697,10 @@ func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
 	if options.RetainDiscoveryRoot == nil {
 		options.RetainDiscoveryRoot = func(string, error) {}
 	}
-	if runtime.GOOS != "darwin" {
-		return options
+	if runtime.GOOS == "darwin" {
+		options.DarwinBestEffortContainment = true
 	}
-	options.DarwinBestEffortContainment = true
-	if strings.ContainsRune(options.Root, '\x00') {
+	if strings.ContainsRune(options.ScratchParent, '\x00') {
 		return options
 	}
 	if options.ExistingXDG.Root != "" {

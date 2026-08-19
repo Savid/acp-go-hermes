@@ -91,7 +91,6 @@ func TestStartServerDefaultsLoggerOnFailure(t *testing.T) {
 	// No Logger provided: exercises the slog.Default() fallback before the
 	// missing executable makes startup fail.
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
-		Root:           t.TempDir(),
 		ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes"),
 	})); err == nil {
 		t.Fatal("StartServer with missing executable unexpectedly succeeded")
@@ -100,7 +99,6 @@ func TestStartServerDefaultsLoggerOnFailure(t *testing.T) {
 	// An escaping seed-file path makes materializeHermesConfig reject the
 	// startup before the process launches.
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
-		Root:      t.TempDir(),
 		SeedFiles: map[string]string{"../escape": "data"},
 	})); err == nil {
 		t.Fatal("StartServer with escaping seed file unexpectedly succeeded")

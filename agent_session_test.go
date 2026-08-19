@@ -266,7 +266,7 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	createClient.closeErr = errors.New("close boom")
 	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-			xdg, err := testGenerationXDG(opts.Root)
+			xdg, err := testGenerationXDG(opts.ScratchParent)
 			if err != nil {
 				return nil, err
 			}
@@ -326,7 +326,7 @@ func TestForkSnapshotFailureLeavesNoOrphan(t *testing.T) {
 			xdg := opts.ExistingXDG
 			if xdg.Root == "" {
 				var err error
-				xdg, err = testGenerationXDG(opts.Root)
+				xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -395,7 +395,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 				xdg := opts.ExistingXDG
 				if xdg.Root == "" {
 					var err error
-					xdg, err = testGenerationXDG(opts.Root)
+					xdg, err = testGenerationXDG(opts.ScratchParent)
 					if err != nil {
 						return nil, err
 					}
@@ -464,7 +464,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 		filepath.Dir(parent.xdg.Root) != agent.options.ScratchDir ||
 		!strings.HasPrefix(filepath.Base(parent.xdg.Root), "acp-go-hermes-runtime-") ||
 		!strings.HasPrefix(filepath.Base(child.xdg.Root), "acp-go-hermes-runtime-") {
-		t.Fatalf("xdg roots parent=%#v child=%#v home=%q", parent.xdg, child.xdg, agent.homeRoot())
+		t.Fatalf("xdg roots parent=%#v child=%#v scratch=%q", parent.xdg, child.xdg, agent.options.ScratchDir)
 	}
 }
 
@@ -1038,7 +1038,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 			xdg := opts.ExistingXDG
 			if xdg.Root == "" {
 				var err error
-				xdg, err = testGenerationXDG(opts.Root)
+				xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1217,7 +1217,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 		createErrClient.createErr = errors.New("create failed")
 		agent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-				createErrClient.xdg, _ = testGenerationXDG(opts.Root)
+				createErrClient.xdg, _ = testGenerationXDG(opts.ScratchParent)
 
 				return createErrClient, nil
 			}
@@ -1493,7 +1493,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 		func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				var err error
-				createClient.xdg, err = testGenerationXDG(opts.Root)
+				createClient.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1600,7 +1600,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				defaultModel = opts.DefaultModel
 				var err error
-				defaultClient.xdg, err = testGenerationXDG(opts.Root)
+				defaultClient.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1632,7 +1632,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 		agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				var err error
-				client.xdg, err = testGenerationXDG(opts.Root)
+				client.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -2170,7 +2170,7 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 		// root is not derivable from the id: only the remembered record names it.
 		agent.forgetDeleteCleanupIfDone("never-remembered")
 
-		xdg, err := testGenerationXDG(agent.homeRoot())
+		xdg, err := testGenerationXDG(agent.options.ScratchDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3539,7 +3539,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		client.createSession = testNativeSession("native-new")
 		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-				xdg, err := testGenerationXDG(opts.Root)
+				xdg, err := testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}

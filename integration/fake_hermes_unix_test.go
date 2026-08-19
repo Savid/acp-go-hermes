@@ -82,7 +82,6 @@ func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T)
 
 	server, err := nativehermes.StartServer(ctx, nativehermes.StartOptions{
 		ACPSessionID:   "orphan",
-		Root:           filepath.Join(home, "acp-go-hermes"),
 		ScratchParent:  home,
 		Cwd:            t.TempDir(),
 		ExecutablePath: fakeHermesExecutable(t, fakeModeOK),

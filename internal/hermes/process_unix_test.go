@@ -125,7 +125,7 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 		_ = cmd.Process.Kill()
 		t.Fatal(err)
 	}
-	if !leaseMatchesProcess(leasePath, lease) {
+	if !leaseMatchesProcess(lease) {
 		_ = cmd.Process.Kill()
 		t.Fatal("child lease did not match live process")
 	}

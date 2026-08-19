@@ -489,7 +489,7 @@ func TestHermesLoadAndForkFactorySentinelRetainsOwnership(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		parent := testSession(agent, parentClient)
 		agent.sessions[parent.id] = parent
-		agent.retainIncompleteHermesRoot("00000000-0000-4000-8000-000000000000", filepath.Join(agent.homeRoot(), "retained"))
+		agent.retainIncompleteHermesRoot("00000000-0000-4000-8000-000000000000", filepath.Join(agent.options.ScratchDir, "retained"))
 
 		_, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
 		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)

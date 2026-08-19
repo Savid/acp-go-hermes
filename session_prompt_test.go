@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -3240,8 +3241,9 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 		if len(opts.MCPServers) != 1 {
 			t.Fatalf("replacement MCP servers = %#v", opts.MCPServers)
 		}
-		if opts.ExistingXDG.Root == "" || !strings.HasPrefix(opts.ExistingXDG.Root, agent.homeRoot()) {
-			t.Fatalf("replacement XDG = %#v, home=%q", opts.ExistingXDG, agent.homeRoot())
+		if filepath.Dir(opts.ExistingXDG.Root) != agent.options.ScratchDir ||
+			!strings.HasPrefix(filepath.Base(opts.ExistingXDG.Root), "acp-go-hermes-runtime-") {
+			t.Fatalf("replacement XDG = %#v, scratch=%q", opts.ExistingXDG, agent.options.ScratchDir)
 		}
 		replacement.xdg = opts.ExistingXDG
 

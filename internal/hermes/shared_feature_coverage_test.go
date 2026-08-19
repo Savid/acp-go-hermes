@@ -217,23 +217,23 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake := newFakeGatewayServer(t)
 		server := newGatewayBackedHermesServer(t, fake, "")
 		fake.setFail("session.active_list")
-		if _, err := server.storedSessionIDForLive(t.Context(), "live-1"); err == nil || !strings.Contains(err.Error(), "lookup failed") {
+		if _, err := server.lookupStoredSessionIDForLive(t.Context(), "live-1", "hermes branch"); err == nil || !strings.Contains(err.Error(), "lookup failed") {
 			t.Fatalf("lookup RPC error = %v", err)
 		}
 
 		fake = newFakeGatewayServer(t)
 		fake.activeNoKey = true
 		server = newGatewayBackedHermesServer(t, fake, "")
-		if _, err := server.storedSessionIDForLive(t.Context(), "live-1"); err == nil || !strings.Contains(err.Error(), "missing session_key") {
+		if _, err := server.lookupStoredSessionIDForLive(t.Context(), "live-1", "hermes branch"); err == nil || !strings.Contains(err.Error(), "missing session_key") {
 			t.Fatalf("lookup missing key error = %v", err)
 		}
 
 		fake = newFakeGatewayServer(t)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		if _, err := server.storedSessionIDForLive(t.Context(), "other-live"); err == nil || !strings.Contains(err.Error(), "missing live session") {
+		if _, err := server.lookupStoredSessionIDForLive(t.Context(), "other-live", "hermes branch"); err == nil || !strings.Contains(err.Error(), "missing live session") {
 			t.Fatalf("lookup missing live error = %v", err)
 		}
-		if stored, err := server.storedSessionIDForLive(t.Context(), "live-1"); err != nil || stored != "stored-1" {
+		if stored, err := server.lookupStoredSessionIDForLive(t.Context(), "live-1", "hermes branch"); err != nil || stored != "stored-1" {
 			t.Fatalf("lookup success = %q, %v", stored, err)
 		}
 	})

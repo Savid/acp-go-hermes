@@ -163,7 +163,6 @@ var ErrBranchRecoveryAmbiguous = errors.New("hermes branch recovery is ambiguous
 
 type StartOptions struct {
 	ACPSessionID ACPSessionIDString
-	Root         string
 	ControlDir   string
 	// ScratchParent is the resolved parent directory for ephemeral on-disk
 	// materialization, supplied by the caller. The internal package never
@@ -498,21 +497,15 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		return nil, envErr
 	}
 
-	root := options.Root
-	if root == "" {
-		root = filepath.Join(options.ScratchParent, valACPGoHermes)
-	}
-
 	xdg := options.ExistingXDG
 	if xdg.Root == "" {
-		var err error
-
-		parent := options.ScratchParent
-		if parent == "" {
-			parent = root
+		if options.ScratchParent == "" {
+			return nil, errors.New("hermes runtime scratch parent is required")
 		}
 
-		xdg, err = CreateGenerationXDGDirs(parent)
+		var err error
+
+		xdg, err = CreateGenerationXDGDirs(options.ScratchParent)
 		if err != nil {
 			return nil, err
 		}
@@ -2132,21 +2125,20 @@ func gatewayEventText(raw json.RawMessage) string {
 	return firstPayloadString(payload, valText, "delta", "content")
 }
 
-// gatewayCompleteText reads the authoritative final assistant text carried by
-// Hermes 0.18.x message.complete events. Complete payloads also contain status,
-// usage, and reasoning strings, so this intentionally reads only the direct
-// text/rendered fields instead of recursively accepting an unrelated string.
+// gatewayCompleteText reads the authoritative final assistant text a
+// message.complete event carries. The payload also carries status, usage,
+// reasoning and an ANSI-rendered copy of the same text for terminal display,
+// so this reads the one member that names the message itself.
 func gatewayCompleteText(raw json.RawMessage) string {
 	var payload struct {
-		Text     string `json:"text"`
-		Rendered string `json:"rendered"`
+		Text string `json:"text"`
 	}
 
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return ""
 	}
 
-	return firstNonEmpty(payload.Text, payload.Rendered)
+	return payload.Text
 }
 
 func firstPayloadString(value any, keys ...string) string {
@@ -2450,10 +2442,6 @@ func (s *hermesServer) recoverFailedBranch(ctx context.Context, marker string, b
 	}
 
 	return branchErr
-}
-
-func (s *hermesServer) storedSessionIDForLive(ctx context.Context, live string) (string, error) {
-	return s.lookupStoredSessionIDForLive(ctx, live, "hermes branch")
 }
 
 func (s *hermesServer) lookupStoredSessionIDForLive(ctx context.Context, live string, label string) (string, error) {
@@ -3190,7 +3178,7 @@ type ServerLease struct {
 	Port             int    `json:"port"`
 	StartedAt        int64  `json:"startedAtUnixMilli"`
 	TokenHash        string `json:"tokenHash"`
-	XDGRoot          string `json:"xdgRoot,omitempty"`
+	XDGRoot          string `json:"xdgRoot"`
 	ProcessStartTime string `json:"processStartTime,omitempty"`
 }
 
@@ -3227,7 +3215,7 @@ func ReapLeaseFile(path string, log *slog.Logger) bool {
 		return false
 	}
 
-	if lease.PID <= 0 || !leaseMatchesProcess(path, lease) {
+	if lease.PID <= 0 || !leaseMatchesProcess(lease) {
 		// Not our identified live process (gone, replaced, or
 		// unidentifiable): the lease is safe to remove.
 		_ = os.Remove(path)
@@ -3307,7 +3295,7 @@ func leaseProcessGone(lease ServerLease) bool {
 	return false
 }
 
-func leaseMatchesProcess(path string, lease ServerLease) bool {
+func leaseMatchesProcess(lease ServerLease) bool {
 	if lease.PID <= 0 || lease.ProcessStartTime == "" {
 		return false
 	}
@@ -3325,8 +3313,7 @@ func leaseMatchesProcess(path string, lease ServerLease) bool {
 		return false
 	}
 
-	root := firstNonEmpty(lease.XDGRoot, filepath.Dir(filepath.Dir(path)))
-	if filepath.Clean(identity.Env[envHermesHome]) != filepath.Clean(root) {
+	if filepath.Clean(identity.Env[envHermesHome]) != filepath.Clean(lease.XDGRoot) {
 		return false
 	}
 

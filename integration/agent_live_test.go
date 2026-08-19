@@ -12,7 +12,6 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
@@ -167,7 +166,7 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 // located under the scratch parent rather than derived from the session id.
 func requireRestoredHermesStateDB(t *testing.T, scratch string, sessionID acp.SessionId) string {
 	t.Helper()
-	roots, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-hermes", "acp-go-hermes-runtime-*"))
+	roots, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-hermes-runtime-*"))
 	if globErr != nil {
 		t.Fatalf("locate restored Hermes runtime root for %q: %v", sessionID, globErr)
 	}

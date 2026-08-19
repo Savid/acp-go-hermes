@@ -1359,7 +1359,6 @@ func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.Sess
 
 	start := nativehermes.StartOptions{
 		ACPSessionID:             nativehermes.ACPSessionIDString(id),
-		Root:                     a.homeRoot(),
 		ScratchParent:            parent,
 		Cwd:                      cwd,
 		ExecutablePath:           a.options.ExecutablePath,
@@ -1592,14 +1591,6 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	}
 
 	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))
-}
-
-// homeRoot returns the parent directory under which isolated per-session
-// Hermes homes are created, rooted at the resolved scratch parent. Home is an
-// unsupported option (rejected before any session is established), so it never
-// participates in this path.
-func (a *Agent) homeRoot() string {
-	return filepath.Join(scratchParent(a.options.ScratchDir), valACPGoHermes)
 }
 
 // rejectInvalidConfiguration fails session establishment on agent configuration
