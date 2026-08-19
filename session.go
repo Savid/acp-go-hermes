@@ -46,7 +46,6 @@ type session struct {
 	updatedAt             string
 	providerID            string
 	modelID               string
-	mode                  string
 	env                   map[string]string
 	extraPathDirs         []string
 	rawMessages           rawMessageConfig
@@ -176,7 +175,6 @@ type sessionSnapshot struct {
 	updatedAt             string
 	providerID            string
 	modelID               string
-	mode                  string
 	env                   map[string]string
 	extraPathDirs         []string
 	rawMessages           rawMessageConfig
@@ -231,7 +229,6 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		updatedAt:             updatedAt,
 		providerID:            providerID,
 		modelID:               modelID,
-		mode:                  firstNonEmpty(native.Agent, "default"),
 		env:                   cloneStringMap(meta.Env),
 		extraPathDirs:         append([]string(nil), meta.ExtraPathDirs...),
 		rawMessages:           meta.RawMessages,
@@ -802,7 +799,6 @@ func (s *session) snapshot() sessionSnapshot {
 		updatedAt:             s.updatedAt,
 		providerID:            s.providerID,
 		modelID:               s.modelID,
-		mode:                  s.mode,
 		env:                   cloneStringMap(s.env),
 		extraPathDirs:         append([]string(nil), s.extraPathDirs...),
 		rawMessages:           s.rawMessages,
@@ -835,13 +831,6 @@ func (s *session) modelSelector() *nativehermes.ModelSelector {
 	}
 
 	return &nativehermes.ModelSelector{ProviderID: s.providerID, ModelID: s.modelID}
-}
-
-func (s *session) currentMode() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.mode
 }
 
 func (s *session) markPart(part nativehermes.Part) bool {

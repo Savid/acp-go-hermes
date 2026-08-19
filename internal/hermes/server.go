@@ -263,7 +263,6 @@ type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
-	Agent     string `json:"agent"`
 	Model     struct {
 		ID         string `json:"id"`
 		ModelID    string `json:"modelID"`
@@ -416,11 +415,8 @@ type QuestionTool struct {
 }
 
 type MessageRequest struct {
-	MessageID string           `json:"messageID,omitempty"`
-	Model     *ModelSelector   `json:"model,omitempty"`
-	Agent     string           `json:"agent,omitempty"`
-	NoReply   bool             `json:"noReply,omitempty"`
-	Parts     []map[string]any `json:"parts"`
+	Model *ModelSelector   `json:"model,omitempty"`
+	Parts []map[string]any `json:"parts"`
 }
 
 type ModelSelector struct {

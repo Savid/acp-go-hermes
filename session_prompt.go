@@ -295,10 +295,6 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 	req := nativehermes.MessageRequest{
 		Parts: parts,
 		Model: s.modelSelector(),
-		Agent: s.currentMode(),
-	}
-	if params.MessageId != nil {
-		req.MessageID = *params.MessageId
 	}
 
 	if !s.needsRuntimeResume() {

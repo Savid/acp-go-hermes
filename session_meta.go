@@ -359,10 +359,6 @@ func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
 		hermesMeta["modelId"] = model
 	}
 
-	if snapshot.mode != "" {
-		hermesMeta[keyMode] = snapshot.mode
-	}
-
 	return map[string]any{hermesMetaKey: hermesMeta}
 }
 

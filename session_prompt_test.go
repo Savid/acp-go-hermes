@@ -1861,7 +1861,7 @@ func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 		if id != "native-1" {
 			t.Fatalf("native id = %q", id)
 		}
-		if req.MessageID != messageID || len(req.Parts) != 1 || req.Parts[0]["text"] != "/review inspect this" {
+		if len(req.Parts) != 1 || req.Parts[0]["text"] != "/review inspect this" {
 			t.Fatalf("plain slash request = %#v", req)
 		}
 
@@ -2052,7 +2052,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		agent.mu.Unlock()
 		messageID := "user-message"
 		client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-			if id != "native-1" || req.MessageID != messageID || len(req.Parts) != 1 {
+			if id != "native-1" || len(req.Parts) != 1 {
 				t.Fatalf("SendMessage id=%q req=%#v", id, req)
 			}
 			msg := nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{

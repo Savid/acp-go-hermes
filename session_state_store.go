@@ -134,7 +134,6 @@ type stateSnapshotSession struct {
 type stateSnapshotModel struct {
 	ProviderID string `json:"providerID,omitempty"`
 	ModelID    string `json:"modelID,omitempty"`
-	Agent      string `json:"agent,omitempty"`
 }
 
 type archiveInfo struct {
@@ -323,7 +322,6 @@ func (s *session) captureSnapshotLocked(
 			Model: stateSnapshotModel{
 				ProviderID: snapshot.providerID,
 				ModelID:    snapshot.modelID,
-				Agent:      snapshot.mode,
 			},
 		},
 		Terminal: terminal,

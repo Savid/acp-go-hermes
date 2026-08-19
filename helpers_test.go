@@ -744,7 +744,7 @@ func signalTestHook(ch chan struct{}) {
 }
 
 func testNativeSession(id string) nativehermes.Session {
-	native := nativehermes.Session{ID: id, Title: "Test", Agent: "build"}
+	native := nativehermes.Session{ID: id, Title: "Test"}
 	native.Model.ProviderID = "openai"
 	native.Model.ModelID = "gpt-test"
 	native.Time.Updated = 1_700_000_000_000
