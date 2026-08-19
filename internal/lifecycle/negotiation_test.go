@@ -41,6 +41,10 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		{"empty versions", offerMeta([]any{}), MetaPath + ".versions"},
 		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
 		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
+		// Integral in the float's own terms and still no integer this adapter can
+		// hold: an offered version is one int or it is not a version at all.
+		{"unholdable version", offerMeta([]any{1e300}), MetaPath + ".versions"},
+		{"unholdable negative version", offerMeta([]any{-1e300}), MetaPath + ".versions"},
 		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
 		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
 	} {
@@ -89,6 +93,56 @@ func TestDecodeOfferReadsEveryIntegerSpelling(t *testing.T) {
 	}
 }
 
+// TestIntegerValueNamesExactlyOneInt pins the reader both surfaces share: a
+// spelling is one version only where it names exactly one int. Integrality alone
+// is not that — a magnitude past the target int is integral in the float's own
+// terms and holdable by nothing — and no wire lexeme survives the SDK's
+// pre-decode to `map[string]any`, so this value test is the whole of what the
+// integrality rule can mean here.
+func TestIntegerValueNamesExactlyOneInt(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		raw   any
+		value int
+		reads bool
+	}{
+		{"wire float", 1.0, 1, true},
+		{"large holdable float", float64(1 << 53), 1 << 53, true},
+		{"negative float", -2.0, -2, true},
+		{"host int", 7, 7, true},
+		{"preserved number", json.Number("3"), 3, true},
+		{"fractional", 1.5, 0, false},
+		{"unholdable magnitude", 1e300, 0, false},
+		{"unholdable negative magnitude", -1e300, 0, false},
+		{"unholdable number", json.Number("1e300"), 0, false},
+		{"string", "1", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			value, ok := integerValue(tc.raw)
+			require.Equal(t, tc.reads, ok)
+			if tc.reads {
+				require.Equal(t, tc.value, value)
+			}
+		})
+	}
+}
+
+// TestDecodeOfferReadsEveryIntegerAFloatHolds pins the accepting side of the
+// representability guard: a large integral float64 the target int holds exactly
+// is still one offered version, so the guard refuses only what no int can name.
+func TestDecodeOfferReadsEveryIntegerAFloatHolds(t *testing.T) {
+	t.Parallel()
+
+	offer, offered, refusal := DecodeOffer(offerMeta([]any{float64(1 << 53)}))
+	require.Nil(t, refusal)
+	require.True(t, offered)
+	require.Equal(t, []int{1 << 53}, offer.Versions)
+}
+
 func correlationMeta(value any) map[string]any {
 	return map[string]any{MetaKey: value}
 }
@@ -130,6 +184,12 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		{"unknown member", map[string]any{"version": 1.0, "submission": submission, "streamId": "x"}, MetaPath + ".streamId"},
 		{"missing version", map[string]any{"submission": submission}, MetaPath + ".version"},
 		{"fractional version", map[string]any{"version": 1.5, "submission": submission}, MetaPath + ".version"},
+		// No fractional part and still no integer this adapter can hold. The
+		// refusal is the guard's, not the intersection's — what an out-of-range
+		// conversion would have produced is implementation-defined, so which
+		// negotiated version it might have collided with is not a thing to reason
+		// about. TestIntegerValueNamesExactlyOneInt pins the guard itself.
+		{"unholdable version", map[string]any{"version": 1e300, "submission": submission}, MetaPath + ".version"},
 		{"unsupported version", map[string]any{"version": 2.0, "submission": submission}, MetaPath + ".version"},
 		{"missing submission", map[string]any{"version": 1.0}, MetaPath + ".submission"},
 		{"unknown submission member", map[string]any{"version": 1.0, "submission": map[string]any{
