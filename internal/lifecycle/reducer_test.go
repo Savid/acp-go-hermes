@@ -86,13 +86,6 @@ func TestStrictEventRoutingAndRunOwnership(t *testing.T) {
 	record, found := reducer.State().Activity("act-1")
 	require.True(t, found)
 	require.Empty(t, record.RunID, "an activity carries a runId exactly when its own first sight supplied one")
-
-	err := reducer.Reduce(Delivery{
-		StreamID: "replacement", Sequence: 1, Carrier: CarrierSessionInfo, Event: openSnapshot(),
-	})
-	var stale *ViolationError
-	require.ErrorAs(t, err, &stale)
-	require.Equal(t, ViolationStaleStream, stale.Kind)
 }
 
 // TestReducerRefusesAnEventWithNoPayload pins that a discriminant without its
@@ -578,7 +571,12 @@ func TestReducerRefusesADeltaFromAnUnseenStream(t *testing.T) {
 	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
 }
 
-func TestReducerAdmitsOnlyValidInactiveReplacement(t *testing.T) {
+// TestReducerAdmitsOnlyAValidReplacement pins what a new incarnation's opening
+// snapshot is judged on: itself. The work the superseded projection still holds
+// is not among the grounds for refusing it — supersession is the natural end of
+// that incarnation, and failing its abandoned work is the durable-authority
+// host's business rather than a stream consumer's.
+func TestReducerAdmitsOnlyAValidReplacement(t *testing.T) {
 	t.Parallel()
 
 	replacement := Delivery{
@@ -606,7 +604,7 @@ func TestReducerAdmitsOnlyValidInactiveReplacement(t *testing.T) {
 		require.NoError(t, reducer.Reduce(replacement))
 	})
 
-	t.Run("owned_activity", func(t *testing.T) {
+	t.Run("live_run", func(t *testing.T) {
 		t.Parallel()
 
 		opening := openSnapshot()
@@ -614,28 +612,18 @@ func TestReducerAdmitsOnlyValidInactiveReplacement(t *testing.T) {
 			ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
 			Cause: CauseSession, OriginTurnID: "turn", RunID: "run",
 		}}
-		reducer, refusal := reduceAll(t, richConfiguration(), opening)
-		require.Nil(t, refusal)
-		require.Error(t, reducer.Reduce(replacement))
-		require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
-	})
-
-	t.Run("owned_action", func(t *testing.T) {
-		t.Parallel()
-
-		opening := openSnapshot()
-		opening.Snapshot.Activities = []ActivityUpdate{{
-			ActivityID: "activity", Kind: ActivityTask, State: ActivityRunning,
-			Cause: CauseSession, OriginTurnID: "turn",
-		}}
 		opening.Snapshot.Actions = []ActionUpdate{{
 			ActionID: "action", Kind: ActionPermission, State: ActionPending,
 			Owner: Owner{Type: OwnerActivity, ID: "activity"}, RunID: "run", BlocksForeground: stated(false),
 		}}
 		reducer, refusal := reduceAll(t, richConfiguration(), opening)
 		require.Nil(t, refusal)
-		require.Error(t, reducer.Reduce(replacement))
-		require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
+
+		require.NoError(t, reducer.Reduce(replacement),
+			"a legal opening snapshot was refused for the work the superseded projection holds")
+		require.Equal(t, "replacement", reducer.State().StreamID)
+		require.Empty(t, reducer.State().Activities, "the fresh projection adopted the superseded one's entities")
+		require.Empty(t, reducer.State().Actions)
 	})
 
 	t.Run("malformed_replacement", func(t *testing.T) {

@@ -155,6 +155,13 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // on a stream identity this reducer has not seen; a projection is per incarnation
 // and adopts nothing from the one it supersedes. A closed session admits no
 // incarnation at all, which is why the fence is judged before this.
+//
+// Supersession is the natural end of the prior incarnation, so the work that one
+// still held is never a ground to refuse this one: an otherwise legal opening
+// snapshot reduces while the superseded projection holds an uncertified run, open
+// turns, or nonterminal entities. Failing abandoned work belongs to the
+// durable-authority host, never to a stream consumer, and the conditions that
+// refuse a snapshot are exhaustive.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if _, superseded := r.retired[delivery.StreamID]; superseded {
 		return r.fail(delivery, ViolationStaleStream, "incarnation "+delivery.StreamID+" was superseded")
@@ -162,10 +169,6 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
-	}
-
-	if r.activeRun() {
-		return r.fail(delivery, ViolationStaleStream, "the active run lost incarnation "+r.state.StreamID)
 	}
 
 	next := &Reducer{negotiated: r.negotiated}
@@ -271,32 +274,6 @@ func (r *Reducer) apply(delivery Delivery) error {
 	}
 
 	return reduce(delivery)
-}
-
-func (r *Reducer) activeRun() bool {
-	if r.state.Quiescence.Certified {
-		return false
-	}
-
-	for index := range r.state.Turns {
-		if r.state.Turns[index].RunID != "" {
-			return true
-		}
-	}
-
-	for index := range r.state.Activities {
-		if r.state.Activities[index].RunID != "" {
-			return true
-		}
-	}
-
-	for index := range r.state.Actions {
-		if r.state.Actions[index].RunID != "" {
-			return true
-		}
-	}
-
-	return false
 }
 
 // invalidateQuiescence revokes the certified fact. Acceptance, a live foreground
