@@ -15,11 +15,7 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 		ID:   "openai",
 		Name: "OpenAI",
 		Models: map[string]nativehermes.ProviderModel{
-			"gpt-test": {
-				ID:        "gpt-test",
-				Name:      "GPT Test",
-				Reasoning: true,
-			},
+			"gpt-test": {ID: "gpt-test", Name: "GPT Test"},
 		},
 	}}}
 	option := modelConfigOption(sessionSnapshot{}, providers)

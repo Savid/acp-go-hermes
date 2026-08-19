@@ -2654,11 +2654,7 @@ func testProviders() nativehermes.ProvidersResponse {
 		ID:   "openai",
 		Name: "OpenAI",
 		Models: map[string]nativehermes.ProviderModel{
-			"gpt-test": {
-				ID:        "gpt-test",
-				Name:      "GPT Test",
-				Reasoning: true,
-			},
+			"gpt-test":  {ID: "gpt-test", Name: "GPT Test"},
 			"gpt-other": {ID: "gpt-other", Name: "GPT Other"},
 		},
 	}}}

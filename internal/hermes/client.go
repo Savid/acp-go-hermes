@@ -304,18 +304,18 @@ func (c *Client) readLoop() {
 	}
 }
 
+// SessionCreateResult and SessionResumeResult name the two identities a new or
+// resumed session answers with. Both responses also carry a message projection
+// and a session-info block; replay reads history through session.history, so
+// neither is decoded here.
 type SessionCreateResult struct {
-	SessionID       string          `json:"session_id"`
-	StoredSessionID string          `json:"stored_session_id"`
-	Messages        []Message       `json:"messages"`
-	Info            json.RawMessage `json:"info"`
+	SessionID       string `json:"session_id"`
+	StoredSessionID string `json:"stored_session_id"`
 }
 
 type SessionResumeResult struct {
-	SessionID  string          `json:"session_id"`
-	SessionKey string          `json:"session_key"`
-	Messages   []Message       `json:"messages"`
-	Info       json.RawMessage `json:"info"`
+	SessionID  string `json:"session_id"`
+	SessionKey string `json:"session_key"`
 }
 
 type SessionTitleResult struct {
@@ -324,7 +324,6 @@ type SessionTitleResult struct {
 }
 
 type SessionHistoryResult struct {
-	Count    int       `json:"count"`
 	Messages []Message `json:"messages"`
 }
 
@@ -393,22 +392,23 @@ func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Provider is one row of the gateway's model catalogue. The row also carries
+// authentication state, pricing, featured hints, and a per-model capability map
+// ({model: {fast, reasoning}}); the config surface this adapter builds publishes
+// the model ids and their names, so nothing else is decoded. Raw keeps the whole
+// row for callers that need to read the catalogue as the gateway wrote it.
 type Provider struct {
-	Slug          string                             `json:"slug"`
-	Name          string                             `json:"name"`
-	Authenticated bool                               `json:"authenticated"`
-	Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-	Models        []string                           `json:"models"`
-	Raw           json.RawMessage                    `json:"-"`
+	Slug   string          `json:"slug"`
+	Name   string          `json:"name"`
+	Models []string        `json:"models"`
+	Raw    json.RawMessage `json:"-"`
 }
 
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	var object struct {
-		Slug          string                             `json:"slug"`
-		Name          string                             `json:"name"`
-		Authenticated bool                               `json:"authenticated"`
-		Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-		Models        json.RawMessage                    `json:"models"`
+		Slug   string          `json:"slug"`
+		Name   string          `json:"name"`
+		Models json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
@@ -429,16 +429,10 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 
 	p.Slug = object.Slug
 	p.Name = object.Name
-	p.Authenticated = object.Authenticated
-	p.Capabilities = object.Capabilities
 	p.Models = models
 	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
-}
-
-type ProviderModelCapability struct {
-	Reasoning bool `json:"reasoning"`
 }
 
 type BranchResult struct {

@@ -364,7 +364,7 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	if out, err := client.SetSessionTitle(ctx, "live", "Durable"); err != nil || out.Pending || out.Title != "Durable" {
 		t.Fatalf("SetSessionTitle = %#v err=%v", out, err)
 	}
-	if out, err := client.History(ctx, "live"); err != nil || out.Count != 1 || len(out.Messages) != 1 {
+	if out, err := client.History(ctx, "live"); err != nil || len(out.Messages) != 1 || out.Messages[0].Text != "hello" {
 		t.Fatalf("History = %#v err=%v", out, err)
 	}
 	if out, err := client.ActiveList(ctx); err != nil || len(out.Sessions) != 1 {
@@ -559,7 +559,7 @@ func TestClientDialAndJSONBranches(t *testing.T) {
 		t.Fatal("Provider accepted malformed JSON")
 	}
 	if err := provider.UnmarshalJSON([]byte(`{"slug":"openrouter","name":"OpenRouter","authenticated":true,"is_current":false,"is_user_defined":false,"source":"built-in","total_models":1,"models":["anthropic/claude-fable-5"],"capabilities":{"anthropic/claude-fable-5":{"fast":false,"reasoning":true}},"pricing":{"anthropic/claude-fable-5":{"cache":"$1.00","free":false,"input":"$10.00","output":"$50.00"}}}`)); err != nil ||
-		provider.Slug != "openrouter" || provider.Models[0] != "anthropic/claude-fable-5" || !provider.Capabilities["anthropic/claude-fable-5"].Reasoning {
+		provider.Slug != "openrouter" || provider.Name != "OpenRouter" || len(provider.Models) != 1 || provider.Models[0] != "anthropic/claude-fable-5" {
 		t.Fatalf("Provider slug shape = %#v err=%v", provider, err)
 	}
 	for _, raw := range []string{

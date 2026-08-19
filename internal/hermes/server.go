@@ -449,9 +449,8 @@ type ProviderInfo struct {
 }
 
 type ProviderModel struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Reasoning bool   `json:"reasoning"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type ProcessIdentity struct {
@@ -2223,12 +2222,7 @@ func providersFromGateway(result ModelOptionsResult) ProvidersResponse {
 				continue
 			}
 
-			capability := provider.Capabilities[modelID]
-			info.Models[modelID] = ProviderModel{
-				ID:        modelID,
-				Name:      modelID,
-				Reasoning: capability.Reasoning,
-			}
+			info.Models[modelID] = ProviderModel{ID: modelID, Name: modelID}
 		}
 
 		providers = append(providers, info)

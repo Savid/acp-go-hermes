@@ -922,7 +922,7 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 		t.Fatal("Fork succeeded after repeated live session not found")
 	}
 	providers, err := server.ConfigProviders(ctx)
-	if err != nil || len(providers.Providers) != 2 || !providers.Providers[0].Models["openai/gpt-test"].Reasoning {
+	if err != nil || len(providers.Providers) != 2 || providers.Providers[0].Models["openai/gpt-test"].ID != "openai/gpt-test" {
 		t.Fatalf("ConfigProviders = %#v err=%v", providers, err)
 	}
 	if err := server.Close(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1821,11 +1821,10 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 		t.Fatalf("ProvidersResponse valid = %#v err=%v", providers, err)
 	}
 	mapped := providersFromGateway(ModelOptionsResult{Providers: []Provider{{
-		Slug:         "p",
-		Models:       []string{"", "named"},
-		Capabilities: map[string]ProviderModelCapability{"named": {Reasoning: true}},
+		Slug:   "p",
+		Models: []string{"", "named"},
 	}}})
-	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || !model.Reasoning {
+	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || model.ID != "named" {
 		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
 	}
 	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
