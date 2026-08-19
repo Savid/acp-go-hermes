@@ -3499,6 +3499,23 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 	return script
 }
 
+// exitWhenParentTestExits is the fake gateway generation's own teardown. The
+// suite exercises closes that deliberately leave a process retained — an
+// unproven containment keeps the native tree alive on purpose — so a generation
+// that only died when its owner killed it outlived the suite that started it.
+// It reaps itself the moment the test binary that launched it is gone.
+func exitWhenParentTestExits() {
+	owner := os.Getppid()
+
+	go func() {
+		for range time.Tick(100 * time.Millisecond) {
+			if os.Getppid() != owner {
+				os.Exit(0)
+			}
+		}
+	}()
+}
+
 func runFakeHermesGatewayProcess(args []string, mode string) error {
 	for _, arg := range args {
 		if arg == "--version" {
@@ -3507,6 +3524,9 @@ func runFakeHermesGatewayProcess(args []string, mode string) error {
 			return nil
 		}
 	}
+
+	exitWhenParentTestExits()
+
 	for _, arg := range args {
 		capture, ok := strings.CutPrefix(arg, mcpEnvCapturePrefix)
 		if !ok {
