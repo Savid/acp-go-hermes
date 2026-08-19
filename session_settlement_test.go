@@ -815,3 +815,41 @@ func TestAgentCloseMakesTheDurableCommitAWireCloseWould(t *testing.T) {
 		"the embedded shutdown dropped a commit a wire close would have made")
 	require.True(t, session.lifecycleStream().fenced(), "the shutdown left the incarnation able to speak")
 }
+
+// TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary pins the ladder's first
+// rungs on the embedded path: admission closes, the turn in flight is cancelled,
+// and the settlement it owes completes before the shutdown's own boundary runs.
+func TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+
+	agent := newTestAgent(WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+	agent.sessions[session.id] = session
+
+	type promptOutcome struct {
+		resp acp.PromptResponse
+		err  error
+	}
+
+	promptDone := make(chan promptOutcome, 1)
+
+	go func() {
+		resp, promptErr := session.Prompt(context.Background(), TextPromptRequest(session.id, "shutdown-active", "hang"))
+		promptDone <- promptOutcome{resp: resp, err: promptErr}
+	}()
+	<-started
+
+	require.NoError(t, agent.Close())
+
+	out := <-promptDone
+	require.NoError(t, out.err)
+	require.Equal(t, acp.StopReasonCancelled, out.resp.StopReason,
+		"the shutdown did not cancel the turn in flight")
+}

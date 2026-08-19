@@ -67,10 +67,10 @@ func TestInMemoryStoreEnforcesTombstoneFinality(t *testing.T) {
 
 	// A different session is untouched by the tombstone on this one.
 	other := SessionKey{SessionID: "s2", Subpath: SessionStoreMainSubpath}
-	if err := store.Replace(ctx, other, []SessionStoreReplacement{
+	if replaceErr := store.Replace(ctx, other, []SessionStoreReplacement{
 		{Key: other, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
-	}); err != nil {
-		t.Fatalf("replace an untombstoned session: %v", err)
+	}); replaceErr != nil {
+		t.Fatalf("replace an untombstoned session: %v", replaceErr)
 	}
 	loaded, err := store.Load(ctx, other)
 	if err != nil || len(loaded) != 1 {
