@@ -154,6 +154,15 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return fmt.Errorf("replacements must include the main key exactly once")
 	}
 
+	// A tombstone is final, and the store is where that finality lives: an
+	// adapter-level deletion marker is one process's memory, while the deleted
+	// state is the answer every reader of this store is owed. A generation
+	// addressed to a session `Delete` removed writes nothing, clears nothing, and
+	// succeeds — the same terms `Append` already answers on.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
+
 	now := time.Now().UnixMilli()
 
 	for candidate := range s.entries {

@@ -8,6 +8,76 @@ import (
 	"testing"
 )
 
+// TestInMemoryStoreEnforcesTombstoneFinality pins the store's own last word on a
+// deleted id. Both writing verbs answer it: neither `Append` nor `Replace` may
+// clear a tombstone it did not create, because the deleted state is the answer
+// every reader of this store is owed and an adapter-level deletion marker is
+// only one process's memory of it.
+func TestInMemoryStoreEnforcesTombstoneFinality(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	idmap := SessionKey{SessionID: "s1", Subpath: "idmap"}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"sessionId":"s1"}`)}},
+	}); err != nil {
+		t.Fatalf("seed replace: %v", err)
+	}
+	if err := store.Delete(ctx, main); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"sessionId":"s1"}`)}},
+	}); err != nil {
+		t.Fatalf("replace over a tombstone must succeed without writing: %v", err)
+	}
+	if err := store.Append(ctx, main, []SessionStoreEntry{json.RawMessage(`{"appended":true}`)}); err != nil {
+		t.Fatalf("append over a tombstone must succeed without writing: %v", err)
+	}
+
+	for _, key := range []SessionKey{main, idmap} {
+		loaded, err := store.Load(ctx, key)
+		if err != nil {
+			t.Fatalf("load %q: %v", key.Subpath, err)
+		}
+		if len(loaded) != 0 {
+			t.Fatalf("a write cleared a tombstone it did not create at %q: %#v", key.Subpath, loaded)
+		}
+	}
+
+	sessions, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("a tombstoned session was listed after a later write: %#v", sessions)
+	}
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	if err != nil {
+		t.Fatalf("ListSubkeys: %v", err)
+	}
+	if len(subkeys) != 0 {
+		t.Fatalf("a tombstoned session listed subkeys after a later write: %#v", subkeys)
+	}
+
+	// A different session is untouched by the tombstone on this one.
+	other := SessionKey{SessionID: "s2", Subpath: SessionStoreMainSubpath}
+	if err := store.Replace(ctx, other, []SessionStoreReplacement{
+		{Key: other, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+	}); err != nil {
+		t.Fatalf("replace an untombstoned session: %v", err)
+	}
+	loaded, err := store.Load(ctx, other)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("untombstoned session load = %#v err=%v", loaded, err)
+	}
+}
+
 func TestInMemoryStoreReplaceTombstonesUnlistedSubpaths(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
