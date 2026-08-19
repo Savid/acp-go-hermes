@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,6 +344,183 @@ func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
 	require.Empty(t, durable.StopReason, "no stop reason names a failure")
 }
 
+// refuseFirstReplaceStore refuses exactly one Replace and then behaves like the
+// in-memory store, which is the store a host recovers: the write that failed is
+// the write the retry is expected to land.
+type refuseFirstReplaceStore struct {
+	*InMemorySessionStore
+	mu       sync.Mutex
+	refusals int
+	err      error
+}
+
+func (s *refuseFirstReplaceStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
+	s.mu.Lock()
+	first := s.refusals == 0
+	s.refusals++
+	s.mu.Unlock()
+
+	if first {
+		return s.err
+	}
+
+	return s.InMemorySessionStore.Replace(ctx, main, replacements)
+}
+
+// TestFailedCloseBoundaryKeepsTheIDCloseable pins what a close that did not
+// complete its boundary leaves behind. The rungs the boundary owes — a tree
+// proved contained, a generation the store accepted — are still owed when it
+// fails, and the id is the only name the host has for them. Detaching it would
+// answer the retry the failure asks for with unknown_session and strand the work
+// with nothing able to reach it, so the session stays addressable and the next
+// close runs the boundary again.
+func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
+	t.Run("containment", func(t *testing.T) {
+		client := newFakeHermesClient()
+
+		var closes atomic.Int32
+
+		client.closeFunc = func(context.Context) error {
+			if closes.Add(1) == 1 {
+				return errors.New("containment failed")
+			}
+
+			return nil
+		}
+
+		agent := newTestAgent()
+		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		})
+		agent.setAgentClient(newRecordingAgentClient())
+		session := testSession(agent, client)
+		require.NoError(t, session.openLifecycleStream())
+
+		session.mu.Lock()
+		session.title = "renamed-before-close"
+		session.mu.Unlock()
+
+		agent.sessions[session.id] = session
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		require.ErrorContains(t, err, "containment failed")
+
+		resolved, resolveErr := agent.session(session.id)
+		require.NoError(t, resolveErr, "the failed close detached the id its retry needs")
+		require.Same(t, session, resolved)
+
+		_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err)
+		require.EqualValues(t, 2, closes.Load(),
+			"the retry answered success without re-running the containment boundary")
+
+		_, resolveErr = agent.session(session.id)
+		require.Error(t, resolveErr, "a completed close still detaches the id")
+
+		// The generation the failed boundary captured is the one the retry owed,
+		// and it reaches the store rather than dying with the first attempt.
+		entries, loadErr := agent.sessionStore().Load(t.Context(), SessionKey{
+			SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+		})
+		require.NoError(t, loadErr)
+		require.NotEmpty(t, entries)
+		require.Contains(t, string(entries[len(entries)-1]), "renamed-before-close")
+	})
+
+	// The refused commit is the same owed rung whether the incarnation still has
+	// a stream to speak on or never opened one: the durable rung is not a stream
+	// rung, so both boundaries retain what the store would not take.
+	for name, opened := range map[string]bool{"durable commit": true, "durable commit on an unopened stream": false} {
+		t.Run(name, func(t *testing.T) {
+			store := &refuseFirstReplaceStore{
+				InMemorySessionStore: NewInMemorySessionStore(),
+				err:                  errors.New("durable commit refused"),
+			}
+			agent := newTestAgent(WithSessionStore(store))
+			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+			})
+			agent.setAgentClient(newRecordingAgentClient())
+			client := newFakeHermesClient()
+			session := testSession(agent, client)
+			require.NoError(t, session.openLifecycleStream())
+
+			if opened {
+				require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+			}
+
+			session.mu.Lock()
+			session.title = "renamed-before-close"
+			session.mu.Unlock()
+
+			agent.sessions[session.id] = session
+			key := SessionKey{SessionID: string(session.id), Subpath: SessionStoreMainSubpath}
+
+			_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+			require.ErrorContains(t, err, "durable commit refused")
+
+			refused, loadErr := store.Load(t.Context(), key)
+			require.NoError(t, loadErr)
+			require.Empty(t, refused, "precondition: the refused commit reached the store anyway")
+
+			resolved, resolveErr := agent.session(session.id)
+			require.NoError(t, resolveErr, "the failed close detached the id its retry needs")
+			require.Same(t, session, resolved)
+
+			_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+			require.NoError(t, err)
+
+			entries, loadErr := store.Load(t.Context(), key)
+			require.NoError(t, loadErr)
+			require.NotEmpty(t, entries, "the retry never made the commit the failed close owed")
+			require.Contains(t, string(entries[len(entries)-1]), "renamed-before-close")
+
+			_, resolveErr = agent.session(session.id)
+			require.Error(t, resolveErr, "a completed close still detaches the id")
+		})
+	}
+}
+
+// TestQuarantinedContainmentStillLeavesTheIDCloseable reconciles the retained id
+// with the generation-root quarantine. The two answer different questions: the
+// quarantine says a root this adapter could not prove empty may never back a
+// resumed runtime again, while the retained id says the close boundary is still
+// owed and still reachable. A quarantined session therefore refuses to resume a
+// turn and accepts another close, which is the only operation that can discharge
+// what it owes.
+func TestQuarantinedContainmentStillLeavesTheIDCloseable(t *testing.T) {
+	client := newFakeHermesClient()
+
+	var closes atomic.Int32
+
+	client.closeFunc = func(context.Context) error {
+		if closes.Add(1) == 1 {
+			return ErrProcessContainmentIncomplete
+		}
+
+		return nil
+	}
+
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	agent.sessions[session.id] = session
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrProcessContainmentIncomplete,
+		"the incomplete generation root was not quarantined")
+	require.NotNil(t, agent.activeSession(session.id), "the quarantine detached the id the retry needs")
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, closes.Load())
+	require.Nil(t, agent.activeSession(session.id))
+
+	// The quarantine outlives the completed close: the root it named is still one
+	// no resume may build on.
+	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrProcessContainmentIncomplete)
+}
+
 // lifecycleUpdateCount counts the notifications that actually carried a
 // lifecycle envelope, which is what "emits nothing on the dead stream" is a
 // claim about.
@@ -571,8 +749,9 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		require.True(t, owned)
 		require.NoError(t, session.lifecycleStream().announceAction(turnCtx, action))
 		session.agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: conn, failAt: 1})
-		err := session.publishClosedBoundary(t.Context(), session.lifecycleStream(), nil, containmentProof{})
+		published, err := session.publishClosedBoundary(t.Context(), session.lifecycleStream(), nil, containmentProof{})
 		require.ErrorContains(t, err, "lifecycle delivery failed")
+		require.False(t, published, "a rung that stopped before the durable one discharged it")
 	})
 
 	t.Run("publication", func(t *testing.T) {
@@ -585,13 +764,16 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 			}},
 			deadline: time.Second,
 		}
-		err := session.publishClosedBoundary(t.Context(), nil, commit, containmentProof{})
+		published, err := session.publishClosedBoundary(t.Context(), nil, commit, containmentProof{})
 		require.Error(t, err)
+		require.False(t, published, "a refused commit was reported as durable")
 	})
 
 	t.Run("unproved vacancy", func(t *testing.T) {
 		session := testSession(newTestAgent(), newFakeHermesClient())
-		require.NoError(t, session.publishClosedBoundary(t.Context(), nil, nil, containmentProof{}))
+		published, err := session.publishClosedBoundary(t.Context(), nil, nil, containmentProof{})
+		require.NoError(t, err)
+		require.True(t, published, "a boundary with no commit to make still owes none")
 	})
 
 	t.Run("proved vacancy", func(t *testing.T) {
@@ -607,9 +789,11 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		session := testSession(agent, newFakeHermesClient())
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
-		require.NoError(t, session.publishClosedBoundary(t.Context(), session.lifecycleStream(), nil, containmentProof{
+		published, err := session.publishClosedBoundary(t.Context(), session.lifecycleStream(), nil, containmentProof{
 			vacantProven: true, empty: true, barrier: "root",
-		}))
+		})
+		require.NoError(t, err)
+		require.True(t, published)
 	})
 }
 

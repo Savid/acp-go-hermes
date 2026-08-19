@@ -823,11 +823,22 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	session.lifecycleMu.Unlock()
 	a.recordIncompleteContainment(closeErr, params.SessionId, session.client.XDGDirs().Root)
 
+	// The id is detached only by a close that completed its boundary. A close
+	// that failed one — a tree it could not prove contained, a commit the store
+	// refused — has left work owed on this session, and dropping the id would
+	// leave that work with no name to reach it by: the host would be answered
+	// unknown_session on the very retry the failure asks for. The session stays
+	// addressable, admits no further prompt, and a later close runs the boundary
+	// again.
+	if err := errors.Join(waitErr, closeErr); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	return acp.CloseSessionResponse{}, errors.Join(waitErr, closeErr)
+	return acp.CloseSessionResponse{}, nil
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {

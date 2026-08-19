@@ -92,6 +92,8 @@ type session struct {
 	lifecycleClosing    bool
 	foregroundText      []byte
 	closed              bool
+	containmentSettled  bool
+	owedCloseCommit     *sessionStoreCommit
 }
 
 // reloadMCPForAuthorizedTurn closes the gap between native process startup and
@@ -873,12 +875,18 @@ func (s *session) closeAfterTurns(ctx context.Context, deleteNative bool) error 
 	return errors.Join(waitErr, s.closeLocked(ctx, deleteNative))
 }
 
+// closeLocked runs the native containment boundary once it completes. A
+// boundary that did not complete is not spent: the tree it owned may still be
+// running, so the latch that short-circuits a repeat close is the completion,
+// never the attempt, and the next close re-runs every step. The lifetime latch
+// is separate and set on the first attempt, because the session object's
+// teardown has begun either way and no prompt or resume may cross it.
 func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
 	s.mu.Lock()
-	if s.closed {
+	if s.containmentSettled {
 		s.mu.Unlock()
 
 		return nil
@@ -900,6 +908,8 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 	s.cancelTurnLocked(client, true)
 
 	if client == nil || runtimeUnavailable {
+		s.markContainmentSettled()
+
 		return nil
 	}
 
@@ -928,7 +938,20 @@ func (s *session) closeLocked(ctx context.Context, deleteNative bool) error {
 
 	closeCancel()
 
-	return errors.Join(deleteErr, err)
+	joined := errors.Join(deleteErr, err)
+	if joined == nil {
+		s.markContainmentSettled()
+	}
+
+	return joined
+}
+
+// markContainmentSettled records that the native containment boundary completed,
+// which is what makes a later close a no-op rather than a retry.
+func (s *session) markContainmentSettled() {
+	s.mu.Lock()
+	s.containmentSettled = true
+	s.mu.Unlock()
 }
 
 func (s *session) info() acp.SessionInfo {

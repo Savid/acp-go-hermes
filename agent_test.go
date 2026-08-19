@@ -238,7 +238,12 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 	})
 }
 
-func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
+// A containment verdict is terminal for the agent's life: the wrapper cannot
+// forget a tree it failed to prove empty, whatever happens to the session
+// afterwards. The id that failed the boundary stays addressable, because the
+// boundary is still owed, and the embedded shutdown still reports the verdict
+// its sweep re-reaches.
+func TestFailedContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
 	agent := newTestAgent()
@@ -247,11 +252,11 @@ func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.Nil(t, agent.activeSession(session.id))
+	require.NotNil(t, agent.activeSession(session.id), "the failed boundary detached the id its retry needs")
 	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 }
 
-func TestServePreservesContainmentEvidenceAfterSessionRemoval(t *testing.T) {
+func TestServePreservesContainmentEvidenceAfterFailedClose(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
 	agent := newTestAgent()

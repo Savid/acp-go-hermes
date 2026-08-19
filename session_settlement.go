@@ -642,16 +642,24 @@ func (s *session) nativeRun(
 // durable after it. Containment removes the generation's own files, so the read
 // cannot follow it; the commit is the durability boundary the ordering rule is
 // stated against, and it is what happens afterwards.
+//
+// A boundary that fails is not spent. The generation it captured but could not
+// publish is retained on the session, and the next close of the same id publishes
+// exactly those bytes: the runtime they were read from is gone by then, so a
+// retry that re-read would have nothing to read and the owed commit would be lost
+// for good.
 func (s *session) settleClosedSession(ctx context.Context) error {
 	stream := s.lifecycleStream()
 
-	var (
-		commit     *sessionStoreCommit
-		captureErr error
-	)
+	var captureErr error
+
+	// A retry owes the commit the failed boundary already captured, so it never
+	// captures a second one.
+	commit := s.takeOwedCloseCommit()
 
 	committed := s.committedState()
-	if s.snapshotBlockedReason() == "" && s.ensureNotPoisoned() == nil && !stream.fenced() && committed.foreground == nil {
+	if commit == nil && s.snapshotBlockedReason() == "" && s.ensureNotPoisoned() == nil &&
+		!stream.fenced() && committed.foreground == nil {
 		commit, captureErr = s.captureSnapshotLocked(context.WithoutCancel(ctx), nil)
 	}
 
@@ -666,6 +674,7 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		// terminal is immutable, so nothing is terminalized, nothing new is
 		// committed, no quiescence fact is stated, and the stream is still fenced.
 		stream.fence()
+		s.retainOwedCloseCommit(commit)
 
 		return errors.Join(captureErr, closeErr)
 	}
@@ -692,16 +701,45 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		var commitErr error
 		if commit != nil {
 			commitErr = s.publishSnapshotLocked(context.WithoutCancel(ctx), commit)
+			if commitErr != nil {
+				s.retainOwedCloseCommit(commit)
+			}
 		}
 
 		return errors.Join(captureErr, commitErr)
 	}
 
 	proof := s.closedContainmentProof()
-	settleErr := s.publishClosedBoundary(ctx, stream, commit, proof)
+	published, settleErr := s.publishClosedBoundary(ctx, stream, commit, proof)
+
+	if !published {
+		s.retainOwedCloseCommit(commit)
+	}
+
 	stream.fence()
 
 	return errors.Join(captureErr, settleErr)
+}
+
+// takeOwedCloseCommit hands back the generation a failed close boundary captured
+// and could not publish, clearing it so exactly one retry owns it.
+func (s *session) takeOwedCloseCommit() *sessionStoreCommit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	commit := s.owedCloseCommit
+	s.owedCloseCommit = nil
+
+	return commit
+}
+
+// retainOwedCloseCommit keeps an unpublished generation for the next close of
+// this id. It is only ever reached with the commit this boundary took, so a
+// boundary that carried none records none and owes none.
+func (s *session) retainOwedCloseCommit(commit *sessionStoreCommit) {
+	s.mu.Lock()
+	s.owedCloseCommit = commit
+	s.mu.Unlock()
 }
 
 // publishClosedBoundary runs the three ordered rungs a completed close boundary
@@ -715,29 +753,33 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 // boundary that skipped its terminal transitions and its quiescence fact: those
 // emissions would have nowhere to be made afterwards, and the settlement
 // response is not allowed to precede them.
+//
+// The first result reports whether the durable rung is discharged — the commit
+// reached the store, or there was none to make — so a failed boundary knows
+// whether the retry still owes it.
 func (s *session) publishClosedBoundary(
 	ctx context.Context,
 	stream *sessionStream,
 	commit *sessionStoreCommit,
 	proof containmentProof,
-) error {
+) (bool, error) {
 	ctx = context.WithoutCancel(ctx)
 
 	if err := stream.terminalizeBlockers(ctx); err != nil {
-		return err
+		return false, err
 	}
 
 	if commit != nil {
 		if err := s.publishSnapshotLocked(ctx, commit); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	if !proof.vacant() {
-		return nil
+		return true, nil
 	}
 
-	return stream.certify(ctx, proof.barrier)
+	return true, stream.certify(ctx, proof.barrier)
 }
 
 // closedContainmentProof reads what the close boundary that just completed proved
