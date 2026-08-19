@@ -703,7 +703,10 @@ func TestAgentStandaloneAuthorityPathRejectsDeletedDescriptor(t *testing.T) {
 	require.ErrorContains(t, err, "deleted directory")
 }
 
-func TestAgentStandaloneOwnerlessMarkerRequiresLegacyAffinityLock(t *testing.T) {
+// TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock pins the
+// audit's reading of a quarantine marker whose owner digest holds no permanent
+// affinity lock: the root is refused until that lock exists.
+func TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
 	owners := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)

@@ -76,23 +76,28 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	}
 }
 
-func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testing.T) {
+// TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive pins
+// what a shared-home session does with a native state archive written by an
+// isolated per-session home: it hydrates the metadata without restoring that
+// archive into the shared residence, and its own next snapshot removes the
+// archive from the store rather than carrying it forward.
+func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *testing.T) {
 	ctx := t.Context()
 	store := NewInMemorySessionStore()
-	legacyXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "legacy")
+	isolatedXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "isolated")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedSQLiteStore(t, filepath.Join(legacyXDG.Root, "state.db"))
-	legacyClient := newFakeHermesClient()
-	legacyClient.xdg = legacyXDG
-	legacySession := testSession(newTestAgent(WithSessionStore(store)), legacyClient)
-	if err := legacySession.snapshotToStore(ctx); err != nil {
-		t.Fatalf("write legacy snapshot: %v", err)
+	seedSQLiteStore(t, filepath.Join(isolatedXDG.Root, "state.db"))
+	isolatedClient := newFakeHermesClient()
+	isolatedClient.xdg = isolatedXDG
+	isolatedSession := testSession(newTestAgent(WithSessionStore(store)), isolatedClient)
+	if err := isolatedSession.snapshotToStore(ctx); err != nil {
+		t.Fatalf("write per-session-home snapshot: %v", err)
 	}
-	legacyEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
-	if err != nil || len(legacyEntries) == 0 {
-		t.Fatalf("legacy archive entries = %d, err=%v", len(legacyEntries), err)
+	isolatedEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
+	if err != nil || len(isolatedEntries) == 0 {
+		t.Fatalf("per-session-home archive entries = %d, err=%v", len(isolatedEntries), err)
 	}
 
 	wrapperXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-wrapper")
@@ -104,7 +109,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testi
 		t.Fatalf("metadata-only hydrate snapshot=%#v ok=%t err=%v", snapshot, ok, err)
 	}
 	if _, err := os.Stat(filepath.Join(wrapperXDG.Root, "state.db")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy native archive restored into shared wrapper: %v", err)
+		t.Fatalf("per-session-home native archive restored into shared wrapper: %v", err)
 	}
 
 	sharedHome := t.TempDir()
@@ -125,7 +130,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testi
 	}
 	entries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("legacy state-db archive was not purged: entries=%d err=%v", len(entries), err)
+		t.Fatalf("per-session-home state-db archive was not purged: entries=%d err=%v", len(entries), err)
 	}
 	mainEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: SessionStoreMainSubpath})
 	if err != nil || len(mainEntries) == 0 {
