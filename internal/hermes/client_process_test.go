@@ -583,10 +583,10 @@ func TestProcessStartCloseAndHelpers(t *testing.T) {
 	// 1011ms against 2ms for the same binary built without -race — so the three
 	// starts and their version probes spend the better part of ten seconds doing
 	// nothing but bringing supervisors up. The coverage gate runs -race in the
-	// initial PID namespace, where the descendant and vacancy sweeps also walk the
-	// host's full process table, and the old ten-second budget expired mid-probe.
-	// The work behind it is bounded by the fixed number of launches this case
-	// makes, so the budget is what has to give.
+	// initial PID namespace, where the descendant and vacancy sweeps also walk
+	// the host's full process table. The work is bounded by the fixed number of
+	// launches this case makes, so the budget is sized for those launches rather
+	// than for the wall clock a smaller one would allow.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	usedConfigure := false
