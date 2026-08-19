@@ -60,7 +60,6 @@ const (
 	evtApprovalRequest    = "approval.request"
 	evtClarifyRequest     = "clarify.request"
 	evtMessagePartUpdated = "message.part.updated"
-	evtServerConnected    = "server.connected"
 )
 
 var errPromptCancelled = errors.New("prompt cancelled")
@@ -92,9 +91,10 @@ func mapTurnFailure(err error) error {
 	return acp.NewInternalError(data)
 }
 
-// reconcileConnected drives the reconnect reconciliation for a turn. The
-// gateway holds no queue a reconnected client can poll, so the whole
-// reconciliation is the MCP reload the reconnected turn owes.
+// reconcileConnected settles what a turn owes the runtime it is about to run
+// against: the MCP reload every turn performs before its frame is submitted.
+// The gateway announces no reconnection and holds no queue to poll, so this is
+// the whole reconciliation, and it runs once per turn.
 func (s *session) reconcileConnected(ctx context.Context) error {
 	if err := s.reloadMCPForAuthorizedTurn(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -1215,7 +1215,7 @@ func (s *session) drainClientBacklog(ctx context.Context) error {
 	for {
 		select {
 		case event := <-s.client.Events():
-			if suppress || event.Type == evtServerConnected || s.shouldSuppressEvent(event) {
+			if suppress || s.shouldSuppressEvent(event) {
 				continue
 			}
 

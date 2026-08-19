@@ -1042,7 +1042,6 @@ func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	client.errs <- errors.New("idle stream closed")
-	client.events <- nativehermes.TurnEvent{Type: "server.connected"}
 	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		return nativehermes.NativeMessage{
 			Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"},
@@ -1993,51 +1992,6 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 		}
 	})
 
-	// A gateway that reconnects mid-turn owes the reconnected runtime the MCP
-	// reload the turn was admitted under. A reload the gateway refuses fails
-	// that turn rather than letting it continue against a runtime whose tool
-	// surface is unknown.
-	t.Run("reconnect mid-turn fails the turn when the reload is refused", func(t *testing.T) {
-		client := newFakeHermesClient()
-		started := make(chan struct{})
-		client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-			close(started)
-			<-ctx.Done()
-
-			return nativehermes.NativeMessage{}, ctx.Err()
-		}
-		session := testSession(newTestAgent(), client)
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		done := make(chan error, 1)
-		go func() {
-			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "reconnect-turn", "reply"))
-			done <- err
-		}()
-		select {
-		case <-started:
-		case <-ctx.Done():
-			t.Fatal("Prompt did not start")
-		}
-
-		session.mu.Lock()
-		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
-		session.mcpReloadComplete = false
-		session.mu.Unlock()
-
-		client.reloadErr = errors.New("reload refused")
-		client.events <- nativehermes.TurnEvent{Type: "server.connected"}
-
-		select {
-		case err := <-done:
-			if err == nil || !strings.Contains(err.Error(), "reload refused") {
-				t.Fatalf("reconnect reload failure = %v", err)
-			}
-		case <-ctx.Done():
-			t.Fatal("Prompt did not finish")
-		}
-	})
 }
 
 func TestPromptSuccessCancelAndErrors(t *testing.T) {
@@ -2288,7 +2242,7 @@ func (s *countingSessionStore) replaceCount() int {
 func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("server connected is ignored before final message", func(t *testing.T) {
+	t.Run("a mid-turn part update streams before the final message", func(t *testing.T) {
 		client := newFakeHermesClient()
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
@@ -2308,7 +2262,6 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 			done <- err
 		}()
 		<-started
-		client.events <- nativehermes.TurnEvent{Type: "server.connected"}
 		client.events <- nativehermes.TurnEvent{
 			Type:       "message.part.updated",
 			Properties: json.RawMessage(`{"id":"event-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
@@ -2454,7 +2407,89 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 	turnCtx := session.beginTurn(t.Context(), "event-edge-turn")
 	testApprovalAndClarifyEventBranches(t, turnCtx, session, client, conn)
 	session.finishTurn()
-	testForeignEventAndPartHelperBranches(t, ctx, session)
+	testEmptyAndMalformedEventMapperBranches(t, ctx, session)
+}
+
+// TestForeignNativeSessionEventsAreRefused pins the guard every turn event
+// carries: the gateway stream is per-process, not per-session, so an event
+// naming another native session is not this session's business. Each of the
+// three turn events is fed in the shape the adapter really receives, with a
+// native session id this session does not own.
+func TestForeignNativeSessionEventsAreRefused(t *testing.T) {
+	client := newFakeHermesClient()
+	conn := newRecordingAgentClient()
+	agent := newTestAgent()
+	agent.setAgentClient(conn)
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+
+	session := testSession(agent, client)
+	ctx := session.beginTurn(t.Context(), "foreign-session-turn")
+
+	defer session.finishTurn()
+
+	for _, test := range []struct {
+		name       string
+		event      nativehermes.TurnEvent
+		wantAction string
+	}{
+		{
+			name: "approval.request",
+			event: nativehermes.TurnEvent{
+				Type: "approval.request",
+				Properties: json.RawMessage(`{
+					"id":"p-foreign",
+					"sessionID":"native-other",
+					"action":"edit",
+					"metadata":{"filepath":"foreign.txt"},
+					"tool":{"messageID":"m1","callID":"c1"}
+				}`),
+			},
+			wantAction: "no permission request",
+		},
+		{
+			name: "clarify.request",
+			event: nativehermes.TurnEvent{
+				Type:       "clarify.request",
+				Properties: json.RawMessage(`{"id":"q-foreign","sessionID":"native-other","questions":[{"question":"Continue?"}]}`),
+			},
+			wantAction: "no elicitation",
+		},
+		{
+			name: "message.part.updated",
+			event: nativehermes.TurnEvent{
+				Type:       "message.part.updated",
+				Properties: json.RawMessage(`{"id":"part-foreign","sessionID":"native-other","messageID":"assistant","type":"text","text":"not ours"}`),
+			},
+			wantAction: "no session update",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := session.handleEvent(ctx, test.event); err != nil {
+				t.Fatalf("foreign %s: %v", test.name, err)
+			}
+		})
+	}
+
+	if got := conn.permissionRequestCount(); got != 0 {
+		t.Fatalf("foreign approval requested permission %d times", got)
+	}
+	if got := client.permissionReplyCount(); got != 0 {
+		t.Fatalf("foreign approval answered the gateway %d times", got)
+	}
+	if got := len(conn.elicitations); got != 0 {
+		t.Fatalf("foreign clarify elicited %d times", got)
+	}
+	if got := client.questionReplyCount(); got != 0 {
+		t.Fatalf("foreign clarify answered the gateway %d times", got)
+	}
+	if got := conn.updateCount(); got != 0 {
+		t.Fatalf("foreign part emitted %d session updates", got)
+	}
+	// A foreign part is refused before it is marked, so the same part id
+	// arriving for this session is still new work.
+	if !session.markPart(nativehermes.Part{ID: "part-foreign", SessionID: "native-1", MessageID: "assistant", Type: "text", Text: "not ours"}) {
+		t.Fatal("a foreign part was recorded as this session's own")
+	}
 }
 
 func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, session *session, client *fakeHermesClient, conn *recordingAgentClient) {
@@ -2501,15 +2536,13 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 	}
 }
 
-func testForeignEventAndPartHelperBranches(t *testing.T, ctx context.Context, session *session) {
+// testEmptyAndMalformedEventMapperBranches covers the mappers' own refusals:
+// an event body that decodes to nothing, and inputs that carry no content to
+// map. Foreign-session refusal is a separate rule, pinned by
+// TestForeignNativeSessionEventsAreRefused.
+func testEmptyAndMalformedEventMapperBranches(t *testing.T, ctx context.Context, session *session) {
 	t.Helper()
 
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "todo.updated", Properties: json.RawMessage(`{"sessionID":"other","todos":[{"content":"x"}]}`)}); err != nil {
-		t.Fatalf("foreign todo event: %v", err)
-	}
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "clarify.request", Properties: json.RawMessage(`{"request":{"id":"q","sessionID":"other"}}`)}); err != nil {
-		t.Fatalf("foreign question event: %v", err)
-	}
 	if _, ok := eventPart(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed eventPart succeeded")
 	}

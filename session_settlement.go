@@ -483,14 +483,6 @@ func (s *session) runPromptTurn(
 	for {
 		select {
 		case event := <-s.client.Events():
-			if event.Type == evtServerConnected {
-				if err := s.reconcileConnected(turnCtx); err != nil {
-					return s.failedRun(turnCtx, err)
-				}
-
-				continue
-			}
-
 			if err := s.handleEvent(turnCtx, event); err != nil {
 				return s.failedRun(turnCtx, err)
 			}
