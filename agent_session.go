@@ -1497,11 +1497,12 @@ type deleteCleanupRecord struct {
 	XDGRoot   string
 }
 
+// deleteCleanupRecord names what a delete still owes the filesystem. The root
+// is the one the session's own runtime holds: a generation root is minted per
+// incarnation under the scratch parent and is not derivable from the session
+// id, so a session with no live client leaves nothing to remove.
 func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCleanupRecord {
-	record := deleteCleanupRecord{
-		SessionID: id,
-		XDGRoot:   filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id))),
-	}
+	record := deleteCleanupRecord{SessionID: id}
 	if session == nil {
 		return record
 	}
@@ -1533,7 +1534,14 @@ func (a *Agent) forgetDeleteCleanupIfDone(id acp.SessionId) {
 		return
 	}
 
-	record := a.deleteCleanupRecord(id, nil)
+	a.mu.Lock()
+	record, remembered := a.deleteCleanup[id]
+	a.mu.Unlock()
+
+	if !remembered {
+		return
+	}
+
 	if _, err := os.Stat(record.XDGRoot); err == nil {
 		return
 	}

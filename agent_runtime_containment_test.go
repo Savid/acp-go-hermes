@@ -286,7 +286,7 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				launched = append(launched, opts)
 
-				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				xdg, err := testGenerationXDG(opts.Root)
 				if err != nil {
 					return nil, err
 				}
@@ -400,7 +400,7 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				starts = append(starts, opts)
 
-				xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				xdg, err := testGenerationXDG(opts.Root)
 				if err != nil {
 					return nil, err
 				}

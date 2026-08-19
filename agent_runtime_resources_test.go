@@ -615,7 +615,7 @@ func TestHermesForkGetSessionProofFailureRetainsOwnership(t *testing.T) {
 func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
 	nativeReleases, scratchReleases := 0, 0
 	rootParent := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(rootParent, "failed-start")
+	xdg, err := testGenerationXDG(rootParent)
 	require.NoError(t, err)
 	client := newFakeHermesClient()
 	client.xdg = xdg
@@ -643,7 +643,7 @@ func TestHermesFailedStartedSessionProofFailureRetainsOwnership(t *testing.T) {
 func TestHermesDeleteProofFailureRetainsOwnership(t *testing.T) {
 	nativeReleases, scratchReleases := 0, 0
 	rootParent := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(rootParent, "deleted")
+	xdg, err := testGenerationXDG(rootParent)
 	require.NoError(t, err)
 	client := newFakeHermesClient()
 	client.xdg = xdg

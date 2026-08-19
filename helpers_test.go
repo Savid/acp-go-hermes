@@ -778,7 +778,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 	if client.xdg.Root == "" {
 		root, err := os.MkdirTemp("", "acp-go-hermes-test-*")
 		if err == nil {
-			client.xdg, _ = nativehermes.CreateXDGDirs(root, "session-1")
+			client.xdg, _ = testGenerationXDG(root)
 		}
 	}
 
@@ -938,4 +938,16 @@ func sessionTurnEpoch(session *session) uint64 {
 	defer session.mu.Unlock()
 
 	return session.turnEpoch
+}
+
+// testGenerationXDG mints one runtime generation under parent the way the
+// adapter does. The adapter's scratch parent always exists by the time a
+// generation is minted under it, so a test standing in for the adapter creates
+// the parent first.
+func testGenerationXDG(parent string) (nativehermes.XDGDirs, error) {
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nativehermes.XDGDirs{}, err
+	}
+
+	return nativehermes.CreateGenerationXDGDirs(parent)
 }

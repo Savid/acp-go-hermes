@@ -441,7 +441,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	agent := newTestAgent()
 	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 		client := newFakeHermesClient()
-		xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), string(opts.ACPSessionID))
+		xdg, err := testGenerationXDG(t.TempDir())
 		if err != nil {
 			return nil, err
 		}

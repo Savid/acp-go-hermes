@@ -1831,9 +1831,6 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || !model.Reasoning {
 		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
 	}
-	if SafePathName(" \t ") != "session" {
-		t.Fatal("SafePathName did not default empty input")
-	}
 	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
 		t.Fatalf("empty config: %v", err)
 	}
@@ -3240,12 +3237,9 @@ func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 
 func TestXDGLeaseAndHelpers(t *testing.T) {
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
-		t.Fatalf("CreateXDGDirs: %v", err)
-	}
-	if filepath.Base(xdg.Root) != "session" {
-		t.Fatalf("default xdg root = %#v", xdg)
+		t.Fatalf("CreateGenerationXDGDirs: %v", err)
 	}
 	if err := ensureXDGDirs(XDGDirs{Root: "", Data: "x", Config: "x", Cache: "x", State: "x"}); err == nil {
 		t.Fatal("ensureXDGDirs accepted empty root")
@@ -3276,9 +3270,6 @@ func TestXDGLeaseAndHelpers(t *testing.T) {
 	}
 	if _, err := os.Stat(malformedLease); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("malformed lease after reap = %v", err)
-	}
-	if got := SafePathName("../a:b"); got != "__a_b" {
-		t.Fatalf("SafePathName = %q", got)
 	}
 }
 
@@ -3332,7 +3323,7 @@ func TestRemoveLeaseFileIfOwned(t *testing.T) {
 
 func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "lease")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}

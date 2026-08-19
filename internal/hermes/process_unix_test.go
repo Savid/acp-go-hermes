@@ -85,7 +85,7 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 		}
 	}
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "lease-child")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "lease-log")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}

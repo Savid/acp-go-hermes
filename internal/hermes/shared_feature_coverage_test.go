@@ -310,8 +310,8 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		originalMkdir := xdgMkdirAll
 		t.Cleanup(func() { xdgMkdirAll = originalMkdir })
 		xdgMkdirAll = func(string, os.FileMode) error { return errors.New("mkdir fault") }
-		if _, err := CreateXDGDirs(t.TempDir(), "fault"); err == nil {
-			t.Fatal("CreateXDGDirs ignored mkdir fault")
+		if _, err := CreateGenerationXDGDirs(t.TempDir()); err == nil {
+			t.Fatal("CreateGenerationXDGDirs ignored mkdir fault")
 		}
 		xdgMkdirAll = originalMkdir
 		if _, err := SharedHomeXDGDirs(""); err == nil {

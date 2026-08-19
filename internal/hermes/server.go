@@ -2640,27 +2640,6 @@ func StreamErrorEpoch(err error) uint64 {
 	return 0
 }
 
-func CreateXDGDirs(root string, sessionID string) (XDGDirs, error) {
-	if sessionID == "" {
-		sessionID = string(PermissionRouteSession)
-	}
-
-	base := filepath.Join(root, SafePathName(sessionID))
-	dirs := XDGDirs{
-		Root:   base,
-		Data:   filepath.Join(base, "data"),
-		Config: filepath.Join(base, "config"),
-		Cache:  filepath.Join(base, "cache"),
-		State:  filepath.Join(base, "state"),
-	}
-
-	if err := ensureXDGDirs(dirs); err != nil {
-		return XDGDirs{}, err
-	}
-
-	return dirs, nil
-}
-
 // CreateGenerationXDGDirs creates the actual wrapper-owned writable state for
 // one Hermes runtime incarnation in a fresh, non-reused scratch generation.
 func CreateGenerationXDGDirs(scratchParent string) (XDGDirs, error) {
@@ -3438,15 +3417,4 @@ func cmdlineLooksLikeHermesServe(args []string) bool {
 	}
 
 	return false
-}
-
-func SafePathName(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return string(PermissionRouteSession)
-	}
-
-	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_")
-
-	return replacer.Replace(value)
 }

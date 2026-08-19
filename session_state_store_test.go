@@ -29,9 +29,9 @@ import (
 func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
-		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
+		t.Fatalf("create session XDG generation: %v", err)
 	}
 	dbPath := filepath.Join(xdg.Root, "state.db")
 	seedSQLiteStore(t, dbPath)
@@ -53,7 +53,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	if err3 := os.RemoveAll(xdg.Root); err3 != nil {
 		t.Fatalf("remove original xdg: %v", err3)
 	}
-	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
+	restored, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatalf("create restored xdg: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *testing.T) {
 	ctx := t.Context()
 	store := NewInMemorySessionStore()
-	isolatedXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "isolated")
+	isolatedXDG, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 		t.Fatalf("per-session-home archive entries = %d, err=%v", len(isolatedEntries), err)
 	}
 
-	wrapperXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-wrapper")
+	wrapperXDG, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 			}
 		}
 	}
-	emptyWrapper, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-empty-wrapper")
+	emptyWrapper, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,9 +338,9 @@ func assertArchiveEntryDecodeFailures(t *testing.T) {
 func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
-		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
+		t.Fatalf("create session XDG generation: %v", err)
 	}
 	for name, body := range map[string]string{
 		"state.db":     "main",
@@ -380,7 +380,7 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	if err7 := os.RemoveAll(xdg.Root); err7 != nil {
 		t.Fatal(err7)
 	}
-	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
+	restored, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 
 func TestHydrateStateFromStoreErrors(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func TestHydrateStateDBArchiveFaults(t *testing.T) {
 
 func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 
 func TestHydrateStateFromStoreFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1371,7 +1371,7 @@ func restoreStateStoreSeams(t *testing.T) {
 func snapshotFaultSession(t *testing.T) *session {
 	t.Helper()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}

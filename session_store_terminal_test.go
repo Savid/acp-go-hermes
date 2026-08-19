@@ -176,9 +176,9 @@ func TestPromptCommitsReplayStableTerminalIdentityAcrossTailCloseAndHydrate(t *t
 	assertStoredTerminal(t, store, string(session.id), "history-4")
 
 	hydrateRoot := t.TempDir()
-	hydrateXDG, err := nativehermes.CreateXDGDirs(hydrateRoot, "hydrated")
+	hydrateXDG, err := testGenerationXDG(hydrateRoot)
 	if err != nil {
-		t.Fatalf("CreateXDGDirs: %v", err)
+		t.Fatalf("create hydrate XDG generation: %v", err)
 	}
 	_, snapshot, ok, err := hydrateStateFromStore(ctx, store, string(session.id), hydrateXDG)
 	if err != nil {
