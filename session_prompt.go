@@ -1529,16 +1529,15 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		return nil
 	}
 
-	// Serialize reservation through delivery so successful notifications cannot
-	// reorder, and claim the sequence before delivery is attempted. A counter
-	// that advanced only on success would hand the consumer a contiguous stream
-	// over events it never received, making the loss invisible; claiming first
-	// means a failed emit leaves exactly the gap that exposes it.
+	// Serialize the candidate through delivery so successful notifications
+	// cannot reorder. This stream is non-authoritative: the counter advances
+	// only once a notification has actually been delivered, so an unsent number
+	// is reused by the next event and what the consumer holds is contiguous
+	// across the deliveries it received.
 	s.rawEventMu.Lock()
 	defer s.rawEventMu.Unlock()
 
-	s.rawSeq++
-	sequence := s.rawSeq
+	sequence := s.rawSeq + 1
 
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
@@ -1555,7 +1554,13 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		return err
 	}
 
-	return conn.NotifyExtension(ctx, RawEventMethod, capped)
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
+		return err
+	}
+
+	s.rawSeq = sequence
+
+	return nil
 }
 
 // usageUpdateFromTokens builds a usage_update. size is the model's true context
