@@ -1956,3 +1956,42 @@ func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }
+
+// TestShippedResumeExampleFixtureHydrates reads the fixture the resume example
+// ships and drives it through session/load's own reader. The example's README
+// and the get-started guide both promise that file loads as-is, and nothing but
+// this test stands between that promise and a store-shape change: the fixture is
+// data, so no compiler notices when the shape it was written in retires.
+func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
+	const sessionID = "7f3a2b1c-9d0e-4a21-8b6c-1f0c5d6e7a80"
+
+	data, err := os.ReadFile(filepath.Join("examples", "resume-from-file", "session.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 2, "the fixture is one main snapshot and one id mapping")
+
+	mainEntry := SessionStoreEntry(lines[0])
+	idmapEntry := SessionStoreEntry(lines[1])
+
+	store := NewInMemorySessionStore()
+	mainKey := SessionKey{SessionID: sessionID, Subpath: SessionStoreMainSubpath}
+	require.NoError(t, store.Replace(t.Context(), mainKey, []SessionStoreReplacement{
+		{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
+		{Key: SessionKey{SessionID: sessionID, Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
+	}))
+
+	idmap, snapshot, ok, err := hydrateStateFromStore(t.Context(), store, sessionID, nativehermes.XDGDirs{Root: t.TempDir()})
+	require.NoError(t, err)
+	require.True(t, ok, "session/load would answer unknown_session for the shipped fixture")
+	require.Equal(t, sessionID, idmap.SessionID)
+	require.Equal(t, idmap.NativeSessionID, snapshot.Session.NativeSessionID)
+
+	// A shipped fixture cannot name a directory that exists on the reader's
+	// machine, and load refuses a snapshot whose cwd disagrees with the request.
+	require.Empty(t, snapshot.Session.Cwd, "a shipped fixture binds no cwd")
+
+	terminal, err := InspectSessionStoreTerminalState(sessionID, []SessionStoreEntry{mainEntry})
+	require.NoError(t, err)
+	require.Equal(t, SessionStoreTerminalState{}, terminal, "the fixture settles no turn of its own")
+}

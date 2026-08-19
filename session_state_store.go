@@ -144,9 +144,7 @@ type archiveInfo struct {
 }
 
 type stateSnapshotWrapper struct {
-	Todos              []nativehermes.Todo `json:"todos"`
-	PermissionsHistory []any               `json:"permissionsHistory"`
-	PendingInput       bool                `json:"pendingInput"`
+	Todos []nativehermes.Todo `json:"todos"`
 	// Foreground is the adapter's own record of how the last accepted turn
 	// ended. It lives in the wrapper section rather than in Terminal because
 	// Terminal is the native archive's completed assistant identity: a turn that
@@ -341,9 +339,8 @@ func (s *session) captureSnapshotLocked(
 		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
 		Wrapper: &stateSnapshotWrapper{
-			Todos:        todos,
-			PendingInput: false,
-			Foreground:   foreground,
+			Todos:      todos,
+			Foreground: foreground,
 		},
 	}
 

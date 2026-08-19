@@ -13,8 +13,15 @@ cd examples/resume-from-file
 go run . -session <session-id> -cwd /absolute/path/to/project
 ```
 
-If the JSONL rows include a `sessionId` or `cwd` field, `-session` and `-cwd`
-can be omitted and are inferred from the transcript. Loading uses normal ACP
+Each JSONL row is one `hermes-state-db-v1` store entry, and rows are routed to
+the store key their shape names: the main snapshot, the id mapping, and any
+native-archive chunks. Writing them all under one key would leave the session
+unreadable, because `session/load` reads those keys independently.
+
+`-session` and `-cwd` are inferred from the transcript where it names them, and
+`-cwd` falls back to the current directory. The shipped fixture binds no `cwd`,
+because `session/load` refuses a snapshot whose `cwd` disagrees with the request
+and no shipped path exists on every machine. Loading uses normal ACP
 `session/load`, and the prompt uses normal ACP `session/prompt`.
 
 Pass `-prompt "..."` to change the smoke-test turn, `-path` to point at a

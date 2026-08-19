@@ -17,20 +17,43 @@ import (
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
+// transcriptSnapshot renders one hermes-state-db-v1 main snapshot row.
+func transcriptSnapshot(sessionID string, cwd string) string {
+	return fmt.Sprintf(
+		`{"format":"hermes-state-db-v1","capturedAtUnixMilli":1,"session":{"sessionId":%q,`+
+			`"nativeSessionId":"native-1","cwd":%q,"title":"t","model":{}},`+
+			`"terminal":{"messageId":"","role":"","finish":""},"archives":{},"wrapper":{"todos":[],"foreground":null}}`,
+		sessionID, cwd,
+	)
+}
+
+// transcriptIdmap renders one hermes-state-db-v1 id-mapping row.
+func transcriptIdmap(sessionID string) string {
+	return fmt.Sprintf(
+		`{"sessionId":%q,"nativeSessionId":"native-1","format":"hermes-state-db-v1",`+
+			`"createdAtUnixMilli":1,"updatedAtUnixMilli":1}`,
+		sessionID,
+	)
+}
+
 func TestReadTranscriptJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	if err := os.WriteFile(path, []byte("\n"+
-		`{"type":"user","sessionId":"session-1","cwd":"/repo"}`+"\n"+
-		`{"type":"assistant"}`+"\n"), 0o600); err != nil {
+		transcriptSnapshot("session-1", "/repo")+"\n"+
+		transcriptIdmap("session-1")+"\n"+
+		`{`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
+	// A row this reader cannot decode is still carried to the store: the store
+	// is the authority on what a session's entries are, and dropping a line here
+	// would hand the loader a transcript it never saw.
 	entries, sessionID, cwd, err := readTranscriptJSONL(path)
 	if err != nil {
 		t.Fatalf("readTranscriptJSONL: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
 	}
 	if sessionID != "session-1" {
 		t.Fatalf("sessionID = %q", sessionID)
@@ -48,12 +71,75 @@ func TestReadTranscriptJSONL(t *testing.T) {
 	}
 }
 
+// TestShippedFixtureRoutesToLoadableStoreKeys proves the file this example ships
+// reaches the store the way ACP load reads it. A hermes-state-db-v1 session is
+// two independent keys, so a transcript written under one key loads as nothing
+// at all — which is exactly how the shipped fixture rotted before.
+func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
+	entries, sessionID, cwd, err := readTranscriptJSONL(defaultSessionFile)
+	if err != nil {
+		t.Fatalf("readTranscriptJSONL: %v", err)
+	}
+	if sessionID == "" {
+		t.Fatal("the shipped fixture names no session id")
+	}
+	if cwd != "" {
+		t.Fatalf("the shipped fixture binds cwd %q, which cannot exist on every machine", cwd)
+	}
+
+	store := hermesacp.NewInMemorySessionStore()
+	ctx := context.Background()
+	if replaceErr := store.Replace(ctx, hermesacp.SessionKey{SessionID: sessionID}, storeReplacements(sessionID, entries)); replaceErr != nil {
+		t.Fatalf("store.Replace: %v", replaceErr)
+	}
+
+	main, err := store.Load(ctx, hermesacp.SessionKey{SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("load main: %v", err)
+	}
+	if len(main) != 1 {
+		t.Fatalf("main entries = %d, want exactly the snapshot", len(main))
+	}
+
+	idmap, err := store.Load(ctx, hermesacp.SessionKey{SessionID: sessionID, Subpath: idmapSubpath})
+	if err != nil {
+		t.Fatalf("load idmap: %v", err)
+	}
+	if len(idmap) != 1 {
+		t.Fatalf("idmap entries = %d, want exactly the id mapping", len(idmap))
+	}
+
+	if _, err := hermesacp.InspectSessionStoreTerminalState(sessionID, main); err != nil {
+		t.Fatalf("the shipped snapshot is not a current-format snapshot: %v", err)
+	}
+}
+
+func TestTranscriptSubpathRouting(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		row  string
+		want string
+	}{
+		{name: "snapshot", row: transcriptSnapshot("s", ""), want: hermesacp.SessionStoreMainSubpath},
+		{name: "idmap", row: transcriptIdmap("s"), want: idmapSubpath},
+		{name: "archive chunk", row: `{"format":"hermes-state-db-v1","sequence":0,"data":"AA=="}`, want: stateDBSubpath},
+		{name: "unrecognized", row: `{"format":"hermes-state-db-v1"}`, want: hermesacp.SessionStoreMainSubpath},
+		{name: "malformed", row: `{`, want: hermesacp.SessionStoreMainSubpath},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := transcriptSubpath(hermesacp.SessionStoreEntry(test.row)); got != test.want {
+				t.Fatalf("subpath = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	cwd := t.TempDir()
 	if err := os.WriteFile(path, []byte(
-		fmt.Sprintf(`{"type":"user","sessionId":"session-1","cwd":%q}`+"\n", cwd)+
-			`{"type":"assistant"}`+"\n"), 0o600); err != nil {
+		transcriptSnapshot("session-1", cwd)+"\n"+
+			transcriptIdmap("session-1")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,8 +169,15 @@ func TestRunUsesInferredValuesAndLoadedSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store.Load: %v", err)
 		}
-		if len(entries) != 2 {
-			t.Fatalf("stored entries = %d, want 2", len(entries))
+		if len(entries) != 1 {
+			t.Fatalf("main entries = %d, want exactly the snapshot", len(entries))
+		}
+		mapping, err := store.Load(context.Background(), hermesacp.SessionKey{SessionID: sessionID, Subpath: idmapSubpath})
+		if err != nil {
+			t.Fatalf("store.Load idmap: %v", err)
+		}
+		if len(mapping) != 1 {
+			t.Fatalf("idmap entries = %d, want exactly the id mapping", len(mapping))
 		}
 		fmt.Fprint(stdout, "loaded")
 
@@ -124,7 +217,7 @@ func TestRunErrors(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"assistant"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(transcriptIdmap("")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run(context.Background(), []string{"-file", path}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "session id is required") {
@@ -141,7 +234,7 @@ func TestRunErrors(t *testing.T) {
 		getwd = previousGetwd
 		runLoaded = previousRunLoaded
 	})
-	if err := os.WriteFile(path, []byte(`{"type":"assistant","sessionId":"session-1"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(transcriptSnapshot("session-1", "")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run(context.Background(), []string{"-file", path}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "getwd failed") {
