@@ -196,10 +196,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 		// The exact store bundle is already committed. Close only the live
 		// runtime; deleting native state here would invalidate durable metadata
 		// that another Agent can safely load.
-		closeErr := session.Close(context.Background())
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
+		return acp.NewSessionResponse{}, a.refuseStartedSession(ctx, session, err)
 	}
 	sessionPublished = true
 	session.operationJournal = nil
@@ -445,10 +442,7 @@ func (a *Agent) loadOrResumeSession(
 	}
 
 	if err := a.storeStartedSession(session); err != nil {
-		closeErr := session.Close(context.Background())
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return nil, errors.Join(err, closeErr)
+		return nil, a.refuseStartedSession(ctx, session, err)
 	}
 
 	return session, nil
@@ -861,7 +855,8 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	// something delete cancels and settles, never a ground to refuse on, so
 	// nothing about the session's state is inspected ahead of the durable write
 	// that makes the id unaddressable.
-	if err := a.tombstoneSession(ctx, params.SessionId, session); err != nil {
+	installed, err := a.tombstoneSession(ctx, params.SessionId, session)
+	if err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
@@ -869,36 +864,20 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		a.rememberDeleteCleanup(record)
 	}
 
-	var (
-		settleErr error
-		err       error
-	)
+	var settleErr error
 
 	if session != nil {
-		// Delete serializes after settlement: admission closes, the turn in
-		// flight is cancelled, and the settlement it owes completes before the
-		// teardown touches the runtime that settlement is still writing through.
-		// The commit that settlement makes lands on a tombstoned id, so it
-		// publishes nothing and cannot recreate the row this delete removed.
-		if session.closeLifecycleAdmission() {
-			session.cancelTurn()
-		}
+		settleErr, err = a.closeDeletedSession(ctx, params.SessionId, session, record.XDGRoot)
+	}
 
-		settleErr = session.awaitSettlement(ctx)
-
-		session.lifecycleMu.Lock()
-
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = session.closeLocked(closeCtx, true)
-
-		closeCancel()
-		// A deleted session has no resumable snapshot to commit, so it states no
-		// quiescence fact: the row this delete tombstoned is exactly the state a
-		// fact would have to stand on. The incarnation still ends here.
-		session.lifecycleStream().fence()
-		session.lifecycleMu.Unlock()
-		a.recordIncompleteContainment(err, params.SessionId, record.XDGRoot)
-		a.observe.AddActiveSession(ctx, -1)
+	if installed != nil && installed != session {
+		// A load or resume that passed its own tombstone check installed in the
+		// window between the map read above and this tombstone. The id names
+		// nothing now, so nothing else will ever reach that runtime: this delete
+		// owns its teardown exactly as it owns the one it read.
+		lateSettleErr, lateErr := a.closeDeletedSession(ctx, params.SessionId, installed, hermesServerRoot(installed.client))
+		settleErr = errors.Join(settleErr, lateSettleErr)
+		err = errors.Join(err, lateErr)
 	}
 
 	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
@@ -926,7 +905,11 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 // A store that refuses the write leaves the session fully addressable. There is
 // no tombstone, so there is nothing to hide behind, and the delete's idempotence
 // is what makes a retry the right answer.
-func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session *session) error {
+//
+// The session the id actually named at that instant is returned, which is not
+// always the one the delete read: an install that won the race to the lock is
+// still live, and nothing but this delete can reach it once the marker is set.
+func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session *session) (*session, error) {
 	if session != nil {
 		session.lifecycleMu.Lock()
 		defer session.lifecycleMu.Unlock()
@@ -938,18 +921,53 @@ func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session 
 	cancel()
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	a.mu.Lock()
-	if session == nil || a.sessions[id] == session {
-		delete(a.sessions, id)
-	}
+	installed := a.sessions[id]
+
+	delete(a.sessions, id)
 
 	a.deleted[id] = struct{}{}
 	a.mu.Unlock()
 
-	return nil
+	return installed, nil
+}
+
+// closeDeletedSession runs the shutdown ladder one deleted session owes. Delete
+// serializes after settlement: admission closes, the turn in flight is
+// cancelled, and the settlement it owes completes before the teardown touches
+// the runtime that settlement is still writing through. The commit that
+// settlement makes lands on a tombstoned id, so it publishes nothing and cannot
+// recreate the row this delete removed.
+func (a *Agent) closeDeletedSession(
+	ctx context.Context,
+	id acp.SessionId,
+	session *session,
+	root string,
+) (settleErr error, closeErr error) {
+	if session.closeLifecycleAdmission() {
+		session.cancelTurn()
+	}
+
+	settleErr = session.awaitSettlement(ctx)
+
+	session.lifecycleMu.Lock()
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr = session.closeLocked(closeCtx, true)
+
+	closeCancel()
+	// A deleted session has no resumable snapshot to commit, so it states no
+	// quiescence fact: the row this delete tombstoned is exactly the state a fact
+	// would have to stand on. The incarnation still ends here.
+	session.lifecycleStream().fence()
+	session.lifecycleMu.Unlock()
+	a.recordIncompleteContainment(closeErr, id, root)
+	a.observe.AddActiveSession(ctx, -1)
+
+	return settleErr, closeErr
 }
 
 //nolint:gocyclo // Fork is one ordered parent/branch/journal/store publication transaction.
@@ -1239,10 +1257,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}
 	cleanupNativeChild = false
 	if err := a.storeStartedSession(session); err != nil {
-		closeErr := session.Close(context.Background())
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
+		return acp.UnstableForkSessionResponse{}, a.refuseStartedSession(ctx, session, err)
 	}
 	sessionPublished = true
 	session.operationJournal = nil

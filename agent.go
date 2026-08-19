@@ -492,6 +492,19 @@ func (a *Agent) activeSession(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
+// storeStartedSession publishes one fully prepared session under its id, and it
+// is the only place an id becomes live. Every reason the id may not be published
+// is re-read here, under the lock that installs it: the entry checks ran before a
+// hydration, an ownership acquisition, and a `hermes serve` launch that take as
+// long as they take, so a verdict reached there is only a guess by the time there
+// is something to install.
+//
+// The deletion tombstone is the reason that guess is load-bearing. A delete that
+// completes while a load or resume is preparing wins, however far the preparation
+// got: the marker is re-read here and the replacement is refused, and the marker
+// is never cleared as a side effect of installing. Clearing it would un-hide the
+// id for every later reader and let the next publish rewrite the very row the
+// delete removed, since the durable publish guard is that same marker.
 func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -500,17 +513,20 @@ func (a *Agent) storeStartedSession(session *session) error {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
 
+	if _, deleted := a.deleted[session.id]; deleted {
+		return unknownSessionError()
+	}
+
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
 	}
 
 	a.sessions[session.id] = session
-	delete(a.deleted, session.id)
 
-	// This is the one place an id becomes live, so it is where both tombstones
-	// are cleared. session/close leaves the durable snapshot in place, so the
-	// same id can be hydrated again, and a provider-auth closed mark that
-	// outlived the reopen would refuse every leg on it for the agent's life.
+	// This is the one place an id becomes live, so it is where the provider-auth
+	// closed mark is cleared. session/close leaves the durable snapshot in place,
+	// so the same id can be hydrated again, and a closed mark that outlived the
+	// reopen would refuse every leg on it for the agent's life.
 	if a.providerAuth != nil {
 		a.providerAuth.reopenSession(session.id)
 	}
@@ -518,6 +534,30 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// refuseStartedSession tears down a fully prepared session the install lock
+// refused and answers with the refusal itself. Nothing else can reach that
+// session — it never became live, so no id names it and no close will ever be
+// addressed to it — which is why the launched process, its scratch generation,
+// and its ownership claims are released here.
+//
+// The refusal is returned unwrapped: the SDK maps a handler error onto its
+// JSON-RPC error by type assertion, so joining a teardown result into it would
+// answer a tombstoned id with an internal error rather than the uniform
+// unknown-session error every other door gives it. A teardown that could not
+// prove containment is recorded on the agent, which is where that verdict is
+// reported from.
+func (a *Agent) refuseStartedSession(ctx context.Context, session *session, refusal error) error {
+	closeErr := session.Close(context.Background())
+
+	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
+	a.log.DebugContext(ctx, "close a Hermes session the install refused",
+		slog.String(jsonFieldError, refusal.Error()),
+		slog.Any(jsonFieldCause, closeErr),
+	)
+
+	return refusal
 }
 
 func (a *Agent) removeSessionIf(id acp.SessionId, target *session) bool {

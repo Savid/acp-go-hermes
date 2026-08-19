@@ -1901,6 +1901,229 @@ func TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow(t *testing.T)
 	require.NoError(t, err, "delete was not idempotent")
 }
 
+// TestInstallRefusesATombstoneItDidNotCreate pins the install lock's own
+// tombstone re-check. The entry check a load or resume ran is only a guess by
+// the time there is something to install, and the marker it re-reads is the
+// same one the durable publish guard reads: an install that cleared it would
+// un-hide the id and let the next commit rewrite the row the delete removed.
+func TestInstallRefusesATombstoneItDidNotCreate(t *testing.T) {
+	client := newFakeHermesClient()
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	entries, err := store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "durable row missing before delete")
+
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err)
+	require.True(t, agent.isDeleted(session.id), "the delete set the tombstone marker")
+
+	// Exactly what a load, resume, or fork that started before the delete does
+	// when it finally reaches its install step.
+	late := testSession(agent, newFakeHermesClient())
+	late.id = session.id
+
+	installErr := agent.storeStartedSession(late)
+	require.Error(t, installErr, "a late install published a tombstoned id")
+
+	var refusal *acp.RequestError
+	require.ErrorAs(t, installErr, &refusal)
+	require.Equal(t, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID,
+	}), refusal, "a tombstoned id answers with the uniform unknown-session refusal")
+
+	require.True(t, agent.isDeleted(session.id), "a late install cleared a tombstone it did not create")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "a refused install left the id live")
+
+	// The durable guard is that same marker, so it still holds.
+	require.NoError(t, late.snapshotToStore(t.Context()))
+
+	entries, err = store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the deleted row was durably resurrected")
+
+	listed, err := agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.NoError(t, err)
+
+	for _, info := range listed.Sessions {
+		require.NotEqual(t, session.id, info.SessionId, "a deleted session was listed after a late install")
+	}
+}
+
+// TestLoadLosingTheRaceToADeleteInstallsNothing drives the same rule through the
+// whole load transaction: the delete completes after the scratch reservation,
+// the generation, the archive hydration, the native-owner acquisition, and the
+// runtime launch have all happened. However far the preparation got, the delete
+// wins — the prepared replacement is torn down and the caller is told what every
+// other door tells it about a deleted id.
+func TestLoadLosingTheRaceToADeleteInstallsNothing(t *testing.T) {
+	ctx := t.Context()
+	cwd := t.TempDir()
+	store := validHydrateStore(t, ctx)
+	loaded := newFakeHermesClient()
+	loaded.getSession = testNativeSession("n")
+
+	var (
+		agent      *Agent
+		deleteOnce sync.Once
+		deleteErr  error
+	)
+
+	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+			loaded.xdg = opts.ExistingXDG
+			deleteOnce.Do(func() {
+				_, deleteErr = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+			})
+
+			return loaded, nil
+		}
+	})
+
+	_, err := agent.LoadSession(ctx, LoadSessionRequest("s", cwd))
+	require.NoError(t, deleteErr, "the delete this load raced failed")
+	require.Error(t, err, "a load that lost the race to a delete installed its session")
+
+	var refusal *acp.RequestError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID,
+	}), refusal, "a deleted id must be wire-indistinguishable from one that never existed")
+
+	require.True(t, agent.isDeleted("s"), "the losing install cleared the deletion marker")
+	require.Positive(t, loaded.closeCount(), "the prepared replacement was left running")
+
+	agent.mu.Lock()
+	_, live := agent.sessions["s"]
+	agent.mu.Unlock()
+	require.False(t, live, "a refused install left the session addressable")
+
+	entries, loadErr := store.Load(ctx, SessionKey{SessionID: "s"})
+	require.NoError(t, loadErr)
+	require.Empty(t, entries, "the deleted row was durably resurrected")
+}
+
+// TestLoadRacingDeleteResurrectsNothing races the two for real. Either order is
+// legal — a load that installed before the tombstone landed keeps the id, and
+// the delete then closes it as the active session it is — but no interleaving
+// may leave a live session, or a durable row, behind a tombstoned id.
+func TestLoadRacingDeleteResurrectsNothing(t *testing.T) {
+	cwd := t.TempDir()
+
+	for attempt := range 8 {
+		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) {
+			ctx := t.Context()
+			store := validHydrateStore(t, ctx)
+			loaded := newFakeHermesClient()
+			loaded.getSession = testNativeSession("n")
+			agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+				options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+					loaded.xdg = opts.ExistingXDG
+
+					return loaded, nil
+				}
+			})
+
+			start := make(chan struct{})
+			var wait sync.WaitGroup
+
+			wait.Add(2)
+
+			go func() {
+				defer wait.Done()
+				<-start
+				_, _ = agent.LoadSession(ctx, LoadSessionRequest("s", cwd))
+			}()
+
+			go func() {
+				defer wait.Done()
+				<-start
+				_, _ = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+			}()
+
+			close(start)
+			wait.Wait()
+
+			require.True(t, agent.isDeleted("s"), "the delete's marker did not survive the race")
+
+			agent.mu.Lock()
+			_, live := agent.sessions["s"]
+			agent.mu.Unlock()
+			require.False(t, live, "a tombstoned id was left naming a live session")
+
+			entries, loadErr := store.Load(ctx, SessionKey{SessionID: "s"})
+			require.NoError(t, loadErr)
+			require.Empty(t, entries, "the deleted row was durably resurrected")
+
+			listed, listErr := agent.ListSessions(ctx, ListSessionsRequest())
+			require.NoError(t, listErr)
+			require.Empty(t, listed.Sessions, "a deleted session was listed after the race")
+		})
+	}
+}
+
+// installOnDeleteStore installs a session under the deleted id at the exact
+// instant the tombstone is being made durable — the window between the delete's
+// read of the active set and the lock that hides the id.
+type installOnDeleteStore struct {
+	*InMemorySessionStore
+	once    sync.Once
+	install func()
+}
+
+func (s *installOnDeleteStore) Delete(ctx context.Context, key SessionKey) error {
+	s.once.Do(s.install)
+
+	return s.InMemorySessionStore.Delete(ctx, key)
+}
+
+// TestDeleteClosesASessionInstalledInsideItsTombstoneWindow pins the other side
+// of the same race. An install that reached the lock first is legal, and the id
+// it published is the one this delete is about: the delete owns its teardown,
+// because once the marker is set nothing else can ever reach that runtime.
+func TestDeleteClosesASessionInstalledInsideItsTombstoneWindow(t *testing.T) {
+	client := newFakeHermesClient()
+
+	var (
+		agent *Agent
+		late  *session
+	)
+
+	store := &installOnDeleteStore{InMemorySessionStore: NewInMemorySessionStore()}
+	store.install = func() {
+		agent.mu.Lock()
+		agent.sessions[late.id] = late
+		agent.mu.Unlock()
+	}
+
+	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	late = testSession(agent, client)
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(late.id))
+	require.NoError(t, err)
+
+	require.True(t, agent.isDeleted(late.id))
+	require.Positive(t, client.closeCount(), "the delete left a live runtime behind a tombstoned id")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[late.id]
+	agent.mu.Unlock()
+	require.False(t, live, "a tombstoned id was left naming a live session")
+}
+
 // TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden pins the tail of
 // the same order: a teardown that fails is reported, but only after the
 // tombstone is durable, and the session stays hidden either way.
