@@ -154,9 +154,9 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 
 // TestSetSessionConfigOptionReadsModelOptionsOnce pins the cost of one model
 // selection at exactly one native enumeration. A host probes model support by
-// selecting models under a short per-probe budget, and this call used to read
-// the whole provider catalogue twice — once to validate the value and once to
-// answer — for a mutation that happens entirely inside the wrapper.
+// selecting models under a short per-probe budget, so one selection validates
+// the value and answers from a single reading of the provider catalogue — the
+// mutation itself happens entirely inside the wrapper.
 func TestSetSessionConfigOptionReadsModelOptionsOnce(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()

@@ -14,13 +14,9 @@ import (
 )
 
 const (
-	testFieldCredential   = "credential"
-	testFieldAccessToken  = "access_token"
-	testFieldRefreshToken = "refresh_token"
-	testFieldMetadata     = "metadata"
-	testProviderID        = "xai-oauth"
-	testConnectionID      = "connection-1"
-	testSessionID         = acp.SessionId("wrapper-session")
+	testProviderID   = "xai-oauth"
+	testConnectionID = "connection-1"
+	testSessionID    = acp.SessionId("wrapper-session")
 )
 
 // newAuthAgent builds an agent with a usable durable ledger root and one

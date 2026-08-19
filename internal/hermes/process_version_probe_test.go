@@ -301,9 +301,8 @@ func TestAbandonedVersionProbeDoesNotFailTheStartsWaitingOnIt(t *testing.T) {
 
 // TestVersionProbeSurvivesAStartThatFailsAfterIt proves the version marker
 // records what the probe proved rather than whether the whole start succeeded.
-// A start refused at spawn used to discard the proof and re-spawn a second
-// --version process on the next attempt, which is an extra native process sat
-// in front of every retry on an already contended host.
+// A start refused at spawn keeps the proof, so a retry on an already contended
+// host spawns no second --version process in front of it.
 func TestVersionProbeSurvivesAStartThatFailsAfterIt(t *testing.T) {
 	restoreProcessSeams(t)
 

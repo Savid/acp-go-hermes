@@ -82,22 +82,3 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		t.Fatalf("session.delete: %v", err)
 	}
 }
-
-func waitForEvent(t *testing.T, ctx context.Context, client *Client, eventType string) {
-	t.Helper()
-	for {
-		select {
-		case event, ok := <-client.Events():
-			if !ok {
-				t.Fatalf("event channel closed waiting for %s", eventType)
-			}
-			if event.Type == eventType {
-				return
-			}
-		case err := <-client.Errors():
-			t.Fatalf("event error waiting for %s: %v", eventType, err)
-		case <-ctx.Done():
-			t.Fatalf("timeout waiting for %s: %v", eventType, ctx.Err())
-		}
-	}
-}

@@ -23,7 +23,6 @@ const (
 // truncated.
 const (
 	authMaxURLBytes      = 2048
-	authMaxMessageBytes  = 2048
 	authMaxUserCodeBytes = 64
 	authMaxLabelBytes    = 256
 )

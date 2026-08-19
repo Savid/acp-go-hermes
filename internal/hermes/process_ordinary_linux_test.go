@@ -97,7 +97,8 @@ func TestExplicitProcessIsolationRefusesWithoutOrdinaryFallback(t *testing.T) {
 }
 
 // TestHermesSupervisorIdentityRuleRequiresADistinctTrustedRoot keeps the
-// negative security rule the deleted shared arm used to exempt itself from.
+// negative security rule every supervisor identity answers to: no arm of the
+// launch path is exempt from it.
 func TestHermesSupervisorIdentityRuleRequiresADistinctTrustedRoot(t *testing.T) {
 	restoreLinuxSupervisorSeams(t)
 

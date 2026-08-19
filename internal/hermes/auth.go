@@ -13,12 +13,12 @@ import (
 	"time"
 )
 
-// Native login-flow discriminators reported by the provider catalog. The start
-// shape differs per flow, so every decoder branches on this value.
+// Native login-flow discriminators this adapter can start. The start shape
+// differs per flow, so every decoder branches on this value; the catalog drops
+// a provider whose flow is neither.
 const (
 	AuthFlowDeviceCode = "device_code"
 	AuthFlowPKCE       = "pkce"
-	AuthFlowExternal   = "external"
 )
 
 // Native poll states reported by Hermes' dashboard OAuth API.

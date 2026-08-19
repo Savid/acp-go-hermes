@@ -314,11 +314,11 @@ func TestCancelKeepsAddressedSessionLifetimeAcrossCloseAndReopen(t *testing.T) {
 		t.Fatalf("read lineage before cancel: %#v/%v/%v", ledgerBefore, present, err)
 	}
 
-	// This is the exact dispatch ordering that used to redirect cleanup: the
-	// cancel leg has retained the addressed objects and terminalized the flow;
-	// close therefore sees no pending flow, removes the old runtime, and load
-	// publishes a replacement with the same durable session ID before native
-	// cleanup resumes.
+	// This is the dispatch ordering cleanup must survive: the cancel leg has
+	// retained the addressed objects and terminalized the flow; close therefore
+	// sees no pending flow, removes the superseded runtime, and load publishes a
+	// replacement with the same durable session ID before native cleanup
+	// resumes. Cleanup follows the objects it retained, never the session id.
 	if !agent.providerAuth.markOwnerCancelled(flow) {
 		t.Fatal("pending flow did not accept owner cancellation")
 	}

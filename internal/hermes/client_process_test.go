@@ -749,9 +749,6 @@ func assertProcessScalarHelpers(t *testing.T, ctx context.Context) {
 	if token, err := randomToken(); err != nil || token == "" {
 		t.Fatalf("randomToken = %q err=%v", token, err)
 	}
-	if !IsStateDB("/tmp/state.db") || !IsStateDB("/tmp/state.db-wal") || !IsStateDB("/tmp/state.db-shm") || IsStateDB("/tmp/other.db") {
-		t.Fatal("IsStateDB mismatch")
-	}
 	if compareVersions("1.2.3", "1.2.2") <= 0 || compareVersions("1.2.3", "1.2.3") != 0 {
 		t.Fatal("compareVersions mismatch")
 	}

@@ -307,17 +307,15 @@ func (c *Client) readLoop() {
 type SessionCreateResult struct {
 	SessionID       string          `json:"session_id"`
 	StoredSessionID string          `json:"stored_session_id"`
-	MessageCount    int             `json:"message_count"`
 	Messages        []Message       `json:"messages"`
 	Info            json.RawMessage `json:"info"`
 }
 
 type SessionResumeResult struct {
-	SessionID    string          `json:"session_id"`
-	SessionKey   string          `json:"session_key"`
-	MessageCount int             `json:"message_count"`
-	Messages     []Message       `json:"messages"`
-	Info         json.RawMessage `json:"info"`
+	SessionID  string          `json:"session_id"`
+	SessionKey string          `json:"session_key"`
+	Messages   []Message       `json:"messages"`
+	Info       json.RawMessage `json:"info"`
 }
 
 type SessionTitleResult struct {
@@ -363,10 +361,8 @@ type ActiveSession struct {
 
 // PersistedSession is one durable state.db row returned by session.list.
 type PersistedSession struct {
-	SessionID    string `json:"id"`
-	Title        string `json:"title"`
-	MessageCount int    `json:"message_count"`
-	Source       string `json:"source"`
+	SessionID string `json:"id"`
+	Title     string `json:"title"`
 }
 
 type SessionListResult struct {
@@ -397,17 +393,9 @@ func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 type Provider struct {
 	Slug          string                             `json:"slug"`
 	Name          string                             `json:"name"`
-	AuthType      string                             `json:"auth_type"`
 	Authenticated bool                               `json:"authenticated"`
 	Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-	IsCurrent     bool                               `json:"is_current"`
-	IsUserDefined bool                               `json:"is_user_defined"`
-	KeyEnv        string                             `json:"key_env"`
 	Models        []string                           `json:"models"`
-	Pricing       map[string]ProviderModelPricing    `json:"pricing"`
-	Source        string                             `json:"source"`
-	TotalModels   int                                `json:"total_models"`
-	Warning       string                             `json:"warning"`
 	Raw           json.RawMessage                    `json:"-"`
 }
 
@@ -415,17 +403,9 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	var object struct {
 		Slug          string                             `json:"slug"`
 		Name          string                             `json:"name"`
-		AuthType      string                             `json:"auth_type"`
 		Authenticated bool                               `json:"authenticated"`
 		Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-		IsCurrent     bool                               `json:"is_current"`
-		IsUserDefined bool                               `json:"is_user_defined"`
-		KeyEnv        string                             `json:"key_env"`
 		Models        json.RawMessage                    `json:"models"`
-		Pricing       map[string]ProviderModelPricing    `json:"pricing"`
-		Source        string                             `json:"source"`
-		TotalModels   int                                `json:"total_models"`
-		Warning       string                             `json:"warning"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
@@ -446,32 +426,16 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 
 	p.Slug = object.Slug
 	p.Name = object.Name
-	p.AuthType = object.AuthType
 	p.Authenticated = object.Authenticated
 	p.Capabilities = object.Capabilities
-	p.IsCurrent = object.IsCurrent
-	p.IsUserDefined = object.IsUserDefined
-	p.KeyEnv = object.KeyEnv
 	p.Models = models
-	p.Pricing = object.Pricing
-	p.Source = object.Source
-	p.TotalModels = object.TotalModels
-	p.Warning = object.Warning
 	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
 }
 
 type ProviderModelCapability struct {
-	Fast      bool `json:"fast"`
 	Reasoning bool `json:"reasoning"`
-}
-
-type ProviderModelPricing struct {
-	Cache  *string `json:"cache"`
-	Free   bool    `json:"free"`
-	Input  string  `json:"input"`
-	Output string  `json:"output"`
 }
 
 type BranchResult struct {

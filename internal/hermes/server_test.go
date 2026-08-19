@@ -2427,7 +2427,7 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 }
 
 // TestHermesGatewayDeltaAndQuestionPublicationBackpressure pins the two event
-// paths that used to discard on a full buffer. Assistant deltas and clarify
+// paths that may never discard on a full buffer. Assistant deltas and clarify
 // requests are part of the session stream this adapter advertises as dropping
 // nothing, so a saturated channel backpressures the gateway reader and the
 // event is delivered — it is never silently thrown away.

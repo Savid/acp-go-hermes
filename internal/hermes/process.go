@@ -1219,9 +1219,3 @@ func defaultWebDistExists() bool {
 
 	return err == nil && info.IsDir()
 }
-
-func IsStateDB(path string) bool {
-	name := filepath.Base(path)
-
-	return name == "state.db" || name == "state.db-wal" || name == "state.db-shm"
-}
