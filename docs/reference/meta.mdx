@@ -170,8 +170,37 @@ Advertised model config options carry per-model `_meta.hermes` metadata:
 where the model exposes them. They carry no generic `capabilities` list and no
 modality or generator fields.
 
-A successful `session/prompt` response carries exactly
-`_meta.hermes.messageId` under the Hermes namespace. The value is the
-replay-stable `history-N` identity of the latest finished assistant and is
-emitted only after the snapshot containing the same terminal identity commits.
-Usage updates do not carry terminal identity metadata.
+A successful `session/prompt` response carries `_meta.hermes.messageId` and
+`_meta.hermes.outcome` under the Hermes namespace, plus `_meta.hermes.stopReason`
+where a v1 stop reason names that outcome. `messageId` is the replay-stable
+`history-N` identity of the latest finished assistant and is emitted only after
+the snapshot containing the same terminal identity commits; `outcome` is the
+outcome the store recorded for that turn, and is the empty string on a turn whose
+commit recorded none. `stopReason` is omitted rather than emitted empty. Usage
+updates carry none of these.
+
+Every session lifecycle response — `session/new`, `session/load`,
+`session/resume`, and the fork extension — carries the session's own
+`_meta.hermes` snapshot:
+
+| Field | Meaning |
+|---|---|
+| `nativeSessionId` | The native Hermes session id this ACP session is bound to. |
+| `model` | The resolved `provider/model` selection, present when one is bound. |
+| `modelId` | The same value under the config-option spelling. |
+| `mode` | The session's native mode, present when one is set. |
+
+The `initialize` response advertises the adapter's own surfaces under
+`agentCapabilities._meta.hermes`:
+
+| Key | Meaning |
+|---|---|
+| `fork` | The unstable fork extension: its method name and its request/response payload shapes. |
+| `elicitation` | The unstable elicitation surface: its scope and the ACP v1 track it follows. |
+| `rawEvent` | The `_hermes/rawEvent` notification: its method, the request field that enables it, its byte ceiling, and that it is off by default. |
+| `sessionStore` | The durable store format and the key shape addressing it. |
+| `providerAuth` | The provider-auth surface, present only when a provider-auth root is configured. |
+
+The family-global literals sit beside that namespace rather than inside it: see
+[Media envelope](#media-envelope) and
+[Lifecycle extension](#lifecycle-extension).

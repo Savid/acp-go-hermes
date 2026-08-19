@@ -134,8 +134,9 @@ option leaves every handoff-form block rejected as `invalid_handoff` and the
 capability unadvertised.
 
 `RuntimeContainmentMode` reports `authoritative`, `shared_identity`,
-`best_effort`, or `unavailable`. Embedded hosts can observe it through the
-runtime-resource hooks. `shared_identity` is the ordinary default reported on
+`best_effort`, or `unavailable`. Embedded hosts read the resolved mode from
+`Agent.ContainmentMode()`, and the `ObserveContainment` runtime-resource hook
+reports it once at agent construction. `shared_identity` is the ordinary default reported on
 every supported platform when `WithProcessIsolation` is omitted; it is
 non-authoritative, so it publishes no provider-descendant snapshots and makes no
 whole-tree quiescence or credential-separation claim. Best-effort snapshots are
@@ -179,7 +180,8 @@ omitting the route envelope when given an empty or oversized nonce, so the
 adapter rejects the resulting request.
 
 `RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
+`ObserveContainment`.
 Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
 callbacks leave standalone operation unbounded. Hermes reserves the isolated
 session home before creating it, holds the native permit for the one

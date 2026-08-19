@@ -142,7 +142,8 @@ A failed turn is never an ACP stop reason. After native message submission has
 started, every non-success settlement destructively fences the isolated runtime
 back to the last committed snapshot before returning one terminal
 `hermes_turn_failed` JSON-RPC error
-(`-32603`, Internal error — the adapter never uses `-32000`). The error `data`
+(`-32603`, Internal error — a turn failure is never reported as `-32000`, which
+belongs to the provider-auth legs). The error `data`
 carries a machine-readable `cause`:
 
 | `cause` | Meaning |
