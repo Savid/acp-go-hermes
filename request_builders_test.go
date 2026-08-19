@@ -207,24 +207,11 @@ func TestPromptMappingHelpers(t *testing.T) {
 			t.Fatalf("empty tool kind for %q", tool)
 		}
 	}
-	for _, priority := range []string{"high", "low", "medium"} {
-		if planPriority(priority) == "" {
-			t.Fatalf("empty plan priority for %q", priority)
-		}
-	}
-	for _, status := range []string{"completed", "in_progress", "pending"} {
-		if planStatus(status) == "" {
-			t.Fatalf("empty plan status for %q", status)
-		}
-	}
 	if questionElicitationMessage([]nativehermes.QuestionInfo{{Question: "Only?"}}) != "Only?" {
 		t.Fatal("single question message mismatch")
 	}
 	if got := questionOptionSchemas([]nativehermes.QuestionOption{{Label: ""}, {Label: "A"}}); len(got) != 1 {
 		t.Fatalf("questionOptionSchemas = %#v", got)
-	}
-	if req, ok := eventQuestion(json.RawMessage(`{"request":{"id":"q","sessionID":"s"}}`)); !ok || req.ID != "q" {
-		t.Fatalf("eventQuestion wrapper = %#v ok=%v", req, ok)
 	}
 	if _, ok := eventQuestion(json.RawMessage(`{}`)); ok {
 		t.Fatal("empty event question parsed")

@@ -1,4 +1,3 @@
-//nolint:tagliatelle // Hermes native event payloads use sessionID wire names.
 package hermesacp
 
 import (
@@ -66,7 +65,6 @@ const (
 	evtApprovalRequest    = "approval.request"
 	evtClarifyRequest     = "clarify.request"
 	evtMessagePartUpdated = "message.part.updated"
-	evtMessagePartCreated = "message.part.created"
 	evtServerConnected    = "server.connected"
 )
 
@@ -99,8 +97,9 @@ func mapTurnFailure(err error) error {
 	return acp.NewInternalError(data)
 }
 
-// reconcileConnected drives the reconnect reconciliation for a turn: pending
-// permissions first, then pending questions.
+// reconcileConnected drives the reconnect reconciliation for a turn. The
+// gateway holds no queue a reconnected client can poll, so the whole
+// reconciliation is the MCP reload the reconnected turn owes.
 func (s *session) reconcileConnected(ctx context.Context) error {
 	if err := s.reloadMCPForAuthorizedTurn(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -110,11 +109,7 @@ func (s *session) reconcileConnected(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.reconcilePermissions(ctx); err != nil {
-		return err
-	}
-
-	return s.reconcileQuestions(ctx)
+	return nil
 }
 
 // failedTurnResult maps a native SendMessage error to the turn outcome only
@@ -785,6 +780,8 @@ func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent)
 		s.agent.observe.RecordRawEventEmitFailure(ctx)
 	}
 
+	// The gateway pushes exactly three turn events. An arm for any other type
+	// would be a claim about a shape this adapter never receives.
 	switch event.Type {
 	case evtApprovalRequest:
 		var req nativehermes.PermissionRequest
@@ -792,19 +789,10 @@ func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent)
 			return err
 		}
 
-		req.ReplyRoute = nativehermes.PermissionRouteAPI
 		if req.SessionID == s.idmap.NativeSessionID {
 			return s.handlePermission(ctx, req)
 		}
-	case "todo.updated":
-		var payload struct {
-			SessionID string              `json:"sessionID"`
-			Todos     []nativehermes.Todo `json:"todos"`
-		}
-		if err := json.Unmarshal(event.Properties, &payload); err == nil && payload.SessionID == s.idmap.NativeSessionID {
-			return s.emitPlan(ctx, payload.Todos)
-		}
-	case evtMessagePartUpdated, evtMessagePartCreated:
+	case evtMessagePartUpdated:
 		part, ok := eventPart(event.Properties)
 		if ok && part.SessionID == s.idmap.NativeSessionID && s.markPart(part) {
 			s.markActiveMessageID(part.MessageID)
@@ -816,8 +804,6 @@ func (s *session) handleEvent(ctx context.Context, event nativehermes.TurnEvent)
 	case evtClarifyRequest:
 		req, ok := eventQuestion(event.Properties)
 		if ok && req.SessionID == s.idmap.NativeSessionID {
-			req.ReplyRoute = nativehermes.QuestionRouteAPI
-
 			return s.handleQuestion(ctx, req)
 		}
 	}
@@ -831,13 +817,6 @@ func eventPart(data json.RawMessage) (nativehermes.Part, bool) {
 		return part, true
 	}
 
-	var wrapper struct {
-		Part nativehermes.Part `json:"part"`
-	}
-	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Part.Type != "" {
-		return wrapper.Part, true
-	}
-
 	return nativehermes.Part{}, false
 }
 
@@ -847,58 +826,7 @@ func eventQuestion(data json.RawMessage) (nativehermes.QuestionRequest, bool) {
 		return req, true
 	}
 
-	for _, key := range []string{keyQuestion, keyRequest, keyData} {
-		var wrapper map[string]json.RawMessage
-		if err := json.Unmarshal(data, &wrapper); err != nil {
-			continue
-		}
-
-		raw := wrapper[key]
-		if len(raw) == 0 {
-			continue
-		}
-
-		if err := json.Unmarshal(raw, &req); err == nil && req.ID != "" {
-			return req, true
-		}
-	}
-
 	return nativehermes.QuestionRequest{}, false
-}
-
-func (s *session) reconcilePermissions(ctx context.Context) error {
-	requests, err := s.client.PendingPermissions(ctx)
-	if err != nil {
-		return err
-	}
-
-	for i := range requests {
-		req := &requests[i]
-		if req.SessionID == s.idmap.NativeSessionID {
-			if err := s.handlePermission(ctx, *req); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func (s *session) reconcileQuestions(ctx context.Context) error {
-	requests, err := s.client.PendingQuestions(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, req := range requests {
-		if req.SessionID == s.idmap.NativeSessionID {
-			if err := s.handleQuestion(ctx, req); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
 }
 
 type permissionTurnRoute struct {
@@ -1458,27 +1386,6 @@ func stringAnswersFromAny(value any) []string {
 	}
 }
 
-func (s *session) emitPlan(ctx context.Context, todos []nativehermes.Todo) error {
-	entries := make([]acp.PlanEntry, 0, len(todos))
-	for _, todo := range todos {
-		if todo.Content == "" {
-			continue
-		}
-
-		entries = append(entries, acp.PlanEntry{
-			Content:  todo.Content,
-			Priority: planPriority(todo.Priority),
-			Status:   planStatus(todo.Status),
-		})
-	}
-
-	if len(entries) == 0 {
-		return nil
-	}
-
-	return s.emitUpdate(ctx, acp.UpdatePlan(entries...))
-}
-
 func (s *session) emitUpdate(ctx context.Context, update acp.SessionUpdate) error {
 	conn := s.agent.connection()
 	if conn == nil {
@@ -1650,27 +1557,5 @@ func toolKind(tool string) acp.ToolKind {
 		return acp.ToolKindThink
 	default:
 		return acp.ToolKindOther
-	}
-}
-
-func planPriority(value string) acp.PlanEntryPriority {
-	switch strings.ToLower(value) {
-	case valHigh:
-		return acp.PlanEntryPriorityHigh
-	case valLow:
-		return acp.PlanEntryPriorityLow
-	default:
-		return acp.PlanEntryPriorityMedium
-	}
-}
-
-func planStatus(value string) acp.PlanEntryStatus {
-	switch strings.ToLower(value) {
-	case valCompleted, valDone:
-		return acp.PlanEntryStatusCompleted
-	case "in_progress", "running":
-		return acp.PlanEntryStatusInProgress
-	default:
-		return acp.PlanEntryStatusPending
 	}
 }

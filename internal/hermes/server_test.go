@@ -833,16 +833,6 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	if live := server.liveSessionID("stored-1"); live != "" {
 		t.Fatalf("deleted session still mapped to %q", live)
 	}
-	if perms, err6 := server.PendingPermissions(ctx); err6 != nil || perms != nil {
-		t.Fatalf("PendingPermissions = %#v err=%v", perms, err6)
-	}
-	if questions, err7 := server.PendingQuestions(ctx); err7 != nil || questions != nil {
-		t.Fatalf("PendingQuestions = %#v err=%v", questions, err7)
-	}
-	if todos, err8 := server.Todos(ctx, "stored-1"); err8 != nil || todos != nil {
-		t.Fatalf("Todos = %#v err=%v", todos, err8)
-	}
-
 	testGatewayServerMessageForkAndClose(ctx, t, server, fake)
 }
 

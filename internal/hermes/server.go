@@ -121,11 +121,8 @@ type Server interface {
 	Messages(context.Context, string) ([]NativeMessage, error)
 	Abort(context.Context, string) error
 	Fork(context.Context, string, string) (Session, error)
-	Todos(context.Context, string) ([]Todo, error)
 	ConfigProviders(context.Context) (ProvidersResponse, error)
-	PendingPermissions(context.Context) ([]PermissionRequest, error)
 	ReplyPermission(context.Context, PermissionRequest, string, string) error
-	PendingQuestions(context.Context) ([]QuestionRequest, error)
 	ReplyQuestion(context.Context, QuestionRequest, [][]string) error
 	RejectQuestion(context.Context, QuestionRequest) error
 	Events() <-chan TurnEvent
@@ -358,13 +355,6 @@ type Tokens struct {
 	} `json:"cache"`
 }
 
-type Todo struct {
-	ID       string `json:"id"`
-	Content  string `json:"content"`
-	Status   string `json:"status"`
-	Priority string `json:"priority"`
-}
-
 type TurnEvent struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`
@@ -388,12 +378,11 @@ func (e *TurnEvent) UnmarshalJSON(data []byte) error {
 }
 
 type PermissionRequest struct {
-	ID         string          `json:"id"`
-	SessionID  string          `json:"sessionID"`
-	Action     string          `json:"action"`
-	Metadata   map[string]any  `json:"metadata"`
-	Tool       permissionTool  `json:"tool"`
-	ReplyRoute PermissionRoute `json:"-"`
+	ID        string         `json:"id"`
+	SessionID string         `json:"sessionID"`
+	Action    string         `json:"action"`
+	Metadata  map[string]any `json:"metadata"`
+	Tool      permissionTool `json:"tool"`
 }
 
 type permissionTool struct {
@@ -401,46 +390,11 @@ type permissionTool struct {
 	CallID    string `json:"callID"`
 }
 
-type PermissionRoute string
-
-const (
-	PermissionRouteSession PermissionRoute = "session"
-	PermissionRouteAPI     PermissionRoute = "api"
-)
-
-func (r PermissionRequest) Route() PermissionRoute {
-	if r.ReplyRoute != "" {
-		return r.ReplyRoute
-	}
-
-	if r.Action != "" {
-		return PermissionRouteAPI
-	}
-
-	return PermissionRouteSession
-}
-
 type QuestionRequest struct {
-	ID         string         `json:"id"`
-	SessionID  string         `json:"sessionID"`
-	Questions  []QuestionInfo `json:"questions"`
-	Tool       QuestionTool   `json:"tool"`
-	ReplyRoute QuestionRoute  `json:"-"`
-}
-
-type QuestionRoute string
-
-const (
-	QuestionRouteSession QuestionRoute = "session"
-	QuestionRouteAPI     QuestionRoute = "api"
-)
-
-func (r QuestionRequest) Route() QuestionRoute {
-	if r.ReplyRoute != "" {
-		return r.ReplyRoute
-	}
-
-	return QuestionRouteSession
+	ID        string         `json:"id"`
+	SessionID string         `json:"sessionID"`
+	Questions []QuestionInfo `json:"questions"`
+	Tool      QuestionTool   `json:"tool"`
 }
 
 type QuestionInfo struct {
@@ -2086,12 +2040,11 @@ func (s *hermesServer) forwardGatewayPermission(
 	}
 
 	req := PermissionRequest{
-		ID:         requestID,
-		SessionID:  stored,
-		Action:     firstNonEmpty(gatewayPayloadString(event.Payload, "command"), "approval"),
-		Metadata:   map[string]any{"liveSessionId": live},
-		Tool:       permissionTool{MessageID: messageID, CallID: toolCallID},
-		ReplyRoute: PermissionRouteAPI,
+		ID:        requestID,
+		SessionID: stored,
+		Action:    firstNonEmpty(gatewayPayloadString(event.Payload, "command"), "approval"),
+		Metadata:  map[string]any{"liveSessionId": live},
+		Tool:      permissionTool{MessageID: messageID, CallID: toolCallID},
 	}
 
 	data, _ := json.Marshal(req)
@@ -2136,7 +2089,6 @@ func (s *hermesServer) forwardGatewayQuestion(ctx context.Context, stored string
 			Header:   "Hermes question",
 			Custom:   true,
 		}},
-		ReplyRoute: QuestionRouteAPI,
 	}
 
 	data, _ := json.Marshal(req)
@@ -2529,12 +2481,6 @@ func (s *hermesServer) lookupStoredSessionIDForLive(ctx context.Context, live st
 	return "", fmt.Errorf("%s active_list missing live session %q", label, live)
 }
 
-func (s *hermesServer) Todos(ctx context.Context, id string) ([]Todo, error) {
-	_, _ = ctx, id
-
-	return nil, nil
-}
-
 func (s *hermesServer) ConfigProviders(ctx context.Context) (ProvidersResponse, error) {
 	live := s.anyLiveSessionID()
 
@@ -2565,12 +2511,6 @@ func (s *hermesServer) SetModel(ctx context.Context, stored string, value string
 	}
 }
 
-func (s *hermesServer) PendingPermissions(ctx context.Context) ([]PermissionRequest, error) {
-	_ = ctx
-
-	return nil, nil
-}
-
 func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionRequest, reply string, message string) error {
 	_ = message
 	choice := "deny"
@@ -2586,12 +2526,6 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionReques
 	}
 
 	return s.gatewayClient().ApprovalRespond(ctx, live, choice, reply == valAlways)
-}
-
-func (s *hermesServer) PendingQuestions(ctx context.Context) ([]QuestionRequest, error) {
-	_ = ctx
-
-	return nil, nil
 }
 
 func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, answers [][]string) error {

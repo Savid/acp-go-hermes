@@ -39,7 +39,6 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	client.todos = []nativehermes.Todo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
 	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err2 := session.snapshotToStore(ctx); err2 != nil {
@@ -1908,16 +1907,6 @@ func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 		session.closed = true
 		_, err := session.captureSnapshotLocked(t.Context(), &terminalSnapshotRequirement{})
 		require.ErrorContains(t, err, "closed")
-	})
-
-	t.Run("todo fallback", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.todosErr = errors.New("todos unavailable")
-		session := testSession(newTestAgent(), client)
-		session.committed.todos = []nativehermes.Todo{{Content: "committed"}}
-		commit, err := session.captureSnapshotLocked(t.Context(), nil)
-		require.NoError(t, err)
-		require.Equal(t, session.committed.todos, commit.todos)
 	})
 
 	t.Run("settled archive read", func(t *testing.T) {

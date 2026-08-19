@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
-
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
 	"github.com/savid/acp-go-hermes/internal/observer"
@@ -321,7 +319,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		valElicitation: map[string]any{
 			"unstable": true,
-			"scope":    string(nativehermes.PermissionRouteSession),
+			"scope":    "session",
 			"tracks":   "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{

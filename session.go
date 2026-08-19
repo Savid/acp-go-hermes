@@ -143,7 +143,6 @@ type committedState struct {
 	terminal   SessionStoreTerminalState
 	native     *stateSnapshotTerminal
 	foreground *stateSnapshotForeground
-	todos      []nativehermes.Todo
 	archives   map[string]archiveInfo
 }
 
@@ -1003,7 +1002,6 @@ func committedStateFromSnapshot(snapshot stateSnapshot) committedState {
 	}
 	if snapshot.Wrapper != nil {
 		state.foreground = snapshot.Wrapper.Foreground
-		state.todos = snapshot.Wrapper.Todos
 	}
 
 	state.archives = cloneArchiveInfo(snapshot.Archives)

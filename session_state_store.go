@@ -144,7 +144,6 @@ type archiveInfo struct {
 }
 
 type stateSnapshotWrapper struct {
-	Todos []nativehermes.Todo `json:"todos"`
 	// Foreground is the adapter's own record of how the last accepted turn
 	// ended. It lives in the wrapper section rather than in Terminal because
 	// Terminal is the native archive's completed assistant identity: a turn that
@@ -226,7 +225,6 @@ type sessionStoreCommit struct {
 	terminal     SessionStoreTerminalState
 	native       *stateSnapshotTerminal
 	foreground   *stateSnapshotForeground
-	todos        []nativehermes.Todo
 	archives     map[string]archiveInfo
 	// deadline bounds the store write, carried from the capture so a captured
 	// generation cannot be published under an unbounded context.
@@ -290,14 +288,6 @@ func (s *session) captureSnapshotLocked(
 
 	committed := s.committedState()
 
-	todos, todosErr := snapshot.client.Todos(snapshotCtx, idmap.NativeSessionID)
-	if todosErr != nil {
-		// A contained generation cannot answer for its own plan state. Restating
-		// the last committed list keeps a settled boundary from silently dropping
-		// state the store already holds.
-		todos = committed.todos
-	}
-
 	terminal, foreground, err := s.foregroundSections(snapshotCtx, snapshot, idmap, requirement, committed)
 	if err != nil {
 		return nil, err
@@ -338,10 +328,7 @@ func (s *session) captureSnapshotLocked(
 		},
 		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
-		Wrapper: &stateSnapshotWrapper{
-			Todos:      todos,
-			Foreground: foreground,
-		},
+		Wrapper:  &stateSnapshotWrapper{Foreground: foreground},
 	}
 
 	replacements := []SessionStoreReplacement{}
@@ -414,7 +401,6 @@ func (s *session) captureSnapshotLocked(
 		terminal:     nextTerminal,
 		native:       terminal,
 		foreground:   foreground,
-		todos:        todos,
 		archives:     main.Archives,
 		deadline:     s.agent.options.storeWriteTTL,
 	}, nil
@@ -477,7 +463,6 @@ func (s *session) publishSnapshotLocked(ctx context.Context, commit *sessionStor
 		terminal:   commit.terminal,
 		native:     commit.native,
 		foreground: commit.foreground,
-		todos:      commit.todos,
 		archives:   commit.archives,
 	}
 	s.mu.Unlock()

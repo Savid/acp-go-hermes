@@ -645,21 +645,11 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 	})
 }
 
-func TestQuestionToolReconcileAndCancelRejectsPending(t *testing.T) {
+func TestQuestionToolCancelRejectsPending(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
-	client.pendingQuestions = []nativehermes.QuestionRequest{
-		{ID: "foreign", SessionID: "other"},
-		{ID: "q1", SessionID: "native-1"},
-	}
 	agent := newTestAgent()
 	session := testSession(agent, client)
-	if err := session.reconcileQuestions(ctx); err != nil {
-		t.Fatalf("reconcileQuestions: %v", err)
-	}
-	if client.questionRejectCount() != 1 {
-		t.Fatalf("question rejects = %d, want 1", client.questionRejectCount())
-	}
 
 	turnCtx := session.beginTurn(ctx, "test-turn")
 	session.mu.Lock()
@@ -670,8 +660,8 @@ func TestQuestionToolReconcileAndCancelRejectsPending(t *testing.T) {
 	if turnCtx.Err() == nil {
 		t.Fatal("turn context was not cancelled")
 	}
-	if client.questionRejectCount() != 2 {
-		t.Fatalf("question rejects after cancel = %d, want 2", client.questionRejectCount())
+	if client.questionRejectCount() != 1 {
+		t.Fatalf("question rejects after cancel = %d, want 1", client.questionRejectCount())
 	}
 	reply := client.permissionReply(0)
 	if reply.reply != "reject" || reply.message != "cancelled" {
@@ -680,7 +670,7 @@ func TestQuestionToolReconcileAndCancelRejectsPending(t *testing.T) {
 	session.finishTurn()
 }
 
-func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
+func TestPermissionV2AskReplyAndCancelled(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
@@ -709,16 +699,6 @@ func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
 	if got := client.permissionReply(1).reply; got != "reject" {
 		t.Fatalf("cancelled reply = %q, want reject", got)
 	}
-
-	foreign := testHermesPermissionRequest(t, "foreign", "tool-foreign")
-	foreign.SessionID = "other"
-	client.pendingPermissions = []nativehermes.PermissionRequest{foreign, testHermesPermissionRequest(t, "perm-3", "tool-3")}
-	if err := session.reconcilePermissions(ctx); err != nil {
-		t.Fatalf("reconcilePermissions: %v", err)
-	}
-	if got := client.permissionReply(2).requestID; got != "perm-3" {
-		t.Fatalf("reconciled request id = %q", got)
-	}
 }
 
 func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
@@ -737,9 +717,11 @@ func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("permission event: %v", err)
 	}
-	client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm-dup", "tool-dup")}
-	if err := session.reconcilePermissions(ctx); err != nil {
-		t.Fatalf("permission reconcile: %v", err)
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+		Type:       "approval.request",
+		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit","tool":{"callID":"tool-dup"}}`),
+	}); err != nil {
+		t.Fatalf("repeated permission event: %v", err)
 	}
 	if conn.permissionRequestCount() != 1 || client.permissionReplyCount() != 1 {
 		t.Fatalf("duplicate permission was not fenced requests=%d replies=%d", conn.permissionRequestCount(), client.permissionReplyCount())
@@ -751,16 +733,18 @@ func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("question event: %v", err)
 	}
-	client.pendingQuestions = []nativehermes.QuestionRequest{{ID: "question-dup", SessionID: "native-1"}}
-	if err := session.reconcileQuestions(ctx); err != nil {
-		t.Fatalf("question reconcile: %v", err)
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+		Type:       "clarify.request",
+		Properties: json.RawMessage(`{"id":"question-dup","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
+	}); err != nil {
+		t.Fatalf("repeated question event: %v", err)
 	}
 	if len(conn.elicitations) != 1 || client.questionReplyCount() != 1 {
 		t.Fatalf("duplicate question was not fenced elicitations=%d replies=%d", len(conn.elicitations), client.questionReplyCount())
 	}
 }
 
-func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
+func TestEventMappingMessagePartToolUsageAndRaw(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
@@ -769,23 +753,19 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 	session := testSession(agent, client)
 	session.rawMessages = rawMessageConfig{enabled: true}
 
-	todoProps := json.RawMessage(`{"sessionID":"native-1","todos":[{"content":"Ship it","status":"in_progress","priority":"high"}]}`)
-	if err := session.handleEvent(ctx, eventFromJSON(t, `{"type":"todo.updated","properties":`+string(todoProps)+`}`)); err != nil {
-		t.Fatalf("todo event: %v", err)
-	}
 	textProps := json.RawMessage(`{"id":"part-1","sessionID":"native-1","messageID":"message-1","type":"text","text":"hello"}`)
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.created", Properties: textProps, Raw: json.RawMessage(`{"type":"message.part.created"}`)}); err != nil {
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.updated", Properties: textProps, Raw: json.RawMessage(`{"type":"message.part.updated"}`)}); err != nil {
 		t.Fatalf("text event: %v", err)
 	}
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.created", Properties: textProps}); err != nil {
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.updated", Properties: textProps}); err != nil {
 		t.Fatalf("duplicate text event: %v", err)
 	}
-	reasoningProps := json.RawMessage(`{"part":{"id":"part-2","sessionID":"native-1","messageID":"message-1","type":"reasoning","text":"thinking"}}`)
+	reasoningProps := json.RawMessage(`{"id":"part-2","sessionID":"native-1","messageID":"message-1","type":"reasoning","text":"thinking"}`)
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.updated", Properties: reasoningProps}); err != nil {
 		t.Fatalf("reasoning event: %v", err)
 	}
 	toolProps := json.RawMessage(`{"id":"part-3","sessionID":"native-1","messageID":"message-1","type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","title":"Run","rawOutput":{"result":"done"}}}`)
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.created", Properties: toolProps}); err != nil {
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "message.part.updated", Properties: toolProps}); err != nil {
 		t.Fatalf("tool event: %v", err)
 	}
 	if err := session.emitMessage(ctx, nativehermes.NativeMessage{
@@ -800,25 +780,22 @@ func TestEventMappingMessagePartToolTodoUsageAndRaw(t *testing.T) {
 		t.Fatalf("emitMessage: %v", err)
 	}
 
-	if conn.updateCount() != 6 {
-		t.Fatalf("updates = %d, want 6: %#v", conn.updateCount(), conn.updates)
+	if conn.updateCount() != 5 {
+		t.Fatalf("updates = %d, want 5: %#v", conn.updateCount(), conn.updates)
 	}
-	if conn.updates[0].Update.Plan == nil {
-		t.Fatalf("first update = %#v, want plan", conn.updates[0].Update)
+	if conn.updates[0].Update.AgentMessageChunk == nil {
+		t.Fatalf("first update = %#v, want agent chunk", conn.updates[0].Update)
 	}
-	if conn.updates[1].Update.AgentMessageChunk == nil {
-		t.Fatalf("second update = %#v, want agent chunk", conn.updates[1].Update)
+	if conn.updates[1].Update.AgentThoughtChunk == nil {
+		t.Fatalf("second update = %#v, want thought", conn.updates[1].Update)
 	}
-	if conn.updates[2].Update.AgentThoughtChunk == nil {
-		t.Fatalf("third update = %#v, want thought", conn.updates[2].Update)
+	if conn.updates[2].Update.ToolCall == nil {
+		t.Fatalf("third update = %#v, want tool", conn.updates[2].Update)
 	}
-	if conn.updates[3].Update.ToolCall == nil {
-		t.Fatalf("fourth update = %#v, want tool", conn.updates[3].Update)
+	if output, _ := conn.updates[2].Update.ToolCall.RawOutput.(map[string]any); output["result"] != "done" {
+		t.Fatalf("tool start raw output = %#v", conn.updates[2].Update.ToolCall.RawOutput)
 	}
-	if output, _ := conn.updates[3].Update.ToolCall.RawOutput.(map[string]any); output["result"] != "done" {
-		t.Fatalf("tool start raw output = %#v", conn.updates[3].Update.ToolCall.RawOutput)
-	}
-	if conn.updates[4].Update.UsageUpdate == nil || conn.updates[5].Update.UsageUpdate == nil {
+	if conn.updates[3].Update.UsageUpdate == nil || conn.updates[4].Update.UsageUpdate == nil {
 		t.Fatalf("usage updates missing: %#v", conn.updates)
 	}
 	if len(conn.extensions) == 0 || conn.extensions[0].method != RawEventMethod {
@@ -1127,7 +1104,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 		t.Fatal("Prompt did not start")
 	}
 	client.events <- nativehermes.TurnEvent{
-		Type:        "message.part.created",
+		Type:        "message.part.updated",
 		StreamEpoch: 7,
 		Properties:  json.RawMessage(`{"id":"stream-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
 	}
@@ -1149,7 +1126,7 @@ func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
 	}
 
 	client.events <- nativehermes.TurnEvent{
-		Type:        "message.part.created",
+		Type:        "message.part.updated",
 		StreamEpoch: 7,
 		Properties:  json.RawMessage(`{"id":"late-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"late"}`),
 	}
@@ -1194,209 +1171,6 @@ func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	}
 	if client.abortCount() != 1 {
 		t.Fatalf("native aborts = %d, want 1", client.abortCount())
-	}
-}
-
-func TestPromptServerReconnectReconcilesPendingPermissionAndQuestion(t *testing.T) {
-	client := newFakeHermesClient()
-	conn := newRecordingAgentClient()
-	agent := newTestAgent()
-	agent.setAgentClient(conn)
-	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-	session := testSession(agent, client)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-		close(started)
-		<-release
-
-		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant-1", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-		done <- err
-	}()
-	select {
-	case <-started:
-	case <-ctx.Done():
-		t.Fatal("Prompt did not start")
-	}
-	client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
-	client.pendingQuestions = []nativehermes.QuestionRequest{{
-		ID:        "question",
-		SessionID: "native-1",
-		Questions: []nativehermes.QuestionInfo{{
-			Question: "Pick?",
-			Header:   "Pick",
-			Options:  []nativehermes.QuestionOption{{Label: "A", Description: "A"}},
-		}},
-	}}
-	client.events <- nativehermes.TurnEvent{Type: "server.connected"}
-	deadline := time.After(time.Second)
-	for client.permissionReplyCount() == 0 || client.questionReplyCount() == 0 {
-		select {
-		case <-deadline:
-			t.Fatalf("pending queues not reconciled permissions=%d questions=%d", client.permissionReplyCount(), client.questionReplyCount())
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	close(release)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	case <-ctx.Done():
-		t.Fatal("Prompt did not finish")
-	}
-}
-
-func TestPromptServerReconnectReconcileFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name          string
-		setup         func(*recordingAgentClient, *Agent) chan struct{}
-		pending       func(*fakeHermesClient)
-		cancel        bool
-		wantErr       string
-		wantCancelled bool
-	}{
-		{
-			name: "permission error",
-			setup: func(conn *recordingAgentClient, _ *Agent) chan struct{} {
-				conn.permErr = errors.New("permission failed")
-
-				return nil
-			},
-			pending: func(client *fakeHermesClient) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
-			},
-			wantErr: "permission failed",
-		},
-		{
-			name: "permission cancelled",
-			setup: func(conn *recordingAgentClient, _ *Agent) chan struct{} {
-				conn.permissionStarted = make(chan struct{}, 1)
-				conn.permissionRelease = make(chan struct{})
-
-				return conn.permissionStarted
-			},
-			pending: func(client *fakeHermesClient) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
-			},
-			cancel:        true,
-			wantCancelled: true,
-		},
-		{
-			name: "question error",
-			setup: func(conn *recordingAgentClient, agent *Agent) chan struct{} {
-				agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-				conn.elicitErr = errors.New("elicitation failed")
-
-				return nil
-			},
-			pending: func(client *fakeHermesClient) {
-				client.pendingQuestions = []nativehermes.QuestionRequest{{
-					ID:        "question",
-					SessionID: "native-1",
-					Questions: []nativehermes.QuestionInfo{{
-						Question: "Pick?",
-						Header:   "Pick",
-						Options:  []nativehermes.QuestionOption{{Label: "A"}},
-					}},
-				}}
-			},
-			wantErr: "elicitation failed",
-		},
-		{
-			name: "question cancelled",
-			setup: func(conn *recordingAgentClient, agent *Agent) chan struct{} {
-				agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-				conn.elicitationStarted = make(chan struct{}, 1)
-				conn.elicitationRelease = make(chan struct{})
-
-				return conn.elicitationStarted
-			},
-			pending: func(client *fakeHermesClient) {
-				client.pendingQuestions = []nativehermes.QuestionRequest{{
-					ID:        "question",
-					SessionID: "native-1",
-					Questions: []nativehermes.QuestionInfo{{
-						Question: "Pick?",
-						Header:   "Pick",
-						Options:  []nativehermes.QuestionOption{{Label: "A"}},
-					}},
-				}}
-			},
-			cancel:        true,
-			wantCancelled: true,
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			client := newFakeHermesClient()
-			conn := newRecordingAgentClient()
-			agent := newTestAgent()
-			agent.setAgentClient(conn)
-			startedHook := tt.setup(conn, agent)
-			session := testSession(agent, client)
-			sendStarted := make(chan struct{})
-			client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-				close(sendStarted)
-				<-ctx.Done()
-
-				return nativehermes.NativeMessage{}, ctx.Err()
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			done := make(chan struct {
-				resp acp.PromptResponse
-				err  error
-			}, 1)
-			go func() {
-				resp, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-				done <- struct {
-					resp acp.PromptResponse
-					err  error
-				}{resp: resp, err: err}
-			}()
-			select {
-			case <-sendStarted:
-			case <-ctx.Done():
-				t.Fatal("Prompt did not start")
-			}
-			tt.pending(client)
-			client.events <- nativehermes.TurnEvent{Type: "server.connected"}
-			if startedHook != nil {
-				select {
-				case <-startedHook:
-				case <-ctx.Done():
-					t.Fatal("reconcile request did not start")
-				}
-			}
-			if tt.cancel {
-				cancel()
-			}
-			select {
-			case got := <-done:
-				if tt.wantCancelled {
-					if got.err != nil || got.resp.StopReason != acp.StopReasonCancelled {
-						t.Fatalf("Prompt cancelled resp=%#v err=%v", got.resp, got.err)
-					}
-
-					return
-				}
-				if got.err == nil || !strings.Contains(got.err.Error(), tt.wantErr) {
-					t.Fatalf("Prompt error = %v, want %q", got.err, tt.wantErr)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("Prompt did not finish")
-			}
-		})
 	}
 }
 
@@ -1448,7 +1222,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 				if client.questionRejectCount() != 1 {
 					t.Fatalf("question rejects = %#v", client.questionRejects)
 				}
-				if client.questionRejects[0].route != nativehermes.QuestionRouteAPI {
+				if client.questionRejects[0].requestID == "" {
 					t.Fatalf("question reject route = %#v", client.questionRejects[0])
 				}
 			},
@@ -1590,76 +1364,6 @@ func TestPromptBacklogErrorBeforeTurn(t *testing.T) {
 	}
 }
 
-func TestPromptReconcileCancelledBeforeSend(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		setup     func(*fakeHermesClient, *recordingAgentClient, *Agent)
-		waitStart func(context.Context, *testing.T, *recordingAgentClient)
-	}{
-		{
-			name: "permission",
-			setup: func(client *fakeHermesClient, conn *recordingAgentClient, _ *Agent) {
-				client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "perm", "tool-perm")}
-				conn.permissionStarted = make(chan struct{}, 1)
-				conn.permissionRelease = make(chan struct{})
-			},
-			waitStart: func(ctx context.Context, t *testing.T, conn *recordingAgentClient) {
-				t.Helper()
-				select {
-				case <-conn.permissionStarted:
-				case <-ctx.Done():
-					t.Fatal("permission request did not start")
-				}
-			},
-		},
-		{
-			name: "question",
-			setup: func(client *fakeHermesClient, conn *recordingAgentClient, agent *Agent) {
-				client.pendingQuestions = []nativehermes.QuestionRequest{{ID: "question", SessionID: "native-1"}}
-				conn.elicitationStarted = make(chan struct{}, 1)
-				conn.elicitationRelease = make(chan struct{})
-				agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-			},
-			waitStart: func(ctx context.Context, t *testing.T, conn *recordingAgentClient) {
-				t.Helper()
-				select {
-				case <-conn.elicitationStarted:
-				case <-ctx.Done():
-					t.Fatal("elicitation request did not start")
-				}
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			client := newFakeHermesClient()
-			conn := newRecordingAgentClient()
-			agent := newTestAgent()
-			agent.setAgentClient(conn)
-			session := testSession(agent, client)
-			agent.sessions[session.id] = session
-			tt.setup(client, conn, agent)
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			done := make(chan acp.PromptResponse, 1)
-			go func() {
-				resp, _ := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-				done <- resp
-			}()
-			tt.waitStart(ctx, t, conn)
-			session.cancelTurn()
-			select {
-			case resp := <-done:
-				if resp.StopReason != acp.StopReasonCancelled {
-					t.Fatalf("resp = %#v", resp)
-				}
-			case <-ctx.Done():
-				t.Fatal("prompt did not return")
-			}
-		})
-	}
-}
-
 func TestPermissionCancelledReplyBranches(t *testing.T) {
 	t.Run("permission without connection rejects native request", func(t *testing.T) {
 		client := newFakeHermesClient()
@@ -1744,14 +1448,12 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		session := testSession(agent, client)
 		turnCtx := session.beginTurn(t.Context(), "test-turn")
 		defer session.finishTurn()
-		req := testHermesPermissionRequest(t, "perm", "tool-perm")
-		req.ReplyRoute = nativehermes.PermissionRouteSession
-		err := session.handlePermission(turnCtx, req)
+		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "permission failed") {
 			t.Fatalf("handlePermission err = %v", err)
 		}
 		reply := client.permissionReply(0)
-		if reply.route != nativehermes.PermissionRouteSession || reply.reply != "reject" || reply.message != "client permission request failed" {
+		if reply.reply != "reject" || reply.message != "client permission request failed" {
 			t.Fatalf("permission fail-closed reply = %#v", reply)
 		}
 	})
@@ -1934,11 +1636,11 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		err := session.handleQuestion(context.Background(), nativehermes.QuestionRequest{ID: "question", SessionID: "native-1", ReplyRoute: nativehermes.QuestionRouteAPI})
+		err := session.handleQuestion(context.Background(), nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
 		if err == nil || !strings.Contains(err.Error(), "elicitation failed") {
 			t.Fatalf("handleQuestion err = %v", err)
 		}
-		if client.questionRejectCount() != 1 || client.questionRejects[0].route != nativehermes.QuestionRouteAPI {
+		if client.questionRejectCount() != 1 {
 			t.Fatalf("question fail-closed rejects = %#v", client.questionRejects)
 		}
 	})
@@ -2289,6 +1991,52 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 			t.Fatalf("post-reload-failure Prompt = %v", nextErr)
 		}
 	})
+
+	// A gateway that reconnects mid-turn owes the reconnected runtime the MCP
+	// reload the turn was admitted under. A reload the gateway refuses fails
+	// that turn rather than letting it continue against a runtime whose tool
+	// surface is unknown.
+	t.Run("reconnect mid-turn fails the turn when the reload is refused", func(t *testing.T) {
+		client := newFakeHermesClient()
+		started := make(chan struct{})
+		client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+			close(started)
+			<-ctx.Done()
+
+			return nativehermes.NativeMessage{}, ctx.Err()
+		}
+		session := testSession(newTestAgent(), client)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "reconnect-turn", "reply"))
+			done <- err
+		}()
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("Prompt did not start")
+		}
+
+		session.mu.Lock()
+		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
+		session.mcpReloadComplete = false
+		session.mu.Unlock()
+
+		client.reloadErr = errors.New("reload refused")
+		client.events <- nativehermes.TurnEvent{Type: "server.connected"}
+
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "reload refused") {
+				t.Fatalf("reconnect reload failure = %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("Prompt did not finish")
+		}
+	})
 }
 
 func TestPromptSuccessCancelAndErrors(t *testing.T) {
@@ -2368,24 +2116,6 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		}
 		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{{Audio: &acp.ContentBlockAudio{Type: "audio", Data: "AA==", MimeType: "audio/wav"}}}}); err == nil {
 			t.Fatal("unsupported audio prompt was accepted")
-		}
-	})
-
-	t.Run("pending permission error", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.permissionsErr = errors.New("permissions failed")
-		session := testSession(newTestAgent(), client)
-		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
-			t.Fatal("permission error prompt succeeded")
-		}
-	})
-
-	t.Run("pending question error", func(t *testing.T) {
-		client := newFakeHermesClient()
-		client.questionsErr = errors.New("questions failed")
-		session := testSession(newTestAgent(), client)
-		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
-			t.Fatal("question error prompt succeeded")
 		}
 	})
 
@@ -2579,7 +2309,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		<-started
 		client.events <- nativehermes.TurnEvent{Type: "server.connected"}
 		client.events <- nativehermes.TurnEvent{
-			Type:       "message.part.created",
+			Type:       "message.part.updated",
 			Properties: json.RawMessage(`{"id":"event-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
 		}
 		deadline := time.After(time.Second)
@@ -2621,7 +2351,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		}()
 		<-started
 		client.events <- nativehermes.TurnEvent{
-			Type:       "message.part.created",
+			Type:       "message.part.updated",
 			Properties: json.RawMessage(`{"id":"event-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
 		}
 		if err := <-done; err == nil || !strings.Contains(err.Error(), "update failed") {
@@ -2740,7 +2470,7 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 		t.Fatalf("approval.request event: %v", err)
 	}
 	reply := client.permissionReply(client.permissionReplyCount() - 1)
-	if reply.route != nativehermes.PermissionRouteAPI || reply.requestID != "p-session" || reply.reply != "once" {
+	if reply.requestID != "p-session" || reply.reply != "once" {
 		t.Fatalf("approval.request reply = %#v", reply)
 	}
 	permissionReq := conn.permissions[len(conn.permissions)-1]
@@ -2759,7 +2489,7 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 		t.Fatalf("clarify.request event: %v", err)
 	}
 	questionReply := client.questionReply(client.questionReplyCount() - 1)
-	if questionReply.route != nativehermes.QuestionRouteAPI || questionReply.requestID != "q-v2" {
+	if questionReply.requestID != "q-v2" {
 		t.Fatalf("clarify.request reply = %#v", questionReply)
 	}
 }
@@ -2773,21 +2503,8 @@ func testForeignEventAndPartHelperBranches(t *testing.T, ctx context.Context, se
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: "clarify.request", Properties: json.RawMessage(`{"request":{"id":"q","sessionID":"other"}}`)}); err != nil {
 		t.Fatalf("foreign question event: %v", err)
 	}
-	if part, ok := eventPart(json.RawMessage(`{"part":{"type":"text","text":"x"}}`)); !ok || part.Text != "x" {
-		t.Fatalf("wrapped eventPart = %#v ok=%v", part, ok)
-	}
 	if _, ok := eventPart(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed eventPart succeeded")
-	}
-	for _, raw := range []json.RawMessage{
-		json.RawMessage(`{"question":{"id":"q1","sessionID":"s"}}`),
-		json.RawMessage(`{"data":{"id":"q2","sessionID":"s"}}`),
-		json.RawMessage(`{`),
-	} {
-		eventQuestion(raw)
-	}
-	if err := session.emitPlan(ctx, []nativehermes.Todo{{Content: ""}}); err != nil {
-		t.Fatalf("empty plan: %v", err)
 	}
 	rawSession := testSession(newTestAgent(), newFakeHermesClient())
 	rawSession.rawMessages = rawMessageConfig{enabled: true}
@@ -2920,10 +2637,6 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		}); err == nil {
 			t.Fatal("permission event ignored client error")
 		}
-		client.pendingPermissions = []nativehermes.PermissionRequest{testHermesPermissionRequest(t, "p2", "tool-p2")}
-		if err := session.reconcilePermissions(turnCtx); err == nil {
-			t.Fatal("reconcilePermissions ignored handle error")
-		}
 		conn.permErr = nil
 
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
@@ -2934,24 +2647,10 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		}); err == nil {
 			t.Fatal("question event ignored client error")
 		}
-		client.pendingQuestions = []nativehermes.QuestionRequest{{ID: "q2", SessionID: "native-1"}}
-		if err := session.reconcileQuestions(ctx); err == nil {
-			t.Fatal("reconcileQuestions ignored handle error")
-		}
 		if req, ok := eventQuestion(json.RawMessage(`{"id":"direct","sessionID":"native-1"}`)); !ok || req.ID != "direct" {
 			t.Fatalf("direct eventQuestion = %#v ok=%v", req, ok)
 		}
 	})
-}
-
-func eventFromJSON(t *testing.T, raw string) nativehermes.TurnEvent {
-	t.Helper()
-	var event nativehermes.TurnEvent
-	if err := json.Unmarshal([]byte(raw), &event); err != nil {
-		t.Fatal(err)
-	}
-
-	return event
 }
 
 // requireTurnFailure asserts err is the uniform hermes_turn_failed JSON-RPC

@@ -102,10 +102,10 @@ is omitted from the response and no lifecycle envelope, correlation read, or
 lifecycle fact exists on the connection at all.
 
 Hermes reports `updatesOutsidePrompt: true` and an empty `activityKinds` list.
-The native gateway has no complete structured activity registry, so todo or
-plan updates are not promoted to lifecycle activities. Authoritative
-quiescence is advertised only when process isolation can prove whole-tree
-vacancy; its source is `process-containment`.
+The native gateway publishes no structured activity registry, so no update
+this adapter emits carries an activity a lifecycle consumer could track.
+Authoritative quiescence is advertised only when process isolation can prove
+whole-tree vacancy; its source is `process-containment`.
 
 Prompt requests carry a version-1 submission correlation value under the
 lifecycle key. Permission and elicitation requests carry the action identity

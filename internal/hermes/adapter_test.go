@@ -7,27 +7,6 @@ import (
 	"testing"
 )
 
-func TestPermissionRequestRoute(t *testing.T) {
-	if got := (PermissionRequest{ReplyRoute: PermissionRouteAPI}).Route(); got != PermissionRouteAPI {
-		t.Fatalf("explicit ReplyRoute = %q, want api", got)
-	}
-	if got := (PermissionRequest{Action: "read"}).Route(); got != PermissionRouteAPI {
-		t.Fatalf("action route = %q, want api", got)
-	}
-	if got := (PermissionRequest{}).Route(); got != PermissionRouteSession {
-		t.Fatalf("default route = %q, want session", got)
-	}
-}
-
-func TestQuestionRequestRoute(t *testing.T) {
-	if got := (QuestionRequest{ReplyRoute: QuestionRouteAPI}).Route(); got != QuestionRouteAPI {
-		t.Fatalf("explicit ReplyRoute = %q, want api", got)
-	}
-	if got := (QuestionRequest{}).Route(); got != QuestionRouteSession {
-		t.Fatalf("default route = %q, want session", got)
-	}
-}
-
 func TestMissingLiveSessionMappingErrorMessage(t *testing.T) {
 	err := MissingLiveSessionMappingError{StoredSessionID: "stored-1"}
 	if err.Error() == "" {

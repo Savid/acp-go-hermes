@@ -127,19 +127,16 @@ type fakeHermesClient struct {
 	persistedSessions []nativehermes.Session
 	forkSession       nativehermes.Session
 	messages          []nativehermes.NativeMessage
-	todos             []nativehermes.Todo
 	providers         nativehermes.ProvidersResponse
 
 	configProviderCalls int
 	setModelCalls       []fakeModelSelection
 	setModelErr         error
 
-	pendingPermissions []nativehermes.PermissionRequest
-	permissionReplies  []fakePermissionReply
-	pendingQuestions   []nativehermes.QuestionRequest
-	questionReplies    []fakeQuestionReply
-	questionRejects    []fakeQuestionReject
-	getSessionIDs      []string
+	permissionReplies []fakePermissionReply
+	questionReplies   []fakeQuestionReply
+	questionRejects   []fakeQuestionReject
+	getSessionIDs     []string
 
 	createSessionFunc func(context.Context, string) (nativehermes.Session, error)
 	sendMessage       func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error)
@@ -161,10 +158,7 @@ type fakeHermesClient struct {
 	abortErr             error
 	forkErr              error
 	forkCalls            int
-	todosErr             error
 	providersErr         error
-	permissionsErr       error
-	questionsErr         error
 	replyErr             error
 	closeErr             error
 	reloadErr            error
@@ -266,7 +260,6 @@ func (c *fakeHermesClient) AuthCancelFlow(_ context.Context, nativeSessionID str
 type fakePermissionReply struct {
 	sessionID string
 	requestID string
-	route     nativehermes.PermissionRoute
 	reply     string
 	message   string
 }
@@ -274,14 +267,12 @@ type fakePermissionReply struct {
 type fakeQuestionReply struct {
 	sessionID string
 	requestID string
-	route     nativehermes.QuestionRoute
 	answers   [][]string
 }
 
 type fakeQuestionReject struct {
 	sessionID string
 	requestID string
-	route     nativehermes.QuestionRoute
 }
 
 func newFakeHermesClient() *fakeHermesClient {
@@ -451,10 +442,6 @@ func (c *fakeHermesClient) forkCallCount() int {
 	return c.forkCalls
 }
 
-func (c *fakeHermesClient) Todos(context.Context, string) ([]nativehermes.Todo, error) {
-	return append([]nativehermes.Todo(nil), c.todos...), c.todosErr
-}
-
 func (c *fakeHermesClient) ConfigProviders(context.Context) (nativehermes.ProvidersResponse, error) {
 	c.mu.Lock()
 	c.configProviderCalls++
@@ -481,16 +468,11 @@ func (c *fakeHermesClient) configProviderCallCount() int {
 	return c.configProviderCalls
 }
 
-func (c *fakeHermesClient) PendingPermissions(context.Context) ([]nativehermes.PermissionRequest, error) {
-	return append([]nativehermes.PermissionRequest(nil), c.pendingPermissions...), c.permissionsErr
-}
-
 func (c *fakeHermesClient) ReplyPermission(_ context.Context, req nativehermes.PermissionRequest, reply string, message string) error {
 	c.mu.Lock()
 	c.permissionReplies = append(c.permissionReplies, fakePermissionReply{
 		sessionID: req.SessionID,
 		requestID: req.ID,
-		route:     req.Route(),
 		reply:     reply,
 		message:   message,
 	})
@@ -499,17 +481,13 @@ func (c *fakeHermesClient) ReplyPermission(_ context.Context, req nativehermes.P
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) PendingQuestions(context.Context) ([]nativehermes.QuestionRequest, error) {
-	return append([]nativehermes.QuestionRequest(nil), c.pendingQuestions...), c.questionsErr
-}
-
 func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req nativehermes.QuestionRequest, answers [][]string) error {
 	copied := make([][]string, len(answers))
 	for i := range answers {
 		copied[i] = append([]string(nil), answers[i]...)
 	}
 	c.mu.Lock()
-	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, route: req.Route(), answers: copied})
+	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, answers: copied})
 	c.mu.Unlock()
 
 	return c.replyErr
@@ -517,7 +495,7 @@ func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req nativehermes.Que
 
 func (c *fakeHermesClient) RejectQuestion(_ context.Context, req nativehermes.QuestionRequest) error {
 	c.mu.Lock()
-	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID, route: req.Route()})
+	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID})
 	c.mu.Unlock()
 
 	return c.replyErr
