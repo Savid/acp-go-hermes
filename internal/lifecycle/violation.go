@@ -42,7 +42,7 @@ const (
 	// ViolationStreamCycle refuses a second snapshot on a live stream.
 	ViolationStreamCycle ViolationKind = "stream_cycle"
 	// ViolationStaleStream refuses an event from an incarnation already fenced or
-	// superseded.
+	// superseded, and every event for a session whose close containment completed.
 	ViolationStaleStream ViolationKind = "stale_stream"
 	// ViolationPostTerminalMutation refuses an update carrying any difference
 	// from the reduced terminal record of an activity, action, or turn already
@@ -50,12 +50,13 @@ const (
 	// a restated immutable at other than its first-sight value. A member-wise
 	// no-op restatement is suppressed instead.
 	ViolationPostTerminalMutation ViolationKind = "post_terminal_mutation"
-	// ViolationImmutableIdentityChange refuses an activity update that changes an
-	// immutable identity field, and a first sight missing one.
+	// ViolationImmutableIdentityChange refuses an update that changes an immutable
+	// identity field, a first sight missing one, and an acceptance reusing a turn
+	// the stream already introduced.
 	ViolationImmutableIdentityChange ViolationKind = "immutable_identity_change"
-	// ViolationInconsistentForeground refuses a requires-action transition for a
-	// cycle with no outstanding blocking action, and a blocking action with no
-	// accompanying transition for the cycle it blocks.
+	// ViolationInconsistentForeground refuses a foreground state with no blocker
+	// behind it, a blocker with no foreground state beside it, and a transition
+	// that releases or ends a cycle an action still blocks.
 	ViolationInconsistentForeground ViolationKind = "inconsistent_foreground"
 	// ViolationParentTerminalBeforeChild refuses a parent activity that
 	// terminalizes while an owned descendant is nonterminal.
