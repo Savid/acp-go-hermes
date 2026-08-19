@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestPermissionRequestRouteActionResource(t *testing.T) {
+func TestPermissionRequestRoute(t *testing.T) {
 	if got := (PermissionRequest{ReplyRoute: PermissionRouteAPI}).Route(); got != PermissionRouteAPI {
 		t.Fatalf("explicit ReplyRoute = %q, want api", got)
 	}
@@ -18,18 +18,6 @@ func TestPermissionRequestRouteActionResource(t *testing.T) {
 	}
 	if got := (PermissionRequest{}).Route(); got != PermissionRouteSession {
 		t.Fatalf("default route = %q, want session", got)
-	}
-	if got := (PermissionRequest{Permission: "fs"}).ActionName(); got != "fs" {
-		t.Fatalf("ActionName fallback = %q, want fs", got)
-	}
-	if got := (PermissionRequest{Action: "run"}).ActionName(); got != "run" {
-		t.Fatalf("ActionName = %q, want run", got)
-	}
-	if got := (PermissionRequest{Resources: []string{"a"}}).ResourceList(); len(got) != 1 || got[0] != "a" {
-		t.Fatalf("ResourceList resources = %v", got)
-	}
-	if got := (PermissionRequest{Patterns: []string{"p"}}).ResourceList(); len(got) != 1 || got[0] != "p" {
-		t.Fatalf("ResourceList patterns = %v", got)
 	}
 }
 

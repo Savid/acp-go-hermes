@@ -690,7 +690,6 @@ func TestPermissionV2AskReplyReconcileAndCancelled(t *testing.T) {
 	defer session.finishTurn()
 
 	req := testHermesPermissionRequest(t, "perm-1", "tool-1")
-	req.Resources = []string{"file.txt"}
 	req.Metadata = map[string]any{"path": "file.txt"}
 	if err := session.handlePermission(ctx, req); err != nil {
 		t.Fatalf("handlePermission: %v", err)
@@ -2788,8 +2787,7 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 		Properties: json.RawMessage(`{
 			"id":"p-session",
 			"sessionID":"native-1",
-			"permission":"edit",
-			"patterns":["acp-permission-probe.txt"],
+			"action":"edit",
 			"metadata":{"filepath":"acp-permission-probe.txt"},
 			"tool":{"messageID":"m1","callID":"c1"}
 		}`),
@@ -2805,9 +2803,9 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 		t.Fatalf("approval.request ACP request = %#v", permissionReq)
 	}
 	rawInput, _ := permissionReq.ToolCall.RawInput.(map[string]any)
-	resources, _ := rawInput["resources"].([]string)
-	if len(resources) != 1 || resources[0] != "acp-permission-probe.txt" {
-		t.Fatalf("approval.request resources = %#v", permissionReq.ToolCall.RawInput)
+	metadata, _ := rawInput["metadata"].(map[string]any)
+	if rawInput["action"] != "edit" || metadata["filepath"] != "acp-permission-probe.txt" {
+		t.Fatalf("approval.request raw input = %#v", permissionReq.ToolCall.RawInput)
 	}
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
 		Type:       "clarify.request",

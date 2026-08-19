@@ -956,19 +956,15 @@ func (s *session) rejectInvalidPermission(
 
 func permissionToolRawInput(req nativehermes.PermissionRequest) map[string]any {
 	return map[string]any{
-		"action":       req.ActionName(),
-		"resources":    req.ResourceList(),
+		"action":       req.Action,
 		"metadata":     req.Metadata,
-		keySource:      req.Source,
-		"save":         req.Save,
-		valAlways:      req.Always,
 		routeFieldTool: req.Tool.CallID,
 		keyMessageID:   req.Tool.MessageID,
 	}
 }
 
 func permissionHermesToolState(req nativehermes.PermissionRequest) hermesToolState {
-	title := req.ActionName()
+	title := req.Action
 	if title == "" {
 		title = "Hermes permission"
 	}

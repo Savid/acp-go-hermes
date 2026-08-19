@@ -391,13 +391,7 @@ type PermissionRequest struct {
 	ID         string          `json:"id"`
 	SessionID  string          `json:"sessionID"`
 	Action     string          `json:"action"`
-	Permission string          `json:"permission"`
-	Resources  []string        `json:"resources"`
-	Patterns   []string        `json:"patterns"`
-	Save       []string        `json:"save"`
-	Always     []string        `json:"always"`
 	Metadata   map[string]any  `json:"metadata"`
-	Source     map[string]any  `json:"source"`
 	Tool       permissionTool  `json:"tool"`
 	ReplyRoute PermissionRoute `json:"-"`
 }
@@ -424,18 +418,6 @@ func (r PermissionRequest) Route() PermissionRoute {
 	}
 
 	return PermissionRouteSession
-}
-
-func (r PermissionRequest) ActionName() string {
-	return firstNonEmpty(r.Action, r.Permission)
-}
-
-func (r PermissionRequest) ResourceList() []string {
-	if len(r.Resources) > 0 {
-		return append([]string(nil), r.Resources...)
-	}
-
-	return append([]string(nil), r.Patterns...)
 }
 
 type QuestionRequest struct {
