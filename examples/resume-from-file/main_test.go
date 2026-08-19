@@ -112,8 +112,8 @@ func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
 		t.Fatalf("idmap entries = %d, want exactly the id mapping", len(idmap))
 	}
 
-	if _, err := hermesacp.InspectSessionStoreTerminalState(sessionID, main); err != nil {
-		t.Fatalf("the shipped snapshot is not a current-format snapshot: %v", err)
+	if _, terminalErr := hermesacp.InspectSessionStoreTerminalState(sessionID, main); terminalErr != nil {
+		t.Fatalf("the shipped snapshot is not a current-format snapshot: %v", terminalErr)
 	}
 
 	var snapshot struct {
@@ -123,8 +123,8 @@ func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
 			Bytes   int    `json:"bytes"`
 		} `json:"archives"`
 	}
-	if err := json.Unmarshal(main[0], &snapshot); err != nil {
-		t.Fatalf("decode shipped snapshot: %v", err)
+	if decodeErr := json.Unmarshal(main[0], &snapshot); decodeErr != nil {
+		t.Fatalf("decode shipped snapshot: %v", decodeErr)
 	}
 	archive, named := snapshot.Archives[stateDBSubpath]
 	if !named || archive.Subpath != stateDBSubpath || archive.SHA256 == "" || archive.Bytes <= 0 {

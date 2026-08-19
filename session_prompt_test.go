@@ -1991,7 +1991,6 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 			t.Fatalf("post-reload-failure Prompt = %v", nextErr)
 		}
 	})
-
 }
 
 func TestPromptSuccessCancelAndErrors(t *testing.T) {
@@ -3586,6 +3585,55 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("prompt did not fail")
 	}
+}
+
+// TestDrainClientBacklogSkipsSuppressedEvents pins what the drain refuses to
+// replay. A backlog left behind by a failed stream is not this turn's work, and
+// neither is an event belonging to a message the stream already failed.
+func TestDrainClientBacklogSkipsSuppressedEvents(t *testing.T) {
+	partEvent := nativehermes.TurnEvent{
+		Type:       "message.part.updated",
+		Properties: json.RawMessage(`{"id":"backlog-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stale"}`),
+	}
+
+	t.Run("a backlog the failed stream left behind", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newRecordingAgentClient()
+		agent := newTestAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		session.markStreamFailed(0)
+		client.events <- partEvent
+
+		if err := session.drainClientBacklog(t.Context()); err != nil {
+			t.Fatalf("drainClientBacklog: %v", err)
+		}
+		if got := conn.updateCount(); got != 0 {
+			t.Fatalf("suppressed backlog emitted %d updates", got)
+		}
+		if session.suppressBacklog() {
+			t.Fatal("the drain left the backlog suppressed for the next turn")
+		}
+	})
+
+	t.Run("an event for a message the stream failed", func(t *testing.T) {
+		client := newFakeHermesClient()
+		conn := newRecordingAgentClient()
+		agent := newTestAgent()
+		agent.setAgentClient(conn)
+		session := testSession(agent, client)
+		session.markActiveMessageID("assistant")
+		session.markStreamFailed(0)
+		session.clearSuppressBacklog()
+		client.events <- partEvent
+
+		if err := session.drainClientBacklog(t.Context()); err != nil {
+			t.Fatalf("drainClientBacklog: %v", err)
+		}
+		if got := conn.updateCount(); got != 0 {
+			t.Fatalf("failed-message event emitted %d updates", got)
+		}
+	})
 }
 
 func TestFailedTurnResultGatewayDisconnectMarksStream(t *testing.T) {
