@@ -716,18 +716,27 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 // owes: terminalize what the session still holds, make the resumable snapshot
 // durable, and state the quiescence fact the proof produced. A failed rung stops
 // the ones after it, so no boundary claims a fact the store does not back.
+//
+// Every rung runs on the same detached context the durable commit does. The
+// containment proof has already completed and the stream is fenced the moment
+// this returns, so a caller that cancelled mid-close cannot be answered with a
+// boundary that skipped its terminal transitions and its quiescence fact: those
+// emissions would have nowhere to be made afterwards, and the settlement
+// response is not allowed to precede them.
 func (s *session) publishClosedBoundary(
 	ctx context.Context,
 	stream *sessionStream,
 	commit *sessionStoreCommit,
 	proof containmentProof,
 ) error {
+	ctx = context.WithoutCancel(ctx)
+
 	if err := stream.terminalizeBlockers(ctx); err != nil {
 		return err
 	}
 
 	if commit != nil {
-		if err := s.publishSnapshotLocked(context.WithoutCancel(ctx), commit); err != nil {
+		if err := s.publishSnapshotLocked(ctx, commit); err != nil {
 			return err
 		}
 	}

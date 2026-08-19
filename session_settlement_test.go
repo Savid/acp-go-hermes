@@ -218,6 +218,83 @@ func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
 	})
 }
 
+// cancelHonoringAgentClient answers a lifecycle emission the way the wire does:
+// a notification written on a cancelled context never reaches the host.
+type cancelHonoringAgentClient struct {
+	*recordingAgentClient
+}
+
+func (c *cancelHonoringAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+// TestCloseRunsItsEmissionRungsOnTheDetachedContext pins that a cancelled caller
+// cannot buy containment, a durable commit, and a fence while skipping the
+// terminal transitions and the quiescence fact the boundary owes. The close
+// fences the stream on every exit, so an emission skipped here has nowhere left
+// to be made: the settlement response would report a contained session whose
+// host projection still holds a pending action and no proof of quiescence,
+// permanently.
+func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
+	closeCancelled := func(t *testing.T, session *session, recorder *recordingAgentClient) int {
+		t.Helper()
+
+		session.agent.sessions[session.id] = session
+		emitted := lifecycleUpdateCount(recorder)
+
+		cancelled, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, err := session.agent.CloseSession(cancelled, acp.CloseSessionRequest{SessionId: session.id})
+		require.NoError(t, err, "a cancelled caller must not fail the boundary it already proved")
+		require.True(t, session.lifecycleStream().fenced(), "a settled close ends the incarnation")
+
+		return lifecycleUpdateCount(recorder) - emitted
+	}
+
+	t.Run("terminalization", func(t *testing.T) {
+		session, recorder, turnCtx := newLifecycleActionSession(t, true)
+		session.agent.setAgentClient(&cancelHonoringAgentClient{recordingAgentClient: recorder})
+
+		action, _, owned := session.lifecycleStream().reserveAction(lifecycle.ActionPermission)
+		require.True(t, owned)
+		require.NoError(t, session.lifecycleStream().announceAction(turnCtx, action))
+
+		session.mu.Lock()
+		session.turnInFlight = false
+		session.mu.Unlock()
+
+		require.Equal(t, 1, closeCancelled(t, session, recorder),
+			"the close owes the pending action its terminal transition")
+	})
+
+	t.Run("quiescence", func(t *testing.T) {
+		agent := newTestAgent()
+		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			Versions:                []int{lifecycle.Version},
+			AuthoritativeQuiescence: true,
+			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+			ActivityKinds:           []lifecycle.ActivityKind{},
+		})
+
+		recorder := newRecordingAgentClient()
+		agent.setAgentClient(&cancelHonoringAgentClient{recordingAgentClient: recorder})
+
+		client := newFakeHermesClient()
+		session := testSession(agent, client)
+		session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
+		require.NoError(t, session.openLifecycleStream())
+		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+
+		require.Equal(t, 1, closeCancelled(t, session, recorder),
+			"the close owes the quiescence fact its completed proof produced")
+	})
+}
+
 // The durable branch's precision: an entity the incarnation loss already
 // terminalized as `failed` stays `failed`. The close terminalizes only what is
 // still nonterminal in the store, so a boundary the store already holds is never
