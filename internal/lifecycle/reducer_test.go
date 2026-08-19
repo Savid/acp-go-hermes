@@ -313,6 +313,25 @@ func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
 	}
 }
 
+// TestEmittedLiveTransitionNamesItsTurn pins the structural rule on the
+// emitter's own path: a running foreground is a turn running and a blocked one
+// is owned work blocked, so a transition to either naming no turn is malformed
+// whatever its cause. The refusal is structural, so it precedes both entity
+// resolution and the blocked-cycle rule — the requires-action case here reaches
+// no cycle to be judged inconsistent about, and neither case reports an
+// unresolvable name it never carried.
+func TestEmittedLiveTransitionNamesItsTurn(t *testing.T) {
+	t.Parallel()
+
+	for _, live := range []StateTransition{
+		{State: ForegroundRunning, CycleID: "cyc-1", Cause: CauseSession},
+		{State: ForegroundRequiresAction, CycleID: "cyc-1", Cause: CauseSession},
+	} {
+		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
+			openSnapshot(), Event{Type: EventStateUpdate, State: &live})
+	}
+}
+
 // TestActivityIdentityIsImmutable pins every restated identity field.
 func TestActivityIdentityIsImmutable(t *testing.T) {
 	t.Parallel()

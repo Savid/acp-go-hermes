@@ -31,6 +31,8 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the snapshot's foreground is incomplete")
 	case foreground.State == ForegroundIdle && foreground.TurnID != "":
 		return r.fail(delivery, ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		return r.fail(delivery, ViolationMalformedEnvelope, "a live foreground names the turn that owns it")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
@@ -225,8 +227,17 @@ func (r *Reducer) applyPromptAccepted(delivery Delivery) error {
 	return nil
 }
 
+// applyStateUpdate reduces one foreground transition. Structural validity is
+// judged first, before any ordering token, before the turn is resolved, and
+// before the blocked cycle is consulted: a transition that omits the turn its
+// live state requires is malformed however its cycle stands, so the emit gate
+// refuses it here for the same reason the decoder refuses it on the way in.
 func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 	transition := delivery.Event.State
+	if detail := turnlessLiveDefect(*transition); detail != "" {
+		return r.fail(delivery, ViolationMalformedEnvelope, detail)
+	}
+
 	if index := r.turnIndex(transition.TurnID); index >= 0 && r.state.Turns[index].Terminal {
 		return r.fail(delivery, ViolationPostTerminalMutation, "turn "+transition.TurnID+" is terminal")
 	}

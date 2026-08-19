@@ -238,7 +238,9 @@ func (d *decoder) snapshot(fields map[string]json.RawMessage) Event {
 // foreground reads the snapshot's foreground object. Presence is a rule rather
 // than a preference: a turn is named exactly while one is open, and its origin
 // is named exactly with it, so a resumed turn always carries recorded
-// provenance.
+// provenance. The rule binds in both directions — an idle foreground names no
+// turn, and a running or blocked one names both members, because no assertion of
+// a live foreground may leave it without the turn that owns it.
 func (d *decoder) foreground(raw json.RawMessage) Foreground {
 	fields, ok := jsonObject(raw)
 	if !ok {
@@ -261,6 +263,8 @@ func (d *decoder) foreground(raw json.RawMessage) Foreground {
 		d.fail(ViolationMalformedEnvelope, "foreground state "+string(foreground.State))
 	case foreground.State == ForegroundIdle && foreground.TurnID != "":
 		d.fail(ViolationMalformedEnvelope, "an idle foreground reports no turn")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		d.fail(ViolationMalformedEnvelope, "a live foreground names the turn that owns it")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		d.fail(ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
@@ -294,6 +298,8 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 		Outcome:    Outcome(d.identifier(fields, fieldOutcome, false)),
 	}
 
+	turnless := turnlessLiveDefect(*transition)
+
 	switch {
 	case !transition.State.Valid():
 		d.fail(ViolationMalformedEnvelope, "transition state "+string(transition.State))
@@ -301,6 +307,8 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 		d.fail(ViolationMalformedEnvelope, "transition cause "+string(transition.Cause))
 	case transition.TurnID == "" && transition.Cause != CauseSession:
 		d.fail(ViolationMalformedEnvelope, "a "+string(transition.Cause)+"-caused transition names its turn")
+	case turnless != "":
+		d.fail(ViolationMalformedEnvelope, turnless)
 	case transition.State != ForegroundIdle && (transition.StopReason != "" || transition.Outcome != ""):
 		d.fail(ViolationMalformedEnvelope, "only an ending transition carries a stop reason and an outcome")
 	case transition.StopReason != "" && !ValidStopReason(transition.StopReason):

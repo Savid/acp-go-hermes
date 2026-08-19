@@ -161,6 +161,28 @@ func endingIdleDefect(transition StateTransition) string {
 	}
 }
 
+// turnlessLiveDefect reports why a transition to a live foreground state is
+// structurally incomplete, or the empty string when it is not. A running
+// foreground is a turn running and a blocked one is owned work blocked, so no
+// transition to either may leave the foreground without the turn that owns it,
+// whatever its cause: a session-caused one may omit its turn on an idle alone.
+//
+// The defect is structural, so both the decoder and the reducer consult it
+// before any name is resolved and before the blocked cycle is consulted at all.
+// An event carrying no name has no unresolvable name to report, and one omitting
+// a member its state requires says nothing about a cycle to judge.
+func turnlessLiveDefect(transition StateTransition) string {
+	if transition.State != ForegroundRunning && transition.State != ForegroundRequiresAction {
+		return ""
+	}
+
+	if transition.TurnID != "" {
+		return ""
+	}
+
+	return "a transition to " + string(transition.State) + " names the turn that owns it"
+}
+
 // ActivityUpdate reports one activity. A first sight carries every immutable
 // identity field; a later update carries state and progress only.
 type ActivityUpdate struct {
