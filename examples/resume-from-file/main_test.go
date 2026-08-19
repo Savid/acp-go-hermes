@@ -73,8 +73,8 @@ func TestReadTranscriptJSONL(t *testing.T) {
 
 // TestShippedFixtureRoutesToLoadableStoreKeys proves the file this example ships
 // reaches the store the way ACP load reads it. A hermes-state-db-v1 session is
-// two independent keys, so a transcript written under one key loads as nothing
-// at all — which is exactly how the shipped fixture rotted before.
+// two independent keys, so a transcript whose rows all land under one key loads
+// as nothing at all.
 func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
 	entries, sessionID, cwd, err := readTranscriptJSONL(defaultSessionFile)
 	if err != nil {
