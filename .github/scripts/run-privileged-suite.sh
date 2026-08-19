@@ -113,7 +113,7 @@ github.com/savid/acp-go-hermes)
 	;;
 github.com/savid/acp-go-opencode)
 	provider_name=opencode
-	root_required='GeneratedNative'
+	root_required='NativeOwnedDirectory'
 	provider_required="$base_provider_required PersistentProof SupervisorConfigIsSealed ProviderCreator"
 	;;
 github.com/savid/acp-go-pi)
