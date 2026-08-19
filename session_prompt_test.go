@@ -2403,8 +2403,14 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 	if err := session.replayMessages(ctx); err != nil {
 		t.Fatalf("replayMessages: %v", err)
 	}
+	// Replay carries the row's own text. An empty chunk is what a history
+	// decoder reading a key the gateway never sends would produce, so the text
+	// is asserted, not merely the update kind.
 	if conn.updateCount() != 1 || conn.updates[0].Update.UserMessageChunk == nil {
 		t.Fatalf("replay updates = %#v", conn.updates)
+	}
+	if replayed := conn.updates[0].Update.UserMessageChunk.Content.Text; replayed == nil || replayed.Text != "user text" {
+		t.Fatalf("replayed user chunk = %#v", conn.updates[0].Update.UserMessageChunk.Content)
 	}
 	client.messagesErr = errors.New("messages failed")
 	if err := session.replayMessages(ctx); err == nil {

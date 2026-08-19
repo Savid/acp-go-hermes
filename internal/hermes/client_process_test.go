@@ -162,7 +162,7 @@ func resultForMethod(method string, params map[string]any) any {
 	case "session.title":
 		return map[string]any{"pending": false, "title": params["title"]}
 	case "session.history":
-		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "content": "hello"}}}
+		return map[string]any{"count": 1, "messages": []map[string]any{{"role": "assistant", "text": "hello"}}}
 	case "session.active_list":
 		return map[string]any{"sessions": []map[string]any{{"id": "live", "session_key": "stored", "title": "Title", "cwd": "/repo"}}}
 	case "session.list":

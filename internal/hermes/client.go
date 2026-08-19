@@ -328,10 +328,13 @@ type SessionHistoryResult struct {
 	Messages []Message `json:"messages"`
 }
 
+// Message is one row of the gateway's session.history projection. The gateway
+// renders every visible row as {"role", "text"}; a tool row carries no text at
+// all, so an empty Text is a row with nothing to replay, never a missed key.
 type Message struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-	Raw     json.RawMessage `json:"-"`
+	Role string          `json:"role"`
+	Text string          `json:"text"`
+	Raw  json.RawMessage `json:"-"`
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {

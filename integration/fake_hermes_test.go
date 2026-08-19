@@ -462,8 +462,8 @@ type fakeGatewayState struct {
 func (s *fakeGatewayState) recordAssistant(text string) {
 	s.mu.Lock()
 	s.messages = append(s.messages, map[string]any{
-		"role":    "assistant",
-		"content": map[string]any{"text": text},
+		"role": "assistant",
+		"text": text,
 	})
 	s.mu.Unlock()
 }

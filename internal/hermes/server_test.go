@@ -465,8 +465,8 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.writeResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
 	case "session.history":
 		s.writeResult(ctx, conn, id, map[string]any{"count": 2, "messages": []map[string]any{
-			{"role": "user", "content": "hi"},
-			{"role": "assistant", "content": map[string]any{"text": "history"}},
+			{"role": "user", "text": "hi"},
+			{"role": "assistant", "text": "history"},
 		}})
 	case "session.branch":
 		s.mu.Lock()
@@ -583,8 +583,8 @@ func (s *fakeGatewayServer) promptEventScript(live string) []Event {
 		{Type: "thinking.delta", SessionID: live, Payload: json.RawMessage(`{"text":"thinking"}`)},
 		{Type: "message.delta", SessionID: "other-live", Payload: json.RawMessage(`{"text":"ignored"}`)},
 		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":""}`)},
-		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"delta":"hello "}`)},
-		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`["world"]`)},
+		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":"hello ","rendered":"\u001b[0mhello "}`)},
+		{Type: "message.delta", SessionID: live, Payload: json.RawMessage(`{"text":"world"}`)},
 		{Type: "tool.complete", SessionID: live, Payload: json.RawMessage(`{"tool_id":"native-tool-1","name":"terminal","args":{"command":"write"},"result":"done"}`)},
 		{Type: "message.complete", SessionID: live, Payload: json.RawMessage(`{"text":"hello world","usage":{"total_tokens":7,"input_tokens":3,"output_tokens":4,"reasoning_tokens":1,"context_max":200000}}`)},
 	}
@@ -896,9 +896,17 @@ func testGatewayServerMessageForkAndClose(ctx context.Context, t *testing.T, ser
 	if err14 := server.Abort(ctx, "stored-1"); err14 != nil {
 		t.Fatalf("Abort: %v", err14)
 	}
+	// session.history names each row's body `text`. Replay carries that text,
+	// so a decoder reading any other key would replay every row as empty.
 	history, err := server.Messages(ctx, "stored-1")
-	if err != nil || len(history) != 2 || history[1].Parts[0].Text != "history" {
+	if err != nil || len(history) != 2 {
 		t.Fatalf("Messages = %#v err=%v", history, err)
+	}
+	if history[0].Info.Role != "user" || history[0].Parts[0].Text != "hi" {
+		t.Fatalf("Messages user row = %#v", history[0])
+	}
+	if history[1].Info.Role != "assistant" || history[1].Parts[0].Text != "history" {
+		t.Fatalf("Messages assistant row = %#v", history[1])
 	}
 	fork, err := server.Fork(ctx, "stored-1", "ignored-message")
 	if err != nil || fork.ID != "stored-branch" {
@@ -1333,13 +1341,13 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if got := textFromHermesParts([]map[string]any{{"text": "one"}, {"other": "skip"}, {"text": "two"}}); got != "one\n\ntwo" {
 		t.Fatalf("textFromHermesParts = %q", got)
 	}
-	for _, raw := range []json.RawMessage{
-		json.RawMessage(`"plain"`),
-		json.RawMessage(`{"content":[{"delta":"nested"}]}`),
-		json.RawMessage(`{"missing":true}`),
-		json.RawMessage(`{`),
-	} {
-		_ = gatewayEventText(raw)
+	// A delta names its chunk `text` and nothing else. The ANSI-rendered copy
+	// message.delta may carry alongside it is for terminal display.
+	if got := gatewayPayloadString(json.RawMessage(`{"text":"chunk","rendered":"ansi"}`), valText); got != "chunk" {
+		t.Fatalf("delta chunk = %q", got)
+	}
+	if got := gatewayPayloadString(json.RawMessage(`{"rendered":"ansi"}`), valText); got != "" {
+		t.Fatalf("rendered-only delta chunk = %q", got)
 	}
 	// The ANSI-rendered copy is for terminal display, never the message text.
 	if got := gatewayCompleteText(json.RawMessage(`{"text":"raw","rendered":"ansi"}`)); got != "raw" {
@@ -1370,9 +1378,17 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	if err := assistantMessageError(NativeMessage{Info: NativeMessageInfo{Finish: "stop"}}); err != nil {
 		t.Fatalf("assistant stop rejected: %v", err)
 	}
-	messages := nativeMessagesFromGateway("stored", []Message{{Role: "assistant", Content: json.RawMessage(`{"text":"mapped"}`)}})
+	// session.history renders every visible row as {"role","text"}; a tool row
+	// carries no text, and replays as a row with nothing to say.
+	messages := nativeMessagesFromGateway("stored", []Message{
+		{Role: "assistant", Text: "mapped"},
+		{Role: "tool"},
+	})
 	if messages[0].Info.SessionID != "stored" || messages[0].Parts[0].Text != "mapped" {
 		t.Fatalf("nativeMessagesFromGateway = %#v", messages)
+	}
+	if messages[1].Parts[0].Text != "" {
+		t.Fatalf("tool row text = %q", messages[1].Parts[0].Text)
 	}
 	if text := gatewayPayloadString(json.RawMessage(`{`), "id"); text != "" {
 		t.Fatalf("invalid payload string = %q", text)
@@ -1388,12 +1404,6 @@ func TestHermesGatewayTextHelpersAndErrors(t *testing.T) {
 	}
 	if got := numberValue(json.Number("12.5")); got != 12.5 {
 		t.Fatalf("numberValue json = %v", got)
-	}
-	if got := gatewayMessageText(Message{}); got != "" {
-		t.Fatalf("empty gateway message text = %q", got)
-	}
-	if got := gatewayMessageText(Message{Content: json.RawMessage(`not-json`)}); got != "not-json" {
-		t.Fatalf("fallback gateway message text = %q", got)
 	}
 	testGatewayProvidersAndConfigHelpers(t)
 }

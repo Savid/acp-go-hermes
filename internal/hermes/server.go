@@ -1689,7 +1689,10 @@ func (s *hermesServer) submitGatewayTextForLive(
 					}
 				}
 			case evtMessageDelta, evtThinkingDelta:
-				chunk := gatewayEventText(event.Payload)
+				// Both deltas name their chunk `text`. message.delta may also
+				// carry `rendered`, an ANSI copy for terminal display that is
+				// never the chunk this adapter forwards.
+				chunk := gatewayPayloadString(event.Payload, valText)
 				if chunk == "" {
 					continue
 				}
@@ -2116,15 +2119,6 @@ func gatewayPayloadString(raw json.RawMessage, key string) string {
 	return ""
 }
 
-func gatewayEventText(raw json.RawMessage) string {
-	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-
-	return firstPayloadString(payload, valText, "delta", "content")
-}
-
 // gatewayCompleteText reads the authoritative final assistant text a
 // message.complete event carries. The payload also carries status, usage,
 // reasoning and an ANSI-rendered copy of the same text for terminal display,
@@ -2139,33 +2133,6 @@ func gatewayCompleteText(raw json.RawMessage) string {
 	}
 
 	return payload.Text
-}
-
-func firstPayloadString(value any, keys ...string) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case []any:
-		for _, item := range typed {
-			if out := firstPayloadString(item, keys...); out != "" {
-				return out
-			}
-		}
-	case map[string]any:
-		for _, key := range keys {
-			if out, _ := typed[key].(string); out != "" {
-				return out
-			}
-		}
-
-		for _, item := range typed {
-			if out := firstPayloadString(item, keys...); out != "" {
-				return out
-			}
-		}
-	}
-
-	return ""
 }
 
 func gatewayUsageTokens(raw json.RawMessage) Tokens {
@@ -2220,7 +2187,6 @@ func nativeMessagesFromGateway(stored string, messages []Message) []NativeMessag
 	for index := range messages {
 		message := &messages[index]
 		messageID := fmt.Sprintf("history-%d", index+1)
-		text := gatewayMessageText(*message)
 		out = append(out, NativeMessage{
 			Info: NativeMessageInfo{
 				ID:        messageID,
@@ -2233,25 +2199,13 @@ func nativeMessagesFromGateway(stored string, messages []Message) []NativeMessag
 				SessionID: stored,
 				MessageID: messageID,
 				Type:      valText,
-				Text:      text,
+				Text:      message.Text,
 				Raw:       message.Raw,
 			}},
 		})
 	}
 
 	return out
-}
-
-func gatewayMessageText(message Message) string {
-	if len(message.Content) == 0 {
-		return ""
-	}
-
-	if out := gatewayEventText(message.Content); out != "" {
-		return out
-	}
-
-	return string(message.Content)
 }
 
 func providersFromGateway(result ModelOptionsResult) ProvidersResponse {
