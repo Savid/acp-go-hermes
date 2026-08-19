@@ -167,10 +167,12 @@ executing a helper from PATH.
 
 Advertised model config options carry exactly one per-model `_meta.hermes`
 field, `modelId`, holding the qualified `provider/model` selection value.
-Hermes' model catalogue answers an id and a display name per model and
-advertises no limits, effort levels, modalities, or capability list, so nothing
-else is published there. The context window a session reports in its usage
-updates comes from the completion Hermes returns, not from this catalogue.
+Hermes' model catalogue answers a model id, a display name, and a per-model
+capability map naming `fast` and `reasoning`, alongside per-provider pricing and
+featured hints. It advertises no limits, effort levels, or modalities, and this
+agent publishes only the id and the name, so nothing else appears in a config
+option. The context window a session reports in its usage updates comes from the
+completion Hermes returns, not from this catalogue.
 
 A successful `session/prompt` response carries `_meta.hermes.messageId` and
 `_meta.hermes.outcome` under the Hermes namespace, plus `_meta.hermes.stopReason`

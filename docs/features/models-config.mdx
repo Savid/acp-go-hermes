@@ -14,10 +14,12 @@ Values are built from native gateway `model.options` results as `provider/model`
 Each advertised option carries per-model `_meta.hermes` metadata — see
 [Metadata](/docs/reference/meta).
 
-Model metadata carries no generic `capabilities` list and no input/output
-modality or generator fields. The current driven gateway does not expose an
-exhaustive selected-model image modality source, so image prompt validation
-uses `unknown` model support and forwards valid images to Hermes.
+An advertised option's `_meta.hermes` metadata carries the selection value and
+nothing else: the gateway catalogue's per-model `fast`/`reasoning` capability map
+is not republished, and it names no input/output modality or generator fields at
+all. The current driven gateway does not expose an exhaustive selected-model
+image modality source, so image prompt validation uses `unknown` model support
+and forwards valid images to Hermes.
 
 No mode selector is advertised: Hermes exposes no approved programmatic
 per-session agent/mode enumeration surface for this adapter. Structured output is
