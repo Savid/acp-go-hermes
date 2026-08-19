@@ -231,6 +231,86 @@ func TestLinuxSupervisorControlCallbacksRequestProvedShutdown(t *testing.T) {
 	}
 }
 
+// TestLinuxSupervisorProvesTreeVacancyFromItsOwnEnumeration drives the vacancy
+// closure the strict launch boundary installs on its containment. Settlement
+// reads that closure to decide a session's native work is over, and it is the
+// only source of a positive vacancy claim on Linux, so every verdict it can
+// reach is pinned on a boundary that really launched: an enumeration that
+// failed proves nothing either way, a retained escapee is a proven negative, a
+// root that still answers the liveness probe keeps the claim withheld even
+// with nothing else left, and only an empty tree whose root has gone is proven
+// vacant.
+func TestLinuxSupervisorProvesTreeVacancyFromItsOwnEnumeration(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+
+	command := exec.Command("/bin/true")
+	configureHermesProcess(command)
+	containment, err := startUnixContainedProcess(command, ContainmentSpec{Isolation: testProcessIsolation()})
+	if err != nil {
+		t.Fatalf("start strict supervisor: %v", err)
+	}
+	t.Cleanup(func() { _ = containment.close() })
+
+	wait := containment.directChild(command)
+	select {
+	case <-wait.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("supervised process did not exit")
+	}
+	if err = containment.complete(10 * time.Second); err != nil {
+		t.Fatalf("complete strict supervisor containment: %v", err)
+	}
+
+	for _, test := range []struct {
+		name        string
+		descendants map[int]byte
+		listErr     error
+		probe       error
+		vacant      bool
+		proved      bool
+	}{
+		{name: "enumeration failed", listErr: errors.New("enumerate")},
+		{name: "escapee retained", descendants: map[int]byte{4242: 'S'}, proved: true},
+		{name: "root still present", descendants: map[int]byte{}, proved: true},
+		{name: "empty and gone", descendants: map[int]byte{}, probe: syscall.ESRCH, vacant: true, proved: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listSupervisorDescendants = func(int) (map[int]byte, error) { return test.descendants, test.listErr }
+			processKill = func(int, syscall.Signal) error { return test.probe }
+			if vacant, proved := containment.treeVacant(); vacant != test.vacant || proved != test.proved {
+				t.Fatalf("tree vacancy = %v/%v, want %v/%v", vacant, proved, test.vacant, test.proved)
+			}
+		})
+	}
+}
+
+// TestLinuxSupervisorRootLivenessProbeReadsEveryAnswer pins the signal probe
+// the vacancy verdict stands on. A root that answers the probe is present, and
+// so is one this process may not signal: an identity it may not reach is still
+// an identity that exists, and reading it as gone would manufacture a vacancy
+// claim out of a permission refusal. Only a probe that names a departed process
+// reports absence.
+func TestLinuxSupervisorRootLivenessProbeReadsEveryAnswer(t *testing.T) {
+	restoreLinuxSupervisorSeams(t)
+
+	for _, test := range []struct {
+		name  string
+		probe error
+		alive bool
+	}{
+		{name: "answered", alive: true},
+		{name: "not permitted", probe: syscall.EPERM, alive: true},
+		{name: "departed", probe: syscall.ESRCH},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			processKill = func(int, syscall.Signal) error { return test.probe }
+			if alive := supervisorProcessAlive(4242); alive != test.alive {
+				t.Fatalf("supervised root liveness = %v, want %v", alive, test.alive)
+			}
+		})
+	}
+}
+
 func TestLinuxSupervisorNativeChildHasSecurityLimits(t *testing.T) {
 	const (
 		phaseEnv  = "ACP_GO_HERMES_TEST_NO_NEW_PRIVS_PHASE"
