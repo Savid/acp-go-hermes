@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,8 +74,10 @@ func TestReadTranscriptJSONL(t *testing.T) {
 
 // TestShippedFixtureRoutesToLoadableStoreKeys proves the file this example ships
 // reaches the store the way ACP load reads it. A hermes-state-db-v1 session is
-// two independent keys, so a transcript whose rows all land under one key loads
-// as nothing at all.
+// three independent keys, so a transcript whose rows all land under one key
+// loads as nothing at all. The snapshot must also name its state-db archive:
+// without it `session/load` reaches a fresh Hermes home that has never heard of
+// the native session, and the gateway refuses the resume.
 func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
 	entries, sessionID, cwd, err := readTranscriptJSONL(defaultSessionFile)
 	if err != nil {
@@ -111,6 +114,56 @@ func TestShippedFixtureRoutesToLoadableStoreKeys(t *testing.T) {
 
 	if _, err := hermesacp.InspectSessionStoreTerminalState(sessionID, main); err != nil {
 		t.Fatalf("the shipped snapshot is not a current-format snapshot: %v", err)
+	}
+
+	var snapshot struct {
+		Archives map[string]struct {
+			Subpath string `json:"subpath"`
+			SHA256  string `json:"sha256"`
+			Bytes   int    `json:"bytes"`
+		} `json:"archives"`
+	}
+	if err := json.Unmarshal(main[0], &snapshot); err != nil {
+		t.Fatalf("decode shipped snapshot: %v", err)
+	}
+	archive, named := snapshot.Archives[stateDBSubpath]
+	if !named || archive.Subpath != stateDBSubpath || archive.SHA256 == "" || archive.Bytes <= 0 {
+		t.Fatalf("the shipped snapshot names no state-db archive: %#v", snapshot.Archives)
+	}
+
+	chunks, err := store.Load(ctx, hermesacp.SessionKey{SessionID: sessionID, Subpath: stateDBSubpath})
+	if err != nil {
+		t.Fatalf("load state-db: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("the shipped fixture names an archive it does not carry")
+	}
+
+	total := 0
+	for index, chunk := range chunks {
+		var entry struct {
+			Format   string `json:"format"`
+			Encoding string `json:"encoding"`
+			Sequence int    `json:"sequence"`
+			Final    bool   `json:"final"`
+			SHA256   string `json:"sha256"`
+			Data     string `json:"data"`
+		}
+		if err := json.Unmarshal(chunk, &entry); err != nil {
+			t.Fatalf("decode archive chunk %d: %v", index, err)
+		}
+		if entry.Format != "hermes-state-db-v1" || entry.Encoding != "tar+zstd+base64" ||
+			entry.Sequence != index || entry.Final != (index == len(chunks)-1) || entry.SHA256 != archive.SHA256 {
+			t.Fatalf("archive chunk %d = %#v", index, entry)
+		}
+		data, err := base64.StdEncoding.DecodeString(entry.Data)
+		if err != nil {
+			t.Fatalf("decode archive chunk %d payload: %v", index, err)
+		}
+		total += len(data)
+	}
+	if total != archive.Bytes {
+		t.Fatalf("archive bytes = %d, snapshot names %d", total, archive.Bytes)
 	}
 }
 

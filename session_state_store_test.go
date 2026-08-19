@@ -1951,30 +1951,52 @@ func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 // and the get-started guide both promise that file loads as-is, and nothing but
 // this test stands between that promise and a store-shape change: the fixture is
 // data, so no compiler notices when the shape it was written in retires.
+//
+// Hydration is also where the promise is either kept or broken. A fixture whose
+// snapshot names no state-db archive leaves the runtime root empty, and the
+// resume behind session/load then asks a gateway that has never heard of the
+// native session, so the archive is restored and inspected here.
 func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
-	const sessionID = "7f3a2b1c-9d0e-4a21-8b6c-1f0c5d6e7a80"
-
 	data, err := os.ReadFile(filepath.Join("examples", "resume-from-file", "session.jsonl"))
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	require.Len(t, lines, 2, "the fixture is one main snapshot and one id mapping")
+	require.GreaterOrEqual(t, len(lines), 3, "the fixture is a snapshot, its archive chunks, and an id mapping")
 
 	mainEntry := SessionStoreEntry(lines[0])
-	idmapEntry := SessionStoreEntry(lines[1])
+	idmapEntry := SessionStoreEntry(lines[len(lines)-1])
+
+	archiveEntries := make([]SessionStoreEntry, 0, len(lines)-2)
+	for _, line := range lines[1 : len(lines)-1] {
+		archiveEntries = append(archiveEntries, SessionStoreEntry(line))
+	}
+
+	var shipped stateSnapshot
+	require.NoError(t, json.Unmarshal(mainEntry, &shipped))
+
+	sessionID := shipped.Session.SessionID
+	require.NotEmpty(t, sessionID, "the fixture names no session id")
 
 	store := NewInMemorySessionStore()
 	mainKey := SessionKey{SessionID: sessionID, Subpath: SessionStoreMainSubpath}
 	require.NoError(t, store.Replace(t.Context(), mainKey, []SessionStoreReplacement{
 		{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
+		{Key: SessionKey{SessionID: sessionID, Subpath: stateDBSubpath}, Entries: archiveEntries},
 		{Key: SessionKey{SessionID: sessionID, Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
 	}))
 
-	idmap, snapshot, ok, err := hydrateStateFromStore(t.Context(), store, sessionID, nativehermes.XDGDirs{Root: t.TempDir()})
+	root := t.TempDir()
+
+	idmap, snapshot, ok, err := hydrateStateFromStore(t.Context(), store, sessionID, nativehermes.XDGDirs{Root: root})
 	require.NoError(t, err)
 	require.True(t, ok, "session/load would answer unknown_session for the shipped fixture")
 	require.Equal(t, sessionID, idmap.SessionID)
 	require.Equal(t, idmap.NativeSessionID, snapshot.Session.NativeSessionID)
+	require.Contains(t, snapshot.Archives, "state-db", "the shipped fixture names no native archive to restore")
+
+	restored, err := os.ReadFile(filepath.Join(root, fileStateDB))
+	require.NoError(t, err, "the shipped archive restored no Hermes database")
+	require.True(t, bytes.HasPrefix(restored, []byte("SQLite format 3\x00")), "the restored Hermes database is not SQLite")
 
 	// A shipped fixture cannot name a directory that exists on the reader's
 	// machine, and load refuses a snapshot whose cwd disagrees with the request.
