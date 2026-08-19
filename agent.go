@@ -221,11 +221,27 @@ func (a *Agent) close() error {
 
 	var err error
 
+	// The shutdown ladder applies identically here, and that includes the durable
+	// rung: an embedded shutdown owes every commit a wire session/close would have
+	// made, rather than dropping retained state along with the wrapper. The
+	// connection is already gone, so the boundary's emission rungs have nowhere to
+	// speak; its containment proof and its commits run exactly as they do on the
+	// wire, and a commit the store refuses fails this close.
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		closeErr := session.Close(ctx)
+
+		if session.closeLifecycleAdmission() {
+			session.cancelTurn()
+		}
+
+		waitErr := session.awaitSettlement(ctx)
+
+		session.lifecycleMu.Lock()
+		closeErr := session.settleClosedSession(ctx)
+		session.lifecycleMu.Unlock()
+
 		a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
-		err = errors.Join(err, closeErr)
+		err = errors.Join(err, waitErr, closeErr)
 
 		cancel()
 	}

@@ -736,3 +736,82 @@ func TestCloseSessionReportsCaptureFailureWhenDeferredOpenFences(t *testing.T) {
 	}
 	require.True(t, session.lifecycleStream().fenced(), "precondition: the deferred open did not fence the stream")
 }
+
+// TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration pins the other
+// half of the fenced branch. A dead incarnation discharges whatever durable
+// commit it owes, and where the loss already committed it owes nothing: the last
+// committed generation is retained unrewritten rather than overwritten with a
+// generation captured from a runtime the fence already ended.
+func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	require.NoError(t, session.openLifecycleStream())
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	key := SessionKey{SessionID: string(session.id), Subpath: SessionStoreMainSubpath}
+	committed, err := agent.sessionStore().Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, committed, "precondition: nothing was ever committed")
+
+	before := string(committed[len(committed)-1])
+
+	// The incarnation is lost, and only then does the host close the session.
+	session.lifecycleStream().fence()
+
+	session.mu.Lock()
+	session.title = "renamed-after-the-fence"
+	session.mu.Unlock()
+
+	agent.sessions[session.id] = session
+
+	_, closeErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, closeErr)
+
+	after, err := agent.sessionStore().Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, after, "the close destroyed the generation the loss had committed")
+	require.Equal(t, before, string(after[len(after)-1]),
+		"the close rewrote a generation the fenced incarnation had already committed")
+}
+
+// TestAgentCloseMakesTheDurableCommitAWireCloseWould pins the ladder's durable
+// rung on the embedded path. Agent.Close runs the same ladder session/close
+// runs, so state a wire close would have committed must not be dropped along
+// with the wrapper.
+func TestAgentCloseMakesTheDurableCommitAWireCloseWould(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	require.NoError(t, session.openLifecycleStream())
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	session.mu.Lock()
+	session.title = "renamed-before-shutdown"
+	session.mu.Unlock()
+
+	agent.sessions[session.id] = session
+
+	require.NoError(t, agent.Close())
+
+	entries, err := agent.sessionStore().Load(t.Context(), SessionKey{
+		SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	require.Contains(t, string(entries[len(entries)-1]), "renamed-before-shutdown",
+		"the embedded shutdown dropped a commit a wire close would have made")
+	require.True(t, session.lifecycleStream().fenced(), "the shutdown left the incarnation able to speak")
+}
