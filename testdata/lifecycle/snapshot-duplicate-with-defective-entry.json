@@ -1,0 +1,64 @@
+{
+  "name": "snapshot-duplicate-with-defective-entry",
+  "purpose": "Within a snapshot's whole-set judgment, set membership precedes entry judgment. This snapshot lists one activityId twice, and the repeated entry is defective on its own terms as well: it omits originTurnId, an immutable member every first sight carries. Both readings refuse, so the question the vector settles is which failure the snapshot commits, and the set's is first: the moment an id is listed twice the set asserts two current states for one entity, and there is no coherent entry left to judge. The verdict is the set's, malformed_envelope, not the entry's identity failure, and the refused snapshot opens nothing.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                },
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission"
+                }
+              ],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

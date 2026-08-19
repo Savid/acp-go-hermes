@@ -2,6 +2,14 @@
   "version": 1,
   "extension": "acp-go.dev/lifecycle",
   "description": "Canonical reducer vectors for the acp-go.dev/lifecycle extension. Every fixture is a wire-level expectation: any implementation that reduces the extension envelope must reach the stated verdict from these bytes, whether it is an agent validating its own emitted stream or a host consuming one.",
+  "vectorShape": {
+    "name": "The fixture's name, matching its file name without the extension.",
+    "purpose": "Prose stating the invariant this fixture pins and the reasoning that makes the verdict the only one available.",
+    "negotiated": "The extension answer this fixture reduces under: `versions`, `updatesOutsidePrompt`, `authoritativeQuiescence`, `quiescenceSource`, and `activityKinds`.",
+    "input": "The delivered elements, in order, in the shape `inputShape` fixes.",
+    "postRefusal": "Present on `fail_closed` only, and optional: further inputs in the same shape as `input`, delivered after the refusal. Fail closed latches, so a harness MUST feed every one of them and MUST assert that each is refused with the same token at the same `(streamId, sequence)` identity and that `state` still holds afterwards. A harness that stops feeding at the first refusal cannot tell a consumer that stopped reducing from one that kept going past a verdict it had already returned.",
+    "expect": "The required verdict, in the shape `expectShape` fixes."
+  },
   "inputShape": {
     "notification": "An element carrying `method` and `params` is one delivered notification. JSON-RPC framing is omitted; `params` is the notification payload verbatim, with the extension envelope at `params._meta[\"acp-go.dev/lifecycle\"]`.",
     "control": "An element carrying only `control` is an out-of-band wire event with no notification of its own. The vocabulary is closed at `session_closed`, meaning `session/close` completed for the addressed session.",
@@ -12,7 +20,6 @@
     "verdict": "`accepted` when every input reduces, `fail_closed` when one is refused.",
     "violation": "Present on `fail_closed` only: one token from the closed violation vocabulary.",
     "atInput": "Present on `fail_closed` only: the zero-based index into the `input` array — counting `control` elements — of the element that must be refused.",
-    "postRefusal": "Present on `fail_closed` only, and optional: further inputs in the same shape as `input`, delivered after the refusal. Fail closed latches, so a harness MUST feed every one of them and MUST assert that each is refused with the same token at the same `(streamId, sequence)` identity and that `state` still holds afterwards. A harness that stops feeding at the first refusal cannot tell a consumer that stopped reducing from one that kept going past a verdict it had already returned.",
     "state": "The projection at the moment of refusal, taken before any fail-closed handling the consumer performs; on an `accepted` fixture, the projection after the last input. Terminalizing held entities and refusing to certify further boundaries happen after this projection is taken and are not pinned here.",
     "stateShape": {
       "members": ["streamId", "reducedThrough", "suppressedRetransmissions", "foreground", "turns", "activities", "actions", "quiescence", "closed"],
@@ -376,6 +383,22 @@
     {
       "file": "snapshot-cross-set-id-legal.json",
       "invariant": "Activities and actions are distinct id spaces, so the same string naming one of each reduces and the two never conflate."
+    },
+    {
+      "file": "replacement-snapshot-refusal-preserves-projection.json",
+      "invariant": "A replacement snapshot is judged whole before the standing projection is touched, so a refused one swaps nothing and the latch holds over the projection exactly as it stood."
+    },
+    {
+      "file": "replacement-supersedes-live-run.json",
+      "invariant": "A new incarnation's opening snapshot is never refused for the uncertified run the superseded projection holds, and the fresh projection adopts nothing of it."
+    },
+    {
+      "file": "snapshot-duplicate-with-defective-entry.json",
+      "invariant": "Set membership precedes entry judgment: an entry that both repeats an id and omits an immutable first-sight member reports the set's malformed_envelope, not its own identity failure."
+    },
+    {
+      "file": "snapshot-duplicate-with-unnegotiated-kind.json",
+      "invariant": "The same ordering holds when the repeated entry's own defect is an unnegotiated kind: the set's verdict is reported, not the entry's."
     }
   ]
 }
