@@ -72,9 +72,8 @@ var (
 	// probe spawns its own process and proves the binary, while the sweep proves
 	// one live gateway, so a start that never reached readiness must not cost a
 	// second --version process next time.
-	executableProbed   = map[string]bool{}
-	executableVersions = map[string]string{}
-	gatewayProbed      = map[string]bool{}
+	executableProbed = map[string]bool{}
+	gatewayProbed    = map[string]bool{}
 	// executableProbes holds the version probe currently in flight per
 	// executable, so concurrent starts share one native probe process instead of
 	// each spawning their own. The channel is closed when that probe settles.
@@ -271,19 +270,16 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opts.SharedHome {
-		if err := bindSharedHermesVersion(ctx, home, executableVersion(executable)); err != nil {
+	if opts.SharedHome && opts.PrepareSharedHome != nil {
+		if err := opts.PrepareSharedHome(ctx, home); err != nil {
 			return nil, err
-		}
-		if opts.PrepareSharedHome != nil {
-			if err := opts.PrepareSharedHome(ctx, home); err != nil {
-				return nil, err
-			}
 		}
 	}
 	// Official shared-home startup must not create the compatibility probe's
 	// durable draft outside the adapter's cross-process session-set journal.
-	// Exact v0.20 version binding is the compatibility boundary in this mode;
+	// The per-start minimum-version probe is the compatibility boundary in this
+	// mode — a shared home is never bound to the native version that first used
+	// it, because official Hermes migrates its own state across self-updates;
 	// ordinary session methods are exercised only after the Agent holds its
 	// shared/exclusive operation fence.
 	probeNeeded := gatewayMethodProbeNeeded(opts, executable)
@@ -888,22 +884,8 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	if compareVersions(version, MinimumVersion) < 0 {
 		return fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
-	recordExecutableVersion(executable, version)
 
 	return nil
-}
-
-func recordExecutableVersion(executable string, version string) {
-	executableProbeMu.Lock()
-	executableVersions[executable] = version
-	executableProbeMu.Unlock()
-}
-
-func executableVersion(executable string) string {
-	executableProbeMu.Lock()
-	defer executableProbeMu.Unlock()
-
-	return executableVersions[executable]
 }
 
 func parseVersion(output string) (string, bool) {

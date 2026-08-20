@@ -65,9 +65,8 @@ processes receive neither capability nor descriptor.
 `WithProviderAuthRoot` enables the values-free provider-auth ledger only when
 `WithSharedHermesHome` also names the official native credential residence.
 The adapter never exposes a public credential type and never reads, copies, or
-returns native credential bytes. Shared mode binds one exact Hermes version and
-one managed MCP/seed configuration to a durable local filesystem; mismatches
-fail before launch. Because one adapter holds the home root exclusively, the
+returns native credential bytes. Shared mode binds one managed MCP/seed
+configuration to a durable local filesystem; a mismatch fails before launch. Because one adapter holds the home root exclusively, the
 native `auth.json` in that residence has exactly one writing adapter at a time
 even when separate ledger roots name the same residence, and within that adapter
 the per-provider fence is keyed by the residence too, so agents configured with

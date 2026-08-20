@@ -58,11 +58,11 @@ environment, and wrapper control root. OS-held locks fence each ACP ID and
 native session ID, so two records cannot resume or mutate one native session
 concurrently, and a session-set lock orders creation, fork, and recovery against
 in-flight turns. Shared-home config mutation is serialized, atomically
-committed, and bound to one exact Hermes version and one managed MCP/seed
-fingerprint. Every adapter-owned coordination artifact — the home-root claim,
-the session-set lock, per-session owner claims, operation journals, and the
-config lock, fingerprint, and version binding — lives in the adapter control
-root paired with the home, never beneath `HERMES_HOME` itself. The home must be
+committed, and bound to one managed MCP/seed fingerprint. Every adapter-owned
+coordination artifact — the home-root claim, the session-set lock, per-session
+owner claims, operation journals, and the config lock and fingerprint — lives
+in the adapter control root paired with the home, never beneath `HERMES_HOME`
+itself. The home must be
 on the platform's durable local-filesystem allowlist. Network, FUSE/virtiofs,
 volatile, FAT/exFAT, and unknown filesystems fail closed. The adapter requires
 official Hermes 0.20.0 or newer.

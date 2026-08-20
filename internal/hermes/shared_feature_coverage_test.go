@@ -1197,27 +1197,6 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		}
 	})
 
-	t.Run("version binding faults", func(t *testing.T) {
-		if err := bindSharedHermesVersion(t.Context(), t.TempDir(), ""); err == nil {
-			t.Fatal("empty version binding was accepted")
-		}
-		home := t.TempDir()
-		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, home), sharedHermesVersionName), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err == nil || !strings.Contains(err.Error(), "read") {
-			t.Fatalf("version read error = %v", err)
-		}
-
-		originalWriter := sharedAtomicWriteFile
-		t.Cleanup(func() { sharedAtomicWriteFile = originalWriter })
-		sharedAtomicWriteFile = func(string, []byte, os.FileMode) error { return errors.New("version write fault") }
-		if err := bindSharedHermesVersion(t.Context(), t.TempDir(), "0.20.0"); err == nil || !strings.Contains(err.Error(), "commit") {
-			t.Fatalf("version write error = %v", err)
-		}
-		sharedAtomicWriteFile = originalWriter
-	})
-
 	t.Run("config lock control, open and run errors", func(t *testing.T) {
 		homeFile := filepath.Join(t.TempDir(), "home-file")
 		if err := os.WriteFile(homeFile, []byte("x"), 0o600); err != nil {

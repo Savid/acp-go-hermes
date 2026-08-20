@@ -251,19 +251,6 @@ func TestSharedHermesConfigRejectsDotEnvMCPSecretOverrides(t *testing.T) {
 	}
 }
 
-func TestSharedHermesHomeBindsExactProbedVersion(t *testing.T) {
-	home := t.TempDir()
-	if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err != nil {
-		t.Fatalf("bind version: %v", err)
-	}
-	if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err != nil {
-		t.Fatalf("repeat version: %v", err)
-	}
-	if err := bindSharedHermesVersion(t.Context(), home, "0.20.1"); err == nil || !strings.Contains(err.Error(), "bound to Hermes 0.20.0") {
-		t.Fatalf("mixed version error = %v", err)
-	}
-}
-
 func TestAtomicSharedHermesWriteKeepsCompleteOldBytesOnRenameFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("old-complete\n"), 0o600); err != nil {

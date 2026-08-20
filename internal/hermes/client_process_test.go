@@ -1409,7 +1409,7 @@ func restoreProcessSeams(t *testing.T) {
 	oldStartContained := startHermesContainedProcess
 	oldNativeTreeHandoff := processNativeTreeHandoff
 	oldAfterOwnerSpawn := afterHermesSpawnBeforeOwnerBind
-	oldProbed, oldVersions, oldGateway := cloneExecutableProbeCaches()
+	oldProbed, oldGateway := cloneExecutableProbeCaches()
 	t.Cleanup(func() {
 		commandContext = oldCommandContext
 		listenTCP = oldListenTCP
@@ -1426,7 +1426,6 @@ func restoreProcessSeams(t *testing.T) {
 		afterHermesSpawnBeforeOwnerBind = oldAfterOwnerSpawn
 		executableProbeMu.Lock()
 		executableProbed = oldProbed
-		executableVersions = oldVersions
 		gatewayProbed = oldGateway
 		executableProbeMu.Unlock()
 	})
@@ -1445,7 +1444,6 @@ func resetProcessSeams() {
 	waitProcessCommand = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	executableProbeMu.Lock()
 	executableProbed = map[string]bool{}
-	executableVersions = map[string]string{}
 	gatewayProbed = map[string]bool{}
 	executableProbes = map[string]chan struct{}{}
 	executableProbeMu.Unlock()
@@ -1457,7 +1455,6 @@ func resetProcessSeams() {
 func markExecutableProbed(executable string) {
 	executableProbeMu.Lock()
 	executableProbed[executable] = true
-	executableVersions[executable] = MinimumVersion
 	gatewayProbed[executable] = true
 	executableProbeMu.Unlock()
 }
@@ -1471,11 +1468,11 @@ func executableVersionProven(executable string) bool {
 	return executableProbed[executable]
 }
 
-func cloneExecutableProbeCaches() (map[string]bool, map[string]string, map[string]bool) {
+func cloneExecutableProbeCaches() (map[string]bool, map[string]bool) {
 	executableProbeMu.Lock()
 	defer executableProbeMu.Unlock()
 
-	return cloneBoolMap(executableProbed), cloneEnvironmentMap(executableVersions), cloneBoolMap(gatewayProbed)
+	return cloneBoolMap(executableProbed), cloneBoolMap(gatewayProbed)
 }
 
 func cloneBoolMap(input map[string]bool) map[string]bool {
