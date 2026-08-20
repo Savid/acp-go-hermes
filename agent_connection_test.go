@@ -16,8 +16,10 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServeContextAndInputDone(t *testing.T) {
@@ -495,6 +497,106 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 		}
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// TestLifecycleOpeningFollowsTheEstablishingResponseOverPipes drives the opening
+// snapshot the way a host does: over the transport, on the request shape a real
+// `session/new` carries — a populated `mcpServers` array and an object-valued
+// `_meta` holding a foreign member. The owed snapshot is correlated with the
+// session the handler built and with the frame the transport wrote, never with
+// anything read back out of the request params, so params carrying members no
+// string map can hold open their stream exactly as minimal params do. The
+// establishing response leaves first and the snapshot follows it, which is the
+// order the write barrier exists to produce.
+func TestLifecycleOpeningFollowsTheEstablishingResponseOverPipes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c2aR, c2aW := io.Pipe()
+	a2cR, a2cW := io.Pipe()
+	t.Cleanup(func() {
+		_ = c2aR.Close()
+		_ = c2aW.Close()
+		_ = a2cR.Close()
+		_ = a2cW.Close()
+	})
+
+	agent := newTestAgent()
+	agent.options.clientFactory = func(_ context.Context, _ nativehermes.StartOptions) (nativehermes.Server, error) {
+		client := newFakeHermesClient()
+		xdg, err := testGenerationXDG(t.TempDir())
+		if err != nil {
+			return nil, err
+		}
+		client.xdg = xdg
+		client.createSession = testNativeSession("native-1")
+
+		return client, nil
+	}
+	conn := newLocalAgentConnection(agent, a2cW, c2aR)
+	agent.setAgentClient(conn)
+
+	lines := make(chan string, 4)
+	go func() {
+		scanner := bufio.NewScanner(a2cR)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+	writeJSONRPC := func(payload string) {
+		t.Helper()
+		_, err := io.WriteString(c2aW, payload+"\n")
+		require.NoError(t, err, "write request")
+	}
+	readLine := func() string {
+		t.Helper()
+		select {
+		case line := <-lines:
+			return line
+		case <-ctx.Done():
+			require.FailNow(t, "timed out waiting for JSON-RPC line")
+
+			return ""
+		}
+	}
+
+	writeJSONRPC(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,` +
+		`"_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}}`)
+
+	var negotiation struct {
+		Result acp.InitializeResponse `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(readLine()), &negotiation), "decode initialize response")
+	require.Contains(t, negotiation.Result.Meta, lifecycle.MetaKey, "the offer was answered")
+
+	cwd := t.TempDir()
+	writeJSONRPC(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":` + strconv.Quote(cwd) + `,` +
+		`"mcpServers":[{"name":"docs","command":"/usr/bin/env","args":["mcp-docs","--stdio"],` +
+		`"env":[{"name":"DOCS_TOKEN","value":"token"}]}],` +
+		`"_meta":{"example.test/host":{"trace":"trace-1","depth":3}}}}`)
+
+	var established struct {
+		ID     int                    `json:"id"`
+		Result acp.NewSessionResponse `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(readLine()), &established), "decode session/new response")
+	require.Equal(t, 2, established.ID)
+	require.NotEmpty(t, established.Result.SessionId)
+
+	var opening struct {
+		Method string                  `json:"method"`
+		Params acp.SessionNotification `json:"params"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(readLine()), &opening), "decode opening notification")
+	require.Equal(t, acp.ClientMethodSessionUpdate, opening.Method)
+	require.Equal(t, established.Result.SessionId, opening.Params.SessionId)
+
+	envelope, ok := opening.Params.Meta[lifecycle.MetaKey].(map[string]any)
+	require.True(t, ok, "the notification carries the lifecycle envelope")
+	require.EqualValues(t, 1, envelope["sequence"], "the snapshot is the incarnation's first event")
+
+	event, ok := envelope["event"].(map[string]any)
+	require.True(t, ok, "the envelope carries its event")
+	require.Equal(t, string(lifecycle.EventSnapshot), event["type"])
 }
 
 func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
