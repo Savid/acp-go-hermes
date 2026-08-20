@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -286,9 +287,78 @@ func TestUnknownModelValueTraversesActiveResume(t *testing.T) {
 	}
 }
 
+// TestUnknownModelNativeRefusalPropagates proves the wrapper returns whatever
+// Hermes answered a model mutation, unchanged and unclassified.
+//
+// The refusal is Hermes' own, reproduced rather than paraphrased: source =
+// hermes 0.20.4 (2026.8.18), measured by TestLiveModelSelectionNativeAnswers in
+// internal/hermes against a real `hermes serve`. Hermes refuses on the provider
+// and not on the model — an unadvertised model under a known provider is
+// accepted, which is why this case names an unknown provider to get a refusal
+// at all. A version bump re-measures there and this literal follows it.
+// TestMalformedModelValueRefusedByBothDoors pins the only refusal model
+// selection still makes locally, and pins that both doors make it.
+//
+// The question is the value's shape and never which models exist: a value that
+// is not provider-qualified cannot become a provider and a model, so no door
+// can carry one. The active-resume door has to answer it itself — nothing that
+// door accepts reaches Hermes, so a value it degraded would leave the next
+// prompt running on the previously bound model while the config option echoed
+// back the value the host asked for. The config door reads the same predicate
+// before its native call, so the two answer alike and neither spends a gateway
+// round trip on a string Hermes could not parse either.
+func TestMalformedModelValueRefusedByBothDoors(t *testing.T) {
+	client := newFakeHermesClient()
+	client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		if req.Model == nil || req.Model.ProviderID != "provider" || req.Model.ModelID != "bound-model" {
+			t.Errorf("prompt after refused selections carried model %#v", req.Model)
+		}
+
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID: "assistant-bound-model", SessionID: id, Role: "assistant", Finish: "stop",
+		}}, nil
+	}
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	session.providerID, session.modelID = "provider", "bound-model"
+	agent.sessions[session.id] = session
+
+	for _, malformed := range []string{
+		"bare-model", "provider/", "/model", "provider/two words", "provider/--flag", "--flag/model",
+	} {
+		_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(session.id, session.cwd,
+			WithSessionHermesOptions(HermesOptions{Model: malformed})))
+		requireUnsupportedField(t, err, hermesModelOptionPath, "active resume "+strconv.Quote(malformed))
+
+		_, err = agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, malformed))
+		requireUnsupportedField(t, err, keyValue, "config door "+strconv.Quote(malformed))
+	}
+
+	// Neither door moved the session, and neither spent a native mutation on a
+	// value it had already refused.
+	if session.currentModel() != "provider/bound-model" {
+		t.Fatalf("current model after refused selections = %q", session.currentModel())
+	}
+	client.mu.Lock()
+	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)
+	client.mu.Unlock()
+	if len(setCalls) != 0 {
+		t.Fatalf("native model selections after refusals = %#v", setCalls)
+	}
+
+	// The bound model is what the next prompt still names, checked inside the
+	// native send above.
+	if _, err := agent.Prompt(t.Context(), TextPromptRequest(session.id, "bound-model-prompt", "continue")); err != nil {
+		t.Fatalf("prompt after refused selections: %v", err)
+	}
+}
+
 func TestUnknownModelNativeRefusalPropagates(t *testing.T) {
 	client := newFakeHermesClient()
-	wantErr := errors.New("hermes json-rpc 5001: Unknown provider 'missing-provider'")
+	wantErr := &nativehermes.RPCError{
+		Code:    5001,
+		Message: "Unknown provider 'missing-provider'. Check 'hermes model' for available providers, or define it in config.yaml under 'providers:'.",
+	}
 	client.setModelErr = wantErr
 	agent := newTestAgent()
 	session := testSession(agent, client)

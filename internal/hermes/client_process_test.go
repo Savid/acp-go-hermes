@@ -502,6 +502,15 @@ func TestModelSwitchCommandUsesRawModelAndExplicitSessionProvider(t *testing.T) 
 		if _, _, err := modelSwitchCommand(invalid); err == nil {
 			t.Fatalf("invalid model selection %q accepted", invalid)
 		}
+		// Callers with no command to build ask the same question through the
+		// exported predicate, so the wrapper's doors cannot answer the shape of a
+		// selection differently from the setter that would have to send it.
+		if err := ModelSelectionShapeError(invalid); err == nil {
+			t.Fatalf("invalid model selection %q passed the exported shape predicate", invalid)
+		}
+	}
+	if err := ModelSelectionShapeError("openrouter/x-ai/grok-4.5"); err != nil {
+		t.Fatalf("provider-qualified selection refused by the exported shape predicate: %v", err)
 	}
 }
 

@@ -55,6 +55,18 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 	switch params.ValueId.ConfigId {
 	case configModel:
+		// A shape refusal, not a value gate. It asks whether the string can name
+		// a provider and a model, never whether that model exists — Hermes owns
+		// the second question, and the allowlist this surface used to carry
+		// answered it here and got it wrong. The refusal is the wrapper's own
+		// rather than the gateway client's, because a client that publishes no
+		// model setter would otherwise take an unqualified value straight into
+		// session state. The active-resume door refuses the same shape through
+		// the same predicate, so no door admits what another refuses.
+		if nativehermes.ModelSelectionShapeError(value) != nil {
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
+		}
+
 		snapshot := session.snapshot()
 
 		client := snapshot.client

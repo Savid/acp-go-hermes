@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,21 @@ const (
 	fakeModeDetachedDescendant = "detached-descendant"
 	fakeModeSessionCLI         = "session-cli"
 	fakeStoredSessionKey       = "stored-fake"
+	// The one provider this gateway publishes, and therefore the only one its
+	// config.set will resolve.
+	fakeGatewayProviderSlug = "openrouter"
 )
+
+// fakeConfigSetProvider reads the provider out of a model switch command, and
+// reports whether the command named one at all.
+func fakeConfigSetProvider(fields []string) (string, bool) {
+	index := slices.Index(fields, "--provider")
+	if index < 0 || index+1 >= len(fields) {
+		return "", false
+	}
+
+	return fields[index+1], true
+}
 
 type fakeSessionCLICapture struct {
 	Path        string `json:"path"`
@@ -90,6 +105,92 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	if fork.SessionId == "" || fork.SessionId == session.SessionId {
 		t.Fatalf("fake fork response = %#v", fork)
 	}
+}
+
+// TestHermesACPAgentFakeExecutableModelSelection drives model selection over
+// the real ACP wire against a gateway that answers the way hermes 0.20.4 was
+// measured to. It carries the claim the model config surface rests on all the
+// way to a host: the published catalogue is a menu, so a value absent from it
+// still reaches the gateway and becomes the option's current value, while a
+// selection the gateway refuses comes back as the gateway's own refusal rather
+// than as a wrapper verdict.
+func TestHermesACPAgentFakeExecutableModelSelection(t *testing.T) {
+	requireRunIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeOK), t.TempDir())
+	defer agent.close()
+
+	conn := acp.NewClientSideConnection(newRecordingClient(), agent.stdin, agent.stdout)
+	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		t.Fatalf("initialize with fake hermes: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new session with fake hermes: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+
+	unadvertised := fakeGatewayProviderSlug + "/unlisted-by-the-menu"
+	selected, err := conn.SetSessionConfigOption(ctx, hermesacp.SetModelRequest(session.SessionId, unadvertised))
+	if err != nil {
+		t.Fatalf("select a model the menu does not advertise: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+
+	current, menu := fakeModelOptionState(t, selected.ConfigOptions)
+	if current != unadvertised {
+		t.Fatalf("current model = %q, want the value sent (%q)", current, unadvertised)
+	}
+	if slices.Contains(menu, unadvertised) {
+		t.Fatalf("the menu advertises the unlisted value: %#v", menu)
+	}
+
+	_, err = conn.SetSessionConfigOption(ctx, hermesacp.SetModelRequest(session.SessionId, "missing-provider/missing-model"))
+	if err == nil {
+		t.Fatalf("gateway refusal did not reach the host\nstderr:\n%s", agent.stderrString())
+	}
+	if !strings.Contains(err.Error(), "Unknown provider 'missing-provider'") {
+		t.Fatalf("refusal reaching the host = %v, want the gateway's own message", err)
+	}
+
+	// The refused selection changed nothing: the session still holds what the
+	// gateway last accepted.
+	after, err := conn.SetSessionConfigOption(ctx, hermesacp.SetModelRequest(session.SessionId, unadvertised))
+	if err != nil {
+		t.Fatalf("reselect after a refusal: %v\nstderr:\n%s", err, agent.stderrString())
+	}
+	if current, _ := fakeModelOptionState(t, after.ConfigOptions); current != unadvertised {
+		t.Fatalf("current model after a refused selection = %q, want %q", current, unadvertised)
+	}
+}
+
+// fakeModelOptionState reads the model option's current value and the values it
+// advertises out of a published option list.
+func fakeModelOptionState(t *testing.T, options []acp.SessionConfigOption) (string, []string) {
+	t.Helper()
+
+	if len(options) != 1 || options[0].Select == nil {
+		t.Fatalf("published config options = %#v", options)
+	}
+
+	selectOption := options[0].Select
+
+	var menu []string
+	if selectOption.Options.Grouped != nil {
+		for _, group := range *selectOption.Options.Grouped {
+			for _, option := range group.Options {
+				menu = append(menu, string(option.Value))
+			}
+		}
+	}
+	if selectOption.Options.Ungrouped != nil {
+		for _, option := range *selectOption.Options.Ungrouped {
+			menu = append(menu, string(option.Value))
+		}
+	}
+
+	return string(selectOption.CurrentValue), menu
 }
 
 func assertFakeGatewayToolLifecycle(t *testing.T, client *recordingClient) {
@@ -570,7 +671,7 @@ func handleFakeGatewayRPC(
 			"model":    "anthropic/claude-sonnet-4",
 			"provider": "",
 			"providers": []map[string]any{{
-				"slug":            "openrouter",
+				"slug":            fakeGatewayProviderSlug,
 				"name":            "OpenRouter",
 				"authenticated":   true,
 				"is_current":      false,
@@ -622,7 +723,25 @@ func handleFakeGatewayRPC(
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{})
 	case "config.set":
 		value, _ := params["value"].(string)
-		raw := strings.Trim(strings.Fields(value)[0], "'")
+		fields := strings.Fields(value)
+		// The double answers the way hermes 0.20.4 (2026.8.18) was measured to,
+		// message text included. Hermes refuses on the provider and never on the
+		// model: a selection naming a provider it does not publish is refused,
+		// while a model no provider advertises is taken. The measurement and its
+		// provenance live in internal/hermes' TestLiveModelSelectionNativeAnswers.
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "--") {
+			writeFakeGatewayError(ctx, conn, id, 5001, "model value required")
+
+			return
+		}
+		if provider, qualified := fakeConfigSetProvider(fields); qualified && provider != fakeGatewayProviderSlug {
+			writeFakeGatewayError(ctx, conn, id, 5001, fmt.Sprintf(
+				"Unknown provider '%s'. Check 'hermes model' for available providers, "+
+					"or define it in config.yaml under 'providers:'.", provider))
+
+			return
+		}
+		raw := strings.Trim(fields[0], "'")
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"key": params["key"], "value": raw, "scope": "session", "confirm_required": false})
 	default:
 		writeFakeGatewayError(ctx, conn, id, -32601, "missing")

@@ -617,6 +617,22 @@ func (c *Client) SetModel(ctx context.Context, liveSessionID string, value strin
 	return nil
 }
 
+// ModelSelectionShapeError reports why value cannot name a model selection, or
+// nil when it can. A selection is provider-qualified: two tokens split on the
+// first "/", neither empty, neither a flag, neither carrying whitespace or
+// control characters.
+//
+// The question is the string's shape and never which models exist. Hermes owns
+// that: a provider-qualified selection reaches config.set whatever it names,
+// and Hermes answers for it. Every door that must turn one host value into a
+// provider and a model asks this one predicate, so no door admits a shape
+// another door refuses.
+func ModelSelectionShapeError(value string) error {
+	_, _, err := modelSwitchCommand(value)
+
+	return err
+}
+
 func modelSwitchCommand(value string) (string, string, error) {
 	provider, rawModel, ok := strings.Cut(value, "/")
 

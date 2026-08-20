@@ -643,6 +643,22 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 		return lifecycleMismatch(hermesExtraPathDirsOptionPath)
 	}
 
+	// A shape refusal, not a value gate. The gate this door used to carry asked
+	// a value question — is this the model already bound? — and answered no for
+	// every model Hermes would have taken. This asks only whether the string can
+	// name a selection at all, and it has to: an active resume sends nothing to
+	// Hermes, so the value survives as this session's provider and model and
+	// nothing else. An unqualified one splits into no provider, leaves a nil
+	// selector, and lets the next prompt run on the previously bound model while
+	// the config option echoes back what the host asked for — a silent wrong
+	// answer where the config door, reading the same predicate before its own
+	// native call, refuses. Session creation refuses nothing here: session.create
+	// carries model and provider as separate fields, so an unqualified value is
+	// representable there and Hermes resolves it itself.
+	if meta.Model != "" && nativehermes.ModelSelectionShapeError(meta.Model) != nil {
+		return unsupportedField(hermesModelOptionPath)
+	}
+
 	existing.mu.Lock()
 	if meta.Model != "" {
 		existing.providerID, existing.modelID = splitModelValue(meta.Model, "", "")

@@ -14,6 +14,7 @@ import (
 const (
 	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
 	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
+	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
 	sessionPathEnvironmentKey     = "PATH"
 	sessionBashEnvironmentKey     = "BASH_ENV"
 	sessionManagedPathEnvPrefix   = "ACP_GO_HERMES_PATH_DIR_"
@@ -112,7 +113,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 				switch optionKey {
 				case metaModelKey:
 					if _, ok := optionValue.(string); !ok {
-						return unsupportedField("_meta.hermes.options.model")
+						return unsupportedField(hermesModelOptionPath)
 					}
 				case metaEnvKey, metaExtraPathDirsKey:
 				case metaOutputSchemaKey:

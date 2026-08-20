@@ -138,7 +138,7 @@ Lifecycle requests accept:
 
 | Field | Meaning |
 |---|---|
-| `options.model` | Selects the `provider/model` pair for the session. |
+| `options.model` | Selects the `provider/model` pair for the session. On a load or resume that reuses a live session it replaces the next prompt's selection, and a value that is not provider-qualified fails naming `_meta.hermes.options.model` — see [Models And Config](/docs/features/models-config). |
 | `options.env` | Per-session environment variables injected into only that session's Hermes process. Raw `PATH`, `BASH_ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are rejected. |
 | `options.extraPathDirs` | Ordered absolute native directories placed first for that process and restored first in actual local terminal commands after login/profile startup. |
 | `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
