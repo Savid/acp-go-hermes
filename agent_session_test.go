@@ -1111,8 +1111,6 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}, ExtraPathDirs: []string{secondPathDir, firstPathDir}})))
 	requireLifecycleMismatch(t, err, hermesExtraPathDirsOptionPath)
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/other", Env: map[string]string{"A": "B"}, ExtraPathDirs: extraPathDirs})))
-	requireLifecycleMismatch(t, err, "_meta.hermes.options.model")
 	if factoryCalls != 1 {
 		t.Fatalf("invalid active load/resume started a native process: %d", factoryCalls)
 	}

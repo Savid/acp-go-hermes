@@ -55,17 +55,6 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 	switch params.ValueId.ConfigId {
 	case configModel:
-		// One native model.options read answers the whole call. The value check
-		// and the answer are the same enumeration read once, because the model
-		// selection between them is a local mutation that changes which option
-		// is current and nothing about which options exist. Reading twice made
-		// one selection cost two full provider enumerations over the gateway,
-		// which is what put a healthy harness outside a host's probe budget.
-		providers, ok := session.configProviders(ctx)
-		if !ok || !hasConfigValue(session.configOptionsFrom(providers), configModel, value) {
-			return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
-		}
-
 		snapshot := session.snapshot()
 
 		client := snapshot.client
@@ -83,7 +72,11 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 		session.setModel(value)
 
-		options = session.configOptionsFrom(providers)
+		// The catalogue is a host menu, not an accepted set. Read it only after
+		// Hermes has answered the mutation, then publish that menu against the
+		// exact value sent. A failed read cannot retroactively refuse a native
+		// selection that already succeeded.
+		options = session.configOptions(ctx)
 	default:
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyConfigID)
 	}
@@ -107,37 +100,6 @@ func sessionConfigOptionMeta(params acp.SetSessionConfigOptionRequest) map[strin
 	default:
 		return nil
 	}
-}
-
-// hasConfigValue reports whether an already-read option list publishes value
-// under configID. It takes the list rather than reading one so its caller
-// controls how many native enumerations the surrounding call costs.
-func hasConfigValue(options []acp.SessionConfigOption, configID acp.SessionConfigId, value string) bool {
-	for _, option := range options {
-		if option.Select == nil || option.Select.Id != configID {
-			continue
-		}
-
-		if option.Select.Options.Ungrouped != nil {
-			for _, item := range *option.Select.Options.Ungrouped {
-				if string(item.Value) == value {
-					return true
-				}
-			}
-		}
-
-		if option.Select.Options.Grouped != nil {
-			for _, group := range *option.Select.Options.Grouped {
-				for _, item := range group.Options {
-					if string(item.Value) == value {
-						return true
-					}
-				}
-			}
-		}
-	}
-
-	return false
 }
 
 func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {

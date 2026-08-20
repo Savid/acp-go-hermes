@@ -643,11 +643,10 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 		return lifecycleMismatch(hermesExtraPathDirsOptionPath)
 	}
 
-	if meta.Model != "" && meta.Model != modelSelectionValue(snapshot.providerID, snapshot.modelID) {
-		return lifecycleMismatch("_meta.hermes.options.model")
-	}
-
 	existing.mu.Lock()
+	if meta.Model != "" {
+		existing.providerID, existing.modelID = splitModelValue(meta.Model, "", "")
+	}
 	existing.rawMessages = meta.RawMessages
 	existing.mu.Unlock()
 
