@@ -300,8 +300,8 @@ func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
 	if conn.extensionCount() != 0 {
 		t.Fatalf("unbounded emitter produced %d notifications", conn.extensionCount())
 	}
-	if session.rawSeq != 1 {
-		t.Fatalf("unbounded emitter claimed sequence %d, want 1", session.rawSeq)
+	if session.rawSeq != 0 {
+		t.Fatalf("unbounded emitter consumed sequence %d, want 0", session.rawSeq)
 	}
 
 	session.id = "session-1"
@@ -316,16 +316,12 @@ func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
 	if len(exts) != 1 {
 		t.Fatalf("rawEvent notifications after structural failure = %d, want 1", len(exts))
 	}
-	if payload := rawEventPayload(t, exts[0]); payload[keySequence] != int64(2) {
-		t.Fatalf("sequence after structural failure = %v, want 2", payload[keySequence])
+	if payload := rawEventPayload(t, exts[0]); payload[keySequence] != int64(1) {
+		t.Fatalf("sequence after structural failure = %v, want 1", payload[keySequence])
 	}
 }
 
-// TestRawEventSequenceIsClaimedBeforeDelivery pins the raw stream's loss
-// visibility: a failed delivery spends its number, so the next successful event
-// leaves an observable gap instead of reusing an identity the adapter already
-// attempted.
-func TestRawEventSequenceIsClaimedBeforeDelivery(t *testing.T) {
+func TestRawEventSequenceReusesCandidateAfterFailedDelivery(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
@@ -340,8 +336,8 @@ func TestRawEventSequenceIsClaimedBeforeDelivery(t *testing.T) {
 	if !errors.Is(err, conn.notifyErr) {
 		t.Fatalf("failed delivery error = %v, want %v", err, conn.notifyErr)
 	}
-	if session.rawSeq != 2 {
-		t.Fatalf("failed delivery claimed sequence %d, want 2", session.rawSeq)
+	if session.rawSeq != 1 {
+		t.Fatalf("failed delivery consumed sequence %d, want 1", session.rawSeq)
 	}
 
 	conn.notifyErr = nil
@@ -352,16 +348,16 @@ func TestRawEventSequenceIsClaimedBeforeDelivery(t *testing.T) {
 	if len(exts) != 4 {
 		t.Fatalf("rawEvent delivery attempts = %d, want 4", len(exts))
 	}
-	// Attempt 2 is the one that failed. The recorder sees every attempted frame;
-	// a real consumer misses 2 and therefore receives 1, 3, 4.
-	want := []int64{1, 2, 3, 4}
+	// The recorder sees the failed attempt and the next event reusing its
+	// candidate. A real consumer receives the contiguous sequence 1, 2, 3.
+	want := []int64{1, 2, 2, 3}
 	for index, ext := range exts {
 		if sequence := rawEventPayload(t, ext)[keySequence]; sequence != want[index] {
 			t.Fatalf("sequence[%d] = %v, want %d", index, sequence, want[index])
 		}
 	}
-	if session.rawSeq != 4 {
-		t.Fatalf("claimed sequence = %d, want 4", session.rawSeq)
+	if session.rawSeq != 3 {
+		t.Fatalf("delivered sequence = %d, want 3", session.rawSeq)
 	}
 }
 
@@ -396,8 +392,8 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 		}, nil
 	}
 
-	// Deliver a raw event mid-turn; its emit fails on the wire but must not
-	// abort the authoritative turn.
+	// Deliver a raw event mid-turn; its observational failure must not alter the
+	// authoritative prompt outcome.
 	client.emitEvent(nativehermes.TurnEvent{Type: nativehermes.EventGatewayRaw, Raw: json.RawMessage(`{"type":"native.custom"}`)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -430,12 +426,8 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 
 	select {
 	case out := <-done:
-		if out.err != nil {
-			t.Fatalf("raw emit failure aborted the turn: %v", out.err)
-		}
-
-		if out.resp.StopReason != acp.StopReasonEndTurn {
-			t.Fatalf("stop reason = %q, want end_turn", out.resp.StopReason)
+		if out.err != nil || out.resp.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("raw failure altered prompt result = %#v, %v", out.resp, out.err)
 		}
 	case <-ctx.Done():
 		t.Fatal("prompt did not return")

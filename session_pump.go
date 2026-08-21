@@ -294,22 +294,25 @@ func (s *session) resolvePromptProjection(route *pumpCycleRoute, err error) {
 	s.compactCycleControls()
 }
 
-func (s *session) awaitPromptForegroundSettlement(ctx context.Context) error {
+func (s *session) promptForegroundSettlementPending() bool {
 	s.pumpMu.Lock()
 	settlement := s.pumpForegroundSettle
-	s.pumpMu.Unlock()
+	defer s.pumpMu.Unlock()
 
-	if err := settlement.await(ctx); err != nil {
-		return err
+	if settlement == nil {
+		return false
 	}
 
-	s.pumpMu.Lock()
-	if s.pumpForegroundSettle == settlement {
-		s.pumpForegroundSettle = nil
-	}
-	s.pumpMu.Unlock()
+	select {
+	case <-settlement.done:
+		if s.pumpForegroundSettle == settlement {
+			s.pumpForegroundSettle = nil
+		}
 
-	return nil
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *session) routeForEvent(event nativehermes.TurnEvent) *pumpCycleRoute {
@@ -676,12 +679,10 @@ func (s *session) handlePumpItem(ctx context.Context, item pumpItem) (result err
 
 	event := *item.event
 	if event.Type == nativehermes.EventCycleStarted && event.Origin == nativehermes.CycleOriginActivity {
-		if err := s.awaitPromptForegroundSettlement(ctx); err != nil {
-			if event.ProjectionDone != nil {
-				event.ProjectionDone(err)
-			}
+		if s.promptForegroundSettlementPending() {
+			s.deferPumpItem(item)
 
-			return err
+			return nil
 		}
 
 		err := s.startAutonomousCycle(ctx, event)

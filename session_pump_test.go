@@ -2202,23 +2202,28 @@ func TestPumpDeferredFailureBarriers(t *testing.T) {
 	})
 }
 
-func TestAutonomousStartWaitsForForegroundSettlementFailure(t *testing.T) {
+func TestAutonomousStartDefersWithoutWaitingForForegroundSettlement(t *testing.T) {
 	s := testSession(newTestAgent(), newFakeHermesClient())
 	defer s.stopPump()
 	settlement := &turnSettlement{done: make(chan struct{})}
 	s.pumpMu.Lock()
 	s.pumpForegroundSettle = settlement
 	s.pumpMu.Unlock()
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
 	event := nativehermes.TurnEvent{
 		Type: nativehermes.EventCycleStarted, Origin: nativehermes.CycleOriginActivity,
 		CycleID: "activity", TransportGeneration: 1,
 	}
 	projected := make(chan error, 1)
 	event.ProjectionDone = func(err error) { projected <- err }
-	require.ErrorIs(t, s.handlePumpItem(ctx, pumpItem{event: &event}), context.Canceled)
-	require.ErrorIs(t, <-projected, context.Canceled)
+	require.NoError(t, s.handlePumpItem(t.Context(), pumpItem{event: &event}))
+	select {
+	case err := <-projected:
+		t.Fatalf("deferred projection completed early: %v", err)
+	default:
+	}
+	s.pumpMu.Lock()
+	require.Len(t, s.pumpDeferred, 1)
+	s.pumpMu.Unlock()
 	require.Error(t, s.startAutonomousCycle(t.Context(), nativehermes.TurnEvent{}))
 }
 

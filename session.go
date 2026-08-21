@@ -422,8 +422,8 @@ func (s *session) reservePromptLocked() *turnSettlement {
 			s.foregroundKind = 0
 		}
 		s.mu.Unlock()
-		s.notifyPumpRetry()
 	}
+	settlement.notify = s.notifyPumpRetry
 	s.promptReservation = settlement
 
 	return settlement
@@ -470,8 +470,8 @@ func (s *session) claimForegroundLocked(kind sessionForegroundKind) *turnSettlem
 			s.foregroundKind = 0
 		}
 		s.mu.Unlock()
-		s.notifyPumpRetry()
 	}
+	settlement.notify = s.notifyPumpRetry
 
 	s.foreground = settlement
 	s.foregroundKind = kind

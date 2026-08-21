@@ -1532,15 +1532,13 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 		return nil
 	}
 
-	// Serialize the claim through delivery so successful notifications cannot
-	// reorder. The sequence is spent before any fallible rendering or write: a
-	// delivery failure is observable as a gap and the next event can never reuse
-	// the failed attempt's identity.
+	// Serialize the candidate through delivery so successful notifications
+	// cannot reorder. A failed write leaves the candidate available to the next
+	// event and the delivered stream remains contiguous.
 	s.rawEventMu.Lock()
 	defer s.rawEventMu.Unlock()
 
-	s.rawSeq++
-	sequence := s.rawSeq
+	sequence := s.rawSeq + 1
 
 	payload := map[string]any{
 		jsonFieldSessionID: s.id,
@@ -1560,6 +1558,7 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		return err
 	}
+	s.rawSeq = sequence
 
 	return nil
 }

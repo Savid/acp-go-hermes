@@ -29,6 +29,19 @@ func TestAwaitSettlementHonorsCancellationAcrossTurnAndReuse(t *testing.T) {
 	require.ErrorIs(t, session.awaitSettlement(ctx), context.Canceled)
 }
 
+func TestTurnSettlementNotifiesAfterCompletionLatch(t *testing.T) {
+	settlement := &turnSettlement{done: make(chan struct{})}
+	settlement.notify = func() {
+		select {
+		case <-settlement.done:
+		default:
+			t.Fatal("settlement notified before closing its completion latch")
+		}
+	}
+
+	settlement.complete()
+}
+
 // Close after an incarnation-ending settlement on an authoritative-quiescence
 // configuration: the settlement already certified and fenced the stream, so the
 // close boundary must not try to certify again on the fenced stream.

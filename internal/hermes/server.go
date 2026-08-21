@@ -1132,9 +1132,9 @@ func (s *hermesServer) gatewayTransport() *gatewayTransport {
 	return s.transport
 }
 
-// enableReconnect wires the idle-reconnect supervisor: it records the redial
-// function and starts a goroutine that watches the connection and redials while
-// no turn is in progress.
+// enableReconnect wires the idle-reconnect supervisor. turnBusy is a transport
+// lease around gateway RPCs (including non-prompt RPCs), not lifecycle turn
+// admission; session admission remains owned by the adapter session actor.
 func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, error)) {
 	s.connMu.Lock()
 

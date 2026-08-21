@@ -91,6 +91,7 @@ type turnSettlement struct {
 	done    chan struct{}
 	once    sync.Once
 	release func()
+	notify  func()
 }
 
 func (t *turnSettlement) complete() {
@@ -104,6 +105,9 @@ func (t *turnSettlement) complete() {
 		}
 
 		close(t.done)
+		if t.notify != nil {
+			t.notify()
+		}
 	})
 }
 
