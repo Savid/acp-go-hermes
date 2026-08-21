@@ -686,6 +686,64 @@ func TestGatewayQueuedPromptIsServedByTheTurnHermesRunsForIt(t *testing.T) {
 	}
 }
 
+// TestGatewayQueuedPromptHoldsEveryFramePastTheRunningTurnsTerminal pins the
+// boundary inside one batch of held frames: the running turn's terminal can
+// arrive with the queued turn's first frames behind it, and those frames are
+// the prompt's — held until it is released, never spent on the cycle that just
+// ended.
+func TestGatewayQueuedPromptHoldsEveryFramePastTheRunningTurnsTerminal(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	handle := registerDirectPrompt(actor)
+	for _, event := range []Event{
+		{Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		{Type: evtMessageComplete, InboundSequence: 8, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		{Type: evtMessageDelta, InboundSequence: 9, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+	} {
+		actor.handleRaw(1, event)
+	}
+
+	result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+		cycleID: handle.cycleID, watermark: 6, disposition: gatewayPromptQueuedTurn,
+	})
+	if result.err != nil || result.deferral == nil {
+		t.Fatalf("queued watermark = %#v", result)
+	}
+
+	var resumed gatewayPromptWatermarkResult
+	select {
+	case resumed = <-result.deferral:
+	default:
+		t.Fatal("the running turn's terminal did not resume the queued prompt")
+	}
+	if resumed.err != nil || len(resumed.projections) != 1 {
+		t.Fatalf("resumed queued prompt = %#v", resumed)
+	}
+	if actor.prompt == nil || actor.prompt.deferred || len(actor.prompt.heldEvents) != 1 {
+		t.Fatalf("queued prompt state = %#v", actor.prompt)
+	}
+	if actor.active != nil {
+		t.Fatalf("running cycle outlived its terminal: %#v", actor.active)
+	}
+
+	started := mustTurnEvent(t, server.deliveries)
+	part := mustTurnEvent(t, server.deliveries)
+	completed := mustTurnEvent(t, server.deliveries)
+	if started.Origin != CycleOriginActivity || part.Origin != CycleOriginActivity ||
+		completed.Type != EventCycleComplete || completed.Message == nil ||
+		completed.Message.Parts[0].Text != "running-turn" || completed.CycleID == handle.cycleID {
+		t.Fatalf("running turn projection = %#v / %#v / %#v", started, part, completed)
+	}
+
+	if err := actor.releasePrompt(&gatewayPromptRelease{cycleID: handle.cycleID}); err != nil {
+		t.Fatalf("release queued prompt: %v", err)
+	}
+	promptPart := mustTurnEvent(t, server.deliveries)
+	if promptPart.Origin != CycleOriginPrompt || promptPart.CycleID != handle.cycleID ||
+		!strings.Contains(actor.prompt.text.String(), "queued-turn") {
+		t.Fatalf("queued turn projection = %#v", promptPart)
+	}
+}
+
 // TestGatewayFoldedPromptStreamsTheTurnItJoined pins the redirect/steer
 // disposition in its ordinary shape: every autonomous driver marks the session
 // running before it emits a frame, so a folded prompt commonly meets a turn
