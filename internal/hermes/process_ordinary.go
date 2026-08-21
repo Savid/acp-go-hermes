@@ -20,11 +20,7 @@ import (
 // value it generated, so these are the names an inherited environment must
 // never be allowed to supply.
 const (
-	envHermesHome = "HERMES_HOME"
-	// envHermesAuthHome is a legacy forbidden key, not a supported residence.
-	// Scrubbing prevents an inherited host environment from reactivating custom
-	// nonofficial behavior in a substituted executable.
-	envHermesAuthHome     = "HERMES_AUTH_HOME"
+	envHermesHome         = "HERMES_HOME"
 	envHermesSessionToken = "HERMES_DASHBOARD_SESSION_TOKEN"
 	// envHermesWebDist is operator-supplied rather than adapter-managed, so it
 	// is read out of a phase map rather than scrubbed out of one.
@@ -36,7 +32,7 @@ const (
 // the adapter itself from a value it generated, so an inherited one can only
 // redirect native state at a root the wrapper does not own — the durable
 // credential residence most of all.
-var ordinaryManagedEnvironmentKeys = []string{envHermesHome, envHermesAuthHome, envHermesSessionToken}
+var ordinaryManagedEnvironmentKeys = []string{envHermesHome, envHermesSessionToken}
 
 // ordinaryPrivateEnvironmentKeys names the adapter-private markers that live
 // outside the private prefix. They travel between the wrapper and its own

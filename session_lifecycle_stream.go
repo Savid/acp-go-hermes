@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 
@@ -34,22 +35,23 @@ type sessionStream struct {
 	stream     *lifecycle.Stream
 	negotiated lifecycle.Negotiated
 	session    *session
-	// opened records that the whole-state assertion that opens the stream has
-	// been stated: reduced into the stream and, where a connection was there to
-	// take it, delivered on it. A connection the host has already dropped takes
-	// nothing, and the stream is open all the same — the sequence is claimed and
-	// the snapshot is the state every later delta is a delta against. It is
-	// stated once, by whichever of the ordered release and the next prompt
-	// reaches it first.
+	// opened records that the whole-state assertion was reduced and delivered.
+	// A missing connection leaves it unopened and consumes no sequence, so every
+	// later projection remains gated behind the snapshot the host must see first.
 	opened bool
 	// openCycleID is the idle cycle the snapshot reports; cycleID is the one an
 	// accepted submission runs in. They are distinct because a snapshot's
 	// foreground state predates every turn.
 	openCycleID string
-	cycleID     string
-	turnID      string
-	turns       uint64
-	actions     uint64
+	// releaseProjection is false while a replacement incarnation is staged.
+	// Its opening snapshot may be prepared, but native event projection remains
+	// gated until the complete replacement tuple is published.
+	releaseProjection bool
+	cycleID           string
+	turnID            string
+	turns             uint64
+	actions           uint64
+	turnCause         lifecycle.Cause
 	// blockers counts the announced actions still blocking the current cycle. The
 	// cycle returns to running when the last one resolves, never the first.
 	blockers int
@@ -65,27 +67,36 @@ func lifecycleStreamID() (string, error) {
 // generation. It emits nothing: a stream's first event is ordered after the
 // establishing response, so the snapshot is delivered by ensureLifecycleOpened.
 func (s *session) openLifecycleStream() error {
-	negotiated := s.agent.negotiatedLifecycle()
-	if !negotiated.Present() {
-		return nil
-	}
-
-	id, err := lifecycleStreamID()
+	stream, err := s.prepareLifecycleStream(true)
 	if err != nil {
 		return err
 	}
 
 	s.streamMu.Lock()
-	defer s.streamMu.Unlock()
-
-	s.stream = &sessionStream{
-		stream:      lifecycle.NewStream(id, negotiated),
-		negotiated:  negotiated,
-		session:     s,
-		openCycleID: id + lifecycleOpenCycleSuffix,
-	}
+	s.stream = stream
+	s.streamMu.Unlock()
 
 	return nil
+}
+
+func (s *session) prepareLifecycleStream(releaseProjection bool) (*sessionStream, error) {
+	negotiated := s.agent.negotiatedLifecycle()
+	if !negotiated.Present() {
+		return nil, nil //nolint:nilnil // Nil is the intentional unnegotiated stream state.
+	}
+
+	id, err := lifecycleStreamID()
+	if err != nil {
+		return nil, err
+	}
+
+	return &sessionStream{
+		stream:            lifecycle.NewStream(id, negotiated),
+		negotiated:        negotiated,
+		session:           s,
+		openCycleID:       id + lifecycleOpenCycleSuffix,
+		releaseProjection: releaseProjection,
+	}, nil
 }
 
 // streamID reports the incarnation identity, or the empty string on a connection
@@ -111,6 +122,17 @@ func (p *sessionStream) turnIdentity() string {
 	defer p.mu.Unlock()
 
 	return p.turnID
+}
+
+func (p *sessionStream) hasOpenTurn() bool {
+	if p == nil {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.turnID != ""
 }
 
 func (s *session) lifecycleStream() *sessionStream {
@@ -145,8 +167,26 @@ func (p *sessionStream) ensureLifecycleOpened(ctx context.Context) error {
 	}
 
 	p.opened = true
+	if p.releaseProjection {
+		p.session.releaseProjectionGate()
+	}
 
 	return nil
+}
+
+func (p *sessionStream) publishProjection() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	p.releaseProjection = true
+	opened := p.opened
+	p.mu.Unlock()
+
+	if opened {
+		p.session.releaseProjectionGate()
+	}
 }
 
 // accept records the dispatch linearization point: the gateway acknowledged the
@@ -169,12 +209,38 @@ func (p *sessionStream) accept(ctx context.Context, submission lifecycle.Submiss
 	p.turnID = p.stream.ID() + lifecycleTurnPrefix + strconv.FormatUint(p.turns, 10)
 	p.cycleID = p.stream.ID() + lifecyclePrefixForCycle(p.turns)
 	p.blockers = 0
+	p.turnCause = lifecycle.CauseSubmission
 
 	if err := p.emitLocked(ctx, lifecycle.AcceptedEvent(submission, p.turnID)); err != nil {
 		return err
 	}
 
 	return p.emitLocked(ctx, lifecycle.RunningEvent(p.cycleID, p.turnID))
+}
+
+func (p *sessionStream) startActivity(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+
+	if err := p.ensureLifecycleOpened(ctx); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.turnID != "" {
+		return acp.NewInternalError(map[string]any{jsonFieldError: "hermes_lifecycle_overlap"})
+	}
+
+	p.turns++
+	p.turnID = p.stream.ID() + lifecycleTurnPrefix + strconv.FormatUint(p.turns, 10)
+	p.cycleID = p.stream.ID() + lifecyclePrefixForCycle(p.turns)
+	p.blockers = 0
+	p.turnCause = lifecycle.CauseActivity
+
+	return p.emitLocked(ctx, lifecycle.RunningEventWithCause(p.cycleID, p.turnID, p.turnCause))
 }
 
 func lifecyclePrefixForCycle(turn uint64) string {
@@ -225,7 +291,7 @@ func (p *sessionStream) announceAction(ctx context.Context, action lifecycle.Act
 
 	p.blockers++
 
-	return p.emitLocked(ctx, lifecycle.RequiresActionEvent(p.cycleID, p.turnID))
+	return p.emitLocked(ctx, lifecycle.RequiresActionEventWithCause(p.cycleID, p.turnID, p.turnCause))
 }
 
 // resolveAction terminalizes one announced action and releases the cycle it
@@ -252,7 +318,7 @@ func (p *sessionStream) resolveActionLocked(ctx context.Context, actionID string
 		return nil
 	}
 
-	return p.emitLocked(ctx, lifecycle.RunningEvent(p.cycleID, p.turnID))
+	return p.emitLocked(ctx, lifecycle.RunningEventWithCause(p.cycleID, p.turnID, p.turnCause))
 }
 
 // terminalizeBlockers resolves every action still blocking the cycle as
@@ -295,13 +361,14 @@ func (p *sessionStream) settle(ctx context.Context, outcome lifecycleTurnOutcome
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := p.emitLocked(ctx, lifecycle.IdleEvent(
-		p.cycleID, p.turnID, outcome.stopReason, outcome.outcome,
+	if err := p.emitLocked(ctx, lifecycle.IdleEventWithCause(
+		p.cycleID, p.turnID, outcome.stopReason, outcome.outcome, p.turnCause,
 	)); err != nil {
 		return err
 	}
 
 	p.turnID = ""
+	p.turnCause = ""
 
 	return nil
 }
@@ -374,6 +441,11 @@ func (p *sessionStream) fenced() bool {
 // reaching a consumer, and a delivery this adapter cannot complete ends the
 // incarnation rather than leaving an undetectable gap behind it.
 func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) error {
+	conn := p.session.agent.connection()
+	if conn == nil {
+		return errors.New("ACP client connection is unavailable")
+	}
+
 	envelope, err := p.stream.Emit(event)
 	if err != nil {
 		p.stream.Fence()
@@ -382,11 +454,6 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 			jsonFieldError: "hermes_lifecycle_violation",
 			jsonFieldCause: err.Error(),
 		})
-	}
-
-	conn := p.session.agent.connection()
-	if conn == nil {
-		return nil
 	}
 
 	// The envelope rides the notification's own `_meta`, beside sessionId and

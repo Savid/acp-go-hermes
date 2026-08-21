@@ -31,6 +31,12 @@ func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 
 	require.NoError(t, stream.ensureLifecycleOpened(t.Context()))
 	require.NoError(t, stream.ensureLifecycleOpened(t.Context()))
+	require.NoError(t, stream.startActivity(t.Context()))
+	require.ErrorContains(t, stream.startActivity(t.Context()), "hermes_lifecycle_overlap")
+	require.NoError(t, stream.settle(t.Context(), lifecycleTurnOutcome{
+		stopReason: lifecycle.StopReasonCancelled,
+		outcome:    lifecycle.OutcomeCancelled,
+	}))
 	require.NoError(t, stream.accept(t.Context(), lifecycle.Submission{
 		SubmissionID: "submission", ClientNonce: "nonce", RunID: "run",
 	}))
@@ -68,9 +74,11 @@ func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 	}
 
 	state := reducer.State()
-	require.Len(t, state.Turns, 1)
+	require.Len(t, state.Turns, 2)
 	require.True(t, state.Turns[0].Terminal)
-	require.Equal(t, lifecycle.OutcomeSuccess, state.Turns[0].Outcome)
+	require.Equal(t, lifecycle.OutcomeCancelled, state.Turns[0].Outcome)
+	require.True(t, state.Turns[1].Terminal)
+	require.Equal(t, lifecycle.OutcomeSuccess, state.Turns[1].Outcome)
 	require.Len(t, state.Actions, 3)
 	for _, action := range state.Actions {
 		require.True(t, action.State.Terminal())
@@ -133,6 +141,7 @@ func TestLifecycleEmitterViolationFencesStream(t *testing.T) {
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
 	})
+	agent.setAgentClient(newRecordingAgentClient())
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	stream := session.lifecycleStream()

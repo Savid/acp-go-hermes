@@ -35,9 +35,18 @@ type wsGateway struct {
 	t      *testing.T
 	server *httptest.Server
 
-	mu         sync.Mutex
-	calls      []rpcCall
-	failMethod string
+	mu               sync.Mutex
+	calls            []rpcCall
+	failMethod       string
+	malformedAtStart bool
+	malformedEvent   bool
+	startupRaw       []byte
+	overflowAtStart  bool
+	reverseEOF       bool
+	reverseRequests  []struct {
+		id    int64
+		value string
+	}
 }
 
 func newWSGateway(t *testing.T) *wsGateway {
@@ -67,15 +76,29 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
 	_ = conn.Write(r.Context(), websocket.MessageBinary, []byte("ignored"))
-	_ = conn.Write(r.Context(), websocket.MessageText, []byte("{"))
 	g.writeEvent(r.Context(), conn, Event{Type: "gateway.ready"})
-	g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{"type": 1}})
 	g.writeEvent(r.Context(), conn, Event{Type: "message.delta", SessionID: "live", Payload: json.RawMessage(`{"text":"hi"}`)})
-	for range 16 {
+	if g.malformedAtStart {
 		_ = conn.Write(r.Context(), websocket.MessageText, []byte("{"))
+
+		return
 	}
-	for range 300 {
-		g.writeEvent(r.Context(), conn, Event{Type: "message.delta", SessionID: "live", Payload: json.RawMessage(`{"text":"overflow"}`)})
+	if g.malformedEvent {
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"jsonrpc":"2.0","method":"event","params":"invalid"}`))
+
+		return
+	}
+	if g.startupRaw != nil {
+		_ = conn.Write(r.Context(), websocket.MessageText, g.startupRaw)
+
+		return
+	}
+	if g.overflowAtStart {
+		for range 300 {
+			g.writeEvent(r.Context(), conn, Event{Type: "message.delta", SessionID: "live", Payload: json.RawMessage(`{"text":"overflow"}`)})
+		}
+
+		return
 	}
 	for {
 		typ, data, err := conn.Read(r.Context())
@@ -114,10 +137,66 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		case "empty-result":
 			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID})
+		case "wrong-version":
+			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "1.0", "id": req.ID, "result": map[string]any{}})
+		case "result-and-error":
+			g.writeRaw(r.Context(), conn, map[string]any{
+				"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{},
+				"error": map[string]any{"code": -32000, "message": "ambiguous"},
+			})
 		case "bad-rpc":
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":"bad","message":"bad"}}`, req.ID)))
+		case "overflow":
+			for range 300 {
+				g.writeEvent(r.Context(), conn, Event{Type: "message.delta", SessionID: "live", Payload: json.RawMessage(`{"text":"overflow"}`)})
+			}
+
+			return
 		case "bad-result":
 			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": "{"})
+		case "reverse-eof":
+			value, _ := params["value"].(string)
+			g.reverseRequests = append(g.reverseRequests, struct {
+				id    int64
+				value string
+			}{id: req.ID, value: value})
+			if g.reverseEOF && len(g.reverseRequests) == 2 {
+				for index := len(g.reverseRequests) - 1; index >= 0; index-- {
+					pending := g.reverseRequests[index]
+					g.writeRaw(r.Context(), conn, map[string]any{
+						"jsonrpc": "2.0", "id": pending.id, "result": map[string]any{"value": pending.value},
+					})
+				}
+				_ = conn.CloseNow()
+
+				return
+			}
+		case "cross-direction":
+			g.writeRaw(r.Context(), conn, map[string]any{
+				"jsonrpc": "2.0", "id": req.ID, "method": "gateway.unsupported", "params": map[string]any{},
+			})
+			responseType, responseData, responseErr := conn.Read(r.Context())
+			if responseErr != nil || responseType != websocket.MessageText {
+				g.t.Errorf("read unsupported-request response: type=%v err=%v", responseType, responseErr)
+
+				return
+			}
+			var unsupported struct {
+				ID    int64     `json:"id"`
+				Error *RPCError `json:"error"`
+			}
+			if err := json.Unmarshal(responseData, &unsupported); err != nil || unsupported.ID != req.ID ||
+				unsupported.Error == nil || unsupported.Error.Code != -32601 {
+				g.t.Errorf("unsupported-request response = %s err=%v", responseData, err)
+
+				return
+			}
+			g.writeRaw(r.Context(), conn, map[string]any{
+				"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"value": "first"},
+			})
+			g.writeRaw(r.Context(), conn, map[string]any{
+				"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"value": "duplicate"},
+			})
 		default:
 			g.writeRaw(r.Context(), conn, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": resultForMethod(req.Method, params)})
 		}
@@ -335,20 +414,319 @@ func TestClientRPCEventsAndWrappers(t *testing.T) {
 func assertClientEventStream(t *testing.T, client *Client) {
 	t.Helper()
 
-	if event := <-client.Events(); event.Type != eventGatewayReady {
-		t.Fatalf("first event = %#v", event)
+	if delivery := <-client.Deliveries(); delivery.Event == nil || delivery.Event.Type != eventGatewayReady {
+		t.Fatalf("first delivery = %#v", delivery)
 	}
-	if err := <-client.Errors(); err == nil {
-		t.Fatal("malformed frame did not reach error channel")
+	if delivery := <-client.Deliveries(); delivery.Event == nil || delivery.Event.Type != "message.delta" ||
+		delivery.Event.SessionID != "live" || len(delivery.Event.Raw) == 0 {
+		t.Fatalf("native delivery = %#v", delivery)
 	}
-	if err := <-client.Errors(); err == nil {
-		t.Fatal("malformed event did not reach error channel")
+	if client.Deliveries() == nil {
+		t.Fatal("delivery accessor returned nil")
 	}
-	if event := <-client.Events(); event.Type != "message.delta" || event.SessionID != "live" || len(event.Raw) == 0 {
-		t.Fatalf("native event = %#v", event)
+}
+
+func TestClientMalformedFrameFencesTransport(t *testing.T) {
+	gateway := newWSGateway(t)
+	gateway.malformedAtStart = true
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if client.Events() == nil || client.Errors() == nil {
-		t.Fatal("event accessors returned nil")
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+
+	<-client.Deliveries()
+	<-client.Deliveries()
+	if delivery := <-client.Deliveries(); delivery.Err == nil {
+		t.Fatal("malformed frame did not fence the transport")
+	}
+	if _, ok := <-client.Deliveries(); ok {
+		t.Fatal("delivery stream remained open after malformed frame")
+	}
+}
+
+func TestClientMalformedEventFencesTransport(t *testing.T) {
+	gateway := newWSGateway(t)
+	gateway.malformedEvent = true
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+
+	<-client.Deliveries()
+	<-client.Deliveries()
+	if delivery := <-client.Deliveries(); delivery.Err == nil {
+		t.Fatal("malformed event did not fence the transport")
+	}
+}
+
+func TestClientRejectsEveryInvalidTopLevelGatewayShape(t *testing.T) {
+	for name, frame := range map[string]string{
+		"non-object":       `null`,
+		"invalid method":   `{"jsonrpc":"2.0","method":1}`,
+		"invalid response": `{"jsonrpc":"2.0","id":"not-an-integer","result":{}}`,
+		"unclassified":     `{"jsonrpc":"2.0"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gateway := newWSGateway(t)
+			gateway.startupRaw = []byte(frame)
+			client, err := Dial(t.Context(), gateway.url(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+
+			<-client.Deliveries()
+			<-client.Deliveries()
+			if delivery := <-client.Deliveries(); delivery.Err == nil {
+				t.Fatalf("invalid gateway frame was not terminal: %s", frame)
+			}
+		})
+	}
+}
+
+func TestUnsupportedGatewayRequestWriteFailureIsReturned(t *testing.T) {
+	gateway := newWSGateway(t)
+	conn, response, err := websocket.Dial(t.Context(), gateway.url(), nil)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.CloseNow()
+	client := &Client{conn: conn, deliveries: make(chan GatewayDelivery, 1)}
+	if client.rejectUnsupportedRequest(json.RawMessage(`77`)) {
+		t.Fatal("unsupported-request rejection claimed success on a closed transport")
+	}
+	if delivery := <-client.Deliveries(); delivery.Err == nil {
+		t.Fatal("unsupported-request write failure did not terminalize the transport")
+	}
+	client.publishTerminal(errors.New("duplicate"))
+	if len(client.deliveries) != 0 {
+		t.Fatal("transport published more than one terminal delivery")
+	}
+}
+
+func TestClientRawEventOverflowFencesTransport(t *testing.T) {
+	gateway := newWSGateway(t)
+	gateway.overflowAtStart = true
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+
+	<-client.Done()
+
+	foundTerminal := false
+	for delivery := range client.Deliveries() {
+		if delivery.Err == nil {
+			continue
+		}
+		if !errors.Is(delivery.Err, ErrGatewayInputOverflow) {
+			t.Fatalf("overflow error = %v, want %v", delivery.Err, ErrGatewayInputOverflow)
+		}
+
+		foundTerminal = true
+
+		break
+	}
+	if !foundTerminal {
+		t.Fatal("overflow terminal was not delivered through its reserved slot")
+	}
+}
+
+func TestClientMalformedKnownRPCResponseFencesTransport(t *testing.T) {
+	for _, method := range []string{"bad-rpc", "empty-result", "wrong-version", "result-and-error"} {
+		t.Run(method, func(t *testing.T) {
+			gateway := newWSGateway(t)
+			client, err := Dial(t.Context(), gateway.url(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+			<-client.Deliveries()
+			<-client.Deliveries()
+
+			callErr := client.Call(t.Context(), method, nil, nil)
+			if callErr == nil {
+				t.Fatal("malformed known response terminalized its call successfully")
+			}
+			delivery := <-client.Deliveries()
+			if delivery.Err == nil {
+				t.Fatal("malformed known response omitted its terminal error")
+			}
+			if !errors.Is(callErr, ErrGatewayDisconnected) || !errors.Is(callErr, delivery.Err) {
+				t.Fatalf("pending call cause = %v, terminal = %v", callErr, delivery.Err)
+			}
+		})
+	}
+}
+
+func TestClientConcurrentCloseJoinsOneExactTransportAttempt(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	want := errors.New("close failed")
+	var calls int
+	var mu sync.Mutex
+	client := &Client{closeTransport: func(websocket.StatusCode, string) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		close(entered)
+		<-release
+
+		return want
+	}}
+
+	closed := make(chan error, 2)
+	go func() { closed <- client.Close(websocket.StatusInternalError, "first") }()
+	<-entered
+	go func() { closed <- client.Close(websocket.StatusNormalClosure, "second") }()
+
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned while its transport attempt was live: %v", err)
+	default:
+	}
+	close(release)
+	first := <-closed
+	second := <-closed
+	if first != second || !errors.Is(first, want) {
+		t.Fatalf("close results = %v and %v, want one exact %v", first, second, want)
+	}
+	if got := client.Close(websocket.StatusNormalClosure, "later"); got != first {
+		t.Fatalf("memoized close result = %v, want exact %v", got, first)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("transport close calls = %d, want 1", calls)
+	}
+}
+
+func TestClientAcceptedResponseWinsAtDoneResultCheck(t *testing.T) {
+	gateway := newWSGateway(t)
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+	<-client.Deliveries()
+	<-client.Deliveries()
+
+	var waiter chan rpcResponse
+	client.beforeCallWait = func() {
+		client.mu.Lock()
+		waiter = client.pending[1]
+		client.mu.Unlock()
+		<-client.Done()
+	}
+	client.beforeDoneResultCheck = func() {
+		waiter <- rpcResponse{JSONRPC: jsonrpcVersion, ID: 1, Result: json.RawMessage(`{"value":"accepted"}`)}
+	}
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := client.Call(t.Context(), "close", nil, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Value != "accepted" {
+		t.Fatalf("result = %q, want accepted", result.Value)
+	}
+}
+
+func TestClientRPCOverflowPreservesTransportCause(t *testing.T) {
+	gateway := newWSGateway(t)
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+	<-client.Deliveries()
+	<-client.Deliveries()
+
+	callErr := client.Call(t.Context(), "overflow", nil, nil)
+	if !errors.Is(callErr, ErrGatewayDisconnected) || !errors.Is(callErr, ErrGatewayInputOverflow) {
+		t.Fatalf("overflowing pending call = %v", callErr)
+	}
+}
+
+func TestClientExactEnqueuedResponsesWinOverLaterEOFInReverseIDOrder(t *testing.T) {
+	gateway := newWSGateway(t)
+	gateway.reverseEOF = true
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+	<-client.Deliveries()
+	<-client.Deliveries()
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	client.beforeCallWait = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	type callResult struct {
+		value string
+		err   error
+	}
+	results := make(chan callResult, 2)
+	for _, value := range []string{"first", "second"} {
+		go func() {
+			var out struct {
+				Value string `json:"value"`
+			}
+			err := client.Call(t.Context(), "reverse-eof", map[string]any{"value": value}, &out)
+			results <- callResult{value: out.Value, err: err}
+		}()
+	}
+	<-entered
+	<-entered
+	<-client.Done()
+	close(release)
+
+	got := map[string]bool{}
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("exact response lost to EOF: %v", result.err)
+		}
+		got[result.value] = true
+	}
+	if !got["first"] || !got["second"] {
+		t.Fatalf("reverse-ID results = %v", got)
+	}
+}
+
+func TestClientClassifiesCrossDirectionRequestBeforeResponseID(t *testing.T) {
+	gateway := newWSGateway(t)
+	client, err := Dial(t.Context(), gateway.url(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
+	<-client.Deliveries()
+	<-client.Deliveries()
+
+	var out struct {
+		Value string `json:"value"`
+	}
+	if err := client.Call(t.Context(), "cross-direction", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Value != "first" {
+		t.Fatalf("cross-direction result = %q", out.Value)
+	}
+
+	// The duplicate response found no pending waiter and did not wedge the sole
+	// reader; a later call still completes normally.
+	if err := client.Call(t.Context(), "later", nil, nil); err != nil {
+		t.Fatalf("call after duplicate response: %v", err)
 	}
 }
 
@@ -424,16 +802,8 @@ func assertClientCallEdges(t *testing.T, ctx context.Context, client *Client) {
 	if err := client.Call(ctx, "bad-result", nil, &bad); err == nil {
 		t.Fatal("bad result unexpectedly decoded")
 	}
-	if err := client.Call(ctx, "empty-result", nil, &bad); err != nil {
-		t.Fatalf("empty result with output: %v", err)
-	}
 	if err := client.Call(ctx, "marshal", map[string]any{"bad": func() {}}, nil); err == nil {
 		t.Fatal("marshal error was nil")
-	}
-	shortBadRPC, cancelBadRPC := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancelBadRPC()
-	if err := client.Call(shortBadRPC, "bad-rpc", nil, nil); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("bad rpc frame error = %v", err)
 	}
 }
 
@@ -485,7 +855,7 @@ func assertClientCloseSemantics(t *testing.T, ctx context.Context, client *Clien
 	}
 	waitLoopDone := make(chan error, 1)
 	go func() { waitLoopDone <- reconnected.Call(context.Background(), "close", nil, nil) }()
-	if err := <-waitLoopDone; err == nil || !strings.Contains(err.Error(), "closed") {
+	if err := <-waitLoopDone; !errors.Is(err, ErrGatewayDisconnected) {
 		t.Fatalf("read loop pending close error = %v", err)
 	}
 }
@@ -515,6 +885,21 @@ func TestModelSwitchCommandUsesRawModelAndExplicitSessionProvider(t *testing.T) 
 }
 
 func TestClientDialAndJSONBranches(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "malformed", raw: `{`},
+		{name: "invalid id", raw: `{"jsonrpc":"2.0","id":"x","result":{}}`},
+		{name: "null error", raw: `{"jsonrpc":"2.0","id":1,"error":null}`},
+	} {
+		t.Run("known response "+test.name, func(t *testing.T) {
+			if _, err := decodeKnownRPCResponse([]byte(test.raw), 1); err == nil {
+				t.Fatalf("accepted malformed known response %s", test.raw)
+			}
+		})
+	}
+
 	if (&RPCError{}).Error() == "" {
 		t.Fatal("empty RPCError string was empty")
 	}
@@ -1131,22 +1516,15 @@ func assertProcessWaitBranches(t *testing.T, ctx context.Context) {
 		t.Fatalf("waitReady process-state error = %v", err)
 	}
 
-	closedEvents := &Client{events: make(chan Event), errs: make(chan error)}
-	close(closedEvents.events)
+	closedEvents := &Client{deliveries: make(chan GatewayDelivery)}
+	close(closedEvents.deliveries)
 	if err := (&Process{Client: closedEvents}).waitGatewayReady(ctx); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("waitGatewayReady closed events err = %v", err)
 	}
-	errorClient := &Client{events: make(chan Event), errs: make(chan error, 1)}
-	errorClient.errs <- errors.New("gateway failed")
+	errorClient := &Client{deliveries: make(chan GatewayDelivery, 1)}
+	errorClient.deliveries <- GatewayDelivery{Err: errors.New("gateway failed")}
 	if err := (&Process{Client: errorClient}).waitGatewayReady(ctx); err == nil || !strings.Contains(err.Error(), "gateway failed") {
 		t.Fatalf("waitGatewayReady error err = %v", err)
-	}
-	closedErrorsCtx, cancelClosedErrors := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancelClosedErrors()
-	closedErrors := &Client{events: make(chan Event), errs: make(chan error)}
-	close(closedErrors.errs)
-	if err := (&Process{Client: closedErrors}).waitGatewayReady(closedErrorsCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("waitGatewayReady closed errors err = %v", err)
 	}
 }
 

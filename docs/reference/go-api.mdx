@@ -24,6 +24,12 @@ loop would otherwise return normally or with context cancellation. A host that
 receives it must retain or quarantine any resources the native process tree may
 still reach.
 
+`ErrGatewayDisconnected` is the stable `errors.Is` discriminator for loss of
+the Hermes gateway. Direct `Agent` calls preserve both that sentinel and the
+exact native transport cause in the Go error chain. The stream transport
+converts the error only at the ACP response boundary, where native messages and
+arbitrary error text are intentionally omitted.
+
 ## Agent options
 
 | Option | Purpose |

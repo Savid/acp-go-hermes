@@ -129,7 +129,7 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 
 	_, err = weak.NewSession(t.Context(), acp.NewSessionRequest{Meta: reserved})
 	require.Error(t, err)
-	_, err = weak.loadOrResumeSession(t.Context(), "session", "", nil, nil, reserved)
+	_, err = weak.loadOrResumeSession(t.Context(), "session", "", nil, nil, reserved, false)
 	require.Error(t, err)
 	_, err = weak.ListSessions(t.Context(), acp.ListSessionsRequest{Meta: reserved})
 	require.Error(t, err)

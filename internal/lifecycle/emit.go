@@ -111,11 +111,15 @@ func AcceptedEvent(submission Submission, turnID string) Event {
 
 // RunningEvent opens or resumes the foreground cycle a submission caused.
 func RunningEvent(cycleID, turnID string) Event {
+	return RunningEventWithCause(cycleID, turnID, CauseSubmission)
+}
+
+func RunningEventWithCause(cycleID, turnID string, cause Cause) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:   ForegroundRunning,
 		CycleID: cycleID,
 		TurnID:  turnID,
-		Cause:   CauseSubmission,
+		Cause:   cause,
 	}}
 }
 
@@ -123,22 +127,30 @@ func RunningEvent(cycleID, turnID string) Event {
 // The action's own record is always emitted first: the resolution is the reason
 // the foreground may move, so the two are never derived from one another.
 func RequiresActionEvent(cycleID, turnID string) Event {
+	return RequiresActionEventWithCause(cycleID, turnID, CauseSubmission)
+}
+
+func RequiresActionEventWithCause(cycleID, turnID string, cause Cause) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:   ForegroundRequiresAction,
 		CycleID: cycleID,
 		TurnID:  turnID,
-		Cause:   CauseSubmission,
+		Cause:   cause,
 	}}
 }
 
 // IdleEvent ends the cycle a submission caused, carrying the turn's truthful stop
 // reason and recorded outcome.
 func IdleEvent(cycleID, turnID, stopReason string, outcome Outcome) Event {
+	return IdleEventWithCause(cycleID, turnID, stopReason, outcome, CauseSubmission)
+}
+
+func IdleEventWithCause(cycleID, turnID, stopReason string, outcome Outcome, cause Cause) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:      ForegroundIdle,
 		CycleID:    cycleID,
 		TurnID:     turnID,
-		Cause:      CauseSubmission,
+		Cause:      cause,
 		StopReason: stopReason,
 		Outcome:    outcome,
 	}}

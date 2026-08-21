@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
@@ -17,8 +18,8 @@ import (
 
 func TestTurnFenceHelperBranches(t *testing.T) {
 	session := testSession(newTestAgent(), newFakeHermesClient())
-	if !session.claimPermissionRequest("") || !session.claimQuestionRequest("") {
-		t.Fatal("empty request ids should not be fenced")
+	if session.claimPermissionRequest("") || session.claimQuestionRequest("") {
+		t.Fatal("empty request ids were admitted without exact ownership")
 	}
 	session.processedPermission = nil
 	session.processedQuestion = nil
@@ -28,28 +29,6 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 	session.markActiveMessageID("")
 	session.activeMessageIDs = nil
 	session.markActiveMessageID("message-1")
-	session.failedMessageIDs = nil
-	session.failedStreamEpochs = nil
-	session.markStreamFailed(9)
-	if !session.shouldSuppressEvent(nativehermes.TurnEvent{StreamEpoch: 9}) {
-		t.Fatal("failed stream epoch was not suppressed")
-	}
-	if !session.shouldSuppressEvent(nativehermes.TurnEvent{
-		Properties: json.RawMessage(`{"sessionID":"native-1","messageID":"message-1","type":"text","text":"late"}`),
-	}) {
-		t.Fatal("failed message id was not suppressed")
-	}
-	if session.shouldSuppressEvent(nativehermes.TurnEvent{
-		Properties: json.RawMessage(`{"sessionID":"native-1","messageID":"message-2","type":"text","text":"ok"}`),
-	}) {
-		t.Fatal("unfailed message id was suppressed")
-	}
-	if err := session.handleEvent(context.Background(), nativehermes.TurnEvent{
-		StreamEpoch: 9,
-		Properties:  json.RawMessage(`{"sessionID":"native-1","messageID":"message-1","type":"text","text":"late"}`),
-	}); err != nil {
-		t.Fatalf("suppressed handleEvent: %v", err)
-	}
 }
 
 func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
@@ -200,7 +179,44 @@ func TestCommittedStateAndForegroundPrefixBoundaries(t *testing.T) {
 	session.recordForegroundPrefix("ignored")
 	require.Len(t, session.foregroundPrefix(), lifecycleForegroundPrefixBytes)
 
+	boundary := testSession(newTestAgent(), newFakeHermesClient())
+	prefix := string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes-1))
+	boundary.recordForegroundPrefix(prefix + "é")
+	boundary.recordForegroundPrefix("must-not-follow-truncation")
+	got := boundary.foregroundPrefix()
+	require.Equal(t, prefix, got)
+	require.True(t, utf8.ValidString(got))
+	encoded, err := json.Marshal(stateSnapshotForeground{Text: got})
+	require.NoError(t, err)
+	var roundTrip stateSnapshotForeground
+	require.NoError(t, json.Unmarshal(encoded, &roundTrip))
+	require.Equal(t, got, roundTrip.Text)
+
 	require.Nil(t, foregroundOf(nil))
 	foreground := &stateSnapshotForeground{TurnID: "turn"}
 	require.Same(t, foreground, foregroundOf(&stateSnapshotWrapper{Foreground: foreground}))
+}
+
+func TestExactForegroundCapacityAndAdmissionExclusion(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	session.recordForegroundPrefix(string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes)))
+	session.recordForegroundPrefix("not retained")
+	require.Equal(t, lifecycleForegroundPrefixBytes, len(session.foregroundPrefix()))
+	session.mu.Lock()
+	truncated := session.foregroundTruncated
+	session.mu.Unlock()
+	require.True(t, truncated)
+
+	other := testSession(newTestAgent(), newFakeHermesClient())
+	_, releaseReuse, err := other.beginReuse(t.Context())
+	require.NoError(t, err)
+	if _, _, acquireErr := other.acquireTurn(t.Context()); acquireErr == nil {
+		t.Fatal("turn crossed active reuse")
+	}
+	other.detachPump()
+	releaseReuse()
+	other.prepareClose()
+	if _, _, reuseErr := other.beginReuse(t.Context()); reuseErr == nil {
+		t.Fatal("reuse crossed close admission")
+	}
 }

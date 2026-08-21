@@ -57,6 +57,8 @@ type Agent struct {
 	containmentErr     error
 	constructions      sync.WaitGroup
 	constructing       int
+	constructionSeq    uint64
+	constructionCancel map[uint64]context.CancelCauseFunc
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
@@ -68,7 +70,7 @@ type Agent struct {
 	lifecycleAnswer    lifecycle.Negotiated
 
 	streamOpenMu   sync.Mutex
-	streamOpens    []*session
+	streamOpens    []*deferredStreamOpen
 	streamOpenWait sync.WaitGroup
 
 	sharedConfigMu          sync.Mutex
@@ -117,17 +119,18 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	agent := &Agent{
-		options:         options,
-		log:             log,
-		optionsErr:      optionsErr,
-		observe:         observe,
-		sessions:        make(map[acp.SessionId]*session),
-		deleted:         make(map[acp.SessionId]struct{}),
-		deleteCleanup:   make(map[acp.SessionId]deleteCleanupRecord),
-		incompleteRoots: make(map[acp.SessionId]map[string]struct{}),
-		clientCalls:     make(chan struct{}, limits.MaxConcurrentClientCalls),
-		containmentMode: mode,
-		ambientEnv:      ambientEnvironment(),
+		options:            options,
+		log:                log,
+		optionsErr:         optionsErr,
+		observe:            observe,
+		sessions:           make(map[acp.SessionId]*session),
+		deleted:            make(map[acp.SessionId]struct{}),
+		deleteCleanup:      make(map[acp.SessionId]deleteCleanupRecord),
+		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
+		constructionCancel: make(map[uint64]context.CancelCauseFunc),
+		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
+		containmentMode:    mode,
+		ambientEnv:         ambientEnvironment(),
 	}
 	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	// Invalid option combinations must be side-effect free. In particular,
@@ -200,12 +203,30 @@ func (a *Agent) Close() error {
 func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
+	constructionCancellations := make([]context.CancelCauseFunc, 0, len(a.constructionCancel))
+	for _, cancel := range a.constructionCancel {
+		constructionCancellations = append(constructionCancellations, cancel)
+	}
+	conn := a.conn
 	a.mu.Unlock()
+	for _, cancel := range constructionCancellations {
+		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage}))
+	}
 
+	a.cancelStreamOpens()
+	var err error
 	a.constructions.Wait()
-	// Every released opening snapshot has finished before the connection goes
-	// away, so no lifecycle notification is still in flight at shutdown.
+	if preparer, ok := conn.(interface{ PrepareTransportClose(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, preparer.PrepareTransportClose(ctx))
+		cancel()
+	}
 	a.awaitStreamOpens()
+	if closer, ok := conn.(interface{ CloseTransport(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, closer.CloseTransport(ctx))
+		cancel()
+	}
 
 	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
@@ -214,10 +235,7 @@ func (a *Agent) close() error {
 	}
 
 	a.sessions = make(map[acp.SessionId]*session)
-	a.conn = nil
 	a.mu.Unlock()
-
-	var err error
 
 	// The shutdown ladder applies identically here, and that includes the durable
 	// rung: an embedded shutdown owes every commit a wire session/close would have
@@ -228,9 +246,7 @@ func (a *Agent) close() error {
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 
-		if session.closeLifecycleAdmission() {
-			session.cancelTurn()
-		}
+		session.prepareClose()
 
 		waitErr := session.awaitSettlement(ctx)
 
@@ -243,6 +259,9 @@ func (a *Agent) close() error {
 
 		cancel()
 	}
+	a.mu.Lock()
+	a.conn = nil
+	a.mu.Unlock()
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	a.mu.Lock()
 	err = errors.Join(err, a.containmentErr)
@@ -251,28 +270,108 @@ func (a *Agent) close() error {
 	return err
 }
 
-func (a *Agent) beginSessionConstruction() error {
+func (a *Agent) beginActiveReuse(ctx context.Context, id acp.SessionId) (*session, context.Context, func(), error) {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	existing := a.sessions[id]
+	a.mu.Unlock()
+	if existing == nil {
+		return nil, nil, nil, nil
+	}
+
+	admissionCtx, release, err := existing.beginReuse(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
+		hook(admissionCtx)
+	}
+
+	return existing, admissionCtx, release, nil
+}
+
+type activeReuseAdmissionHookKey struct{}
+
+func (a *Agent) completeActiveReuse(
+	ctx context.Context,
+	id acp.SessionId,
+	existing *session,
+	replay bool,
+	release func(),
+) (*deferredStreamOpen, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	if a.closed || context.Cause(ctx) != nil {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
-	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
+	if a.sessions[id] != existing {
+		return nil, unknownSessionError()
 	}
 
-	a.constructing++
-	a.constructions.Add(1)
+	owed, deferred, err := a.deferStreamOpenLocked(ctx, existing)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil
+	identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
+	if deferred && orderedResponse && identity.token != "" {
+		owed.afterResponse = func() {
+			var replayErr error
+			if replay {
+				replayErr = existing.replayMessages(ctx)
+			}
+			release()
+			if replayErr != nil {
+				existing.failReuseAfterResponse(replayErr)
+			}
+		}
+		owed.onCancel = release
+	}
+
+	return owed, nil
 }
 
-func (a *Agent) endSessionConstruction() {
+func (a *Agent) beginSessionConstruction(ctx context.Context) (context.Context, func(), error) {
 	a.mu.Lock()
-	a.constructing--
+
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
+		a.mu.Unlock()
+
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
+	}
+
+	a.constructionSeq++
+	constructionID := a.constructionSeq
+	constructionCtx, cancel := context.WithCancelCause(ctx)
+	a.constructionCancel[constructionID] = cancel
+	a.constructing++
+	a.constructions.Add(1)
 	a.mu.Unlock()
-	a.constructions.Done()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			a.mu.Lock()
+			delete(a.constructionCancel, constructionID)
+			a.constructing--
+			a.mu.Unlock()
+			cancel(nil)
+			a.constructions.Done()
+		})
+	}
+
+	return constructionCtx, release, nil
 }
 
 // optionsError reports a construction-time option failure as the uniform
@@ -467,6 +566,10 @@ func (a *Agent) sessionStoreContext(ctx context.Context) (context.Context, conte
 }
 
 func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
+	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
+		return func() {}, nil
+	}
+
 	select {
 	case a.clientCalls <- struct{}{}:
 		return func() { <-a.clientCalls }, nil
@@ -475,6 +578,25 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	default:
 		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "client_calls"})
 	}
+}
+
+type clientCallLeaseKey struct{}
+
+type clientCallLease struct {
+	agent *Agent
+}
+
+func (a *Agent) beginClientOperation(ctx context.Context) (context.Context, func(), error) {
+	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
+		return ctx, func() {}, nil
+	}
+
+	release, err := a.acquireClientCall(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return context.WithValue(ctx, clientCallLeaseKey{}, &clientCallLease{agent: a}), release, nil
 }
 
 func (a *Agent) session(id acp.SessionId) (*session, error) {
@@ -523,6 +645,30 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	return a.storeStartedSessionLocked(session)
+}
+
+func (a *Agent) storeStartedSessionWithOpening(ctx context.Context, session *session) (*deferredStreamOpen, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	owed, _, err := a.deferStreamOpenLocked(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.storeStartedSessionLocked(session); err != nil {
+		a.abandonStreamOpen(owed)
+
+		return nil, err
+	}
+
+	return owed, nil
+}
+
+func (a *Agent) storeStartedSessionLocked(session *session) error {
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}

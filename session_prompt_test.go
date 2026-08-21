@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -33,6 +34,53 @@ type strictHermesPermissionClient struct {
 type sessionUpdateHookClient struct {
 	*recordingAgentClient
 	afterUpdate func()
+}
+
+type publicationFailControlClient struct {
+	*recordingAgentClient
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+}
+
+func (c *publicationFailControlClient) SessionUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	if _, lifecycleUpdate := notification.Meta[lifecycle.MetaKey]; lifecycleUpdate {
+		return errors.New("lifecycle delivery failed")
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+func (c *publicationFailControlClient) RequestPermissionRegistered(
+	ctx context.Context,
+	_ acp.RequestPermissionRequest,
+	written chan<- error,
+) (acp.RequestPermissionResponse, error) {
+	written <- nil
+	close(c.started)
+	<-ctx.Done()
+	close(c.cancelled)
+	<-c.release
+
+	return acp.RequestPermissionResponse{}, ctx.Err()
+}
+
+func (c *publicationFailControlClient) CreateElicitationRegistered(
+	ctx context.Context,
+	_ acp.UnstableCreateElicitationRequest,
+	_ elicitationScope,
+	written chan<- error,
+) (acp.UnstableCreateElicitationResponse, error) {
+	written <- nil
+	close(c.started)
+	<-ctx.Done()
+	close(c.cancelled)
+	<-c.release
+
+	return acp.UnstableCreateElicitationResponse{}, ctx.Err()
 }
 
 func (c *sessionUpdateHookClient) SessionUpdate(
@@ -99,6 +147,18 @@ func (c *strictHermesPermissionClient) RequestPermission(
 	return c.recordingAgentClient.RequestPermission(ctx, request)
 }
 
+func (c *strictHermesPermissionClient) RequestPermissionRegistered(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	written chan<- error,
+) (acp.RequestPermissionResponse, error) {
+	if written != nil {
+		written <- nil
+	}
+
+	return c.RequestPermission(ctx, request)
+}
+
 func (c *strictHermesPermissionClient) orderSnapshot() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,6 +179,8 @@ func testHermesPermissionRequest(t *testing.T, requestID string, toolCallID stri
 	if err := json.Unmarshal([]byte(raw), &req); err != nil {
 		t.Fatalf("decode permission request: %v", err)
 	}
+	req.CycleID = testControlCycleID
+	req.TransportGeneration = 1
 
 	return req
 }
@@ -131,7 +193,7 @@ func TestPermissionPublishesExactNativeToolPendingBeforeCallback(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	turnCtx := session.beginTurn(t.Context(), turnNonce)
+	turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 	defer session.finishTurn()
 
 	req := testHermesPermissionRequest(t, "native-request-distinct", "native-tool-distinct")
@@ -157,7 +219,7 @@ func TestPermissionPublishesExactNativeToolPendingBeforeCallback(t *testing.T) {
 	}
 }
 
-func TestPermissionNativeStartAndSyntheticPendingShareOneLifecycle(t *testing.T) {
+func TestPermissionAndNativeStartShareOneToolLifecycle(t *testing.T) {
 	const turnNonce = "permission-turn"
 
 	t.Run("native start wins", func(t *testing.T) {
@@ -166,7 +228,7 @@ func TestPermissionNativeStartAndSyntheticPendingShareOneLifecycle(t *testing.T)
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), turnNonce)
+		turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 		defer session.finishTurn()
 
 		part := nativehermes.Part{
@@ -199,7 +261,7 @@ func TestPermissionNativeStartAndSyntheticPendingShareOneLifecycle(t *testing.T)
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), turnNonce)
+		turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 		defer session.finishTurn()
 
 		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request-synthetic", "native-tool-synthetic")); err != nil {
@@ -259,12 +321,15 @@ func TestPermissionRejectsMissingStaleAndTerminalToolRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "stale turn route",
-			ctx:  func(ctx context.Context) context.Context { return withTurnRoute(ctx, "stale-turn") },
+			name: "stale actor route",
+			ctx:  func(ctx context.Context) context.Context { return ctx },
 			req: func(t *testing.T) nativehermes.PermissionRequest {
 				t.Helper()
 
-				return testHermesPermissionRequest(t, "request-stale", "tool-stale")
+				req := testHermesPermissionRequest(t, "request-stale", "tool-stale")
+				req.CycleID = "stale-cycle"
+
+				return req
 			},
 		},
 		{
@@ -290,7 +355,7 @@ func TestPermissionRejectsMissingStaleAndTerminalToolRoutes(t *testing.T) {
 			agent := newTestAgent()
 			agent.setAgentClient(conn)
 			session := testSession(agent, client)
-			turnCtx := session.beginTurn(t.Context(), turnNonce)
+			turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 			defer session.finishTurn()
 
 			if test.setup != nil {
@@ -384,25 +449,23 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 		route, active := session.permissionTurnRoute(turnCtx)
 		if !active {
 			t.Fatal("permission turn was not active")
 		}
 		req := testHermesPermissionRequest(t, "request", "tool")
 
-		session.mu.Lock()
-		session.turnNonce = "new-turn"
-		session.turnEpoch++
-		session.mu.Unlock()
+		session.pumpMu.Lock()
+		delete(session.pumpRoutes, route.cycleID)
+		session.pumpMu.Unlock()
 		if err := session.ensurePermissionToolPending(turnCtx, req, route); err == nil || !strings.Contains(err.Error(), "crossed") {
 			t.Fatalf("stale pending admission error = %v", err)
 		}
 
-		session.mu.Lock()
-		session.turnNonce = "permission-turn"
-		session.turnEpoch = route.epoch
-		session.mu.Unlock()
+		session.pumpMu.Lock()
+		session.pumpRoutes[route.cycleID] = route.pump
+		session.pumpMu.Unlock()
 		conn.updateErr = errors.New("pending failed")
 		if err := session.ensurePermissionToolPending(turnCtx, req, route); err == nil || !strings.Contains(err.Error(), "pending failed") {
 			t.Fatalf("pending publication error = %v", err)
@@ -417,13 +480,12 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 		base := newRecordingAgentClient()
 		conn := &sessionUpdateHookClient{recordingAgentClient: base}
 		conn.afterUpdate = func() {
-			session.mu.Lock()
-			session.turnNonce = "replacement-turn"
-			session.turnEpoch++
-			session.mu.Unlock()
+			session.pumpMu.Lock()
+			delete(session.pumpRoutes, testControlCycleID)
+			session.pumpMu.Unlock()
 		}
 		agent.setAgentClient(conn)
-		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 		defer session.finishTurn()
 
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request", "tool"))
@@ -439,7 +501,7 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		agent := newTestAgent()
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), "permission-turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 		defer session.finishTurn()
 		conn := &sessionUpdateHookClient{recordingAgentClient: newRecordingAgentClient()}
 		conn.afterUpdate = func() {
@@ -477,17 +539,16 @@ func TestPermissionCallbackRouteChangeBranches(t *testing.T) {
 			agent := newTestAgent()
 			agent.setAgentClient(conn)
 			session := testSession(agent, client)
-			turnCtx := session.beginTurn(t.Context(), "permission-turn")
+			turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 			defer session.finishTurn()
 			done := make(chan error, 1)
 			go func() {
 				done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "request", "tool"))
 			}()
 			<-conn.permissionStarted
-			session.mu.Lock()
-			session.turnNonce = "replacement-turn"
-			session.turnEpoch++
-			session.mu.Unlock()
+			session.pumpMu.Lock()
+			delete(session.pumpRoutes, testControlCycleID)
+			session.pumpMu.Unlock()
 			close(conn.permissionRelease)
 			err := <-done
 			if test.replyErr != nil {
@@ -505,35 +566,8 @@ func TestPermissionCallbackRouteChangeBranches(t *testing.T) {
 
 	t.Run("empty native permission identity is ignored", func(t *testing.T) {
 		session := testSession(newTestAgent(), newFakeHermesClient())
-		if err := session.handlePermission(t.Context(), nativehermes.PermissionRequest{}); err != nil {
-			t.Fatalf("empty permission request: %v", err)
-		}
+		require.ErrorContains(t, session.handlePermission(t.Context(), nativehermes.PermissionRequest{}), "missing exact ownership")
 	})
-}
-
-func TestPromptBacklogQuestionCancellationBeforeTurn(t *testing.T) {
-	client := newFakeHermesClient()
-	conn := newRecordingAgentClient()
-	conn.elicitErr = context.Canceled
-	agent := newTestAgent()
-	agent.setAgentClient(conn)
-	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-	session := testSession(agent, client)
-	session.mu.Lock()
-	session.cancelled = true
-	session.mu.Unlock()
-	client.events <- nativehermes.TurnEvent{
-		Type:       evtClarifyRequest,
-		Properties: json.RawMessage(`{"id":"question","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
-	}
-
-	resp, err := session.Prompt(t.Context(), acp.PromptRequest{
-		Meta: turnRouteMeta("prompt-turn"), SessionId: session.id,
-		Prompt: []acp.ContentBlock{acp.TextBlock("hello")},
-	})
-	if err != nil || resp.StopReason != acp.StopReasonCancelled {
-		t.Fatalf("cancelled backlog response = %#v err=%v", resp, err)
-	}
 }
 
 func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
@@ -556,13 +590,15 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 			t.Fatalf("Initialize: %v", err)
 		}
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(ctx, "turn-question-1")
+		turnCtx := beginTestControlTurn(t, session, ctx, "turn-question-1")
 		defer session.finishTurn()
 
 		req := nativehermes.QuestionRequest{
-			ID:        "question-1",
-			SessionID: "native-1",
-			Tool:      nativehermes.QuestionTool{MessageID: "message-1", CallID: "call-1"},
+			ID:                  "question-1",
+			SessionID:           "native-1",
+			CycleID:             testControlCycleID,
+			TransportGeneration: 1,
+			Tool:                nativehermes.QuestionTool{MessageID: "message-1", CallID: "call-1"},
 			Questions: []nativehermes.QuestionInfo{
 				{
 					Question: "Proceed?",
@@ -620,9 +656,9 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 			t.Fatalf("Initialize: %v", err)
 		}
 		session := testSession(agent, client)
-		if err := session.handleQuestion(ctx, nativehermes.QuestionRequest{ID: "q", SessionID: "native-1"}); err != nil {
-			t.Fatalf("handleQuestion: %v", err)
-		}
+		turnCtx := beginTestControlTurn(t, session, ctx, "decline-question")
+		defer session.finishTurn()
+		require.NoError(t, session.handleQuestion(turnCtx, testHermesQuestionRequest("q")))
 		if client.questionRejectCount() != 1 {
 			t.Fatalf("question rejects = %d, want 1", client.questionRejectCount())
 		}
@@ -634,9 +670,9 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		if err := session.handleQuestion(ctx, nativehermes.QuestionRequest{ID: "q", SessionID: "native-1"}); err != nil {
-			t.Fatalf("handleQuestion: %v", err)
-		}
+		turnCtx := beginTestControlTurn(t, session, ctx, "unsupported-question")
+		defer session.finishTurn()
+		require.NoError(t, session.handleQuestion(turnCtx, testHermesQuestionRequest("q")))
 		if len(conn.elicitations) != 0 {
 			t.Fatalf("elicitation sent without capability: %#v", conn.elicitations)
 		}
@@ -677,7 +713,7 @@ func TestPermissionV2AskReplyAndCancelled(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	ctx := session.beginTurn(t.Context(), "permission-turn")
+	ctx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 	defer session.finishTurn()
 
 	req := testHermesPermissionRequest(t, "perm-1", "tool-1")
@@ -702,47 +738,28 @@ func TestPermissionV2AskReplyAndCancelled(t *testing.T) {
 	}
 }
 
-func TestPermissionQuestionDuplicateRequestIDsAreFenced(t *testing.T) {
+func TestPermissionQuestionRawMetadataIsRefused(t *testing.T) {
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	ctx := session.beginTurn(t.Context(), "permission-turn")
+	ctx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 	defer session.finishTurn()
 
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+	require.ErrorContains(t, session.handleEvent(ctx, nativehermes.TurnEvent{
 		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit","tool":{"callID":"tool-dup"}}`),
-	}); err != nil {
-		t.Fatalf("permission event: %v", err)
-	}
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
-		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm-dup","sessionID":"native-1","action":"edit","tool":{"callID":"tool-dup"}}`),
-	}); err != nil {
-		t.Fatalf("repeated permission event: %v", err)
-	}
-	if conn.permissionRequestCount() != 1 || client.permissionReplyCount() != 1 {
-		t.Fatalf("duplicate permission was not fenced requests=%d replies=%d", conn.permissionRequestCount(), client.permissionReplyCount())
-	}
-
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+		Properties: json.RawMessage(`{"id":"perm-raw","sessionID":"native-1"}`),
+	}), "missing typed ownership")
+	require.ErrorContains(t, session.handleEvent(ctx, nativehermes.TurnEvent{
 		Type:       "clarify.request",
-		Properties: json.RawMessage(`{"id":"question-dup","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
-	}); err != nil {
-		t.Fatalf("question event: %v", err)
-	}
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
-		Type:       "clarify.request",
-		Properties: json.RawMessage(`{"id":"question-dup","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
-	}); err != nil {
-		t.Fatalf("repeated question event: %v", err)
-	}
-	if len(conn.elicitations) != 1 || client.questionReplyCount() != 1 {
-		t.Fatalf("duplicate question was not fenced elicitations=%d replies=%d", len(conn.elicitations), client.questionReplyCount())
-	}
+		Properties: json.RawMessage(`{"request_id":"question-raw","sessionID":"native-1"}`),
+	}), "missing typed ownership")
+	require.Zero(t, conn.permissionRequestCount())
+	require.Empty(t, conn.elicitations)
+	require.Zero(t, client.permissionReplyCount())
+	require.Zero(t, client.questionReplyCount())
 }
 
 func TestEventMappingMessagePartToolUsageAndRaw(t *testing.T) {
@@ -799,8 +816,8 @@ func TestEventMappingMessagePartToolUsageAndRaw(t *testing.T) {
 	if conn.updates[3].Update.UsageUpdate == nil || conn.updates[4].Update.UsageUpdate == nil {
 		t.Fatalf("usage updates missing: %#v", conn.updates)
 	}
-	if len(conn.extensions) == 0 || conn.extensions[0].method != RawEventMethod {
-		t.Fatalf("raw events = %#v", conn.extensions)
+	if len(conn.extensions) != 0 {
+		t.Fatalf("prompt mapper duplicated raw projection: %#v", conn.extensions)
 	}
 }
 
@@ -890,23 +907,35 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 		complete string
 		streamed string
 		want     string
+		wantErr  bool
 	}{
 		{name: "completion only", complete: "final answer", want: "final answer"},
 		{name: "fully streamed", complete: "final answer", streamed: "final answer"},
 		{name: "completion suffix", complete: "final answer", streamed: "final ", want: "answer"},
-		{name: "inconsistent completion", complete: "replacement", streamed: "already sent"},
+		{name: "inconsistent completion", complete: "replacement", streamed: "already sent", wantErr: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			updates := partUpdates(valAssistant, nativehermes.Part{
+			updates, delivered, err := partUpdates(valAssistant, nativehermes.Part{
 				MessageID:    "message-1",
 				Type:         valText,
 				Text:         test.complete,
 				StreamedText: test.streamed,
 			})
+			if test.wantErr {
+				require.ErrorContains(t, err, "conflicts with its streamed prefix")
+				require.Nil(t, updates)
+				require.Empty(t, delivered)
+
+				return
+			}
+			require.NoError(t, err)
+			if delivered != test.want {
+				t.Fatalf("delivered text = %q, want %q", delivered, test.want)
+			}
 			if test.want == "" {
 				if updates != nil {
 					t.Fatalf("updates = %#v, want nil", updates)
@@ -922,6 +951,62 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeliveredCompletionSuffixIsTheRecordedForegroundPrefix(t *testing.T) {
+	conn := newRecordingAgentClient()
+	agent := newTestAgent()
+	agent.setAgentClient(conn)
+	session := testSession(agent, newFakeHermesClient())
+	t.Cleanup(session.stopPump)
+
+	parts := []nativehermes.Part{
+		{MessageID: "message-1", Type: valText, Text: "final "},
+		{MessageID: "message-1", Type: valText, Text: "final answer", StreamedText: "final "},
+		// A repeated full completion has no append-only suffix.
+		{MessageID: "message-1", Type: valText, Text: "final answer", StreamedText: "final answer"},
+	}
+	for _, part := range parts {
+		require.NoError(t, session.emitPartUpdates(t.Context(), valAssistant, part))
+	}
+	require.ErrorContains(t, session.emitPartUpdates(t.Context(), valAssistant, nativehermes.Part{
+		MessageID: "message-1", Type: valText, Text: "replacement", StreamedText: "final answer",
+	}), "conflicts with its streamed prefix")
+
+	conn.mu.Lock()
+	updates := append([]acp.SessionNotification(nil), conn.updates...)
+	conn.mu.Unlock()
+	chunks := make([]string, 0, len(updates))
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			chunks = append(chunks, chunk.Content.Text.Text)
+		}
+	}
+	require.Equal(t, []string{"final ", "answer"}, chunks)
+	require.Equal(t, "final answer", session.foregroundPrefix())
+}
+
+func TestReplayStopsBeforePublishingTheNextMessageAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	base := newRecordingAgentClient()
+	var once sync.Once
+	conn := &sessionUpdateHookClient{recordingAgentClient: base, afterUpdate: func() { once.Do(cancel) }}
+	agent := newTestAgent()
+	agent.setAgentClient(conn)
+	client := newFakeHermesClient()
+	client.messages = []nativehermes.NativeMessage{
+		{
+			Info:  nativehermes.NativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: valAssistant},
+			Parts: []nativehermes.Part{{MessageID: "message-1", SessionID: "native-1", Type: valText, Text: "first"}},
+		},
+		{
+			Info:  nativehermes.NativeMessageInfo{ID: "message-2", SessionID: "native-1", Role: valAssistant},
+			Parts: []nativehermes.Part{{MessageID: "message-2", SessionID: "native-1", Type: valText, Text: "second"}},
+		},
+	}
+	session := testSession(agent, client)
+	require.ErrorIs(t, session.replayMessages(ctx), context.Canceled)
+	require.Equal(t, 1, base.updateCount())
 }
 
 // TestUsageUpdateSizeIsContextWindow pins where the usage size comes from: the
@@ -1005,7 +1090,7 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Prompt did not start native send")
 	}
-	client.errs <- errors.New("stream closed")
+	client.emitError(errors.New("stream closed"))
 	select {
 	case err := <-done:
 		requireTurnFailure(t, err, nativehermes.CauseTransport, "stream closed")
@@ -1039,9 +1124,9 @@ func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 	}
 }
 
-func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
+func TestPromptIdleGatewayDisconnectRequiresResumeBeforeNextTurn(t *testing.T) {
 	client := newFakeHermesClient()
-	client.errs <- errors.New("idle stream closed")
+	client.emitError(errors.New("idle stream closed"))
 	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		return nativehermes.NativeMessage{
 			Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"},
@@ -1052,90 +1137,18 @@ func TestPromptIdleSSEDisconnectDoesNotPoisonNextTurn(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
+	session.pumpMu.Lock()
+	pumpDone := session.pumpDone
+	session.pumpMu.Unlock()
+	<-pumpDone
 
-	resp, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("resp = %#v", resp)
-	}
-	if client.abortCount() != 0 {
-		t.Fatalf("idle disconnect aborted native turn %d times", client.abortCount())
-	}
-}
-
-func TestPromptSuppressesLateFailedEpochEvents(t *testing.T) {
-	client := newFakeHermesClient()
-	conn := newRecordingAgentClient()
-	store := NewInMemorySessionStore()
-	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
-	agent.setAgentClient(conn)
-	session := testSession(agent, client)
-	session.cwd = t.TempDir()
-	if err := session.snapshotToStore(t.Context()); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
-	}
-	resumedClient := newFakeHermesClient()
-	resumedClient.getSession = testNativeSession("native-1")
-	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-		resumedClient.xdg = opts.ExistingXDG
-
-		return resumedClient, nil
-	}
-	started := make(chan struct{})
-	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-		close(started)
-		<-ctx.Done()
-
-		return nativehermes.NativeMessage{}, ctx.Err()
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
-		done <- err
-	}()
-	select {
-	case <-started:
-	case <-ctx.Done():
-		t.Fatal("Prompt did not start")
-	}
-	client.events <- nativehermes.TurnEvent{
-		Type:        "message.part.updated",
-		StreamEpoch: 7,
-		Properties:  json.RawMessage(`{"id":"stream-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
-	}
-	deadline := time.After(time.Second)
-	for conn.updateCount() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("stream update was not emitted")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	client.errs <- nativehermes.NewStreamError(7, errors.New("stream failed"))
-	select {
-	case err := <-done:
-		requireTurnFailure(t, err, nativehermes.CauseTransport, "stream failed")
-	case <-ctx.Done():
-		t.Fatal("Prompt did not fail on stream error")
-	}
-
-	client.events <- nativehermes.TurnEvent{
-		Type:        "message.part.updated",
-		StreamEpoch: 7,
-		Properties:  json.RawMessage(`{"id":"late-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"late"}`),
-	}
-	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}}); err != nil {
-		t.Fatalf("second Prompt: %v", err)
-	}
-	if conn.updateCount() != 1 {
-		t.Fatalf("late failed-epoch update was emitted: %#v", conn.updates)
-	}
+	_, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "hermes_runtime_resume_failed", data[jsonFieldError])
+	require.Zero(t, client.abortCount())
 }
 
 func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
@@ -1162,7 +1175,7 @@ func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Prompt did not start")
 	}
-	client.errs <- nativehermes.NewStreamError(11, errors.New("websocket closed"))
+	client.emitError(errors.New("websocket closed"))
 	select {
 	case err := <-done:
 		requireTurnFailure(t, err, nativehermes.CauseTransport, "websocket closed")
@@ -1184,10 +1197,12 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 		{
 			name: "permission",
 			sendEvent: func(client *fakeHermesClient) {
-				client.events <- nativehermes.TurnEvent{
-					Type:       "approval.request",
-					Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","action":"edit","tool":{"callID":"tool-perm"}}`),
-				}
+				req := testHermesPermissionRequest(t, "perm", "tool-perm")
+				req.CycleID = "fake/native-1/cycle-1"
+				client.emitEvent(nativehermes.TurnEvent{
+					Type: evtApprovalRequest, CycleID: req.CycleID, TransportGeneration: 1,
+					Permission: &req,
+				})
 			},
 			assertDone: func(t *testing.T, client *fakeHermesClient, conn *recordingAgentClient) {
 				t.Helper()
@@ -1209,10 +1224,15 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 				agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 			},
 			sendEvent: func(client *fakeHermesClient) {
-				client.events <- nativehermes.TurnEvent{
-					Type:       "clarify.request",
-					Properties: json.RawMessage(`{"id":"question","sessionID":"native-1","questions":[{"question":"Pick one","options":[{"label":"Yes"}]}]}`),
-				}
+				req := testHermesQuestionRequest("question")
+				req.CycleID = "fake/native-1/cycle-1"
+				req.Questions = []nativehermes.QuestionInfo{{
+					Question: "Pick one", Options: []nativehermes.QuestionOption{{Label: "Yes"}},
+				}}
+				client.emitEvent(nativehermes.TurnEvent{
+					Type: evtClarifyRequest, CycleID: req.CycleID, TransportGeneration: 1,
+					Question: &req,
+				})
 			},
 			assertDone: func(t *testing.T, client *fakeHermesClient, conn *recordingAgentClient) {
 				t.Helper()
@@ -1303,12 +1323,16 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	ctx := session.beginTurn(t.Context(), "missing-live-turn")
+	ctx := beginTestControlTurn(t, session, t.Context(), "missing-live-turn")
 	defer session.finishTurn()
 
 	err := session.handleEvent(ctx, nativehermes.TurnEvent{
-		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm-missing-live","sessionID":"native-1","action":"edit","tool":{"callID":"tool-missing-live"}}`),
+		Type: evtApprovalRequest,
+		Permission: func() *nativehermes.PermissionRequest {
+			req := testHermesPermissionRequest(t, "perm-missing-live", "tool-missing-live")
+
+			return &req
+		}(),
 	})
 	if err == nil {
 		t.Fatal("missing live mapping did not fail permission handling")
@@ -1326,53 +1350,15 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 	}
 }
 
-func TestPromptBacklogPermissionBeforeTurnFailsClosed(t *testing.T) {
-	client := newFakeHermesClient()
-	conn := newRecordingAgentClient()
-	conn.permErr = context.Canceled
-	agent := newTestAgent()
-	agent.setAgentClient(conn)
-	session := testSession(agent, client)
-	session.mu.Lock()
-	session.cancelled = true
-	session.mu.Unlock()
-	client.events <- nativehermes.TurnEvent{
-		Type:       "approval.request",
-		Properties: json.RawMessage(`{"id":"perm","sessionID":"native-1","tool":{"callID":"tool-perm"}}`),
-	}
-	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil ||
-		!strings.Contains(err.Error(), "outside its active turn") {
-		t.Fatalf("Prompt error = %v, want inactive-turn rejection", err)
-	}
-	if conn.permissionRequestCount() != 0 {
-		t.Fatalf("permission requests = %d, want 0", conn.permissionRequestCount())
-	}
-	if got := client.permissionReply(0).message; got != "stale or unknown tool call" {
-		t.Fatalf("permission reply = %q", got)
-	}
-}
-
-func TestPromptBacklogErrorBeforeTurn(t *testing.T) {
-	client := newFakeHermesClient()
-	session := testSession(newTestAgent(), client)
-	client.events <- nativehermes.TurnEvent{
-		Type:       "approval.request",
-		Properties: json.RawMessage(`{`),
-	}
-	if _, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
-		t.Fatal("malformed backlog event was ignored")
-	}
-}
-
 func TestPermissionCancelledReplyBranches(t *testing.T) {
 	t.Run("permission without connection rejects native request", func(t *testing.T) {
 		client := newFakeHermesClient()
 		session := testSession(newTestAgent(), client)
-		turnCtx := session.beginTurn(t.Context(), "test-turn")
-		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err != nil {
-			t.Fatalf("handlePermission: %v", err)
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
+		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err == nil {
+			t.Fatal("permission emission without a connection did not fail closed")
 		}
-		if got := client.permissionReply(0).message; got != "client unavailable" {
+		if got := client.permissionReply(0).message; got != "stale or unknown tool call" {
 			t.Fatalf("permission reply = %q", got)
 		}
 		session.finishTurn()
@@ -1386,7 +1372,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "outside its active turn") {
@@ -1408,7 +1394,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "outside its active turn") {
@@ -1431,7 +1417,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
 		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err == nil {
 			t.Fatal("reply error was ignored")
@@ -1446,7 +1432,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
 		defer session.finishTurn()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "permission failed") {
@@ -1466,7 +1452,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(t.Context(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
 		defer session.finishTurn()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
 		if err == nil || !strings.Contains(err.Error(), "permission failed") || !strings.Contains(err.Error(), "reply failed") {
@@ -1483,7 +1469,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
@@ -1511,7 +1497,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
 			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
@@ -1535,11 +1521,11 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		session := testSession(newTestAgent(), client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
-		if err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}); err != nil {
-			t.Fatalf("handleQuestion: %v", err)
-		}
+		require.ErrorContains(t,
+			session.handleQuestion(turnCtx, testHermesQuestionRequest("question")),
+			"outside its owning cycle")
 		if client.questionRejectCount() != 1 {
 			t.Fatalf("question rejects = %#v", client.questionRejects)
 		}
@@ -1555,12 +1541,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
-		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		if !errors.Is(err, errPromptCancelled) {
-			t.Fatalf("handleQuestion err = %v", err)
-		}
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "outside its owning cycle")
 		if client.questionRejectCount() != 1 {
 			t.Fatalf("question rejects = %#v", client.questionRejects)
 		}
@@ -1576,9 +1560,11 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		if err := session.handleQuestion(context.Background(), nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}); err == nil {
-			t.Fatal("reject error was ignored")
-		}
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "decline-reply-error")
+		defer session.finishTurn()
+		require.ErrorContains(t,
+			session.handleQuestion(turnCtx, testHermesQuestionRequest("question")),
+			"reject failed")
 	})
 
 	t.Run("question decline after context cancellation returns cancelled", func(t *testing.T) {
@@ -1590,12 +1576,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
-		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		if !errors.Is(err, errPromptCancelled) {
-			t.Fatalf("handleQuestion err = %v", err)
-		}
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "outside its owning cycle")
 		session.finishTurn()
 	})
 
@@ -1610,10 +1594,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+			done <- session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
 		}()
 		<-conn.elicitationStarted
 		session.cancelTurn()
@@ -1636,10 +1620,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		err := session.handleQuestion(context.Background(), nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		if err == nil || !strings.Contains(err.Error(), "elicitation failed") {
-			t.Fatalf("handleQuestion err = %v", err)
-		}
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "elicitation-error")
+		defer session.finishTurn()
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "elicitation failed")
 		if client.questionRejectCount() != 1 {
 			t.Fatalf("question fail-closed rejects = %#v", client.questionRejects)
 		}
@@ -1654,10 +1638,11 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		err := session.handleQuestion(context.Background(), nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		if err == nil || !strings.Contains(err.Error(), "elicitation failed") || !strings.Contains(err.Error(), "reject failed") {
-			t.Fatalf("handleQuestion err = %v", err)
-		}
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "elicitation-and-reject-error")
+		defer session.finishTurn()
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "elicitation failed")
+		require.ErrorContains(t, err, "reject failed")
 	})
 
 	t.Run("question accept after context cancellation rejects native request", func(t *testing.T) {
@@ -1668,12 +1653,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
-		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		if !errors.Is(err, errPromptCancelled) {
-			t.Fatalf("handleQuestion err = %v", err)
-		}
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "outside its owning cycle")
 		if client.questionRejectCount() != 1 {
 			t.Fatalf("question rejects = %#v", client.questionRejects)
 		}
@@ -1689,11 +1672,11 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
-		turnCtx := session.beginTurn(ctx, "test-turn")
+		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
-		if err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}); err == nil {
-			t.Fatal("reject error was ignored")
-		}
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "outside its owning cycle")
+		require.ErrorContains(t, err, "reject failed")
 		session.finishTurn()
 	})
 
@@ -1707,10 +1690,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+			done <- session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
 		}()
 		<-conn.elicitationStarted
 		session.cancelTurn()
@@ -1736,10 +1719,10 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
 		session := testSession(agent, client)
-		turnCtx := session.beginTurn(context.Background(), "test-turn")
+		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+			done <- session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
 		}()
 		<-conn.elicitationStarted
 		session.cancelTurn()
@@ -2261,10 +2244,10 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 			done <- err
 		}()
 		<-started
-		client.events <- nativehermes.TurnEvent{
-			Type:       "message.part.updated",
+		client.emitEvent(nativehermes.TurnEvent{
+			Type: "message.part.updated", CycleID: "fake/native-1/cycle-1", TransportGeneration: 1,
 			Properties: json.RawMessage(`{"id":"event-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
-		}
+		})
 		deadline := time.After(time.Second)
 		for conn.updateCount() == 0 {
 			select {
@@ -2303,10 +2286,10 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 			done <- err
 		}()
 		<-started
-		client.events <- nativehermes.TurnEvent{
-			Type:       "message.part.updated",
+		client.emitEvent(nativehermes.TurnEvent{
+			Type: "message.part.updated", CycleID: "fake/native-1/cycle-1", TransportGeneration: 1,
 			Properties: json.RawMessage(`{"id":"event-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stream"}`),
-		}
+		})
 		if err := <-done; err == nil || !strings.Contains(err.Error(), "update failed") {
 			t.Fatalf("event error = %v", err)
 		}
@@ -2375,35 +2358,31 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 		t.Fatalf("emitUpdate with conn: %v", err)
 	}
 	nilConnSession := testSession(newTestAgent(), newFakeHermesClient())
-	if err := nilConnSession.emitUpdate(ctx, acp.UpdatePlan(acp.PlanEntry{Content: "no client"})); err != nil {
-		t.Fatalf("emitUpdate without conn: %v", err)
+	if err := nilConnSession.emitUpdate(ctx, acp.UpdatePlan(acp.PlanEntry{Content: "no client"})); err == nil {
+		t.Fatal("emitUpdate without conn claimed success")
 	}
 
 	noConnClient := newFakeHermesClient()
 	noConnSession := testSession(newTestAgent(), noConnClient)
-	if err := noConnSession.handlePermission(ctx, nativehermes.PermissionRequest{}); err != nil {
-		t.Fatalf("empty permission: %v", err)
-	}
+	require.ErrorContains(t, noConnSession.handlePermission(ctx, nativehermes.PermissionRequest{}), "missing exact ownership")
 	noConnSession.pending = nil
-	noConnTurnCtx := noConnSession.beginTurn(t.Context(), "no-connection-turn")
-	if err := noConnSession.handlePermission(noConnTurnCtx, testHermesPermissionRequest(t, "p", "tool-p")); err != nil {
-		t.Fatalf("nil conn permission: %v", err)
+	noConnTurnCtx := beginTestControlTurn(t, noConnSession, t.Context(), "no-connection-turn")
+	if err := noConnSession.handlePermission(noConnTurnCtx, testHermesPermissionRequest(t, "p", "tool-p")); err == nil {
+		t.Fatal("nil conn permission claimed success")
 	}
 	noConnSession.finishTurn()
-	if got := noConnClient.permissionReply(0).message; got != "client unavailable" {
+	if got := noConnClient.permissionReply(0).message; got != "stale or unknown tool call" {
 		t.Fatalf("nil conn permission reply = %q", got)
 	}
 	session.questions = nil
-	if err := session.handleQuestion(ctx, nativehermes.QuestionRequest{}); err != nil {
-		t.Fatalf("empty question: %v", err)
-	}
+	require.ErrorContains(t, session.handleQuestion(ctx, nativehermes.QuestionRequest{}), "missing exact ownership")
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn.elicitErr = errors.New("elicitation failed")
-	if err := session.handleQuestion(ctx, nativehermes.QuestionRequest{ID: "q-error", SessionID: "native-1"}); err == nil {
-		t.Fatal("elicitation error was ignored")
-	}
+	turnCtx := beginTestControlTurn(t, session, t.Context(), "event-edge-turn")
+	require.ErrorContains(t,
+		session.handleQuestion(turnCtx, testHermesQuestionRequest("q-error")),
+		"elicitation failed")
 	conn.elicitErr = nil
-	turnCtx := session.beginTurn(t.Context(), "event-edge-turn")
 	testApprovalAndClarifyEventBranches(t, turnCtx, session, client, conn)
 	session.finishTurn()
 	testEmptyAndMalformedEventMapperBranches(t, ctx, session)
@@ -2434,22 +2413,22 @@ func TestForeignNativeSessionEventsAreRefused(t *testing.T) {
 		{
 			name: "approval.request",
 			event: nativehermes.TurnEvent{
-				Type: "approval.request",
-				Properties: json.RawMessage(`{
-					"id":"p-foreign",
-					"sessionID":"native-other",
-					"action":"edit",
-					"metadata":{"filepath":"foreign.txt"},
-					"tool":{"messageID":"m1","callID":"c1"}
-				}`),
+				Type: evtApprovalRequest,
+				Permission: &nativehermes.PermissionRequest{
+					ID: "p-foreign", SessionID: "native-other", CycleID: testControlCycleID,
+					TransportGeneration: 1,
+				},
 			},
 			wantAction: "no permission request",
 		},
 		{
 			name: "clarify.request",
 			event: nativehermes.TurnEvent{
-				Type:       "clarify.request",
-				Properties: json.RawMessage(`{"id":"q-foreign","sessionID":"native-other","questions":[{"question":"Continue?"}]}`),
+				Type: evtClarifyRequest,
+				Question: &nativehermes.QuestionRequest{
+					ID: "q-foreign", SessionID: "native-other",
+					CycleID: testControlCycleID, TransportGeneration: 1,
+				},
 			},
 			wantAction: "no elicitation",
 		},
@@ -2498,15 +2477,11 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 		t.Fatal("malformed permission event succeeded")
 	}
 	conn.permission = acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("once")}
+	permission := testHermesPermissionRequest(t, "p-session", "c1")
+	permission.Metadata = map[string]any{"filepath": "acp-permission-probe.txt"}
 	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
-		Type: "approval.request",
-		Properties: json.RawMessage(`{
-			"id":"p-session",
-			"sessionID":"native-1",
-			"action":"edit",
-			"metadata":{"filepath":"acp-permission-probe.txt"},
-			"tool":{"messageID":"m1","callID":"c1"}
-		}`),
+		Type:       evtApprovalRequest,
+		Permission: &permission,
 	}); err != nil {
 		t.Fatalf("approval.request event: %v", err)
 	}
@@ -2523,10 +2498,9 @@ func testApprovalAndClarifyEventBranches(t *testing.T, ctx context.Context, sess
 	if rawInput["action"] != "edit" || metadata["filepath"] != "acp-permission-probe.txt" {
 		t.Fatalf("approval.request raw input = %#v", permissionReq.ToolCall.RawInput)
 	}
-	if err := session.handleEvent(ctx, nativehermes.TurnEvent{
-		Type:       "clarify.request",
-		Properties: json.RawMessage(`{"id":"q-v2","sessionID":"native-1","questions":[{"question":"Continue?"}]}`),
-	}); err != nil {
+	question := testHermesQuestionRequest("q-v2")
+	question.Questions = []nativehermes.QuestionInfo{{Question: "Continue?"}}
+	if err := session.handleEvent(ctx, nativehermes.TurnEvent{Type: evtClarifyRequest, Question: &question}); err != nil {
 		t.Fatalf("clarify.request event: %v", err)
 	}
 	questionReply := client.questionReply(client.questionReplyCount() - 1)
@@ -2547,8 +2521,11 @@ func testEmptyAndMalformedEventMapperBranches(t *testing.T, ctx context.Context,
 	}
 	rawSession := testSession(newTestAgent(), newFakeHermesClient())
 	rawSession.rawMessages = rawMessageConfig{enabled: true}
-	if err := rawSession.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Raw: json.RawMessage(`{"type":"x"}`)}); err != nil {
-		t.Fatalf("raw event without conn: %v", err)
+	if err := rawSession.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Raw: json.RawMessage(`{"type":"x"}`)}); err == nil {
+		t.Fatal("raw event without conn claimed success")
+	}
+	if rawSession.rawSeq != 0 {
+		t.Fatalf("raw event without conn consumed sequence %d", rawSession.rawSeq)
 	}
 	if usageFromTokens(nativehermes.Tokens{}) != nil {
 		t.Fatal("empty tokens produced usage")
@@ -2557,10 +2534,10 @@ func testEmptyAndMalformedEventMapperBranches(t *testing.T, ctx context.Context,
 	if part, err := embeddedResourceHermesPart(emptyResource, &imagePromptBudget{}); err == nil || part != nil {
 		t.Fatalf("empty embeddedResourceHermesPart = %#v err=%v", part, err)
 	}
-	if updates := partUpdates("assistant", nativehermes.Part{Type: "text"}); updates != nil {
+	if updates, delivered, err := partUpdates("assistant", nativehermes.Part{Type: "text"}); err != nil || updates != nil || delivered != "" {
 		t.Fatalf("empty text updates = %#v", updates)
 	}
-	if updates := partUpdates("assistant", nativehermes.Part{Type: "reasoning"}); updates != nil {
+	if updates, delivered, err := partUpdates("assistant", nativehermes.Part{Type: "reasoning"}); err != nil || updates != nil || delivered != "" {
 		t.Fatalf("empty reasoning updates = %#v", updates)
 	}
 }
@@ -2669,25 +2646,19 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		session := testSession(agent, client)
 		turnCtx := session.beginTurn(t.Context(), "same-session-turn")
 		defer session.finishTurn()
-		conn.permErr = errors.New("permission failed")
 		if err := session.handleEvent(turnCtx, nativehermes.TurnEvent{
 			Type:       "approval.request",
 			Properties: json.RawMessage(`{"id":"p","sessionID":"native-1","tool":{"callID":"tool-p"}}`),
 		}); err == nil {
-			t.Fatal("permission event ignored client error")
+			t.Fatal("metadata-only permission event was accepted")
 		}
-		conn.permErr = nil
 
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
-		conn.elicitErr = errors.New("elicitation failed")
-		if err := session.handleEvent(ctx, nativehermes.TurnEvent{
+		if err := session.handleEvent(turnCtx, nativehermes.TurnEvent{
 			Type:       "clarify.request",
 			Properties: json.RawMessage(`{"id":"q","sessionID":"native-1"}`),
 		}); err == nil {
-			t.Fatal("question event ignored client error")
-		}
-		if req, ok := eventQuestion(json.RawMessage(`{"id":"direct","sessionID":"native-1"}`)); !ok || req.ID != "direct" {
-			t.Fatalf("direct eventQuestion = %#v ok=%v", req, ok)
+			t.Fatal("metadata-only question event was accepted")
 		}
 	})
 }
@@ -2725,13 +2696,14 @@ func requireTurnFailure(t *testing.T, err error, cause nativehermes.TurnFailureC
 		t.Fatalf("turn failure cause = %v, want %q", data[jsonFieldCause], cause)
 	}
 
-	msg, _ := data[jsonFieldMessage].(string)
-	if wantMsgSubstr != "" && !strings.Contains(msg, wantMsgSubstr) {
-		t.Fatalf("turn failure message = %q, want substring %q", msg, wantMsgSubstr)
+	if _, exposed := data[jsonFieldMessage]; exposed {
+		t.Fatalf("turn failure exposed native message on the wire: %#v", data)
 	}
-
-	if msg == "" {
-		t.Fatalf("turn failure message is empty (never a fixed placeholder is required)")
+	if wantMsgSubstr != "" {
+		nativeCause := errors.Unwrap(err)
+		if nativeCause == nil || !strings.Contains(nativeCause.Error(), wantMsgSubstr) {
+			t.Fatalf("native cause = %v, want substring %q", nativeCause, wantMsgSubstr)
+		}
 	}
 
 	return data
@@ -2749,7 +2721,13 @@ func promptOnce(ctx context.Context, session *session, text string) (acp.PromptR
 func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 	client := newFakeHermesClient()
 	client.sendMessage = func(_ context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-		return nativehermes.NativeMessage{}, nativehermes.NewProviderTurnFailure("hermes assistant error: model overloaded", 503, "overloaded")
+		failure := nativehermes.NewProviderTurnFailure("hermes assistant error: model overloaded", 503, "overloaded")
+		client.emitEvent(nativehermes.TurnEvent{
+			Type: nativehermes.EventCycleFailed, CycleID: "fake/native-1/cycle-1",
+			TransportGeneration: 1, Origin: nativehermes.CycleOriginPrompt, Err: failure,
+		})
+
+		return nativehermes.NativeMessage{}, failure
 	}
 
 	conn := newRecordingAgentClient()
@@ -2767,12 +2745,13 @@ func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 		t.Fatalf("statusCode = %v, want 503", data[jsonFieldStatusCode])
 	}
 
-	if data[jsonFieldProviderCode] != "overloaded" {
-		t.Fatalf("providerCode = %v, want overloaded", data[jsonFieldProviderCode])
+	if _, exposed := data[jsonFieldProviderCode]; exposed {
+		t.Fatalf("providerCode reached secret-safe wire data: %#v", data)
 	}
-	if client.closeCount() != 1 || !session.needsRuntimeResume() {
-		t.Fatalf("provider failure close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
+	if client.closeCount() != 0 || session.needsRuntimeResume() {
+		t.Fatalf("provider outcome ended runtime: close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
 	}
+	require.NoError(t, session.synchronizePump(t.Context()))
 }
 
 // nativehermes.TurnFailureError.Error falls back to a cause-derived string only when no
@@ -2826,7 +2805,7 @@ func TestTurnFailureStreamErrorWhileCancelledStaysCancelled(t *testing.T) {
 	session.cancelled = true
 	session.mu.Unlock()
 
-	client.errs <- nativehermes.NewStreamError(0, errors.New("stream died mid cancel"))
+	client.emitError(errors.New("stream died mid cancel"))
 
 	select {
 	case out := <-done:
@@ -3578,7 +3557,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 		t.Fatal("prompt did not start")
 	}
 
-	client.errs <- nativehermes.NewStreamError(0, errors.New("read tcp: unexpected EOF from hermes serve"))
+	client.emitError(errors.New("read tcp: unexpected EOF from hermes serve"))
 	select {
 	case err := <-done:
 		requireTurnFailure(t, err, nativehermes.CauseTransport, "unexpected EOF from hermes serve")
@@ -3587,70 +3566,22 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	}
 }
 
-// TestDrainClientBacklogSkipsSuppressedEvents pins what the drain refuses to
-// replay. A backlog left behind by a failed stream is not this turn's work, and
-// neither is an event belonging to a message the stream already failed.
-func TestDrainClientBacklogSkipsSuppressedEvents(t *testing.T) {
-	partEvent := nativehermes.TurnEvent{
-		Type:       "message.part.updated",
-		Properties: json.RawMessage(`{"id":"backlog-part","sessionID":"native-1","messageID":"assistant","type":"text","text":"stale"}`),
-	}
-
-	t.Run("a backlog the failed stream left behind", func(t *testing.T) {
-		client := newFakeHermesClient()
-		conn := newRecordingAgentClient()
-		agent := newTestAgent()
-		agent.setAgentClient(conn)
-		session := testSession(agent, client)
-		session.markStreamFailed(0)
-		client.events <- partEvent
-
-		if err := session.drainClientBacklog(t.Context()); err != nil {
-			t.Fatalf("drainClientBacklog: %v", err)
-		}
-		if got := conn.updateCount(); got != 0 {
-			t.Fatalf("suppressed backlog emitted %d updates", got)
-		}
-		if session.suppressBacklog() {
-			t.Fatal("the drain left the backlog suppressed for the next turn")
-		}
-	})
-
-	t.Run("an event for a message the stream failed", func(t *testing.T) {
-		client := newFakeHermesClient()
-		conn := newRecordingAgentClient()
-		agent := newTestAgent()
-		agent.setAgentClient(conn)
-		session := testSession(agent, client)
-		session.markActiveMessageID("assistant")
-		session.markStreamFailed(0)
-		session.clearSuppressBacklog()
-		client.events <- partEvent
-
-		if err := session.drainClientBacklog(t.Context()); err != nil {
-			t.Fatalf("drainClientBacklog: %v", err)
-		}
-		if got := conn.updateCount(); got != 0 {
-			t.Fatalf("failed-message event emitted %d updates", got)
-		}
-	})
-}
-
-func TestFailedTurnResultGatewayDisconnectMarksStream(t *testing.T) {
+func TestFailedTurnResultGatewayDisconnectFencesRuntime(t *testing.T) {
 	client := newFakeHermesClient()
 	session := testSession(newTestAgent(), client)
 	turnCtx := session.beginTurn(t.Context(), "gateway-disconnect")
 	turnEpoch := session.currentTurnEpoch()
 	defer session.finishTurn()
 
-	sendErr := fmt.Errorf("send frame: %w", nativehermes.ErrGatewayDisconnected)
+	nativeCause := errors.New("native websocket EOF")
+	sendErr := fmt.Errorf("send frame: %w: %w", nativehermes.ErrGatewayDisconnected, nativeCause)
 	_, err := session.failedTurnResult(turnCtx, turnEpoch, sendErr)
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "send frame")
+	if !errors.Is(err, ErrGatewayDisconnected) || !errors.Is(err, nativeCause) {
+		t.Fatalf("embeddable error lost gateway identity or native cause: %v", err)
+	}
 	if client.closeCount() != 1 || !session.needsRuntimeResume() {
 		t.Fatalf("gateway disconnect close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
-	}
-	if !session.suppressBacklog() {
-		t.Fatal("gateway disconnect did not mark the stream failed for backlog suppression")
 	}
 }
 
@@ -3840,13 +3771,13 @@ func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent.setAgentClient(conn)
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
-	turnCtx := session.beginTurn(t.Context(), "turn")
+	turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 	require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
 		SubmissionID: "submission", ClientNonce: "nonce",
 	}))
 
 	require.NoError(t, session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool")))
-	require.NoError(t, session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"}))
+	require.NoError(t, session.handleQuestion(turnCtx, testHermesQuestionRequest("question")))
 
 	conn.mu.Lock()
 	permissionMeta := conn.permissions[0].Meta
@@ -3859,15 +3790,15 @@ func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 
 func TestLifecycleActionAdmissionFailuresRejectNativeRequests(t *testing.T) {
 	t.Run("permission without owner", func(t *testing.T) {
-		session, _, turnCtx := newLifecycleActionSession(t, false)
-		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
-		require.ErrorContains(t, err, "outside an accepted lifecycle turn")
+		session, _, _ := newLifecycleActionSession(t, true)
+		err := session.handlePermission(t.Context(), testHermesPermissionRequest(t, "permission", "tool"))
+		require.ErrorContains(t, err, "outside its active turn")
 	})
 
 	t.Run("question without owner", func(t *testing.T) {
-		session, _, turnCtx := newLifecycleActionSession(t, false)
-		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
-		require.NoError(t, err)
+		session, _, _ := newLifecycleActionSession(t, true)
+		err := session.handleQuestion(t.Context(), testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "outside its owning cycle")
 		client, ok := session.client.(*fakeHermesClient)
 		require.True(t, ok)
 		require.Equal(t, 1, client.questionRejectCount())
@@ -3883,15 +3814,62 @@ func TestLifecycleActionAdmissionFailuresRejectNativeRequests(t *testing.T) {
 	t.Run("question announcement", func(t *testing.T) {
 		session, conn, turnCtx := newLifecycleActionSession(t, true)
 		session.agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: conn, failAt: 1})
-		err := session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
 		require.ErrorContains(t, err, "lifecycle delivery failed")
 	})
+}
+
+func TestLifecycleActionPublicationFailureCancelsAndJoinsHostRequest(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		permission bool
+	}{
+		{name: "permission", permission: true},
+		{name: "elicitation"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, base, turnCtx := newLifecycleActionSession(t, true)
+			client := &publicationFailControlClient{
+				recordingAgentClient: base,
+				started:              make(chan struct{}),
+				cancelled:            make(chan struct{}),
+				release:              make(chan struct{}),
+			}
+			s.agent.setAgentClient(client)
+			done := make(chan error, 1)
+			if test.permission {
+				go func() {
+					done <- s.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+				}()
+			} else {
+				go func() { done <- s.handleQuestion(turnCtx, testHermesQuestionRequest("question")) }()
+			}
+
+			<-client.started
+			<-client.cancelled
+			select {
+			case err := <-done:
+				t.Fatalf("handler returned while its host request was live: %v", err)
+			default:
+			}
+			close(client.release)
+			require.ErrorContains(t, <-done, "lifecycle delivery failed")
+			native, ok := s.client.(*fakeHermesClient)
+			require.True(t, ok)
+			if test.permission {
+				require.Equal(t, 1, native.permissionReplyCount())
+			} else {
+				require.Equal(t, 1, native.questionRejectCount())
+			}
+		})
+	}
 }
 
 func TestLifecycleResolutionFailureDominatesCallbackResult(t *testing.T) {
 	runPermission := func(t *testing.T, callbackErr error) {
 		t.Helper()
 		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		pending := lifecyclePendingActionBarrier(session, conn)
 		conn.permErr = callbackErr
 		conn.permissionStarted = make(chan struct{}, 1)
 		conn.permissionRelease = make(chan struct{})
@@ -3900,6 +3878,7 @@ func TestLifecycleResolutionFailureDominatesCallbackResult(t *testing.T) {
 			done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
 		}()
 		<-conn.permissionStarted
+		<-pending
 		setLifecycleDeliveryError(conn)
 		close(conn.permissionRelease)
 		require.ErrorContains(t, <-done, "lifecycle delivery failed")
@@ -3915,15 +3894,17 @@ func TestLifecycleResolutionFailureDominatesCallbackResult(t *testing.T) {
 	runQuestion := func(t *testing.T, response acp.UnstableCreateElicitationResponse, callbackErr error) {
 		t.Helper()
 		session, conn, turnCtx := newLifecycleActionSession(t, true)
+		pending := lifecyclePendingActionBarrier(session, conn)
 		conn.elicitation = response
 		conn.elicitErr = callbackErr
 		conn.elicitationStarted = make(chan struct{}, 1)
 		conn.elicitationRelease = make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			done <- session.handleQuestion(turnCtx, nativehermes.QuestionRequest{ID: "question", SessionID: "native-1"})
+			done <- session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
 		}()
 		<-conn.elicitationStarted
+		<-pending
 		setLifecycleDeliveryError(conn)
 		close(conn.elicitationRelease)
 		require.ErrorContains(t, <-done, "lifecycle delivery failed")
@@ -3939,6 +3920,189 @@ func TestLifecycleResolutionFailureDominatesCallbackResult(t *testing.T) {
 		runQuestion(t, acp.UnstableCreateElicitationResponse{
 			Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{}},
 		}, nil)
+	})
+}
+
+func lifecyclePendingActionBarrier(session *session, conn *recordingAgentClient) <-chan struct{} {
+	pending := make(chan struct{}, 1)
+	hook := &sessionUpdateHookClient{recordingAgentClient: conn}
+	hook.afterUpdate = func() {
+		conn.mu.Lock()
+		defer conn.mu.Unlock()
+		if len(conn.updates) == 0 {
+			return
+		}
+		envelope, _ := conn.updates[len(conn.updates)-1].Meta[lifecycle.MetaKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["state"] == string(lifecycle.ForegroundRequiresAction) {
+			select {
+			case pending <- struct{}{}:
+			default:
+			}
+		}
+	}
+	session.agent.setAgentClient(hook)
+
+	return pending
+}
+
+func failLifecycleDelivery(t *testing.T, session *session) {
+	t.Helper()
+	hook, ok := session.agent.connection().(*sessionUpdateHookClient)
+	require.True(t, ok)
+	setLifecycleDeliveryError(hook.recordingAgentClient)
+}
+
+func TestLifecycleControlHardCutFailureBranches(t *testing.T) {
+	t.Run("unowned permission", func(t *testing.T) {
+		s, _, turnCtx := newLifecycleActionSession(t, false)
+		stream := s.lifecycleStream()
+		stream.mu.Lock()
+		stream.turnID = ""
+		stream.mu.Unlock()
+		err := s.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		require.ErrorContains(t, err, "accepted lifecycle turn")
+	})
+	t.Run("unowned question", func(t *testing.T) {
+		s, _, turnCtx := newLifecycleActionSession(t, false)
+		stream := s.lifecycleStream()
+		stream.mu.Lock()
+		stream.turnID = ""
+		stream.mu.Unlock()
+		err := s.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.NoError(t, err)
+	})
+
+	t.Run("permission operation admission", func(t *testing.T) {
+		s, _, turnCtx := newLifecycleActionSession(t, true)
+		for index := 0; index < cap(s.agent.clientCalls); index++ {
+			s.agent.clientCalls <- struct{}{}
+		}
+		err := s.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		for index := 0; index < cap(s.agent.clientCalls); index++ {
+			<-s.agent.clientCalls
+		}
+		require.ErrorContains(t, err, valBackpressure)
+	})
+	t.Run("question operation admission", func(t *testing.T) {
+		s, _, turnCtx := newLifecycleActionSession(t, true)
+		for index := 0; index < cap(s.agent.clientCalls); index++ {
+			s.agent.clientCalls <- struct{}{}
+		}
+		err := s.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		for index := 0; index < cap(s.agent.clientCalls); index++ {
+			<-s.agent.clientCalls
+		}
+		require.ErrorContains(t, err, valBackpressure)
+	})
+
+	t.Run("permission host write", func(t *testing.T) {
+		s, conn, turnCtx := newLifecycleActionSession(t, true)
+		conn.permissionWriteErr = errors.New("permission write failed")
+		err := s.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission", "tool"))
+		require.ErrorContains(t, err, "permission write failed")
+	})
+	t.Run("question host write", func(t *testing.T) {
+		s, conn, turnCtx := newLifecycleActionSession(t, true)
+		conn.elicitationWriteErr = errors.New("question write failed")
+		err := s.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
+		require.ErrorContains(t, err, "question write failed")
+	})
+
+	runPermissionAfterPending := func(t *testing.T, callbackErr error, beforeReturn func(*session, context.CancelFunc)) error {
+		t.Helper()
+		s, conn, turnCtx := newLifecycleActionSession(t, true)
+		pending := lifecyclePendingActionBarrier(s, conn)
+		ctx, cancel := context.WithCancel(turnCtx)
+		defer cancel()
+		conn.permissionStarted = make(chan struct{}, 1)
+		conn.permissionRelease = make(chan struct{})
+		conn.permErr = callbackErr
+		conn.permissionBeforeReturn = func() { beforeReturn(s, cancel) }
+		done := make(chan error, 1)
+		go func() {
+			done <- s.handlePermission(ctx, testHermesPermissionRequest(t, "permission", "tool"))
+		}()
+		<-conn.permissionStarted
+		<-pending
+		close(conn.permissionRelease)
+
+		return <-done
+	}
+	t.Run("permission missing after result", func(t *testing.T) {
+		err := runPermissionAfterPending(t, nil, func(s *session, _ context.CancelFunc) {
+			_, _, _ = s.takePendingPermission("permission")
+		})
+		require.ErrorIs(t, err, errPromptCancelled)
+	})
+	t.Run("permission cancelled after result", func(t *testing.T) {
+		err := runPermissionAfterPending(t, nil, func(_ *session, cancel context.CancelFunc) { cancel() })
+		require.ErrorIs(t, err, errPromptCancelled)
+	})
+	t.Run("permission callback terminalization", func(t *testing.T) {
+		err := runPermissionAfterPending(t, errors.New("callback failed"), func(s *session, _ context.CancelFunc) {
+			failLifecycleDelivery(t, s)
+		})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+	t.Run("permission answer terminalization", func(t *testing.T) {
+		err := runPermissionAfterPending(t, nil, func(s *session, _ context.CancelFunc) {
+			failLifecycleDelivery(t, s)
+		})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+
+	runQuestionAfterPending := func(
+		t *testing.T,
+		response acp.UnstableCreateElicitationResponse,
+		callbackErr error,
+		beforeReturn func(*session, context.CancelFunc),
+	) error {
+		t.Helper()
+		s, conn, turnCtx := newLifecycleActionSession(t, true)
+		pending := lifecyclePendingActionBarrier(s, conn)
+		ctx, cancel := context.WithCancel(turnCtx)
+		defer cancel()
+		conn.elicitation = response
+		conn.elicitErr = callbackErr
+		conn.elicitationStarted = make(chan struct{}, 1)
+		conn.elicitationRelease = make(chan struct{})
+		conn.elicitationBeforeReturn = func() { beforeReturn(s, cancel) }
+		done := make(chan error, 1)
+		go func() { done <- s.handleQuestion(ctx, testHermesQuestionRequest("question")) }()
+		<-conn.elicitationStarted
+		<-pending
+		close(conn.elicitationRelease)
+
+		return <-done
+	}
+	t.Run("question missing after result", func(t *testing.T) {
+		err := runQuestionAfterPending(t, acp.NewUnstableCreateElicitationResponseDecline(), nil,
+			func(s *session, _ context.CancelFunc) { _, _, _ = s.takePendingQuestion("question") })
+		require.ErrorIs(t, err, errPromptCancelled)
+	})
+	t.Run("question cancelled after result", func(t *testing.T) {
+		err := runQuestionAfterPending(t, acp.NewUnstableCreateElicitationResponseDecline(), nil,
+			func(_ *session, cancel context.CancelFunc) { cancel() })
+		require.ErrorIs(t, err, errPromptCancelled)
+	})
+	setDeliveryError := func(s *session, _ context.CancelFunc) {
+		failLifecycleDelivery(t, s)
+	}
+	t.Run("question callback terminalization", func(t *testing.T) {
+		err := runQuestionAfterPending(t, acp.UnstableCreateElicitationResponse{}, errors.New("callback failed"), setDeliveryError)
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+	t.Run("question decline terminalization", func(t *testing.T) {
+		err := runQuestionAfterPending(t, acp.NewUnstableCreateElicitationResponseDecline(), nil, setDeliveryError)
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+	t.Run("question answer terminalization", func(t *testing.T) {
+		response := acp.UnstableCreateElicitationResponse{
+			Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{}},
+		}
+		err := runQuestionAfterPending(t, response, nil, setDeliveryError)
+		require.ErrorContains(t, err, "lifecycle delivery failed")
 	})
 }
 
@@ -4010,5 +4174,688 @@ func TestPromptFailsOnUnmappedNativeFinish(t *testing.T) {
 	data, _ := reqErr.Data.(map[string]any)
 	require.Equal(t, valHermesTurnFailed, data[jsonFieldError])
 	require.Equal(t, string(nativehermes.CauseProvider), data[jsonFieldCause])
-	require.Contains(t, data[jsonFieldMessage], "tool_calls")
+	require.NotContains(t, data, jsonFieldMessage)
+	require.ErrorContains(t, errors.Unwrap(err), "tool_calls")
+}
+func TestActionOwnershipEdges(t *testing.T) {
+	s := testSession(newTestAgent(), newFakeHermesClient())
+	defer s.stopPump()
+
+	require.NoError(t, s.resolveBlockingAction(t.Context(), announcedAction{}, lifecycle.ActionCancelled))
+	err := s.resolveBlockingAction(t.Context(), announcedAction{id: "outside"}, lifecycle.ActionCancelled)
+	require.Error(t, err)
+
+	turnCtx := beginTestControlTurn(t, s, t.Context(), "turn")
+	require.NoError(t, s.resolveBlockingAction(turnCtx, announcedAction{id: "already-resolved"}, lifecycle.ActionCancelled))
+
+	route, active := s.permissionTurnRoute(turnCtx)
+	require.True(t, active)
+	action := lifecycle.BlockingAction("action", lifecycle.ActionPermission, "")
+	s.actionRequests = nil
+	s.registerActionRequest(action, "request", route)
+	require.Contains(t, s.actionRequests, action.ActionID)
+
+	wrong := s.actionRequests[action.ActionID]
+	wrong.nonce = "wrong"
+	s.actionRequests[action.ActionID] = wrong
+	taken, current := s.takeActionRequest(turnCtx, action.ActionID)
+	require.False(t, taken)
+	require.False(t, current)
+
+	s.registerActionRequest(action, "request", route)
+	taken, current = s.takeActionRequest(turnCtx, action.ActionID)
+	require.True(t, taken)
+	require.True(t, current)
+	taken, current = s.takeActionRequest(turnCtx, action.ActionID)
+	require.False(t, taken)
+	require.True(t, current)
+
+	cancelled, cancel := context.WithCancel(turnCtx)
+	cancel()
+	taken, current = s.takeActionRequest(cancelled, "action")
+	require.False(t, taken)
+	require.False(t, current)
+
+	s.pending = nil
+	permission := nativehermes.PermissionRequest{ID: "permission-after-reset", SessionID: "native-1"}
+	s.addPendingPermission(permission)
+	pending, found, _ := s.takePendingPermission(permission.ID)
+	require.True(t, found)
+	require.Equal(t, permission.ID, pending.ID)
+
+	mapped := &mappedWireError{wire: acp.NewInternalError(nil), cause: errors.New("cause")}
+	var ordinary error
+	require.False(t, mapped.As(&ordinary))
+	require.False(t, s.permissionTurnRouteCurrent(t.Context(), permissionTurnRoute{}))
+	require.Error(t, s.emitToolPartUpdate(t.Context(), nativehermes.Part{}))
+	require.Equal(t, "Hermes permission", permissionHermesToolState(nativehermes.PermissionRequest{}).title)
+}
+func activeQuestionSession(
+	t *testing.T,
+	response acp.UnstableCreateElicitationResponse,
+	callbackErr error,
+) (*session, *fakeHermesClient, *recordingAgentClient, context.Context, context.CancelFunc) {
+	t.Helper()
+	client := newFakeHermesClient()
+	conn := newRecordingAgentClient()
+	conn.elicitation = response
+	conn.elicitErr = callbackErr
+	agent := newTestAgent()
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	agent.setAgentClient(conn)
+	s := testSession(agent, client)
+	t.Cleanup(s.stopPump)
+	ctx, cancel := context.WithCancel(t.Context())
+	client.emitEvent(nativehermes.TurnEvent{
+		Type: nativehermes.EventCycleStarted, CycleID: "question-cycle",
+		TransportGeneration: 1, Origin: nativehermes.CycleOriginActivity,
+	})
+	require.NoError(t, s.synchronizePump(ctx))
+	route := s.routeForEvent(nativehermes.TurnEvent{CycleID: "question-cycle", TransportGeneration: 1})
+	require.NotNil(t, route)
+	turnCtx := withPumpRoute(ctx, route)
+
+	return s, client, conn, turnCtx, cancel
+}
+
+func questionRequest(id string) nativehermes.QuestionRequest {
+	return nativehermes.QuestionRequest{
+		ID: id, SessionID: "native-1",
+		CycleID: "question-cycle", TransportGeneration: 1,
+		Questions: []nativehermes.QuestionInfo{{Question: "Continue?"}},
+	}
+}
+
+func TestQuestionActiveRouteBranches(t *testing.T) {
+	t.Run("no connection", func(t *testing.T) {
+		client := newFakeHermesClient()
+		s := testSession(newTestAgent(), client)
+		defer s.stopPump()
+		turnCtx := beginTestControlTurn(t, s, t.Context(), "turn")
+		req := questionRequest("no-connection")
+		req.CycleID = testControlCycleID
+		require.NoError(t, s.handleQuestion(turnCtx, req))
+		require.Equal(t, 1, client.questionRejectCount())
+	})
+
+	t.Run("stale identity", func(t *testing.T) {
+		s, client, _, turnCtx, _ := activeQuestionSession(t, acp.UnstableCreateElicitationResponse{}, nil)
+		route, active := s.permissionTurnRoute(turnCtx)
+		require.True(t, active)
+		req := questionRequest("stale")
+		req.CycleID = route.cycleID + "other"
+		require.Error(t, s.handleQuestion(turnCtx, req))
+		require.Equal(t, 1, client.questionRejectCount())
+	})
+
+	for _, rejectFails := range []bool{false, true} {
+		name := "callback error"
+		if rejectFails {
+			name += " and reject error"
+		}
+		t.Run(name, func(t *testing.T) {
+			callbackErr := errors.New("elicitation failed")
+			s, client, _, turnCtx, _ := activeQuestionSession(t, acp.UnstableCreateElicitationResponse{}, callbackErr)
+			if rejectFails {
+				client.replyErr = errors.New("reject failed")
+			}
+			err := s.handleQuestion(turnCtx, questionRequest("callback-error"))
+			require.ErrorIs(t, err, callbackErr)
+			if rejectFails {
+				require.ErrorContains(t, err, "reject failed")
+			}
+		})
+	}
+
+	for _, rejectFails := range []bool{false, true} {
+		name := "decline"
+		if rejectFails {
+			name += " reject error"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, client, _, turnCtx, _ := activeQuestionSession(t, acp.NewUnstableCreateElicitationResponseDecline(), nil)
+			if rejectFails {
+				client.replyErr = errors.New("reject failed")
+			}
+			err := s.handleQuestion(turnCtx, questionRequest("decline"))
+			if rejectFails {
+				require.ErrorContains(t, err, "reject failed")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		response := acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{
+			Action: "accept", Content: map[string]any{"question_1": "yes"},
+		}}
+		s, client, _, turnCtx, _ := activeQuestionSession(t, response, nil)
+		require.NoError(t, s.handleQuestion(turnCtx, questionRequest("accepted")))
+		require.Equal(t, 1, client.questionReplyCount())
+	})
+}
+
+func TestQuestionLateContextCancellationBranches(t *testing.T) {
+	responses := []struct {
+		name     string
+		response acp.UnstableCreateElicitationResponse
+		callErr  error
+	}{
+		{name: "callback error", callErr: errors.New("elicitation failed")},
+		{name: "decline", response: acp.NewUnstableCreateElicitationResponseDecline()},
+		{name: "accept", response: acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{
+			Action: "accept", Content: map[string]any{"question_1": "yes"},
+		}}},
+	}
+	for _, test := range responses {
+		for _, rejectFails := range []bool{false, true} {
+			name := test.name
+			if rejectFails {
+				name += " reject error"
+			}
+			t.Run(name, func(t *testing.T) {
+				s, client, conn, turnCtx, cancel := activeQuestionSession(t, test.response, test.callErr)
+				conn.elicitationStarted = make(chan struct{}, 1)
+				conn.elicitationRelease = make(chan struct{})
+				conn.elicitationIgnoreContext = true
+				if rejectFails {
+					client.replyErr = errors.New("reject failed")
+				}
+				done := make(chan error, 1)
+				go func() { done <- s.handleQuestion(turnCtx, questionRequest("late")) }()
+				<-conn.elicitationStarted
+				cancel()
+				close(conn.elicitationRelease)
+				err := <-done
+				if rejectFails && test.name != "callback error" {
+					require.ErrorContains(t, err, "reject failed")
+				} else {
+					require.ErrorIs(t, err, errPromptCancelled)
+				}
+				require.Equal(t, 1, client.questionRejectCount())
+			})
+		}
+	}
+}
+
+func TestPermissionStaleIdentityIsRejected(t *testing.T) {
+	s := testSession(newTestAgent(), newFakeHermesClient())
+	defer s.stopPump()
+	route := &pumpCycleRoute{
+		incarnation: s.pumpIncarnation, generation: 1, cycleID: "permission-cycle",
+		nonce: "turn", prompt: true, projected: make(chan error, 1),
+	}
+	s.pumpMu.Lock()
+	s.pumpRoutes[route.cycleID] = route
+	s.pumpMu.Unlock()
+	turnCtx := withPumpRoute(t.Context(), route)
+	req := testHermesPermissionRequest(t, "permission", "tool")
+	req.TransportGeneration = 1
+	req.CycleID = "stale"
+	require.Error(t, s.handlePermission(turnCtx, req))
+}
+
+type orderedControlACPClient struct {
+	*pipeACPClient
+
+	events            chan string
+	wireEvents        chan string
+	permissionRelease chan struct{}
+	questionRelease   chan struct{}
+
+	mu         sync.Mutex
+	permission acp.RequestPermissionRequest
+	question   acp.UnstableCreateElicitationRequest
+}
+
+func newOrderedControlACPClient() *orderedControlACPClient {
+	return &orderedControlACPClient{
+		pipeACPClient:     &pipeACPClient{},
+		events:            make(chan string, 8),
+		wireEvents:        make(chan string, 8),
+		permissionRelease: make(chan struct{}),
+		questionRelease:   make(chan struct{}),
+	}
+}
+
+func (c *orderedControlACPClient) RequestPermission(
+	_ context.Context,
+	request acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	c.mu.Lock()
+	c.permission = request
+	c.mu.Unlock()
+	c.events <- "permission"
+	<-c.permissionRelease
+
+	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(valOnce)}, nil
+}
+
+func (c *orderedControlACPClient) UnstableCreateElicitation(
+	_ context.Context,
+	request acp.UnstableCreateElicitationRequest,
+) (acp.UnstableCreateElicitationResponse, error) {
+	c.mu.Lock()
+	c.question = request
+	c.mu.Unlock()
+	c.events <- "question"
+	<-c.questionRelease
+
+	return acp.UnstableCreateElicitationResponse{
+		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{"question_1": "yes"}},
+	}, nil
+}
+
+func (c *orderedControlACPClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
+	if pendingActionNotification(notification) {
+		c.events <- "action"
+	}
+
+	return nil
+}
+
+func pendingActionNotification(notification acp.SessionNotification) bool {
+	envelope, _ := notification.Meta[lifecycle.MetaKey].(map[string]any)
+	event, _ := envelope["event"].(map[string]any)
+	action, _ := event["action"].(map[string]any)
+
+	return event["type"] == string(lifecycle.EventActionUpdate) && action["state"] == string(lifecycle.ActionPending)
+}
+
+type orderedControlWireWriter struct {
+	target io.Writer
+	events chan<- string
+}
+
+func (w orderedControlWireWriter) Write(frame []byte) (int, error) {
+	written, err := w.target.Write(frame)
+	if err != nil || written != len(frame) {
+		return written, err
+	}
+
+	var envelope struct {
+		Method string                  `json:"method"`
+		Params acp.SessionNotification `json:"params"`
+	}
+	_ = json.Unmarshal(frame, &envelope)
+
+	switch envelope.Method {
+	case acp.ClientMethodSessionRequestPermission:
+		w.events <- "permission"
+	case acp.ClientMethodElicitationCreate:
+		w.events <- "question"
+	case acp.ClientMethodSessionUpdate:
+		if pendingActionNotification(envelope.Params) {
+			w.events <- "action"
+		}
+	}
+
+	return written, nil
+}
+
+func newOrderedControlSession(t *testing.T) (*session, *fakeHermesClient, *orderedControlACPClient, context.Context) {
+	t.Helper()
+	c2aR, c2aW := io.Pipe()
+	a2cR, a2cW := io.Pipe()
+	t.Cleanup(func() {
+		_ = c2aR.Close()
+		_ = c2aW.Close()
+		_ = a2cR.Close()
+		_ = a2cW.Close()
+	})
+
+	host := newOrderedControlACPClient()
+	_ = acp.NewClientSideConnection(host, c2aW, a2cR)
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	connection := newLocalAgentConnection(agent, orderedControlWireWriter{target: a2cW, events: host.wireEvents}, c2aR)
+	agent.setAgentClient(connection)
+	native := newFakeHermesClient()
+	s := testSession(agent, native)
+	t.Cleanup(s.stopPump)
+	require.NoError(t, s.openLifecycleStream())
+	turnCtx := beginTestControlTurn(t, s, t.Context(), "wire-control")
+
+	return s, native, host, turnCtx
+}
+
+func TestHostControlWritePrecedesPendingActionWithExactIdentity(t *testing.T) {
+	t.Run("permission", func(t *testing.T) {
+		s, _, host, turnCtx := newOrderedControlSession(t)
+		req := testHermesPermissionRequest(t, "native-permission-id", "native-tool-id")
+		done := make(chan error, 1)
+		go func() { done <- s.handlePermission(turnCtx, req) }()
+
+		require.Equal(t, "permission", <-host.wireEvents)
+		require.Equal(t, "action", <-host.wireEvents)
+		for event := range host.events {
+			if event == "permission" {
+				break
+			}
+		}
+		host.mu.Lock()
+		requestID := controlRequestID(host.permission.Meta)
+		host.mu.Unlock()
+		require.Equal(t, req.ID, requestID)
+		close(host.permissionRelease)
+		require.NoError(t, <-done)
+	})
+
+	t.Run("question", func(t *testing.T) {
+		s, _, host, turnCtx := newOrderedControlSession(t)
+		req := testHermesQuestionRequest("native-question-id")
+		done := make(chan error, 1)
+		go func() { done <- s.handleQuestion(turnCtx, req) }()
+
+		require.Equal(t, "question", <-host.wireEvents)
+		require.Equal(t, "action", <-host.wireEvents)
+		for event := range host.events {
+			if event == "question" {
+				break
+			}
+		}
+		host.mu.Lock()
+		route, ok := host.question.Form.Meta[routeMetaKey].(map[string]any)
+		host.mu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, req.ID, route[routeFieldReq])
+		close(host.questionRelease)
+		require.NoError(t, <-done)
+	})
+}
+
+func TestHostControlCancellationAfterWriteSuppressesPendingAction(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		close      bool
+		permission bool
+	}{
+		{name: "permission cancel", permission: true},
+		{name: "question close", close: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, native, host, turnCtx := newOrderedControlSession(t)
+			atWrite := make(chan struct{})
+			releaseWrite := make(chan struct{})
+			s.afterHostControlWrite = func() {
+				close(atWrite)
+				<-releaseWrite
+			}
+			done := make(chan error, 1)
+			if test.permission {
+				req := testHermesPermissionRequest(t, "cancel-permission-id", "cancel-tool-id")
+				go func() { done <- s.handlePermission(turnCtx, req) }()
+				require.Equal(t, "permission", <-host.events)
+			} else {
+				req := testHermesQuestionRequest("close-question-id")
+				go func() { done <- s.handleQuestion(turnCtx, req) }()
+				require.Equal(t, "question", <-host.events)
+			}
+			<-atWrite
+			if test.close {
+				s.prepareClose()
+				s.pumpMu.Lock()
+				stopping := s.pumpStopping
+				s.pumpMu.Unlock()
+				require.True(t, stopping, "close drained a control before establishing pump shutdown")
+			} else {
+				s.cancelTurn()
+			}
+			close(releaseWrite)
+			if test.permission {
+				close(host.permissionRelease)
+				require.Equal(t, 1, native.permissionReplyCount())
+			} else {
+				close(host.questionRelease)
+				require.Equal(t, 1, native.questionRejectCount())
+			}
+			require.ErrorIs(t, <-done, errPromptCancelled)
+			if test.close {
+				s.mu.Lock()
+				resumeNeeded := s.runtimeNeedsResume
+				s.mu.Unlock()
+				require.False(t, resumeNeeded)
+				require.False(t, s.lifecycleStream().fenced(), "close-woken control fenced the stream")
+			}
+			select {
+			case event := <-host.events:
+				require.NotEqual(t, "action", event)
+			default:
+			}
+		})
+	}
+}
+
+func TestPermissionRouteStaleAfterWriteRejectsOwnedPendingRequest(t *testing.T) {
+	s, conn, turnCtx := newLifecycleActionSession(t, true)
+	defer s.stopPump()
+	s.afterHostControlWrite = func() {
+		s.pumpMu.Lock()
+		s.pumpIncarnation++
+		s.pumpMu.Unlock()
+	}
+
+	err := s.handlePermission(turnCtx, testHermesPermissionRequest(t, "stale-permission", "stale-tool"))
+	require.ErrorIs(t, err, errPromptCancelled)
+	native, ok := s.client.(*fakeHermesClient)
+	require.True(t, ok)
+	require.Equal(t, 1, native.permissionReplyCount())
+	require.Empty(t, s.actionRequests)
+	require.Len(t, conn.permissions, 1)
+}
+
+func runProjectionPrompt(t *testing.T, s *session) promptRun {
+	t.Helper()
+	release, settlement, err := s.acquireTurn(t.Context())
+	require.NoError(t, err)
+	defer settlement.complete()
+	defer release()
+	turnCtx := s.beginTurn(t.Context(), "projection-turn")
+	t.Cleanup(s.finishTurn)
+	epoch := sessionTurnEpoch(s)
+
+	return s.runPromptTurn(t.Context(), turnCtx, epoch, lifecycle.Submission{}, nativehermes.MessageRequest{}, nil)
+}
+
+func TestPromptProjectionRegistrationFailure(t *testing.T) {
+	client := newFakeHermesClient()
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	want := errors.New("projection registry failed")
+	client.beforePromptDispatch = func() {
+		s.pumpMu.Lock()
+		s.pumpErr = want
+		s.pumpMu.Unlock()
+	}
+	run := runProjectionPrompt(t, s)
+	require.ErrorIs(t, run.err, want)
+}
+
+func TestPromptDispatchPromotionRefusals(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*session) *turnSettlement
+		want   string
+	}{
+		{
+			name: "lost reservation",
+			mutate: func(s *session) *turnSettlement {
+				s.promptReservation = nil
+
+				return nil
+			},
+			want: "prompt reservation is no longer current",
+		},
+		{
+			name: "closing session",
+			mutate: func(s *session) *turnSettlement {
+				s.lifecycleClosing = true
+
+				return nil
+			},
+			want: valSessionClosed,
+		},
+		{
+			name: "autonomous foreground won",
+			mutate: func(s *session) *turnSettlement {
+				return s.claimForegroundLocked(foregroundAutonomous)
+			},
+			want: valBackpressure,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeHermesClient()
+			s := testSession(newTestAgent(), client)
+			defer s.stopPump()
+			var blocker *turnSettlement
+			client.beforePromptDispatch = func() {
+				s.mu.Lock()
+				blocker = test.mutate(s)
+				s.mu.Unlock()
+			}
+
+			run := runProjectionPrompt(t, s)
+			blocker.complete()
+			require.ErrorContains(t, run.err, test.want)
+		})
+	}
+}
+
+func TestPromptSynchronizationFailureAbortsBeforeDispatch(t *testing.T) {
+	client := newFakeHermesClient()
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	want := errors.New("pump synchronization failed")
+	s.pumpMu.Lock()
+	s.pumpErr = want
+	s.pumpMu.Unlock()
+
+	run := runProjectionPrompt(t, s)
+	require.ErrorIs(t, run.err, want)
+	require.Equal(t, 1, client.abortCount())
+}
+
+func TestPromptLifecycleAcceptanceFailureResolvesProjection(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	base := newRecordingAgentClient()
+	agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 2})
+	client := newFakeHermesClient()
+	s := testSession(agent, client)
+	defer s.stopPump()
+	require.NoError(t, s.openLifecycleStream())
+	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
+	run := runProjectionPrompt(t, s)
+	require.Error(t, run.err)
+}
+
+func TestPromptProjectionArrivesBeforeNativeResult(t *testing.T) {
+	client := newFakeHermesClient()
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	projectionAcknowledged := make(chan struct{})
+	s.afterProjectionAck = func() { close(projectionAcknowledged) }
+	client.afterPromptTerminal = func() {
+		_ = s.synchronizePump(t.Context())
+		<-projectionAcknowledged
+	}
+	run := runProjectionPrompt(t, s)
+	require.NoError(t, run.err)
+}
+
+func TestPromptProjectionFailureAfterNativeResult(t *testing.T) {
+	client := newFakeHermesClient()
+	client.omitPromptTerminal = true
+	returned := make(chan struct{})
+	client.afterPromptTerminal = func() { close(returned) }
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	release, settlement, err := s.acquireTurn(t.Context())
+	require.NoError(t, err)
+	defer settlement.complete()
+	defer release()
+	turnCtx := s.beginTurn(t.Context(), "projection-turn")
+	defer s.finishTurn()
+	epoch := sessionTurnEpoch(s)
+	done := make(chan promptRun, 1)
+	go func() {
+		done <- s.runPromptTurn(t.Context(), turnCtx, epoch, lifecycle.Submission{}, nativehermes.MessageRequest{}, nil)
+	}()
+	<-returned
+	want := errors.New("projection failed")
+	projected := make(chan error, 1)
+	client.emitEvent(nativehermes.TurnEvent{
+		Type: nativehermes.EventCycleFailed, TransportGeneration: 1,
+		CycleID: "fake/native-1/cycle-1", Origin: nativehermes.CycleOriginPrompt, Err: want,
+		ProjectionDone: func(err error) { projected <- err },
+	})
+	require.NoError(t, <-projected)
+	run := <-done
+	require.ErrorIs(t, run.err, want)
+}
+
+func TestPromptCancellationWhileAwaitingProjection(t *testing.T) {
+	client := newFakeHermesClient()
+	client.omitPromptTerminal = true
+	returned := make(chan struct{})
+	client.afterPromptTerminal = func() { close(returned) }
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	release, settlement, err := s.acquireTurn(t.Context())
+	require.NoError(t, err)
+	defer settlement.complete()
+	defer release()
+	turnCtx := s.beginTurn(t.Context(), "projection-turn")
+	defer s.finishTurn()
+	done := make(chan promptRun, 1)
+	go func() {
+		done <- s.runPromptTurn(t.Context(), turnCtx, sessionTurnEpoch(s), lifecycle.Submission{}, nativehermes.MessageRequest{}, nil)
+	}()
+	<-returned
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	cancel()
+	run := <-done
+	require.True(t, run.cancelled)
+}
+
+func TestNativeResultConsumesItsAlreadySentDispatchBeforeSettlement(t *testing.T) {
+	results := make(chan promptDispatchResult, 1)
+	results <- promptDispatchResult{registered: true}
+	var observed promptDispatchResult
+	consumePromptDispatchBeforeResult(true, false, results, func(result promptDispatchResult) { observed = result })
+	require.True(t, observed.registered)
+}
+
+func TestAwaitPromptProjectionReturnsCancellation(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	success := make(chan error, 1)
+	success <- nil
+	require.Nil(t, session.awaitPromptProjection(t.Context(), success))
+	want := errors.New("projection failed")
+	failure := make(chan error, 1)
+	failure <- want
+	require.ErrorIs(t, session.awaitPromptProjection(t.Context(), failure).err, want)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	run := session.awaitPromptProjection(ctx, make(chan error))
+	require.NotNil(t, run)
+	require.True(t, run.cancelled)
+}
+
+func TestPromptSynchronizeCancellationIsUnaccepted(t *testing.T) {
+	client := newFakeHermesClient()
+	s := testSession(newTestAgent(), client)
+	defer s.stopPump()
+	s.pumpMu.Lock()
+	s.pumpErr = errPromptCancelled
+	s.pumpMu.Unlock()
+	run := runProjectionPrompt(t, s)
+	require.Equal(t, acp.StopReasonCancelled, run.response.StopReason)
 }

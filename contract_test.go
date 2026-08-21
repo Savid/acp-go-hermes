@@ -15,7 +15,7 @@ import (
 // Contract pins: capability surface, stable-route rejection, and the uniform
 // unknown-session error shape.
 
-func TestInitializeCapabilitiesHardCutover(t *testing.T) {
+func TestInitializeCapabilitiesCurrentShape(t *testing.T) {
 	agent := newTestAgent()
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {

@@ -149,7 +149,7 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 		if setErr := setter.SetModel(ctx, l.native.ID, selection); setErr != nil {
 			t.Fatalf("%s set model: %v", l.id, setErr)
 		}
-		selected, selectedErr := l.server.ConfigProviders(ctx)
+		selected, selectedErr := sessionModelOptions(ctx, l.server, l.native.ID)
 		if selectedErr != nil {
 			t.Fatalf("%s selected model state: %v", l.id, selectedErr)
 		}
@@ -223,6 +223,25 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 
 		return resumeErr
 	})
+}
+
+func sessionModelOptions(ctx context.Context, server Server, storedSessionID string) (ProvidersResponse, error) {
+	runtime := server.(*hermesServer)
+	transport := runtime.beginGatewayTurn()
+	defer runtime.endGatewayTurn()
+	if transport == nil {
+		return ProvidersResponse{}, ErrGatewayDisconnected
+	}
+	liveSessionID := runtime.liveSessionIDOn(transport, storedSessionID)
+	if liveSessionID == "" {
+		return ProvidersResponse{}, MissingLiveSessionMappingError{StoredSessionID: storedSessionID}
+	}
+	models, err := transport.client.ModelOptions(ctx, liveSessionID)
+	if err != nil {
+		return ProvidersResponse{}, err
+	}
+
+	return providersFromGateway(models), nil
 }
 
 func runLanesConcurrently[T any](t *testing.T, lanes []*T, run func(*T) error) {

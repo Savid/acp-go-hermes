@@ -1034,8 +1034,13 @@ func TestCloseLifecycleAdmissionCancelsOnlyBeforeSettlement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := testSession(newTestAgent(), newFakeHermesClient())
+			session.mu.Lock()
+			settlement := session.reservePromptLocked()
+			session.settlement = settlement
 			session.turnInFlight = true
 			session.turnSettlement = test.state
+			session.mu.Unlock()
+			defer settlement.complete()
 
 			if got := session.closeLifecycleAdmission(); got != test.wantCancel {
 				t.Fatalf("cancel = %v, want %v", got, test.wantCancel)
@@ -1057,7 +1062,12 @@ func TestCloseLifecycleAdmissionCancelsOnlyBeforeSettlement(t *testing.T) {
 
 func TestAdmittedCloseCancellationSurvivesTurnStart(t *testing.T) {
 	session := testSession(newTestAgent(), newFakeHermesClient())
+	session.mu.Lock()
+	settlement := session.reservePromptLocked()
+	session.settlement = settlement
 	session.turnInFlight = true
+	session.mu.Unlock()
+	defer settlement.complete()
 
 	if !session.closeLifecycleAdmission() {
 		t.Fatal("admitted turn was not cancelled")

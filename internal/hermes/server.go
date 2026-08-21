@@ -60,6 +60,7 @@ const (
 	keyEagerBuild       = "eager_build"
 	jsonFieldError      = "error"
 	jsonFieldCwd        = "cwd"
+	jsonFieldStatus     = "status"
 	msgHermesNeedsInput = "Hermes needs input"
 
 	evtApprovalRequest    = "approval.request"
@@ -74,6 +75,13 @@ const (
 	evtTerminalReadReq    = "terminal.read.request"
 	evtToolComplete       = "tool.complete"
 	evtToolStart          = "tool.start"
+
+	promptPhaseRegister    = "register"
+	promptPhaseSubmit      = "submit"
+	promptPhaseSynchronize = "synchronize"
+	promptPhaseWatermark   = "watermark"
+	promptPhaseRelease     = "release"
+	promptPhaseResult      = "result"
 )
 
 // firstNonEmpty returns the first non-empty string in values.
@@ -125,8 +133,7 @@ type Server interface {
 	ReplyPermission(context.Context, PermissionRequest, string, string) error
 	ReplyQuestion(context.Context, QuestionRequest, [][]string) error
 	RejectQuestion(context.Context, QuestionRequest) error
-	Events() <-chan TurnEvent
-	EventErrors() <-chan error
+	Deliveries() <-chan TurnDelivery
 	XDGDirs() XDGDirs
 	AuthProviders(context.Context) ([]AuthProvider, error)
 	AuthStart(context.Context, string) (AuthStart, error)
@@ -211,30 +218,54 @@ type hermesServer struct {
 	lease     ServerLease
 	leasePath string
 
-	events chan TurnEvent
-	errs   chan error
-	closed chan struct{}
-	once   sync.Once
+	deliveries       chan TurnDelivery
+	closed           chan struct{}
+	deliveryMu       sync.Mutex
+	deliveryTerminal error
+	admissionOnce    sync.Once
+	shutdownOnce     sync.Once
+	shutdownErr      error
+	closeMu          sync.Mutex
+	closeAttempt     *hermesServerCloseAttempt
+	closeSucceeded   bool
 
-	gateway               *Client
 	process               *Process
+	closeNative           func(context.Context) error
 	gatewayMu             sync.Mutex
-	liveByStored          map[string]string
-	storedByLive          map[string]string
+	actorsByStored        map[string]*gatewaySessionActor
 	cwd                   string
 	defaultModel          string
 	providerAuthSupported bool
 	sharedSessionOwner    *SharedSessionOwner
 	sharedHomeOwner       *SharedHomeOwner
 
-	connMu   sync.Mutex
-	turnBusy int
-	turnIdle *sync.Cond
-	redial   func(context.Context) (*Client, error)
+	connMu              sync.Mutex
+	turnLease           sync.RWMutex
+	turnBusy            int
+	turnIdle            *sync.Cond
+	redial              func(context.Context) (*Client, error)
+	transportGeneration uint64
+	dispatchers         map[uint64]*gatewayTransportDispatcher
+	transport           *gatewayTransport
+	registrations       uint64
 
-	supervisorWG  sync.WaitGroup
-	afterTurnIdle func()
+	supervisorWG           sync.WaitGroup
+	dispatcherWG           sync.WaitGroup
+	actorWG                sync.WaitGroup
+	transportCloseWG       sync.WaitGroup
+	afterTurnIdle          func()
+	afterGatewayClientDone func()
+	beforeTransportPublish func()
+	beforeHandshakeBind    func(gatewayHandshakeKind, uint64)
+	beforePromptPhase      func(string, *gatewaySessionActor)
 }
+
+type hermesServerCloseAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+type serverCloseJoinHookKey struct{}
 
 func (s *hermesServer) ProviderDescendantCount() (int, bool) {
 	if s == nil || s.process == nil {
@@ -354,12 +385,31 @@ type Tokens struct {
 }
 
 type TurnEvent struct {
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Properties  json.RawMessage `json:"properties"`
-	Raw         json.RawMessage `json:"-"`
-	StreamEpoch uint64          `json:"-"`
+	ID                  string             `json:"id"`
+	Type                string             `json:"type"`
+	Properties          json.RawMessage    `json:"properties"`
+	Raw                 json.RawMessage    `json:"-"`
+	TransportGeneration uint64             `json:"-"`
+	CycleID             string             `json:"-"`
+	Origin              CycleOrigin        `json:"-"`
+	Message             *NativeMessage     `json:"-"`
+	Permission          *PermissionRequest `json:"-"`
+	Question            *QuestionRequest   `json:"-"`
+	Err                 error              `json:"-"`
+	ProjectionDone      func(error)        `json:"-"`
 }
+
+type CycleOrigin string
+
+const (
+	CycleOriginPrompt   CycleOrigin = "prompt"
+	CycleOriginActivity CycleOrigin = "activity"
+
+	EventCycleStarted  = "cycle.started"
+	EventCycleComplete = "cycle.complete"
+	EventCycleFailed   = "cycle.failed"
+	EventGatewayRaw    = "gateway.raw"
+)
 
 func (e *TurnEvent) UnmarshalJSON(data []byte) error {
 	type alias TurnEvent
@@ -376,11 +426,14 @@ func (e *TurnEvent) UnmarshalJSON(data []byte) error {
 }
 
 type PermissionRequest struct {
-	ID        string         `json:"id"`
-	SessionID string         `json:"sessionID"`
-	Action    string         `json:"action"`
-	Metadata  map[string]any `json:"metadata"`
-	Tool      permissionTool `json:"tool"`
+	ID                  string         `json:"id"`
+	SessionID           string         `json:"sessionID"`
+	Action              string         `json:"action"`
+	Metadata            map[string]any `json:"metadata"`
+	Tool                permissionTool `json:"tool"`
+	CycleID             string         `json:"-"`
+	TransportGeneration uint64         `json:"-"`
+	route               *gatewayControlRoute
 }
 
 type permissionTool struct {
@@ -389,10 +442,13 @@ type permissionTool struct {
 }
 
 type QuestionRequest struct {
-	ID        string         `json:"id"`
-	SessionID string         `json:"sessionID"`
-	Questions []QuestionInfo `json:"questions"`
-	Tool      QuestionTool   `json:"tool"`
+	ID                  string         `json:"id"`
+	SessionID           string         `json:"sessionID"`
+	Questions           []QuestionInfo `json:"questions"`
+	Tool                QuestionTool   `json:"tool"`
+	CycleID             string         `json:"-"`
+	TransportGeneration uint64         `json:"-"`
+	route               *gatewayControlRoute
 }
 
 type QuestionInfo struct {
@@ -693,19 +749,19 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		log:                   options.Logger,
 		lease:                 lease,
 		leasePath:             leasePath,
-		events:                make(chan TurnEvent, 256),
-		errs:                  make(chan error, 8),
+		deliveries:            make(chan TurnDelivery, gatewayMappedDeliveryCapacity+1),
 		closed:                make(chan struct{}),
-		gateway:               proc.Client,
 		process:               proc,
-		liveByStored:          make(map[string]string),
-		storedByLive:          make(map[string]string),
+		closeNative:           proc.Close,
+		actorsByStored:        make(map[string]*gatewaySessionActor),
+		dispatchers:           make(map[uint64]*gatewayTransportDispatcher),
 		cwd:                   options.Cwd,
 		defaultModel:          options.DefaultModel,
 		providerAuthSupported: options.SharedHermesHome != "",
 		sharedSessionOwner:    sessionOwner,
 		sharedHomeOwner:       homeOwner,
 	}
+	server.installGatewayDispatcher(proc.Client)
 	server.enableReconnect(proc.Redial)
 
 	keepOwners = true
@@ -738,46 +794,91 @@ func observeHermesStartupStage(ctx context.Context, observe func(context.Context
 }
 
 func (s *hermesServer) Close(ctx context.Context) error {
-	var err error
-
-	s.once.Do(func() {
+	s.admissionOnce.Do(func() {
 		close(s.closed)
 		s.connMu.Lock()
 		if s.turnIdle != nil {
 			s.turnIdle.Broadcast()
 		}
 		s.connMu.Unlock()
+	})
 
+	s.closeMu.Lock()
+	if s.closeSucceeded {
+		s.closeMu.Unlock()
+
+		return nil
+	}
+
+	if attempt := s.closeAttempt; attempt != nil {
+		s.closeMu.Unlock()
+
+		if hook, ok := ctx.Value(serverCloseJoinHookKey{}).(func()); ok {
+			hook()
+		}
+
+		select {
+		case <-attempt.done:
+			return attempt.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	attempt := &hermesServerCloseAttempt{done: make(chan struct{})}
+	s.closeAttempt = attempt
+	s.closeMu.Unlock()
+
+	attempt.err = s.closeAttemptOnce(ctx)
+
+	s.closeMu.Lock()
+	if attempt.err == nil {
+		s.closeSucceeded = true
+	}
+
+	s.closeAttempt = nil
+
+	close(attempt.done)
+	s.closeMu.Unlock()
+
+	return attempt.err
+}
+
+func (s *hermesServer) closeAttemptOnce(ctx context.Context) error {
+	s.shutdownOnce.Do(func() {
 		if gw := s.gatewayClient(); gw != nil {
 			gwErr := gw.Close(1000, "closing")
 			if s.process == nil {
-				err = gwErr
+				s.shutdownErr = gwErr
 			}
 		}
 
-		var processErr error
-		if s.process != nil {
-			processErr = s.process.Close(ctx)
-			err = processErr
-		}
-
+		s.dispatcherWG.Wait()
+		s.stopGatewayActors()
+		s.actorWG.Wait()
 		s.supervisorWG.Wait()
-
-		if s.leasePath != "" {
-			err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
-		}
-
-		// An unproven containment result means descendants may still be writing
-		// this residence. Both claims are retained rather than merely left
-		// unreleased: an unreachable owner has its descriptor closed by the
-		// *os.File finalizer, which would drop the kernel lock silently.
-		if errors.Is(processErr, ErrProcessContainmentIncomplete) {
-			s.sharedSessionOwner.Retain()
-			s.sharedHomeOwner.Retain()
-		} else {
-			err = errors.Join(err, s.sharedSessionOwner.Release(), s.sharedHomeOwner.Release())
-		}
+		s.turnLease.Lock()
+		s.transportCloseWG.Wait()
+		close(s.deliveries)
+		s.turnLease.Unlock()
 	})
+
+	err := s.shutdownErr
+	if s.closeNative != nil {
+		err = errors.Join(err, s.closeNative(ctx))
+	} else if s.process != nil {
+		err = errors.Join(err, s.process.Close(ctx))
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if s.leasePath != "" {
+		err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
+	}
+
+	err = errors.Join(err, s.sharedSessionOwner.Release(), s.sharedHomeOwner.Release())
 
 	return err
 }
@@ -808,12 +909,47 @@ func removeLeaseFileIfOwned(path string, owner ServerLease) error {
 	return os.Remove(path)
 }
 
-func (s *hermesServer) Events() <-chan TurnEvent {
-	return s.events
+type TurnDelivery struct {
+	Event *TurnEvent
+	Err   error
 }
 
-func (s *hermesServer) EventErrors() <-chan error {
-	return s.errs
+func (s *hermesServer) Deliveries() <-chan TurnDelivery {
+	return s.deliveries
+}
+
+func (s *hermesServer) publishTurnEvent(event TurnEvent) error {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+
+	if len(s.deliveries) >= cap(s.deliveries)-1 {
+		return ErrGatewayMappedOverflow
+	}
+
+	copyEvent := event
+	s.deliveries <- TurnDelivery{Event: &copyEvent}
+
+	return nil
+}
+
+func (s *hermesServer) publishTurnError(err error) {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+
+	if s.deliveryTerminal != nil {
+		return
+	}
+
+	if err == nil {
+		err = errGatewayStreamClosed
+	}
+
+	s.deliveryTerminal = err
+
+	select {
+	case s.deliveries <- TurnDelivery{Err: err}:
+	default:
+	}
 }
 
 func (s *hermesServer) XDGDirs() XDGDirs {
@@ -966,17 +1102,13 @@ func gatewayEventFailure(payload json.RawMessage) *TurnFailureError {
 	return failure
 }
 
-// gatewayDisconnectCause recovers the real transport error the read loop parked
-// on the gateway error channel before it closed. It falls back to the stream
-// closed sentinel when the connection ended without a specific error (a clean
-// close), so the turn never surfaces a bare or generic disconnect string.
+// gatewayDisconnectCause recovers the terminal cause recorded by the sole
+// ordered reader. A clean close has no cause and maps to the closed sentinel.
 func gatewayDisconnectCause(gw *Client) error {
-	select {
-	case err, ok := <-gw.Errors():
-		if ok && err != nil {
+	if gw != nil {
+		if err := gw.terminalCause(); err != nil {
 			return err
 		}
-	default:
 	}
 
 	return errGatewayStreamClosed
@@ -985,10 +1117,19 @@ func gatewayDisconnectCause(gw *Client) error {
 // gatewayClient returns the current live gateway client. A reconnect can swap
 // it, so all callers read it through this accessor under connMu.
 func (s *hermesServer) gatewayClient() *Client {
+	transport := s.gatewayTransport()
+	if transport != nil {
+		return transport.client
+	}
+
+	return nil
+}
+
+func (s *hermesServer) gatewayTransport() *gatewayTransport {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 
-	return s.gateway
+	return s.transport
 }
 
 // enableReconnect wires the idle-reconnect supervisor: it records the redial
@@ -1012,16 +1153,27 @@ func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, er
 	}()
 }
 
-func (s *hermesServer) beginGatewayTurn() {
+func (s *hermesServer) beginGatewayTurn() *gatewayTransport {
+	s.turnLease.RLock()
 	s.connMu.Lock()
 	s.turnBusy++
+
+	transport := s.transport
+	if s.serverClosed() {
+		transport = nil
+	}
 	s.connMu.Unlock()
+
+	return transport
 }
 
 func (s *hermesServer) endGatewayTurn() {
 	s.connMu.Lock()
+	release := false
+
 	if s.turnBusy > 0 {
 		s.turnBusy--
+		release = true
 	}
 
 	cond := s.turnIdle
@@ -1029,6 +1181,10 @@ func (s *hermesServer) endGatewayTurn() {
 
 	if cond != nil {
 		cond.Broadcast()
+	}
+
+	if release {
+		s.turnLease.RUnlock()
 	}
 }
 
@@ -1038,11 +1194,30 @@ func (s *hermesServer) endGatewayTurn() {
 // supervisor waits for the turn to finish before reconnecting.
 func (s *hermesServer) superviseGateway() {
 	for {
-		gw := s.gatewayClient()
+		transport := s.gatewayTransport()
+		if transport == nil || transport.client == nil || transport.dispatcher == nil {
+			return
+		}
+
+		gw := transport.client
 		select {
 		case <-s.closed:
 			return
 		case <-gw.Done():
+		}
+
+		if s.afterGatewayClientDone != nil {
+			s.afterGatewayClientDone()
+		}
+
+		// Client.Done closes before the dispatcher is necessarily finished. The
+		// dispatcher terminalizes every actor owned by this generation before its
+		// own done barrier closes; publishing a reconnect earlier could rebind a
+		// stored session through the old actor in that gap.
+		select {
+		case <-s.closed:
+			return
+		case <-transport.dispatcher.done:
 		}
 
 		s.connMu.Lock()
@@ -1086,7 +1261,7 @@ func (s *hermesServer) reconnectGateway() {
 
 	if err != nil {
 		if s.log != nil {
-			s.log.Debug("reconnect hermes gateway failed", slog.String(jsonFieldError, err.Error()))
+			s.log.Debug("reconnect hermes gateway failed", slog.String("classification", "dial_failed"))
 		}
 
 		leaseReapSleep(LeaseReapPollInterval)
@@ -1094,26 +1269,16 @@ func (s *hermesServer) reconnectGateway() {
 		return
 	}
 
-	s.connMu.Lock()
-
-	closed := s.serverClosed()
-	if !closed {
-		s.gateway = client
-	}
-	s.connMu.Unlock()
-
-	if closed {
+	if s.serverClosed() {
 		// The server shut down while redialing; discard the new connection.
 		_ = client.Close(1000, "closing")
 
 		return
 	}
-	// Live session ids are runtime-only; force re-resume against the new
-	// connection on next use.
-	s.gatewayMu.Lock()
-	s.liveByStored = map[string]string{}
-	s.storedByLive = map[string]string{}
-	s.gatewayMu.Unlock()
+
+	// Installing publishes the new client, dispatcher, generation, and empty
+	// runtime-only mappings as one coherent transport tuple.
+	s.installGatewayDispatcher(client)
 }
 
 func (s *hermesServer) CreateSession(ctx context.Context, title string) (Session, error) {
@@ -1125,6 +1290,13 @@ func (s *hermesServer) CreateSessionWithDraft(
 	title string,
 	bindDraft func(SessionDraft) error,
 ) (Session, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return Session{}, ErrGatewayDisconnected
+	}
+
 	params := map[string]any{jsonFieldCwd: s.cwd, keySource: valACPGoHermes}
 	if title != "" {
 		params[keyTitle] = title
@@ -1137,7 +1309,19 @@ func (s *hermesServer) CreateSessionWithDraft(
 		}
 	}
 
-	result, err := s.gatewayClient().CreateSession(ctx, params)
+	handshake, err := s.beginGatewayHandshake(ctx, transport, gatewayHandshakeCreate)
+	if err != nil {
+		return Session{}, err
+	}
+
+	bound := false
+	defer func() {
+		if !bound {
+			_ = s.cancelGatewayHandshake(transport, handshake)
+		}
+	}()
+
+	result, sequence, err := transport.client.CreateSessionWatermark(ctx, params)
 	if err != nil {
 		return Session{}, err
 	}
@@ -1156,7 +1340,7 @@ func (s *hermesServer) CreateSessionWithDraft(
 			StoredSessionID: result.StoredSessionID,
 		}); bindErr != nil {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
+			closeErr := transport.client.CloseSession(cleanupCtx, result.SessionID)
 
 			cleanupCancel()
 
@@ -1168,7 +1352,20 @@ func (s *hermesServer) CreateSessionWithDraft(
 		}
 	}
 
-	s.rememberGatewaySession(result.StoredSessionID, result.SessionID)
+	if s.beforeHandshakeBind != nil {
+		s.beforeHandshakeBind(gatewayHandshakeCreate, handshake)
+	}
+
+	bindResult := s.bindGatewayHandshake(ctx, transport, handshake, gatewayHandshakeCreate,
+		result.StoredSessionID, result.SessionID, GatewayWatermark{
+			TransportGeneration: transport.generation,
+			Sequence:            sequence,
+		})
+	if bindResult.err != nil {
+		return Session{}, bindResult.err
+	}
+
+	bound = true
 
 	// Hermes session.create intentionally leaves a draft only in the live
 	// gateway. session.title is the native persistence boundary for an otherwise
@@ -1178,26 +1375,26 @@ func (s *hermesServer) CreateSessionWithDraft(
 	// resumed after an interrupt or process restart.
 	durableTitle := firstNonEmpty(title, "Hermes session")
 
-	titleResult, err := s.gatewayClient().SetSessionTitle(ctx, result.SessionID, durableTitle)
+	titleResult, err := transport.client.SetSessionTitle(ctx, result.SessionID, durableTitle)
 	if err != nil {
-		s.forgetGatewaySession(result.StoredSessionID)
+		s.dropGatewayBindingOn(transport, result.StoredSessionID)
 
 		return Session{}, fmt.Errorf("persist Hermes session: %w", err)
 	}
 
 	if titleResult.Pending {
-		s.forgetGatewaySession(result.StoredSessionID)
+		s.dropGatewayBindingOn(transport, result.StoredSessionID)
 
 		return Session{}, fmt.Errorf("persist Hermes session: session.title remained pending")
 	}
 
 	if titleResult.Title != durableTitle {
-		s.forgetGatewaySession(result.StoredSessionID)
+		s.dropGatewayBindingOn(transport, result.StoredSessionID)
 
 		return Session{}, fmt.Errorf("persist Hermes session: session.title response missing durable title")
 	}
 
-	persisted, err := s.PersistedSessions(ctx)
+	persisted, err := s.persistedSessionsOn(ctx, transport)
 	if err != nil {
 		return Session{}, fmt.Errorf("verify persisted Hermes session: %w", err)
 	}
@@ -1212,46 +1409,35 @@ func (s *hermesServer) CreateSessionWithDraft(
 }
 
 func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return Session{}, ErrGatewayDisconnected
+	}
+
 	storedID := id
-	if s.liveSessionID(id) == "" {
-		active, err := s.gatewayClient().ActiveList(ctx)
-		if err == nil {
-			for _, item := range active.Sessions {
-				if item.SessionID == "" {
-					return Session{}, fmt.Errorf("hermes active_list response missing id")
-				}
-
-				if item.SessionKey == "" {
-					return Session{}, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
-				}
-
-				s.rememberGatewaySession(item.SessionKey, item.SessionID)
-
-				if item.SessionKey == id {
-					return s.nativeSessionFromGateway(id, item.Title), nil
-				}
-			}
-		}
-
-		result, err := s.resumeGatewaySession(ctx, id)
+	if s.liveSessionIDOn(transport, id) == "" {
+		result, err := s.resumeGatewaySessionOn(ctx, transport, id)
 		if err != nil {
 			return Session{}, err
 		}
 
-		stored, err := s.storedSessionIDFromResume(result)
-		if err != nil {
-			return Session{}, err
-		}
-
-		s.rememberGatewaySession(stored, result.SessionID)
-		storedID = stored
+		storedID = result.SessionKey // resumeGatewaySessionOn validated both native identities.
 	}
 
 	return s.nativeSessionFromGateway(storedID, ""), nil
 }
 
 func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]Session, error) {
-	active, err := s.gatewayClient().ActiveList(ctx)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return nil, ErrGatewayDisconnected
+	}
+
+	active, err := transport.client.ActiveList(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1266,7 +1452,6 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]Session,
 			return nil, fmt.Errorf("hermes active_list response missing session_key for live session %q", item.SessionID)
 		}
 
-		s.rememberGatewaySession(item.SessionKey, item.SessionID)
 		session := s.nativeSessionFromGateway(item.SessionKey, item.Title)
 
 		session.Directory = firstNonEmpty(item.Cwd, s.cwd)
@@ -1279,7 +1464,18 @@ func (s *hermesServer) ListSessions(ctx context.Context, cwd string) ([]Session,
 }
 
 func (s *hermesServer) PersistedSessions(ctx context.Context) ([]Session, error) {
-	result, err := s.gatewayClient().PersistedSessions(ctx)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return nil, ErrGatewayDisconnected
+	}
+
+	return s.persistedSessionsOn(ctx, transport)
+}
+
+func (s *hermesServer) persistedSessionsOn(ctx context.Context, transport *gatewayTransport) ([]Session, error) {
+	result, err := transport.client.PersistedSessions(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1301,37 +1497,45 @@ func (s *hermesServer) PersistedSessions(ctx context.Context) ([]Session, error)
 }
 
 func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
-	live := s.liveSessionID(id)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return ErrGatewayDisconnected
+	}
+
+	live := s.liveSessionIDOn(transport, id)
 	if live == "" {
-		active, listErr := s.gatewayClient().ActiveList(ctx)
+		active, listErr := transport.client.ActiveList(ctx)
 		if listErr != nil && !IsNotFound(listErr) {
 			return fmt.Errorf("list live Hermes sessions before delete: %w", listErr)
 		}
 
 		for _, item := range active.Sessions {
-			if item.SessionKey == id {
-				if item.SessionID == "" {
-					return fmt.Errorf("hermes active_list response missing id for stored session %q", id)
-				}
-
-				live = item.SessionID
-				s.rememberGatewaySession(id, live)
-
-				break
+			if item.SessionKey != id {
+				continue
 			}
+
+			if item.SessionID == "" {
+				return fmt.Errorf("hermes active_list response missing id for stored session %q", id)
+			}
+
+			live = item.SessionID
+
+			break
 		}
 	}
 
 	if live != "" {
-		closeErr := s.gatewayClient().CloseSession(ctx, live)
+		closeErr := transport.client.CloseSession(ctx, live)
 		if closeErr != nil && !IsNotFound(closeErr) {
 			return fmt.Errorf("close Hermes session before delete: %w", closeErr)
 		}
 	}
 
-	s.forgetGatewaySession(id)
+	s.dropGatewayBindingOn(transport, id)
 
-	err := s.gatewayClient().DeleteSession(ctx, id)
+	err := transport.client.DeleteSession(ctx, id)
 	if IsNotFound(err) {
 		err = nil
 	}
@@ -1344,8 +1548,15 @@ func (s *hermesServer) DeleteSession(ctx context.Context, id string) error {
 // the native process starts, which is too early for hosts that arm an
 // authorization-scoped MCP endpoint only after session/new has returned.
 func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return ErrGatewayDisconnected
+	}
+
 	for attempt := 0; ; attempt++ {
-		live, err := s.ensureLiveGatewaySession(ctx, id)
+		live, err := s.ensureLiveGatewaySessionOn(ctx, transport, id)
 		if err != nil {
 			return err
 		}
@@ -1354,7 +1565,7 @@ func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
 			Status string `json:"status"`
 		}
 
-		err = s.gatewayClient().Call(ctx, "reload.mcp", map[string]any{
+		err = transport.client.Call(ctx, "reload.mcp", map[string]any{
 			keySessionIDSnake: live,
 			"confirm":         true,
 		}, &result)
@@ -1362,7 +1573,7 @@ func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
 			// A reconnect or native reload can retire the runtime-only live id.
 			// Forget only that routing cache entry, resume the durable key once,
 			// and repeat the idempotent reload against the rebound live session.
-			s.forgetGatewaySession(id)
+			s.dropGatewayBindingOn(transport, id)
 
 			continue
 		}
@@ -1380,13 +1591,20 @@ func (s *hermesServer) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (s *hermesServer) SendMessage(ctx context.Context, id string, req MessageRequest) (NativeMessage, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return NativeMessage{}, ErrGatewayDisconnected
+	}
+
 	if req.Model != nil {
-		if err := s.SetModel(ctx, id, ModelSelectionValue(req.Model.ProviderID, req.Model.ModelID)); err != nil {
+		if err := s.setModelOn(ctx, transport, id, ModelSelectionValue(req.Model.ProviderID, req.Model.ModelID)); err != nil {
 			return NativeMessage{}, err
 		}
 	}
 
-	return s.submitGatewayParts(ctx, id, req.Parts)
+	return s.submitGatewayPartsOn(ctx, transport, id, req.Parts)
 }
 
 // ModelSelectionValue qualifies one official model row with its owning
@@ -1430,64 +1648,50 @@ func assistantMessageError(message NativeMessage) error {
 	return fmt.Errorf("hermes assistant error: %s", detail)
 }
 
-func (s *hermesServer) rememberGatewaySession(stored string, live string) {
-	if stored == "" || live == "" {
+func (s *hermesServer) dropGatewayBindingOn(transport *gatewayTransport, stored string) {
+	if transport == nil || transport.mappings == nil {
 		return
 	}
 
-	s.gatewayMu.Lock()
-	defer s.gatewayMu.Unlock()
+	mappings := transport.mappings
+	mappings.mu.Lock()
+	defer mappings.mu.Unlock()
 
-	s.liveByStored[stored] = live
-	s.storedByLive[live] = stored
-}
-
-func (s *hermesServer) forgetGatewaySession(stored string) {
-	s.gatewayMu.Lock()
-	defer s.gatewayMu.Unlock()
-
-	live := s.liveByStored[stored]
-	delete(s.liveByStored, stored)
-
-	if live != "" {
-		delete(s.storedByLive, live)
-	}
+	delete(mappings.bindings, stored)
 }
 
 func (s *hermesServer) liveSessionID(stored string) string {
-	s.gatewayMu.Lock()
-	defer s.gatewayMu.Unlock()
-
-	return s.liveByStored[stored]
+	return s.liveSessionIDOn(s.gatewayTransport(), stored)
 }
 
-func (s *hermesServer) anyLiveSessionID() string {
-	s.gatewayMu.Lock()
-	defer s.gatewayMu.Unlock()
-
-	for _, live := range s.liveByStored {
-		return live
+func (s *hermesServer) liveSessionIDOn(transport *gatewayTransport, stored string) string {
+	if transport == nil || transport.mappings == nil {
+		return ""
 	}
 
-	return ""
+	transport.mappings.mu.Lock()
+	defer transport.mappings.mu.Unlock()
+
+	return transport.mappings.bindings[stored].live
 }
 
 func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored string) (string, error) {
-	if live := s.liveSessionID(stored); live != "" {
+	return s.ensureLiveGatewaySessionOn(ctx, s.gatewayTransport(), stored)
+}
+
+func (s *hermesServer) ensureLiveGatewaySessionOn(
+	ctx context.Context,
+	transport *gatewayTransport,
+	stored string,
+) (string, error) {
+	if live := s.liveSessionIDOn(transport, stored); live != "" {
 		return live, nil
 	}
 
-	result, err := s.resumeGatewaySession(ctx, stored)
+	result, err := s.resumeGatewaySessionOn(ctx, transport, stored)
 	if err != nil {
 		return "", err
 	}
-
-	resolvedStored, err := s.storedSessionIDFromResume(result)
-	if err != nil {
-		return "", err
-	}
-
-	s.rememberGatewaySession(resolvedStored, result.SessionID)
 
 	return result.SessionID, nil
 }
@@ -1496,8 +1700,52 @@ func (s *hermesServer) ensureLiveGatewaySession(ctx context.Context, stored stri
 // agent before publishing its live id. Hermes 0.20 otherwise returns from a
 // cold resume while a background build is still pending; a config.set sent in
 // that window can report success and then be overwritten by the stale build.
-func (s *hermesServer) resumeGatewaySession(ctx context.Context, stored string) (SessionResumeResult, error) {
-	return s.gatewayClient().ResumeSession(ctx, stored, map[string]any{keyEagerBuild: true})
+func (s *hermesServer) resumeGatewaySessionOn(
+	ctx context.Context,
+	transport *gatewayTransport,
+	stored string,
+) (SessionResumeResult, error) {
+	if transport == nil {
+		return SessionResumeResult{}, ErrGatewayDisconnected
+	}
+
+	handshake, err := s.beginGatewayHandshake(ctx, transport, gatewayHandshakeResume)
+	if err != nil {
+		return SessionResumeResult{}, err
+	}
+
+	bound := false
+	defer func() {
+		if !bound {
+			_ = s.cancelGatewayHandshake(transport, handshake)
+		}
+	}()
+
+	result, sequence, err := transport.client.ResumeSessionWatermark(ctx, stored, map[string]any{keyEagerBuild: true})
+	if err != nil {
+		return SessionResumeResult{}, err
+	}
+
+	resolvedStored, err := s.storedSessionIDFromResume(result)
+	if err != nil {
+		return SessionResumeResult{}, err
+	}
+
+	if s.beforeHandshakeBind != nil {
+		s.beforeHandshakeBind(gatewayHandshakeResume, handshake)
+	}
+
+	bindResult := s.bindGatewayHandshake(ctx, transport, handshake, gatewayHandshakeResume, resolvedStored, result.SessionID, GatewayWatermark{
+		TransportGeneration: transport.generation,
+		Sequence:            sequence,
+	})
+	if bindResult.err != nil {
+		return SessionResumeResult{}, bindResult.err
+	}
+
+	bound = true
+
+	return result, nil
 }
 
 func (s *hermesServer) storedSessionIDFromResume(result SessionResumeResult) (string, error) {
@@ -1573,24 +1821,40 @@ func imageAttachmentsFromHermesParts(parts []map[string]any) ([][]byte, error) {
 }
 
 func (s *hermesServer) submitGatewayParts(ctx context.Context, stored string, parts []map[string]any) (NativeMessage, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return NativeMessage{}, ErrGatewayDisconnected
+	}
+
+	return s.submitGatewayPartsOn(ctx, transport, stored, parts)
+}
+
+func (s *hermesServer) submitGatewayPartsOn(
+	ctx context.Context,
+	transport *gatewayTransport,
+	stored string,
+	parts []map[string]any,
+) (NativeMessage, error) {
 	attachments, err := imageAttachmentsFromHermesParts(parts)
 	if err != nil {
 		return NativeMessage{}, err
 	}
 
 	for attempt := 0; ; attempt++ {
-		live, liveErr := s.ensureLiveGatewaySession(ctx, stored)
+		live, liveErr := s.ensureLiveGatewaySessionOn(ctx, transport, stored)
 		if liveErr != nil {
 			return NativeMessage{}, liveErr
 		}
 
-		message, submitErr := s.submitGatewayTextForLive(ctx, stored, live, textFromHermesParts(parts), attachments)
+		message, submitErr := s.submitGatewayTextForLive(ctx, transport, stored, live, textFromHermesParts(parts), attachments)
 		if IsNotFound(submitErr) && attempt == 0 {
 			// A 4007 RPC response means Hermes rejected the prompt before
 			// admission. Re-resume the durable session and retry exactly once;
 			// errors after admission are event/transport failures and never enter
 			// this branch, so a model turn cannot be duplicated.
-			s.forgetGatewaySession(stored)
+			s.dropGatewayBindingOn(transport, stored)
 
 			continue
 		}
@@ -1601,203 +1865,283 @@ func (s *hermesServer) submitGatewayParts(ctx context.Context, stored string, pa
 
 func (s *hermesServer) submitGatewayTextForLive(
 	ctx context.Context,
+	transport *gatewayTransport,
 	stored string,
 	live string,
 	text string,
 	attachments [][]byte,
 ) (NativeMessage, error) {
-	s.beginGatewayTurn()
-	defer s.endGatewayTurn()
+	if transport == nil {
+		return NativeMessage{}, ErrGatewayDisconnected
+	}
 
-	gw := s.gatewayClient()
+	gw := transport.client
 	for _, attachment := range attachments {
 		if err := gw.AttachImageBytes(ctx, live, attachment); err != nil {
 			return NativeMessage{}, err
 		}
 	}
 
-	messageID := "hermes-" + live
-	if err := gw.SubmitPrompt(ctx, live, text); err != nil {
-		return NativeMessage{}, err
+	actor := s.actorForTransportSession(transport, stored, live)
+	generation := transport.generation
+
+	if actor == nil {
+		return NativeMessage{}, gatewayDispatcherCause(transport.dispatcher)
 	}
 
-	// The gateway acknowledged the frame, so it owns this turn from here. The
-	// dispatch point is reported before the loop below forwards anything the
-	// frame causes, which is what lets a caller record acceptance ahead of every
-	// event attributed to it.
-	if err := NotifyPromptDispatch(ctx); err != nil {
-		return NativeMessage{}, err
-	}
+	result := make(chan gatewayCycleResult, 1)
+	registered := make(chan gatewayPromptHandle, 1)
 
-	var textBuilder strings.Builder
+	s.connMu.Lock()
+	s.registrations++
+	registrationID := fmt.Sprintf("hermes/%s/registration-%d", stored, s.registrations)
+	s.connMu.Unlock()
 
-	activeToolCalls := map[string]struct{}{}
-	toolCallStates := map[string]gatewayActiveTool{}
-	toolParts := make([]Part, 0)
+	registration := &gatewayPromptRegistration{id: registrationID, result: result, reply: registered}
+	accepted := false
+	acceptedWatermark := uint64(0)
+	cancelRegistration := func(cause error) error {
+		registration.cancel(cause)
 
-	for {
+		done := make(chan struct{})
+		if !actor.enqueue(gatewayActorMessage{cancel: &gatewayPromptCancel{
+			registrationID: registrationID,
+			err:            cause,
+			accepted:       accepted,
+			generation:     generation,
+			watermark:      acceptedWatermark,
+			done:           done,
+		}}) {
+			cause := actor.enqueueCause()
+			s.failGatewayTransport(transport, cause)
+
+			return cause
+		}
+
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer waitCancel()
+
 		select {
-		case event, ok := <-gw.Events():
-			if !ok {
-				// The event channel closes when the gateway connection
-				// terminates; fence the turn as a disconnect carrying the real
-				// transport cause the read loop parked before closing.
-				return NativeMessage{}, s.reportGatewayDisconnect(gatewayDisconnectCause(gw))
+		case <-done:
+			return nil
+		case <-actor.done:
+			return nil
+		case <-waitCtx.Done():
+			s.failGatewayTransport(transport, waitCtx.Err())
+
+			return waitCtx.Err()
+		}
+	}
+
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseRegister, actor)
+	}
+
+	if !actor.enqueue(gatewayActorMessage{register: registration}) {
+		cause := actor.enqueueCause()
+		s.failGatewayTransport(transport, cause)
+
+		return NativeMessage{}, cause
+	}
+
+	var handle gatewayPromptHandle
+	select {
+	case handle = <-registered:
+	case <-actor.done:
+		return NativeMessage{}, gatewayDispatcherCause(transport.dispatcher)
+	case <-ctx.Done():
+		cancelErr := cancelRegistration(ctx.Err())
+
+		return NativeMessage{}, errors.Join(ctx.Err(), cancelErr)
+	}
+
+	if handle.err != nil {
+		return NativeMessage{}, handle.err
+	}
+
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseSubmit, actor)
+	}
+
+	submit, watermark, ambiguous, err := gw.SubmitPromptWatermark(ctx, live, text)
+	if err != nil {
+		accepted = ambiguous
+		acceptedWatermark = watermark
+
+		cancelErr := cancelRegistration(err)
+		if ambiguous {
+			cause := errors.Join(err, cancelErr)
+			s.failGatewayTransport(transport, cause)
+
+			if ctx.Err() != nil {
+				return NativeMessage{}, errors.Join(ctx.Err(), cancelErr)
 			}
 
-			if event.SessionID != "" && event.SessionID != live {
-				continue
-			}
+			return NativeMessage{}, gatewayTransportFailure(cause)
+		}
 
-			switch event.Type {
-			case evtApprovalRequest:
-				if err := s.forwardGatewayPermission(ctx, stored, live, messageID, uniqueGatewayToolCallID(activeToolCalls), event); err != nil {
-					return NativeMessage{}, err
-				}
-			case evtClarifyRequest:
-				if err := s.forwardGatewayQuestion(ctx, stored, live, event); err != nil {
-					return NativeMessage{}, err
-				}
-			case evtTerminalReadReq, evtSudoRequest, evtSecretRequest:
-				s.declineGatewayQuestion(ctx, live, event.Type)
-			case evtSessionError:
-				return NativeMessage{}, gatewayEventFailure(event.Payload)
-			case evtToolStart:
-				if part, ok := gatewayToolPart(stored, messageID, event, gatewayActiveTool{}); ok {
-					activeToolCalls[part.CallID] = struct{}{}
+		return NativeMessage{}, errors.Join(err, cancelErr)
+	}
 
-					toolCallStates[part.CallID] = gatewayActiveTool{
-						rawInput: append(json.RawMessage(nil), event.Payload...),
-						name:     part.Tool,
-					}
+	if submit.Status != "streaming" {
+		ambiguity := fmt.Errorf(
+			"%w: prompt.submit returned status %q instead of immediate stream ownership",
+			ErrGatewayAmbiguousTurn,
+			submit.Status,
+		)
+		accepted = true
+		acceptedWatermark = watermark
+		cancelErr := cancelRegistration(ambiguity)
+		cause := errors.Join(ambiguity, cancelErr)
+		s.failGatewayTransport(transport, cause)
 
-					toolParts = append(toolParts, part)
-					if err := s.forwardGatewayToolPart(ctx, part, event); err != nil {
-						return NativeMessage{}, err
-					}
-				}
-			case evtToolComplete:
-				toolCallID := gatewayToolCallID(event.Payload)
-				if part, ok := gatewayToolPart(stored, messageID, event, toolCallStates[toolCallID]); ok {
-					delete(activeToolCalls, part.CallID)
-					delete(toolCallStates, part.CallID)
+		return NativeMessage{}, gatewayTransportFailure(cause)
+	}
 
-					toolParts = append(toolParts, part)
-					if err := s.forwardGatewayToolPart(ctx, part, event); err != nil {
-						return NativeMessage{}, err
-					}
-				}
-			case evtMessageDelta, evtThinkingDelta:
-				// Both deltas name their chunk `text`. message.delta may also
-				// carry `rendered`, an ANSI copy for terminal display that is
-				// never the chunk this adapter forwards.
-				chunk := gatewayPayloadString(event.Payload, valText)
-				if chunk == "" {
-					continue
-				}
+	accepted = true
+	acceptedWatermark = watermark
 
-				if event.Type == evtMessageDelta {
-					textBuilder.WriteString(chunk)
-				}
+	failAccepted := func(cause error) error {
+		cancelErr := cancelRegistration(cause)
+		joined := errors.Join(cause, cancelErr)
+		s.failGatewayTransport(transport, joined)
 
-				if err := s.forwardGatewayPart(ctx, stored, messageID, event, chunk); err != nil {
-					return NativeMessage{}, err
-				}
-			case evtMessageComplete:
-				if failure := gatewayCompleteFailure(event.Payload); failure != nil {
-					return NativeMessage{}, failure
-				}
+		return joined
+	}
 
-				tokens := gatewayUsageTokens(event.Payload)
-				streamedText := textBuilder.String()
-				completeText := gatewayCompleteText(event.Payload)
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseSynchronize, actor)
+	}
 
-				if completeText == "" {
-					completeText = streamedText
-				}
+	if err := s.synchronizeGatewayWatermark(ctx, transport, watermark); err != nil {
+		cause := failAccepted(err)
 
-				parts := append([]Part(nil), toolParts...)
-				parts = append(parts, Part{
-					ID:           messageID + "-text",
-					SessionID:    stored,
-					MessageID:    messageID,
-					Type:         valText,
-					Text:         completeText,
-					StreamedText: streamedText,
-				})
+		if ctx.Err() != nil {
+			return NativeMessage{}, ctx.Err()
+		}
 
-				return NativeMessage{
-					Info: NativeMessageInfo{
-						ID:            messageID,
-						SessionID:     stored,
-						Role:          valAssistant,
-						Finish:        valStop,
-						Tokens:        tokens,
-						ContextWindow: gatewayContextWindow(event.Payload),
-					},
-					Parts: parts,
-				}, nil
+		return NativeMessage{}, gatewayTransportFailure(cause)
+	}
+
+	watermarkReply := make(chan gatewayPromptWatermarkResult, 1)
+
+	command := &gatewayPromptWatermark{cycleID: handle.cycleID, watermark: watermark, reply: watermarkReply}
+
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseWatermark, actor)
+	}
+
+	if !actor.enqueue(gatewayActorMessage{watermark: command}) {
+		cause := actor.enqueueCause()
+		_ = failAccepted(cause)
+
+		return NativeMessage{}, cause
+	}
+
+	var watermarkResult gatewayPromptWatermarkResult
+	select {
+	case watermarkResult = <-watermarkReply:
+	case <-actor.done:
+		cause := gatewayDispatcherCause(transport.dispatcher)
+		cause = failAccepted(cause)
+
+		return NativeMessage{}, gatewayTransportFailure(cause)
+	case <-ctx.Done():
+		cancelErr := failAccepted(ctx.Err())
+
+		return NativeMessage{}, errors.Join(ctx.Err(), cancelErr)
+	case <-s.closed:
+		_ = failAccepted(ErrGatewayDisconnected)
+
+		return NativeMessage{}, ErrGatewayDisconnected
+	}
+
+	if watermarkResult.err != nil {
+		_ = failAccepted(watermarkResult.err)
+
+		return NativeMessage{}, watermarkResult.err
+	}
+
+	for _, projection := range watermarkResult.projections {
+		select {
+		case projectionErr := <-projection.done:
+			if projectionErr != nil {
+				_ = failAccepted(projectionErr)
+
+				return NativeMessage{}, projectionErr
 			}
 		case <-ctx.Done():
+			_ = failAccepted(ctx.Err())
+
 			return NativeMessage{}, ctx.Err()
 		}
 	}
-}
 
-// reportGatewayDisconnect feeds the real mid-turn disconnect cause into the
-// server error channel that the prompt loop watches via EventErrors and returns
-// a transport turn failure carrying that same cause. The failure unwraps to
-// ErrGatewayDisconnected so the prompt loop fences the stream exactly once,
-// while data.message reports the real cause instead of a generic string.
-func (s *hermesServer) reportGatewayDisconnect(cause error) error {
-	if cause == nil {
-		cause = errGatewayStreamClosed
+	dispatch := PromptDispatchInfo{
+		CycleID:             handle.cycleID,
+		TransportGeneration: generation,
+	}
+	if err := NotifyPromptDispatch(ctx, dispatch); err != nil {
+		_ = failAccepted(err)
+
+		return NativeMessage{}, err
+	}
+
+	releaseReply := make(chan error, 1)
+
+	release := &gatewayPromptRelease{cycleID: handle.cycleID, reply: releaseReply}
+
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseRelease, actor)
+	}
+
+	if !actor.enqueue(gatewayActorMessage{release: release}) {
+		cause := actor.enqueueCause()
+		_ = failAccepted(cause)
+
+		return NativeMessage{}, cause
 	}
 
 	select {
-	case s.errs <- StreamError{err: cause}:
-	default:
-	}
+	case err := <-releaseReply:
+		if err != nil {
+			_ = failAccepted(err)
 
-	return &TurnFailureError{cause: CauseTransport, message: cause.Error(), wrapped: ErrGatewayDisconnected}
-}
+			return NativeMessage{}, err
+		}
+	case <-actor.done:
+		cause := gatewayDispatcherCause(transport.dispatcher)
+		cause = failAccepted(cause)
 
-// forwardGatewayPart hands one assistant text or thinking delta to the turn
-// event channel. It blocks on the caller's context rather than discarding the
-// delta when the buffer is full: this session's stream advertises delivery
-// between prompts and drops nothing, and a silently discarded delta would
-// falsify that with no error and no gap for a consumer to notice.
-func (s *hermesServer) forwardGatewayPart(ctx context.Context, stored string, messageID string, event Event, text string) error {
-	partType := valText
-	if event.Type == evtThinkingDelta {
-		partType = valReasoning
-	}
-
-	part := Part{
-		ID:        messageID + "-" + partType,
-		SessionID: stored,
-		MessageID: messageID,
-		Type:      partType,
-		Text:      text,
-		Raw:       event.Raw,
-	}
-
-	data, _ := json.Marshal(part)
-	select {
-	case s.events <- TurnEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
-		return nil
+		return NativeMessage{}, gatewayTransportFailure(cause)
 	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
+		_ = failAccepted(ctx.Err())
 
-func (s *hermesServer) forwardGatewayToolPart(ctx context.Context, part Part, event Event) error {
-	data := append(json.RawMessage(nil), part.Raw...)
+		return NativeMessage{}, ctx.Err()
+	case <-s.closed:
+		_ = failAccepted(ErrGatewayDisconnected)
+
+		return NativeMessage{}, ErrGatewayDisconnected
+	}
+
+	if s.beforePromptPhase != nil {
+		s.beforePromptPhase(promptPhaseResult, actor)
+	}
+
 	select {
-	case s.events <- TurnEvent{Type: evtMessagePartUpdated, Properties: data, Raw: event.Raw}:
-		return nil
+	case completed, ok := <-handle.result:
+		if !ok {
+			resultErr := errors.New("hermes gateway prompt cycle closed without a result")
+			_ = failAccepted(resultErr)
+
+			return NativeMessage{}, resultErr
+		}
+
+		return completed.message, completed.err
 	case <-ctx.Done():
-		return ctx.Err()
+		_ = failAccepted(ctx.Err())
+
+		return NativeMessage{}, ctx.Err()
 	}
 }
 
@@ -1838,7 +2182,7 @@ func gatewayToolPart(
 		}
 	}
 
-	state := map[string]any{"status": status}
+	state := map[string]any{jsonFieldStatus: status}
 
 	switch {
 	case event.Type == evtToolComplete && len(payload.Args) > 0:
@@ -2017,36 +2361,6 @@ func gatewayPolishedTool(toolName string) bool {
 	}
 }
 
-func (s *hermesServer) forwardGatewayPermission(
-	ctx context.Context,
-	stored string,
-	live string,
-	messageID string,
-	toolCallID string,
-	event Event,
-) error {
-	requestID := "approval-unbound"
-	if toolCallID != "" {
-		requestID = "approval:" + toolCallID
-	}
-
-	req := PermissionRequest{
-		ID:        requestID,
-		SessionID: stored,
-		Action:    firstNonEmpty(gatewayPayloadString(event.Payload, "command"), "approval"),
-		Metadata:  map[string]any{"liveSessionId": live},
-		Tool:      permissionTool{MessageID: messageID, CallID: toolCallID},
-	}
-
-	data, _ := json.Marshal(req)
-	select {
-	case s.events <- TurnEvent{Type: evtApprovalRequest, Properties: data, Raw: event.Raw}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func gatewayToolCallID(raw json.RawMessage) string {
 	return gatewayPayloadString(raw, "tool_id")
 }
@@ -2065,43 +2379,26 @@ func uniqueGatewayToolCallID(active map[string]struct{}) string {
 	return unique
 }
 
-// forwardGatewayQuestion hands one clarify request to the turn event channel,
-// where it becomes an elicitation the host must answer. It blocks on the
-// caller's context for the same reason forwardGatewayPart does, and with a
-// sharper consequence: a discarded question leaves the native side waiting on
-// an answer no host was ever asked for.
-func (s *hermesServer) forwardGatewayQuestion(ctx context.Context, stored string, live string, event Event) error {
-	question := firstNonEmpty(gatewayPayloadString(event.Payload, keyQuestion), gatewayPayloadString(event.Payload, "prompt"), msgHermesNeedsInput)
-	req := QuestionRequest{
-		ID:        firstNonEmpty(gatewayPayloadString(event.Payload, "id"), gatewayPayloadString(event.Payload, "request_id"), "clarify"),
-		SessionID: stored,
-		Questions: []QuestionInfo{{
-			Question: question,
-			Header:   "Hermes question",
-			Custom:   true,
-		}},
+func (s *hermesServer) declineGatewayQuestion(ctx context.Context, generation uint64, live string, eventType string) {
+	s.connMu.Lock()
+	dispatcher := s.dispatchers[generation]
+	current := s.transport != nil && s.transport.generation == generation &&
+		s.transport.dispatcher == dispatcher
+	s.connMu.Unlock()
+
+	if !current || dispatcher == nil || live == "" {
+		return
 	}
 
-	data, _ := json.Marshal(req)
+	client := dispatcher.client
 
-	_ = live
-
-	select {
-	case s.events <- TurnEvent{Type: evtClarifyRequest, Properties: data, Raw: event.Raw}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (s *hermesServer) declineGatewayQuestion(ctx context.Context, live string, eventType string) {
 	switch eventType {
 	case evtTerminalReadReq:
-		_ = s.gatewayClient().Call(ctx, "terminal.read.respond", map[string]any{keySessionIDSnake: live, valText: ""}, nil)
+		_ = client.Call(ctx, "terminal.read.respond", map[string]any{keySessionIDSnake: live, valText: ""}, nil)
 	case evtSudoRequest:
-		_ = s.gatewayClient().Call(ctx, "sudo.respond", map[string]any{keySessionIDSnake: live, "password": ""}, nil)
+		_ = client.Call(ctx, "sudo.respond", map[string]any{keySessionIDSnake: live, "password": ""}, nil)
 	case evtSecretRequest:
-		_ = s.gatewayClient().Call(ctx, "secret.respond", map[string]any{keySessionIDSnake: live, keyValue: ""}, nil)
+		_ = client.Call(ctx, "secret.respond", map[string]any{keySessionIDSnake: live, keyValue: ""}, nil)
 	}
 }
 
@@ -2232,12 +2529,19 @@ func providersFromGateway(result ModelOptionsResult) ProvidersResponse {
 }
 
 func (s *hermesServer) Messages(ctx context.Context, id string) ([]NativeMessage, error) {
-	live, err := s.ensureLiveGatewaySession(ctx, id)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return nil, ErrGatewayDisconnected
+	}
+
+	live, err := s.ensureLiveGatewaySessionOn(ctx, transport, id)
 	if err != nil {
 		return nil, err
 	}
 
-	history, err := s.gatewayClient().History(ctx, live)
+	history, err := transport.client.History(ctx, live)
 	if err != nil {
 		return nil, err
 	}
@@ -2246,16 +2550,30 @@ func (s *hermesServer) Messages(ctx context.Context, id string) ([]NativeMessage
 }
 
 func (s *hermesServer) Abort(ctx context.Context, id string) error {
-	live := s.liveSessionID(id)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return ErrGatewayDisconnected
+	}
+
+	live := s.liveSessionIDOn(transport, id)
 	if live == "" {
 		return nil
 	}
 
-	return s.gatewayClient().Interrupt(ctx, live)
+	return transport.client.Interrupt(ctx, live)
 }
 
 func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (Session, error) {
-	persisted, err := s.PersistedSessions(ctx)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return Session{}, ErrGatewayDisconnected
+	}
+
+	persisted, err := s.persistedSessionsOn(ctx, transport)
 	if err != nil {
 		return Session{}, fmt.Errorf("list Hermes sessions before branch: %w", err)
 	}
@@ -2265,7 +2583,7 @@ func (s *hermesServer) Fork(ctx context.Context, id string, messageID string) (S
 		baseline = append(baseline, session.ID)
 	}
 
-	return s.ForkWithBaseline(ctx, id, messageID, baseline)
+	return s.forkWithBaselineOn(ctx, transport, id, messageID, baseline)
 }
 
 func (s *hermesServer) ForkWithBaseline(
@@ -2274,25 +2592,42 @@ func (s *hermesServer) ForkWithBaseline(
 	marker string,
 	baseline []string,
 ) (Session, error) {
-	live, err := s.ensureLiveGatewaySession(ctx, id)
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return Session{}, ErrGatewayDisconnected
+	}
+
+	return s.forkWithBaselineOn(ctx, transport, id, marker, baseline)
+}
+
+func (s *hermesServer) forkWithBaselineOn(
+	ctx context.Context,
+	transport *gatewayTransport,
+	id string,
+	marker string,
+	baseline []string,
+) (Session, error) {
+	live, err := s.ensureLiveGatewaySessionOn(ctx, transport, id)
 	if err != nil {
 		return Session{}, err
 	}
 
-	result, err := s.gatewayClient().Branch(ctx, live, marker)
+	result, err := transport.client.Branch(ctx, live, marker)
 	if IsNotFound(err) {
-		s.forgetGatewaySession(id)
+		s.dropGatewayBindingOn(transport, id)
 
-		live, err = s.ensureLiveGatewaySession(ctx, id)
+		live, err = s.ensureLiveGatewaySessionOn(ctx, transport, id)
 		if err != nil {
 			return Session{}, err
 		}
 
-		result, err = s.gatewayClient().Branch(ctx, live, marker)
+		result, err = transport.client.Branch(ctx, live, marker)
 	}
 
 	if err != nil {
-		return Session{}, s.recoverFailedBranch(ctx, marker, baseline, err)
+		return Session{}, s.recoverFailedBranch(ctx, transport, marker, baseline, err)
 	}
 
 	if result.SessionID == "" {
@@ -2301,7 +2636,7 @@ func (s *hermesServer) ForkWithBaseline(
 
 	if result.StoredSessionID == "" {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
+		closeErr := transport.client.CloseSession(cleanupCtx, result.SessionID)
 
 		cleanupCancel()
 
@@ -2317,7 +2652,7 @@ func (s *hermesServer) ForkWithBaseline(
 	// process will resume the same stored session, and two live gateways must
 	// never be able to drive it concurrently.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	closeErr := s.gatewayClient().CloseSession(cleanupCtx, result.SessionID)
+	closeErr := transport.client.CloseSession(cleanupCtx, result.SessionID)
 
 	cleanupCancel()
 
@@ -2325,11 +2660,11 @@ func (s *hermesServer) ForkWithBaseline(
 		closeErr = nil
 	}
 
-	s.forgetGatewaySession(result.StoredSessionID)
+	s.dropGatewayBindingOn(transport, result.StoredSessionID)
 
 	if closeErr != nil {
 		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		deleteErr := s.gatewayClient().DeleteSession(deleteCtx, result.StoredSessionID)
+		deleteErr := transport.client.DeleteSession(deleteCtx, result.StoredSessionID)
 
 		deleteCancel()
 
@@ -2343,8 +2678,14 @@ func (s *hermesServer) ForkWithBaseline(
 	return s.nativeSessionFromGateway(result.StoredSessionID, firstNonEmpty(result.Title, "Hermes branch")), nil
 }
 
-func (s *hermesServer) recoverFailedBranch(ctx context.Context, marker string, baseline []string, branchErr error) error {
-	persisted, listErr := s.PersistedSessions(ctx)
+func (s *hermesServer) recoverFailedBranch(
+	ctx context.Context,
+	transport *gatewayTransport,
+	marker string,
+	baseline []string,
+	branchErr error,
+) error {
+	persisted, listErr := s.persistedSessionsOn(ctx, transport)
 	if listErr != nil {
 		return errors.Join(branchErr, fmt.Errorf("list durable Hermes sessions after failed branch: %w", listErr))
 	}
@@ -2373,12 +2714,16 @@ func (s *hermesServer) recoverFailedBranch(ctx context.Context, marker string, b
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cleanupCancel()
 
-	cleanupErr := s.DeleteSession(cleanupCtx, delta[0].ID)
+	cleanupErr := transport.client.DeleteSession(cleanupCtx, delta[0].ID)
+	if IsNotFound(cleanupErr) {
+		cleanupErr = nil
+	}
+
 	if cleanupErr != nil {
 		return errors.Join(branchErr, fmt.Errorf("delete failed Hermes branch %q: %w", delta[0].ID, cleanupErr))
 	}
 
-	remaining, verifyErr := s.PersistedSessions(cleanupCtx)
+	remaining, verifyErr := s.persistedSessionsOn(cleanupCtx, transport)
 	if verifyErr != nil {
 		return errors.Join(branchErr, fmt.Errorf("verify failed Hermes branch cleanup: %w", verifyErr))
 	}
@@ -2392,31 +2737,15 @@ func (s *hermesServer) recoverFailedBranch(ctx context.Context, marker string, b
 	return branchErr
 }
 
-func (s *hermesServer) lookupStoredSessionIDForLive(ctx context.Context, live string, label string) (string, error) {
-	active, err := s.gatewayClient().ActiveList(ctx)
-	if err != nil {
-		return "", fmt.Errorf("%s active_list lookup failed: %w", label, err)
-	}
-
-	for _, item := range active.Sessions {
-		if item.SessionID != live {
-			continue
-		}
-
-		if item.SessionKey == "" {
-			return "", fmt.Errorf("%s active_list missing session_key for live session %q", label, live)
-		}
-
-		return item.SessionKey, nil
-	}
-
-	return "", fmt.Errorf("%s active_list missing live session %q", label, live)
-}
-
 func (s *hermesServer) ConfigProviders(ctx context.Context) (ProvidersResponse, error) {
-	live := s.anyLiveSessionID()
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
 
-	models, err := s.gatewayClient().ModelOptions(ctx, live)
+	if transport == nil {
+		return ProvidersResponse{}, ErrGatewayDisconnected
+	}
+
+	models, err := transport.client.ModelOptions(ctx, "")
 	if err != nil {
 		return ProvidersResponse{}, err
 	}
@@ -2426,15 +2755,26 @@ func (s *hermesServer) ConfigProviders(ctx context.Context) (ProvidersResponse, 
 
 // SetModel applies a session-scoped official gateway model selection.
 func (s *hermesServer) SetModel(ctx context.Context, stored string, value string) error {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return ErrGatewayDisconnected
+	}
+
+	return s.setModelOn(ctx, transport, stored, value)
+}
+
+func (s *hermesServer) setModelOn(ctx context.Context, transport *gatewayTransport, stored string, value string) error {
 	for attempt := 0; ; attempt++ {
-		live, err := s.ensureLiveGatewaySession(ctx, stored)
+		live, err := s.ensureLiveGatewaySessionOn(ctx, transport, stored)
 		if err != nil {
 			return err
 		}
 
-		err = s.gatewayClient().SetModel(ctx, live, value)
+		err = transport.client.SetModel(ctx, live, value)
 		if IsNotFound(err) && attempt == 0 {
-			s.forgetGatewaySession(stored)
+			s.dropGatewayBindingOn(transport, stored)
 
 			continue
 		}
@@ -2452,58 +2792,27 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionReques
 		choice = reply
 	}
 
-	live := s.liveSessionID(req.SessionID)
-	if live == "" {
-		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
+	if req.ID == "" || req.CycleID == "" || req.TransportGeneration == 0 || req.route == nil {
+		return fmt.Errorf("%w: permission transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.gatewayClient().ApprovalRespond(ctx, live, choice, reply == valAlways)
+	return s.completeGatewayControl(ctx, req.route, gatewayControlPermission, choice, reply == valAlways, nil)
 }
 
 func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, answers [][]string) error {
-	live := s.liveSessionID(req.SessionID)
-	if live == "" {
-		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
+	if req.ID == "" || req.CycleID == "" || req.TransportGeneration == 0 || req.route == nil {
+		return fmt.Errorf("%w: question transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.gatewayClient().ClarifyRespond(ctx, live, req.ID, answers)
+	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", false, answers)
 }
 
 func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) error {
-	live := s.liveSessionID(req.SessionID)
-	if live == "" {
-		return MissingLiveSessionMappingError{StoredSessionID: req.SessionID}
+	if req.ID == "" || req.CycleID == "" || req.TransportGeneration == 0 || req.route == nil {
+		return fmt.Errorf("%w: question transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.gatewayClient().ClarifyRespond(ctx, live, req.ID, "")
-}
-
-type StreamError struct {
-	epoch uint64
-	err   error
-}
-
-func (e StreamError) Error() string {
-	return e.err.Error()
-}
-
-func (e StreamError) Unwrap() error {
-	return e.err
-}
-
-// NewStreamError builds a gateway stream error carrying the turn epoch it
-// belongs to, so a late failure from a superseded turn can be ignored.
-func NewStreamError(epoch uint64, err error) StreamError {
-	return StreamError{epoch: epoch, err: err}
-}
-
-func StreamErrorEpoch(err error) uint64 {
-	var streamErr StreamError
-	if errors.As(err, &streamErr) {
-		return streamErr.epoch
-	}
-
-	return 0
+	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", false, "")
 }
 
 // CreateGenerationXDGDirs creates the actual wrapper-owned writable state for

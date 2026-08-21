@@ -213,9 +213,6 @@ func TestPromptMappingHelpers(t *testing.T) {
 	if got := questionOptionSchemas([]nativehermes.QuestionOption{{Label: ""}, {Label: "A"}}); len(got) != 1 {
 		t.Fatalf("questionOptionSchemas = %#v", got)
 	}
-	if _, ok := eventQuestion(json.RawMessage(`{}`)); ok {
-		t.Fatal("empty event question parsed")
-	}
 }
 
 func TestCallForkSessionHelper(t *testing.T) {
@@ -297,7 +294,7 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	if requestError(ctx, errors.New("boom")).Code != -32603 {
 		t.Fatal("generic error did not map to internal error")
 	}
-	gate := newConnectionInputGate(strings.NewReader("x"))
+	gate := newConnectionInputGate(strings.NewReader("x\n"))
 	gate.open()
 	buf := make([]byte, 1)
 	if n, err := gate.Read(buf); n != 1 || err != nil || string(buf) != "x" {

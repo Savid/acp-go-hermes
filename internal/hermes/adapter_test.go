@@ -2,7 +2,6 @@ package hermes
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -32,19 +31,6 @@ func TestTurnFailureErrorAccessors(t *testing.T) {
 	}
 	if bare.StatusCode() != 0 || bare.ProviderCode() != "" {
 		t.Fatalf("bare codes = %d/%q", bare.StatusCode(), bare.ProviderCode())
-	}
-}
-
-func TestStreamErrorHelpers(t *testing.T) {
-	se := NewStreamError(9, errors.New("boom"))
-	if se.Error() != "boom" || errors.Unwrap(se) == nil {
-		t.Fatalf("stream error = %v", se)
-	}
-	if got := StreamErrorEpoch(se); got != 9 {
-		t.Fatalf("epoch = %d, want 9", got)
-	}
-	if got := StreamErrorEpoch(errors.New("plain")); got != 0 {
-		t.Fatalf("non-stream epoch = %d, want 0", got)
 	}
 }
 

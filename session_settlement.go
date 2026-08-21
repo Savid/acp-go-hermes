@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -45,6 +46,40 @@ type promptRun struct {
 	markCancelled   bool
 }
 
+type promptDispatchResult struct {
+	projection <-chan error
+	registered bool
+	err        error
+}
+
+func consumePromptDispatchBeforeResult(
+	dispatched bool,
+	observed bool,
+	results <-chan promptDispatchResult,
+	apply func(promptDispatchResult),
+) {
+	if dispatched && !observed {
+		apply(<-results)
+	}
+}
+
+func (s *session) awaitPromptProjection(turnCtx context.Context, projection <-chan error) *promptRun {
+	select {
+	case projectionErr := <-projection:
+		if projectionErr != nil {
+			run := s.failedRun(turnCtx, projectionErr)
+
+			return &run
+		}
+
+		return nil
+	case <-turnCtx.Done():
+		run := s.cancelledRun()
+
+		return &run
+	}
+}
+
 // turnSettlement is the completion latch close and delete wait on. It is
 // released only once the prompt is wholly settled — the containment boundary,
 // the durable commit, the terminal idle, and the quiescence fact — so a close
@@ -53,8 +88,9 @@ type promptRun struct {
 // settlement's own verdict belongs to the prompt that produced it: close and
 // delete wait for the boundary, they do not inherit its error.
 type turnSettlement struct {
-	done chan struct{}
-	once sync.Once
+	done    chan struct{}
+	once    sync.Once
+	release func()
 }
 
 func (t *turnSettlement) complete() {
@@ -63,6 +99,10 @@ func (t *turnSettlement) complete() {
 	}
 
 	t.once.Do(func() {
+		if t.release != nil {
+			t.release()
+		}
+
 		close(t.done)
 	})
 }
@@ -88,10 +128,16 @@ func (t *turnSettlement) await(ctx context.Context) error {
 // terminal emission the prompt still owes.
 func (s *session) awaitSettlement(ctx context.Context) error {
 	s.mu.Lock()
-	settlement := s.settlement
+	foreground := s.foreground
+	reservation := s.promptReservation
 	s.mu.Unlock()
 
-	return settlement.await(ctx)
+	foregroundErr := foreground.await(ctx)
+	if reservation == foreground {
+		return foregroundErr
+	}
+
+	return errors.Join(foregroundErr, reservation.await(ctx))
 }
 
 // closeLifecycleAdmission stops admitting prompts before close or delete waits
@@ -103,15 +149,23 @@ func (s *session) awaitSettlement(ctx context.Context) error {
 // waits for it.
 func (s *session) closeLifecycleAdmission() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.lifecycleClosing = true
+	reuseCancel := s.reuseCancel
 
-	if !s.turnInFlight || (s.turnSettlement != turnSettlementIdle && s.turnSettlement != turnSettlementOpen) {
-		return false
+	cancelTurn := s.promptReservation != nil && s.turnInFlight &&
+		(s.turnSettlement == turnSettlementIdle || s.turnSettlement == turnSettlementOpen)
+	if cancelTurn {
+		s.turnSettlement = turnSettlementCancelled
+	}
+	s.mu.Unlock()
+
+	if reuseCancel != nil {
+		reuseCancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed}))
 	}
 
-	s.turnSettlement = turnSettlementCancelled
+	if !cancelTurn {
+		return false
+	}
 
 	return true
 }
@@ -453,28 +507,86 @@ func (s *session) runPromptTurn(
 		return promptRun{err: err}
 	}
 
-	type nativeResult struct {
-		message nativehermes.NativeMessage
-		err     error
+	if err := s.synchronizePump(turnCtx); err != nil {
+		if errors.Is(err, errPromptCancelled) || s.observedCancel(turnCtx) {
+			return s.unacceptedCancel(turnEpoch, messageID)
+		}
+
+		abortTurn()
+
+		return promptRun{err: err}
 	}
 
-	var acceptErr error
+	type nativeResult struct {
+		message    nativehermes.NativeMessage
+		err        error
+		dispatched bool
+	}
+
+	var (
+		projectionResult     <-chan error
+		projected            bool
+		projectionRegistered bool
+		acceptErr            error
+		dispatchObserved     bool
+	)
+
+	dispatchResults := make(chan promptDispatchResult, 1)
+	applyDispatch := func(result promptDispatchResult) {
+		dispatchObserved = true
+		projectionResult = result.projection
+		projectionRegistered = result.registered
+		acceptErr = result.err
+	}
 
 	done := make(chan nativeResult, 1)
+
+	var dispatchSent atomic.Bool
 	// Acceptance is emitted at the dispatch linearization point the gateway
 	// reports, so it precedes every event the submitted frame causes and follows
 	// nothing the frame did not cause.
-	dispatchCtx := nativehermes.WithPromptDispatch(turnCtx, func(hookCtx context.Context) error {
-		acceptErr = s.lifecycleStream().accept(hookCtx, submission)
+	dispatchCtx := nativehermes.WithPromptDispatch(turnCtx, func(hookCtx context.Context, info nativehermes.PromptDispatchInfo) error {
+		dispatchSent.Store(true)
 
-		return acceptErr
+		if promotionErr := s.promotePromptForeground(); promotionErr != nil {
+			dispatchResults <- promptDispatchResult{err: promotionErr}
+
+			return promotionErr
+		}
+
+		projectionRoute, projection, registrationErr := s.registerPromptProjection(info, turnNonceFromContext(turnCtx), turnEpoch)
+		if registrationErr != nil {
+			dispatchResults <- promptDispatchResult{err: registrationErr}
+
+			return registrationErr
+		}
+
+		dispatchErr := s.lifecycleStream().accept(hookCtx, submission)
+		if dispatchErr != nil {
+			s.resolvePromptProjection(projectionRoute, dispatchErr)
+		}
+
+		dispatchResults <- promptDispatchResult{
+			projection: projection,
+			registered: true,
+			err:        dispatchErr,
+		}
+
+		return dispatchErr
 	})
 
 	go func() {
-		defer recoverAgentGoroutine(turnCtx, agentLogger(s.agent), "Hermes turn send")
+		defer func() {
+			if recover() != nil {
+				done <- nativeResult{err: nativehermes.NewTurnFailure(
+					nativehermes.CauseTransport,
+					"hermes prompt source corrupted",
+				), dispatched: dispatchSent.Load()}
+			}
+		}()
 
 		message, err := s.client.SendMessage(dispatchCtx, s.idmap.NativeSessionID, req)
-		done <- nativeResult{message: message, err: err}
+		done <- nativeResult{message: message, err: err, dispatched: dispatchSent.Load()}
 	}()
 
 	timeout, stopTimer := s.promptDeadline()
@@ -482,24 +594,38 @@ func (s *session) runPromptTurn(
 
 	for {
 		select {
-		case event := <-s.client.Events():
-			if err := s.handleEvent(turnCtx, event); err != nil {
-				return s.failedRun(turnCtx, err)
-			}
-		case err := <-s.client.EventErrors():
-			// Cancel guard runs before all failure mapping: a stream error
-			// observed while the turn is cancelled stays cancelled.
-			cancelled := s.observedCancel(turnCtx)
-			s.markStreamFailed(nativehermes.StreamErrorEpoch(err))
+		case dispatch := <-dispatchResults:
+			applyDispatch(dispatch)
+		case projectionErr := <-projectionResult:
+			projectionResult = nil
 
-			if cancelled {
-				return s.cancelledRun()
+			if projectionErr != nil {
+				return s.failedRun(turnCtx, projectionErr)
 			}
 
-			return s.failedRun(turnCtx,
-				mapTurnFailure(nativehermes.NewTurnFailure(nativehermes.CauseTransport, err.Error())))
+			projected = true
+
+			if s.afterProjectionAck != nil {
+				s.afterProjectionAck()
+			}
 		case result := <-done:
-			return s.nativeRun(turnCtx, result.message, result.err, acceptErr)
+			consumePromptDispatchBeforeResult(result.dispatched, dispatchObserved, dispatchResults, applyDispatch)
+
+			waitForProjection := result.err == nil
+			if result.err != nil {
+				var failure *nativehermes.TurnFailureError
+
+				waitForProjection = errors.As(result.err, &failure) && failure.Cause() == nativehermes.CauseProvider &&
+					!s.observedCancel(turnCtx)
+			}
+
+			if projectionRegistered && waitForProjection && !projected {
+				if projectionRun := s.awaitPromptProjection(turnCtx, projectionResult); projectionRun != nil {
+					return *projectionRun
+				}
+			}
+
+			return s.nativeRun(turnCtx, result.message, result.err, acceptErr, result.dispatched)
 		case <-timeout:
 			// The cancel guard runs before all failure mapping, the turn deadline
 			// included: when a user cancel and the timeout fire together the result
@@ -570,7 +696,20 @@ func (s *session) nativeRun(
 	message nativehermes.NativeMessage,
 	sendErr error,
 	acceptErr error,
+	dispatched bool,
 ) promptRun {
+	if !dispatched {
+		if acceptErr != nil {
+			return promptRun{err: acceptErr}
+		}
+
+		if sendErr != nil {
+			return promptRun{err: mapTurnFailure(sendErr)}
+		}
+
+		return promptRun{err: mapTurnFailure(nativehermes.ErrPromptDispatchIdentity)}
+	}
+
 	if acceptErr != nil {
 		return promptRun{settle: true, endsIncarnation: true, err: acceptErr}
 	}
@@ -580,11 +719,14 @@ func (s *session) nativeRun(
 			return s.cancelledRun()
 		}
 
-		if nativehermes.IsGatewayDisconnect(sendErr) {
-			s.markStreamFailed(0)
+		endsIncarnation := true
+
+		var failure *nativehermes.TurnFailureError
+		if errors.As(sendErr, &failure) && failure.Cause() == nativehermes.CauseProvider {
+			endsIncarnation = false
 		}
 
-		return promptRun{settle: true, endsIncarnation: true, err: mapTurnFailure(sendErr)}
+		return promptRun{settle: true, endsIncarnation: endsIncarnation, err: mapTurnFailure(sendErr)}
 	}
 
 	if err := s.emitMessage(turnCtx, message, false); err != nil {
@@ -651,6 +793,24 @@ func (s *session) nativeRun(
 func (s *session) settleClosedSession(ctx context.Context) error {
 	stream := s.lifecycleStream()
 
+	pumpSyncCtx, pumpSyncCancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	pumpSyncErr := s.synchronizePump(pumpSyncCtx)
+
+	pumpSyncCancel()
+
+	if pumpSyncErr != nil {
+		s.mu.Lock()
+		alreadyContained := s.runtimeNeedsResume || s.containmentSettled
+		s.mu.Unlock()
+		s.pumpMu.Lock()
+		stopping := s.pumpStopping && s.pumpErr == nil
+		s.pumpMu.Unlock()
+
+		if alreadyContained || stopping {
+			pumpSyncErr = nil
+		}
+	}
+
 	var captureErr error
 
 	// A retry owes the commit the failed boundary already captured, so it never
@@ -658,9 +818,46 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 	commit := s.takeOwedCloseCommit()
 
 	committed := s.committedState()
-	if commit == nil && s.snapshotBlockedReason() == "" && s.ensureNotPoisoned() == nil &&
-		!stream.fenced() && committed.foreground == nil {
-		commit, captureErr = s.captureSnapshotLocked(context.WithoutCancel(ctx), nil)
+	if commit == nil && s.snapshotBlockedReason() == "" && s.ensureNotPoisoned() == nil && !stream.fenced() {
+		var (
+			requirement *terminalSnapshotRequirement
+			capture     = true
+		)
+
+		switch {
+		case stream.hasOpenTurn():
+			requirement = &terminalSnapshotRequirement{
+				baseline: s.committedTerminalState(),
+				foreground: stateSnapshotForeground{
+					StreamID:            stream.streamID(),
+					TurnID:              stream.turnIdentity(),
+					Outcome:             string(lifecycle.OutcomeCancelled),
+					StopReason:          lifecycle.StopReasonCancelled,
+					Text:                s.foregroundPrefix(),
+					CapturedAtUnixMilli: time.Now().UnixMilli(),
+				},
+				nativeUnavailable: true,
+				settlementCapture: true,
+			}
+		case committed.foreground == nil:
+			requirement = nil
+		default:
+			capture = false
+		}
+
+		if capture {
+			commit, captureErr = s.captureSnapshotLocked(context.WithoutCancel(ctx), requirement)
+		}
+	}
+
+	if captureErr != nil {
+		// Capture is the mandatory, non-destructive first rung of an eligible
+		// close. If it fails, the live generation and its stream remain intact and
+		// the close-only logical session stays addressable so the exact capture can
+		// be retried. Containment would destroy the only source for that retry.
+		s.retainOwedCloseCommit(commit)
+
+		return errors.Join(pumpSyncErr, captureErr)
 	}
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
@@ -676,7 +873,7 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 		stream.fence()
 		s.retainOwedCloseCommit(commit)
 
-		return errors.Join(captureErr, closeErr)
+		return errors.Join(pumpSyncErr, captureErr, closeErr)
 	}
 
 	if !stream.live() {
@@ -706,7 +903,7 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 			}
 		}
 
-		return errors.Join(captureErr, commitErr)
+		return errors.Join(pumpSyncErr, captureErr, commitErr)
 	}
 
 	proof := s.closedContainmentProof()
@@ -718,7 +915,7 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 
 	stream.fence()
 
-	return errors.Join(captureErr, settleErr)
+	return errors.Join(pumpSyncErr, captureErr, settleErr)
 }
 
 // takeOwedCloseCommit hands back the generation a failed close boundary captured
@@ -775,6 +972,15 @@ func (s *session) publishClosedBoundary(
 		}
 	}
 
+	if stream.hasOpenTurn() {
+		if err := stream.settle(ctx, lifecycleTurnOutcome{
+			stopReason: lifecycle.StopReasonCancelled,
+			outcome:    lifecycle.OutcomeCancelled,
+		}); err != nil {
+			return true, err
+		}
+	}
+
 	if !proof.vacant() {
 		return true, nil
 	}
@@ -807,33 +1013,69 @@ type announcedAction struct {
 	correlation map[string]any
 }
 
-// announceBlockingAction registers one held request against its lifecycle action
-// id and then announces it on the ordered stream. The second result is false when
-// the connection negotiated the extension but no accepted turn owns the request:
-// such a request is residue of a fenced incarnation, and it is refused natively
-// rather than shown to a host that could not answer it.
-func (s *session) announceBlockingAction(
-	ctx context.Context,
+type actionRequestOwnership struct {
+	incarnation uint64
+	generation  uint64
+	epoch       uint64
+	cycleID     string
+	turnID      string
+	actionID    string
+	requestID   string
+	nonce       string
+}
+
+// reserveBlockingAction mints and registers one held request without emitting
+// lifecycle state. The host JSON-RPC request must be registered and written
+// successfully before publishBlockingAction exposes its pending action.
+func (s *session) reserveBlockingAction(
 	kind lifecycle.ActionKind,
 	requestID string,
-) (announcedAction, bool, error) {
+	route permissionTurnRoute,
+) (announcedAction, lifecycle.ActionUpdate, bool) {
 	stream := s.lifecycleStream()
 	if stream == nil {
-		return announcedAction{}, true, nil
+		return announcedAction{}, lifecycle.ActionUpdate{}, true
 	}
 
 	action, correlation, owned := stream.reserveAction(kind)
 	if !owned {
-		return announcedAction{}, false, nil
+		return announcedAction{}, lifecycle.ActionUpdate{}, false
 	}
 
-	s.registerActionRequest(action.ActionID, requestID)
+	s.registerActionRequest(action, requestID, route)
 
+	return announcedAction{id: action.ActionID, correlation: correlation}, action, true
+}
+
+func (s *session) publishBlockingAction(
+	ctx context.Context,
+	reserved announcedAction,
+	action lifecycle.ActionUpdate,
+) error {
+	if reserved.id == "" {
+		return nil
+	}
+
+	stream := s.lifecycleStream()
 	if err := stream.announceAction(ctx, action); err != nil {
-		return announcedAction{}, false, err
+		s.mu.Lock()
+		delete(s.actionRequests, action.ActionID)
+		s.mu.Unlock()
+
+		return err
 	}
 
-	return announcedAction{id: action.ActionID, correlation: correlation}, true, nil
+	return nil
+}
+
+func (s *session) discardBlockingAction(action announcedAction) {
+	if action.id == "" {
+		return
+	}
+
+	s.mu.Lock()
+	delete(s.actionRequests, action.id)
+	s.mu.Unlock()
 }
 
 // resolveBlockingAction terminalizes one announced action exactly once. A second
@@ -848,34 +1090,66 @@ func (s *session) resolveBlockingAction(
 		return nil
 	}
 
-	if !s.takeActionRequest(action.id) {
+	taken, current := s.takeActionRequest(ctx, action.id)
+	if !current {
+		return routeInvalid("lifecycle action callback crossed its owning cycle")
+	}
+
+	if !taken {
 		return nil
 	}
 
 	return s.lifecycleStream().resolveAction(ctx, action.id, state)
 }
 
-func (s *session) registerActionRequest(actionID string, requestID string) {
+func (s *session) registerActionRequest(
+	action lifecycle.ActionUpdate,
+	requestID string,
+	route permissionTurnRoute,
+) {
 	s.mu.Lock()
 	if s.actionRequests == nil {
-		s.actionRequests = map[string]string{}
+		s.actionRequests = map[string]actionRequestOwnership{}
 	}
 
-	s.actionRequests[actionID] = requestID
+	s.actionRequests[action.ActionID] = actionRequestOwnership{
+		incarnation: route.incarnation,
+		generation:  route.generation,
+		epoch:       route.epoch,
+		cycleID:     route.cycleID,
+		turnID:      action.Owner.ID,
+		actionID:    action.ActionID,
+		requestID:   requestID,
+		nonce:       route.nonce,
+	}
 	s.mu.Unlock()
 }
 
-func (s *session) takeActionRequest(actionID string) bool {
+func (s *session) takeActionRequest(ctx context.Context, actionID string) (bool, bool) {
+	route, active := s.permissionTurnRoute(ctx)
+	if !active {
+		return false, false
+	}
+
+	turnID := s.lifecycleStream().turnIdentity()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.actionRequests[actionID]; !ok {
-		return false
+	owned, ok := s.actionRequests[actionID]
+	if !ok {
+		return false, true
+	}
+
+	if owned.incarnation != route.incarnation || owned.generation != route.generation ||
+		owned.epoch != route.epoch || owned.cycleID != route.cycleID || owned.turnID != turnID ||
+		owned.actionID != actionID || owned.nonce != route.nonce {
+		return false, false
 	}
 
 	delete(s.actionRequests, actionID)
 
-	return true
+	return true, true
 }
 
 // actionMeta stamps the lifecycle correlation beside whatever vendor or route

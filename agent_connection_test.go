@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +81,25 @@ type signalBlockingReader struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(value []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.b.Write(value)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.b.String()
 }
 
 func (r *signalBlockingReader) Read([]byte) (int, error) {
@@ -307,7 +328,6 @@ func TestRequestErrorCancelPrecedence(t *testing.T) {
 		"live request keeps its request error": {
 			err:      invalidParams,
 			wantCode: -32602,
-			wantSame: true,
 		},
 		"live request wraps an opaque failure": {
 			err:      errors.New("plain"),
@@ -349,7 +369,7 @@ func TestRequestErrorCancelPrecedence(t *testing.T) {
 }
 
 func TestCapabilityAndElicitationHelpers(t *testing.T) {
-	lifecycle := localLifecycleResponse[acp.CloseSessionRequest, *acp.CloseSessionRequest, acp.CloseSessionResponse](
+	lifecycle := localResponse[acp.CloseSessionRequest, *acp.CloseSessionRequest, acp.CloseSessionResponse](
 		func(*Agent, context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 			return acp.CloseSessionResponse{}, errors.New("close failed")
 		},
@@ -428,6 +448,220 @@ func TestNewLocalAgentConnectionDone(t *testing.T) {
 	}
 }
 
+func TestConnectionInputGateRejectsUnboundedOrIncompleteLifecycleFrames(t *testing.T) {
+	t.Run("unterminated", func(t *testing.T) {
+		body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"secret-body"}}`
+		gate := newConnectionInputGate(strings.NewReader(body))
+		gate.open()
+
+		_, err := gate.Read(make([]byte, 1))
+		require.ErrorIs(t, err, errConnectionInputUnterminated)
+		require.NotContains(t, err.Error(), "secret-body")
+		require.Empty(t, gate.requestIDs)
+		require.Zero(t, gate.nextToken)
+	})
+
+	t.Run("oversized before stamping", func(t *testing.T) {
+		gate := newConnectionInputGate(strings.NewReader(strings.Repeat("x", connectionInputFrameLimit+1) + "\n"))
+		gate.open()
+
+		_, err := gate.Read(make([]byte, 1))
+		require.ErrorIs(t, err, errConnectionInputOversized)
+		require.Empty(t, gate.requestIDs)
+		require.Zero(t, gate.nextToken)
+	})
+
+	t.Run("stamped frame cannot exceed SDK limit", func(t *testing.T) {
+		prefix := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"padding":"`
+		suffix := `"}}` + "\n"
+		padding := connectionInputFrameLimit - len(prefix) - len(suffix)
+		require.Positive(t, padding)
+		gate := newConnectionInputGate(strings.NewReader(prefix + strings.Repeat("x", padding) + suffix))
+		gate.open()
+
+		_, err := gate.Read(make([]byte, 1))
+		require.ErrorIs(t, err, errConnectionInputOversized)
+		require.Empty(t, gate.requestIDs)
+		_, claimed := gate.claimLifecycleRequest("lifecycle-request-1")
+		require.False(t, claimed)
+	})
+}
+
+func TestPrivateLifecycleConnectionBranchCoverage(t *testing.T) {
+	gate := newConnectionInputGate(strings.NewReader(""))
+	got, err := gate.stampLifecycleRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":null}`))
+	if err != nil || !bytes.Contains(got, []byte(`"params":null`)) {
+		t.Fatalf("null params were unexpectedly stamped: %s", got)
+	}
+	ctx := t.Context()
+	raw := json.RawMessage(`{`)
+	if (&localAgentConnection{}).bindLifecycleRequest(ctx, &raw) != ctx ||
+		((*localAgentConnection)(nil)).bindLifecycleRequest(ctx, &raw) != ctx ||
+		(&localAgentConnection{inputGate: gate}).bindLifecycleRequest(ctx, nil) != ctx {
+		t.Fatal("unbound lifecycle request changed context")
+	}
+	if (&localAgentConnection{inputGate: gate}).bindLifecycleRequest(ctx, &raw) != ctx {
+		t.Fatal("malformed lifecycle params changed context")
+	}
+	raw = json.RawMessage(`{}`)
+	if (&localAgentConnection{inputGate: gate}).bindLifecycleRequest(ctx, &raw) != ctx {
+		t.Fatal("marker-free lifecycle params changed context")
+	}
+	raw = json.RawMessage(`{"` + lifecycleRequestMarkerField + `":"missing"}`)
+	if (&localAgentConnection{inputGate: gate}).bindLifecycleRequest(ctx, &raw) != ctx {
+		t.Fatal("unknown lifecycle marker changed context")
+	}
+
+	logger := protocolSafeLogger(nil)
+	handler := logger.Handler()
+	_ = handler.WithAttrs([]slog.Attr{slog.String("ignored", "secret")})
+	_ = handler.WithGroup("ignored")
+	if protocolLogClassification("failed to parse incoming message") != "malformed_frame" ||
+		protocolLogClassification("connection closed") != "connection_closed" ||
+		protocolLogClassification("other") != "protocol_failure" {
+		t.Fatal("protocol log classifications drifted")
+	}
+
+	identityCtx := context.WithValue(ctx, lifecycleRequestIdentityKey{}, lifecycleRequestIdentity{token: "token"})
+	if got, err := markLifecycleResponse(ctx, map[string]any{"ok": true}); err != nil || reflect.TypeOf(got).Kind() != reflect.Map {
+		t.Fatalf("unmarked response = %#v, %v", got, err)
+	}
+	if _, err := markLifecycleResponse(identityCtx, func() {}); err == nil {
+		t.Fatal("unserializable lifecycle response was marked")
+	}
+	if _, err := markLifecycleResponse(identityCtx, "scalar"); err == nil {
+		t.Fatal("scalar lifecycle response was marked")
+	}
+
+	written := make(chan error, 4)
+	local := &localAgentConnection{agent: newTestAgent()}
+	if _, err := local.CreateElicitationRegistered(ctx, acp.UnstableCreateElicitationRequest{}, elicitationScope{}, written); err == nil {
+		t.Fatal("invalid elicitation reached client-call admission")
+	}
+	if <-written == nil {
+		t.Fatal("invalid elicitation did not signal its write failure")
+	}
+	requestID := "request"
+	validElicitation := acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "m"}}
+	elicitationKey := hostControlRequestKey(acp.ClientMethodElicitationCreate, "session", requestID)
+	blocker, registrationErr := local.registerOutboundWrite(elicitationKey, make(chan error, 1))
+	require.NoError(t, registrationErr)
+	if _, err := local.CreateElicitationRegistered(ctx, validElicitation, elicitationScope{
+		SessionID: "session", TurnNonce: "turn", RequestID: &requestID,
+	}, written); err == nil {
+		t.Fatal("duplicate elicitation identity was registered")
+	}
+	if <-written == nil {
+		t.Fatal("duplicate elicitation identity did not signal its write failure")
+	}
+	local.finishOutboundWrite(elicitationKey, blocker)
+
+	local.agent.clientCalls <- struct{}{}
+	if _, err := local.RequestPermissionRegistered(ctx, acp.RequestPermissionRequest{}, written); err == nil {
+		t.Fatal("permission ignored client-call backpressure")
+	}
+	<-local.agent.clientCalls
+	if <-written == nil {
+		t.Fatal("permission backpressure did not signal its write failure")
+	}
+
+	signalHostWrite(nil, errors.New("ignored"))
+	registration, registrationErr := local.registerOutboundWrite("", nil)
+	require.NoError(t, registrationErr)
+	local.finishOutboundWrite("", nil)
+	local.finishOutboundWrite("missing", registration)
+	if _, err := local.registerOutboundWrite("", written); err == nil {
+		t.Fatal("empty outbound identity was registered")
+	}
+	first, registrationErr := local.registerOutboundWrite("duplicate", written)
+	require.NoError(t, registrationErr)
+	if _, err := local.registerOutboundWrite("duplicate", written); err == nil {
+		t.Fatal("duplicate outbound identity was registered")
+	}
+	local.finishOutboundWrite("duplicate", first)
+
+	for _, code := range []int{-32700, -32600, -32601, -32602, -32800, -32000, 123} {
+		if sanitizeRequestError(&acp.RequestError{Code: code}) == nil {
+			t.Fatalf("request error code %d sanitized to nil", code)
+		}
+	}
+	if sanitizeRequestError(nil) != nil {
+		t.Fatal("nil request error was not preserved")
+	}
+}
+
+func TestExtensionForkResponseCarriesPrivateLifecycleToken(t *testing.T) {
+	parentClient := newFakeHermesClient()
+	parentClient.forkSession = testNativeSession("native-child")
+	childClient := newFakeHermesClient()
+	childClient.getSession = testNativeSession("native-child")
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+		childClient.xdg = start.ExistingXDG
+
+		return childClient, nil
+	}
+	parent := testSession(agent, parentClient)
+	parent.id = "parent"
+	parent.idmap.SessionID = "parent"
+	parent.idmap.NativeSessionID = "native-parent"
+	agent.sessions[parent.id] = parent
+
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+	ctx := context.WithValue(t.Context(), lifecycleRequestIdentityKey{}, lifecycleRequestIdentity{
+		token: "opaque-fork-token",
+	})
+	result, reqErr := conn.handle(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, t.TempDir())))
+	require.Nil(t, reqErr)
+	marked, ok := result.(map[string]json.RawMessage)
+	require.True(t, ok)
+	require.JSONEq(t, `"opaque-fork-token"`, string(marked[lifecycleRequestMarkerField]))
+}
+
+func TestProtocolBoundaryNeverLeaksMalformedPayloadsOrArbitraryErrors(t *testing.T) {
+	const secret = "SECRET_SENTINEL"
+	var logs lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	agent := newTestAgent(WithLogger(logger))
+	var output lockedBuffer
+	conn := newLocalAgentConnection(agent, &output, strings.NewReader(secret+`{"jsonrpc":"2.0"}`))
+	<-conn.Done()
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("protocol logger leaked malformed raw frame: %s", logs.String())
+	}
+	if strings.Contains(output.String(), secret) {
+		t.Fatalf("protocol response leaked malformed raw frame: %s", output.String())
+	}
+
+	nativeCause := errors.New(secret)
+	mapped := mapTurnFailure(fmt.Errorf("native transport: %w", nativeCause))
+	if !errors.Is(mapped, ErrGatewayDisconnected) || !errors.Is(mapped, nativeCause) {
+		t.Fatalf("embeddable mapping lost exact cause: %v", mapped)
+	}
+	wire := requestError(context.Background(), mapped)
+	encoded, err := json.Marshal(wire)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), valHermesTurnFailed)
+	require.Contains(t, string(encoded), string(nativehermes.CauseTransport))
+	if strings.Contains(string(encoded), secret) || strings.Contains(wire.Error(), secret) {
+		t.Fatalf("wire conversion leaked arbitrary native error: %s", encoded)
+	}
+
+	local := &localAgentConnection{agent: newTestAgent()}
+	local.initialized.Store(true)
+	_, requestErr := local.handle(context.Background(), acp.AgentMethodSessionPrompt,
+		json.RawMessage(`{"sessionId":"`+secret+`","prompt":[{"type":"text","text":"`+secret+`"}]}`))
+	if requestErr == nil {
+		t.Fatal("malformed secret-bearing prompt unexpectedly succeeded")
+	}
+	encoded, err = json.Marshal(requestErr)
+	require.NoError(t, err)
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("prompt error leaked payload: %s", encoded)
+	}
+}
+
 func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -490,12 +724,10 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	if !strings.Contains(responseLine, `"id":2`) || !strings.Contains(responseLine, `"result"`) {
 		t.Fatalf("session/new response line = %s", responseLine)
 	}
-	select {
-	case line := <-lines:
-		if strings.Contains(line, "available_commands_update") {
-			t.Fatalf("unexpected command update line = %s", line)
-		}
-	case <-time.After(50 * time.Millisecond):
+	writeJSONRPC(`{"jsonrpc":"2.0","id":3,"method":"session/list","params":{}}`)
+	line := readLine()
+	if strings.Contains(line, "available_commands_update") || !strings.Contains(line, `"id":3`) {
+		t.Fatalf("line before session/list barrier = %s", line)
 	}
 }
 
@@ -610,7 +842,7 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 		_ = a2cW.Close()
 	})
 
-	client := &pipeACPClient{}
+	client := &pipeACPClient{changed: make(chan struct{}, 1)}
 	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
@@ -690,6 +922,55 @@ func TestLocalAgentConnectionClientCallsOverPipes(t *testing.T) {
 	}
 }
 
+func TestPermissionOperationUsesOneClientCallLeaseOverPipes(t *testing.T) {
+	c2aR, c2aW := io.Pipe()
+	a2cR, a2cW := io.Pipe()
+	t.Cleanup(func() {
+		_ = c2aR.Close()
+		_ = c2aW.Close()
+		_ = a2cR.Close()
+		_ = a2cW.Close()
+	})
+
+	permissionEntered := make(chan struct{})
+	actionPublished := make(chan struct{})
+	client := &pipeACPClient{
+		changed:           make(chan struct{}, 1),
+		permissionEntered: permissionEntered,
+		actionPublished:   actionPublished,
+	}
+	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	conn := newLocalAgentConnection(agent, a2cW, c2aR)
+	agent.setAgentClient(conn)
+
+	native := newFakeHermesClient()
+	session := testSession(agent, native)
+	require.NoError(t, session.openLifecycleStream())
+	turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
+	defer session.finishTurn()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.handlePermission(turnCtx, testHermesPermissionRequest(t, "permission-1", "tool-1"))
+	}()
+	<-permissionEntered
+	<-actionPublished
+	require.NoError(t, <-done)
+
+	client.mu.Lock()
+	order := append([]string(nil), client.order...)
+	client.mu.Unlock()
+	permissionIndex := slices.Index(order, "permission")
+	actionIndex := slices.Index(order, "action-pending")
+	require.NotEqual(t, -1, permissionIndex, "order: %v", order)
+	require.Equal(t, permissionIndex+1, actionIndex, "order: %v", order)
+	require.Equal(t, "once", native.permissionReply(0).reply)
+}
+
 func mustJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(value)
@@ -705,6 +986,11 @@ type pipeACPClient struct {
 	updates      int
 	extensions   []string
 	elicitations []acp.UnstableCreateElicitationRequest
+	changed      chan struct{}
+	order        []string
+
+	permissionEntered chan struct{}
+	actionPublished   chan struct{}
 }
 
 // awaitNotifications waits until the client has handled the notifications the
@@ -715,8 +1001,6 @@ type pipeACPClient struct {
 func (c *pipeACPClient) awaitNotifications(t *testing.T, updates int, extensions int) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-
 	for {
 		c.mu.Lock()
 		gotUpdates, gotExtensions := c.updates, len(c.extensions)
@@ -726,11 +1010,11 @@ func (c *pipeACPClient) awaitNotifications(t *testing.T, updates int, extensions
 			return
 		}
 
-		if time.Now().After(deadline) {
+		select {
+		case <-c.changed:
+		case <-t.Context().Done():
 			t.Fatalf("handled updates=%d extensions=%d, want %d and %d", gotUpdates, gotExtensions, updates, extensions)
 		}
-
-		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -746,14 +1030,38 @@ func (*pipeACPClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (
 	return acp.WriteTextFileResponse{}, nil
 }
 
-func (*pipeACPClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (c *pipeACPClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	c.mu.Lock()
+	c.order = append(c.order, "permission")
+	entered := c.permissionEntered
+	published := c.actionPublished
+	c.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if published != nil {
+		<-published
+	}
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("once")}, nil
 }
 
-func (c *pipeACPClient) SessionUpdate(context.Context, acp.SessionNotification) error {
+func (c *pipeACPClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
+	encoded, _ := json.Marshal(notification)
+	label := "update"
+	if bytes.Contains(encoded, []byte(`"action_update"`)) && bytes.Contains(encoded, []byte(`"pending"`)) {
+		label = "action-pending"
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.updates++
+	c.order = append(c.order, label)
+	published := c.actionPublished
+	shouldPublish := published != nil && label == "action-pending"
+	c.mu.Unlock()
+	if shouldPublish {
+		close(published)
+	}
+	c.signalChanged()
 
 	return nil
 }
@@ -802,8 +1110,20 @@ func (*pipeACPClient) UnstableDisconnectMcp(context.Context, acp.UnstableDisconn
 
 func (c *pipeACPClient) HandleExtensionMethod(_ context.Context, method string, _ json.RawMessage) (any, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.extensions = append(c.extensions, method)
+	c.mu.Unlock()
+	c.signalChanged()
 
 	return map[string]any{"ok": true}, nil
+}
+
+func (c *pipeACPClient) signalChanged() {
+	if c.changed == nil {
+		return
+	}
+
+	select {
+	case c.changed <- struct{}{}:
+	default:
+	}
 }

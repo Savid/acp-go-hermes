@@ -94,7 +94,7 @@ func (o Offer) Answer(proven Negotiated) (Negotiated, bool) {
 // decodeVersions reads the non-empty integer array every negotiation object
 // carries. It is validated on every offer whatever the version. Only the answer
 // is ordered: a host is free to offer its versions in any order, and refusing an
-// unordered offer would break the forward compatibility the array exists for.
+// unordered offer would break the deterministic version preference the array exists for.
 func decodeVersions(raw any) ([]int, *ParamError) {
 	listed, ok := raw.([]any)
 	if !ok || len(listed) == 0 {

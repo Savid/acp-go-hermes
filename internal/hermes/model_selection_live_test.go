@@ -25,10 +25,9 @@ const measuredUnknownProviderRefusal = "Unknown provider 'missing-provider'. " +
 	"Check 'hermes model' for available providers, or define it in config.yaml under 'providers:'."
 
 // TestLiveModelSelectionNativeAnswers measures what Hermes itself answers a
-// model mutation, and is the provenance for every place this repository
-// reproduces one of those answers — today session_config_test.go's
-// TestUnknownModelNativeRefusalPropagates and the fake harness' config.set
-// double in integration/fake_hermes_test.go.
+// model mutation. The adapter classifies that answer into a stable bounded ACP
+// error; the native text remains here only as the version-pinned measurement
+// that proves the classifier is exercised by the real refusal.
 //
 // It measures two answers that together say where Hermes draws the line:
 //

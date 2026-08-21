@@ -27,7 +27,7 @@ import (
 const (
 	MinimumVersion = "0.20.0"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
-	// catalog before the compatibility sweep reaches model.options.
+	// catalog before the required-method sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
 	fieldCwd              = "cwd"
 	fieldTitle            = "title"
@@ -95,7 +95,7 @@ type ProcessOptions struct {
 	// executable can never mutate the durable residence.
 	PrepareSharedHome func(context.Context, string) error
 	// SharedSessionOwners are bound to the native PID/start-time immediately
-	// after spawn, before readiness or compatibility probes can run.
+	// after spawn, before readiness or required-method probes can run.
 	SharedSessionOwners []*SharedSessionOwner
 	// SharedHomeOwner is the exclusive claim on Home held across this and every
 	// other native writer this adapter runs against that root. Its descriptor is
@@ -275,11 +275,11 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 			return nil, err
 		}
 	}
-	// Official shared-home startup must not create the compatibility probe's
+	// Official shared-home startup must not create the required-method probe's
 	// durable draft outside the adapter's cross-process session-set journal.
-	// The per-start minimum-version probe is the compatibility boundary in this
+	// The per-start minimum-version probe is the executable support boundary in this
 	// mode — a shared home is never bound to the native version that first used
-	// it, because official Hermes migrates its own state across self-updates;
+	// it, because official Hermes owns its state across self-updates;
 	// ordinary session methods are exercised only after the Agent holds its
 	// shared/exclusive operation fence.
 	probeNeeded := gatewayMethodProbeNeeded(opts, executable)
@@ -1152,17 +1152,17 @@ func (p *Process) waitReady(ctx context.Context) error {
 func (p *Process) waitGatewayReady(ctx context.Context) error {
 	for {
 		select {
-		case event, ok := <-p.Client.Events():
+		case delivery, ok := <-p.Client.Deliveries():
 			if !ok {
 				return fmt.Errorf("hermes websocket closed before gateway.ready")
 			}
 
-			if event.Type == eventGatewayReady {
-				return nil
+			if delivery.Err != nil {
+				return delivery.Err
 			}
-		case err, ok := <-p.Client.Errors():
-			if ok && err != nil {
-				return err
+
+			if delivery.Event != nil && delivery.Event.Type == eventGatewayReady {
+				return nil
 			}
 		case <-ctx.Done():
 			return ctx.Err()

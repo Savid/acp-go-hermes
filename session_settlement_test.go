@@ -14,6 +14,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAwaitSettlementHonorsCancellationAcrossTurnAndReuse(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	session.mu.Lock()
+	session.foreground = &turnSettlement{done: make(chan struct{})}
+	session.mu.Unlock()
+	require.ErrorIs(t, session.awaitSettlement(ctx), context.Canceled)
+
+	session.mu.Lock()
+	session.foreground = &turnSettlement{done: make(chan struct{})}
+	session.mu.Unlock()
+	require.ErrorIs(t, session.awaitSettlement(ctx), context.Canceled)
+}
+
 // Close after an incarnation-ending settlement on an authoritative-quiescence
 // configuration: the settlement already certified and fenced the stream, so the
 // close boundary must not try to certify again on the fenced stream.
@@ -57,6 +72,35 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 	if err := session.settleClosedSession(t.Context()); err != nil {
 		t.Errorf("close after a fenced incarnation must not report an error: %v", err)
 	}
+}
+
+func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *testing.T) {
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions:                []int{lifecycle.Version},
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
+		ActivityKinds:           []lifecycle.ActivityKind{},
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	client := newFakeHermesClient()
+	session := testSession(agent, client)
+	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
+	require.NoError(t, session.openLifecycleStream())
+	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+	agent.sessions[session.id] = session
+
+	require.NoError(t, agent.Close())
+
+	conn.mu.Lock()
+	events := lifecycleEvents(append([]acp.SessionNotification(nil), conn.updates...))
+	conn.mu.Unlock()
+	require.Len(t, events, 2)
+	require.Equal(t, string(lifecycle.EventSnapshot), events[0]["type"])
+	require.Equal(t, string(lifecycle.EventQuiescenceUpdate), events[1]["type"])
+	require.Equal(t, true, events[1]["quiescent"])
+	require.Nil(t, agent.connection())
 }
 
 // The same shape through the public CloseSession handler, as a host drives it:
@@ -155,7 +199,7 @@ func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 	agent.sessions[session.id] = session
 	// The establishing response queues the owed snapshot; the release goroutine
 	// that delivers it is detached, and CloseSession never joins it.
-	agent.deferStreamOpen(session)
+	requireStreamOpenDeferred(t, agent, lifecycleRequestContext(t.Context(), 1), session)
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 	require.NoError(t, err)
@@ -265,12 +309,14 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 		require.True(t, owned)
 		require.NoError(t, session.lifecycleStream().announceAction(turnCtx, action))
 
-		session.mu.Lock()
-		session.turnInFlight = false
-		session.mu.Unlock()
+		route := session.routeForEvent(nativehermes.TurnEvent{
+			CycleID: testControlCycleID, TransportGeneration: 1,
+		})
+		require.NotNil(t, route)
+		session.finishAutonomousRoute(route)
 
-		require.Equal(t, 1, closeCancelled(t, session, recorder),
-			"the close owes the pending action its terminal transition")
+		require.Equal(t, 2, closeCancelled(t, session, recorder),
+			"the close owes the pending action terminal transition and one cancelled idle")
 	})
 
 	t.Run("quiescence", func(t *testing.T) {
@@ -626,17 +672,11 @@ func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
 	agent := newTestAgent()
 	session := testSession(agent, newFakeHermesClient())
 
-	action, owned, err := session.announceBlockingAction(t.Context(), lifecycle.ActionPermission, "request")
-	require.NoError(t, err)
+	action, update, owned := session.reserveBlockingAction(lifecycle.ActionPermission, "request", permissionTurnRoute{})
 	require.True(t, owned)
+	require.NoError(t, session.publishBlockingAction(t.Context(), action, update))
 	require.Empty(t, action.id)
 	require.NoError(t, session.resolveBlockingAction(t.Context(), action, lifecycle.ActionAccepted))
-
-	session.registerActionRequest("action", "request")
-	require.False(t, session.takeActionRequest("unknown"))
-	require.True(t, session.takeActionRequest("action"))
-	require.False(t, session.takeActionRequest("action"))
-	require.NoError(t, session.resolveBlockingAction(t.Context(), announcedAction{id: "unknown"}, lifecycle.ActionAccepted))
 
 	meta := map[string]any{"vendor": true}
 	require.Equal(t, meta, actionMeta(meta, announcedAction{}))
@@ -648,6 +688,37 @@ func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
 	}, valReject))
 	require.Equal(t, lifecycle.ActionDeclined, permissionActionState(acp.RequestPermissionResponse{}, valReject))
 	require.Equal(t, lifecycle.ActionAccepted, permissionActionState(acp.RequestPermissionResponse{}, valOnce))
+
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	require.NoError(t, session.openLifecycleStream())
+	_, _, owned = session.reserveBlockingAction(lifecycle.ActionPermission, "unowned", permissionTurnRoute{})
+	require.False(t, owned)
+
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	turnCtx := session.beginTurn(t.Context(), "turn")
+	require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "nonce",
+	}))
+	conn.updateErr = errors.New("pending action failed")
+	action, update, owned = session.reserveBlockingAction(lifecycle.ActionPermission, "failed", permissionTurnRoute{})
+	require.True(t, owned)
+	err := session.publishBlockingAction(turnCtx, action, update)
+	require.ErrorContains(t, err, "pending action failed")
+}
+
+func TestPromptContainsPanickingNativeSend(t *testing.T) {
+	client := newFakeHermesClient()
+	client.sendMessage = func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		panic("native send panic")
+	}
+	session := testSession(newTestAgent(), client)
+	defer session.stopPump()
+	_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "panic-send", "reply"))
+	require.Error(t, err)
+	require.ErrorContains(t, errors.Unwrap(err), "source corrupted")
 }
 
 func TestTurnSettlementValueBoundaries(t *testing.T) {
@@ -700,15 +771,17 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 			ActivityKinds:           []lifecycle.ActivityKind{},
 		})
 		base := newRecordingAgentClient()
-		conn := &lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 5}
+		conn := &lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 6}
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
 		session := testSession(agent, client)
 		session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 		require.NoError(t, session.openLifecycleStream())
-		turnCtx := session.beginTurn(t.Context(), "turn")
+		turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 		session.mu.Lock()
 		session.turnInFlight = true
+		session.turnEpoch = 1
+		session.turnSettlement = turnSettlementOpen
 		session.mu.Unlock()
 		require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
 			SubmissionID: "submission", ClientNonce: "nonce",
@@ -726,20 +799,74 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 func TestLifecycleRunFailureClassification(t *testing.T) {
 	session := testSession(newTestAgent(), newFakeHermesClient())
 	acceptErr := errors.New("acceptance failed")
-	run := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nil, acceptErr)
-	require.ErrorIs(t, run.err, acceptErr)
-	require.True(t, run.endsIncarnation)
-
-	run = session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayDisconnected, nil)
-	require.Error(t, run.err)
-	require.True(t, run.endsIncarnation)
+	for _, test := range []struct {
+		name            string
+		sendErr         error
+		acceptErr       error
+		dispatched      bool
+		wantSettle      bool
+		wantIncarnation bool
+	}{
+		{name: "registration refusal", sendErr: nativehermes.ErrGatewayAmbiguousTurn},
+		{name: "admission refusal", acceptErr: acceptErr},
+		{name: "missing dispatch proof"},
+		{name: "post-dispatch admission failure", acceptErr: acceptErr, dispatched: true, wantSettle: true, wantIncarnation: true},
+		{name: "post-dispatch transport failure", sendErr: nativehermes.ErrGatewayDisconnected, dispatched: true, wantSettle: true, wantIncarnation: true},
+		{name: "post-dispatch provider failure", sendErr: nativehermes.NewTurnFailure(nativehermes.CauseProvider, "provider failed"), dispatched: true, wantSettle: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, test.sendErr, test.acceptErr, test.dispatched)
+			require.Error(t, run.err)
+			require.Equal(t, test.wantSettle, run.settle)
+			require.Equal(t, test.wantIncarnation, run.endsIncarnation)
+		})
+	}
 
 	client := newFakeHermesClient()
 	client.closeErr = errors.New("containment failed")
 	session = testSession(newTestAgent(), client)
 	session.beginTurn(t.Context(), "turn")
-	run = session.unacceptedCancel(sessionTurnEpoch(session), nil)
+	run := session.unacceptedCancel(sessionTurnEpoch(session), nil)
 	require.ErrorContains(t, run.err, "containment failed")
+}
+
+type predispatchRefusingServer struct {
+	*fakeHermesClient
+	err error
+}
+
+func (s predispatchRefusingServer) SendMessage(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+	return nativehermes.NativeMessage{}, s.err
+}
+
+func TestPredispatchRefusalHasNoTurnSettlementBoundary(t *testing.T) {
+	store := newCountingSessionStore()
+	base := newFakeHermesClient()
+	agent := newTestAgent(WithSessionStore(store))
+	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	connection := newRecordingAgentClient()
+	agent.setAgentClient(connection)
+	session := testSession(agent, base)
+	defer session.stopPump()
+	session.client = predispatchRefusingServer{fakeHermesClient: base, err: nativehermes.ErrGatewayAmbiguousTurn}
+	require.NoError(t, session.openLifecycleStream())
+	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+	updatesBefore := lifecycleUpdateCount(connection)
+
+	_, err := session.Prompt(t.Context(), acp.PromptRequest{
+		Meta: autonomousPromptMeta("predispatch-refusal"), SessionId: session.id,
+		Prompt: []acp.ContentBlock{acp.TextBlock("refuse")},
+	})
+	require.Error(t, err)
+	require.Equal(t, updatesBefore, lifecycleUpdateCount(connection))
+	require.Zero(t, store.replaceCount())
+	require.Zero(t, base.abortCount())
+	require.Zero(t, base.closeCount())
+	require.False(t, session.lifecycleStream().fenced())
+	session.mu.Lock()
+	require.Nil(t, session.foreground)
+	require.Equal(t, turnSettlementIdle, session.turnSettlement)
+	session.mu.Unlock()
 }
 
 func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
@@ -767,6 +894,23 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		published, err := session.publishClosedBoundary(t.Context(), nil, commit, containmentProof{})
 		require.Error(t, err)
 		require.False(t, published, "a refused commit was reported as durable")
+	})
+
+	t.Run("cancelled idle delivery", func(t *testing.T) {
+		agent := newTestAgent()
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		connection := newRecordingAgentClient()
+		agent.setAgentClient(connection)
+		session := testSession(agent, newFakeHermesClient())
+		defer session.stopPump()
+		require.NoError(t, session.openLifecycleStream())
+		stream := session.lifecycleStream()
+		require.NoError(t, stream.ensureLifecycleOpened(t.Context()))
+		require.NoError(t, stream.startActivity(t.Context()))
+		connection.updateErr = errors.New("cancelled idle unavailable")
+		published, err := session.publishClosedBoundary(t.Context(), stream, nil, containmentProof{})
+		require.ErrorContains(t, err, "cancelled idle unavailable")
+		require.True(t, published, "the boundary had no missing durable publication")
 	})
 
 	t.Run("unproved vacancy", func(t *testing.T) {
@@ -828,7 +972,7 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 	// rather than one that was never written.
 	require.NoError(t, session.snapshotToStore(t.Context()))
 	agent.sessions[session.id] = session
-	agent.deferStreamOpen(session)
+	requireStreamOpenDeferred(t, agent, lifecycleRequestContext(t.Context(), 2), session)
 
 	session.mu.Lock()
 	session.title = "renamed-before-close"
@@ -847,7 +991,7 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 	}
 	// The write barrier fires here: the owed snapshot cannot be delivered, so the
 	// deferred open fences the incarnation while the close boundary is mid-flight.
-	agent.releaseStreamOpens()
+	releaseLifecycleOpening(t, agent, session, 2)
 	agent.awaitStreamOpens()
 	close(releaseClose)
 
@@ -868,57 +1012,55 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 		"the generation captured before the containment boundary was never published")
 }
 
-// The same window with a capture that failed: the close boundary observed the
-// failure before the fence landed, so the close must report it rather than answer
-// success over a generation it never made durable.
-func TestCloseSessionReportsCaptureFailureWhenDeferredOpenFences(t *testing.T) {
+// A mandatory close capture is the last read of the live generation. Failure
+// therefore returns before containment or fencing and leaves the exact logical
+// session addressable but close-only. A retry must really capture again; it may
+// not answer success from the prior failure.
+func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
-	conn.updateErr = errors.New("opening failed")
 	agent.setAgentClient(conn)
 
 	client := newFakeHermesClient()
 	client.messagesErr = errors.New("native history read failed")
-	inClose := make(chan struct{})
-	releaseClose := make(chan struct{})
-	client.closeFunc = func(context.Context) error {
-		close(inClose)
-		<-releaseClose
-
-		return nil
-	}
-
 	session := testSession(agent, client)
 	require.NoError(t, session.openLifecycleStream())
+	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+	session.mu.Lock()
+	session.title = "captured-on-successful-retry"
+	session.mu.Unlock()
 	agent.sessions[session.id] = session
-	agent.deferStreamOpen(session)
 
-	closed := make(chan error, 1)
-	go func() {
+	for attempt := 1; attempt <= 2; attempt++ {
 		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-		closed <- err
-	}()
+		require.ErrorContains(t, err, "native history read failed")
+		require.Equal(t, 0, client.closeCount(), "attempt %d destructively contained the runtime", attempt)
+		require.False(t, session.lifecycleStream().fenced(), "attempt %d fenced the live stream", attempt)
 
-	select {
-	case <-inClose:
-	case <-time.After(10 * time.Second):
-		t.Fatal("close never reached the native containment boundary")
+		resolved, resolveErr := agent.session(session.id)
+		require.NoError(t, resolveErr)
+		require.Same(t, session, resolved)
 	}
-	agent.releaseStreamOpens()
-	agent.awaitStreamOpens()
-	close(releaseClose)
 
-	select {
-	case err := <-closed:
-		require.ErrorContains(t, err, "native history read failed",
-			"a capture failure the close boundary observed was swallowed by the fenced path")
-	case <-time.After(10 * time.Second):
-		t.Fatal("close hung")
-	}
-	require.True(t, session.lifecycleStream().fenced(), "precondition: the deferred open did not fence the stream")
+	client.mu.Lock()
+	client.messagesErr = nil
+	client.mu.Unlock()
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+	require.NoError(t, err)
+	require.Equal(t, 1, client.closeCount())
+	_, resolveErr := agent.session(session.id)
+	require.Error(t, resolveErr, "successful close did not detach the id")
+
+	entries, loadErr := agent.sessionStore().Load(t.Context(), SessionKey{
+		SessionID: string(session.id), Subpath: SessionStoreMainSubpath,
+	})
+	require.NoError(t, loadErr)
+	require.NotEmpty(t, entries, "successful retry detached before persistence")
+	require.Contains(t, string(entries[len(entries)-1]), "captured-on-successful-retry")
 }
 
 // TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration pins the other

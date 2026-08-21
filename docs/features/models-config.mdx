@@ -18,7 +18,9 @@ Those advertised values are a menu for the host, not an accepted set. A
 `provider/model` value absent from the latest menu still travels to Hermes from
 lifecycle metadata, `session/set_session_config_option`, and the next prompt.
 Hermes decides whether it resolves: an accepted selection becomes the config
-option's exact `currentValue`, while a native mutation error is returned as-is.
+option's exact `currentValue`, while a native refusal returns invalid params
+with `error: hermes_model_selection_refused` and `field: value`. Native error
+text is not copied across the ACP boundary.
 Session creation may accept a selection whose provider cannot be resolved until
 the first prompt; that prompt then returns Hermes' native turn failure. A failed
 `model.options` read can hide the menu, but it does not reject a model mutation

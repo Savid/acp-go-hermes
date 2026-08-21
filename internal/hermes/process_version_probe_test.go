@@ -60,14 +60,14 @@ func TestSharedHomeVersionProbeIsFreshAfterSamePathReplacement(t *testing.T) {
 	}
 }
 
-func TestSharedHomeSkipsMutatingGatewayCompatibilityProbe(t *testing.T) {
+func TestSharedHomeSkipsMutatingGatewayMethodProbe(t *testing.T) {
 	restoreProcessSeams(t)
 	executable := filepath.Join(t.TempDir(), "hermes-unprobed")
 	if !gatewayMethodProbeNeeded(ProcessOptions{}, executable) {
-		t.Fatal("ordinary process unexpectedly skipped the compatibility probe")
+		t.Fatal("ordinary process unexpectedly skipped the required-method probe")
 	}
 	if gatewayMethodProbeNeeded(ProcessOptions{SharedHome: true}, executable) {
-		t.Fatal("shared-home process would run the mutating compatibility probe")
+		t.Fatal("shared-home process would run the mutating required-method probe")
 	}
 
 	process, err := Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
@@ -77,7 +77,7 @@ func TestSharedHomeSkipsMutatingGatewayCompatibilityProbe(t *testing.T) {
 		Timeout:        10 * time.Second,
 	}))
 	if err != nil {
-		t.Fatalf("shared-home Start invoked the mutating compatibility probe: %v", err)
+		t.Fatalf("shared-home Start invoked the mutating required-method probe: %v", err)
 	}
 	if err := process.Close(t.Context()); err != nil {
 		t.Fatalf("close shared-home process: %v", err)

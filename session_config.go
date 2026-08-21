@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -12,8 +13,9 @@ import (
 
 // Session-config option vocabulary.
 const (
-	keyValue    = "value"
-	keyConfigID = "configId"
+	keyValue                       = "value"
+	keyConfigID                    = "configId"
+	valHermesModelSelectionRefused = "hermes_model_selection_refused"
 )
 
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
@@ -78,6 +80,17 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 			SetModel(context.Context, string, string) error
 		}); supported {
 			if err := setter.SetModel(ctx, snapshot.idmap.NativeSessionID, value); err != nil {
+				var nativeRefusal *nativehermes.RPCError
+				if errors.As(err, &nativeRefusal) {
+					return acp.SetSessionConfigOptionResponse{}, &mappedWireError{
+						wire: acp.NewInvalidParams(map[string]any{
+							jsonFieldError: valHermesModelSelectionRefused,
+							keyField:       keyValue,
+						}),
+						cause: err,
+					}
+				}
+
 				return acp.SetSessionConfigOptionResponse{}, err
 			}
 		}

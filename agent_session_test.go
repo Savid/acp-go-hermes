@@ -22,6 +22,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFailedPostResponseReplayRetractsAndContainsItsSession(t *testing.T) {
+	agent := newTestAgent()
+	client := newFakeHermesClient()
+	s := testSession(agent, client)
+	agent.sessions[s.id] = s
+
+	s.failReuseAfterResponse(errors.New("replay failed"))
+
+	require.Nil(t, agent.activeSession(s.id))
+	require.Equal(t, 1, client.closeCount())
+}
+
 // toggleReplaceStore wraps InMemorySessionStore and can be switched to fail all
 // Replace calls, simulating a disk-full/store outage after native success.
 type toggleReplaceStore struct {
@@ -84,6 +96,83 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 	if agent.activeSession(forked.SessionId) == nil || len(parentClient.deleted) != 0 {
 		t.Fatalf("committed fork registration/deletion = %#v/%#v", agent.activeSession(forked.SessionId), parentClient.deleted)
 	}
+}
+
+func TestActiveLoadReplayFailureReturnsExactCause(t *testing.T) {
+	want := errors.New("active replay failed")
+	client := newFakeHermesClient()
+	client.messagesErr = want
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	require.NoError(t, agent.storeStartedSession(session))
+
+	_, err := agent.LoadSession(t.Context(), LoadSessionRequest(session.id, session.cwd))
+	require.ErrorIs(t, err, want)
+}
+
+func TestActiveLoadCannotReplayAcrossForegroundPrompt(t *testing.T) {
+	store := NewInMemorySessionStore()
+	client := newFakeHermesClient()
+	client.getSession = testNativeSession("native-1")
+	client.messages = []nativehermes.NativeMessage{{
+		Info:  nativehermes.NativeMessageInfo{ID: historyMessageID(0), SessionID: "native-1", Role: valAssistant},
+		Parts: []nativehermes.Part{{ID: "history-b-part", SessionID: "native-1", MessageID: historyMessageID(0), Type: valText, Text: "historical B"}},
+	}}
+	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		return nativehermes.NativeMessage{
+			Info:  nativehermes.NativeMessageInfo{ID: "assistant-a", SessionID: id, Role: valAssistant, Finish: valStop},
+			Parts: []nativehermes.Part{{ID: "part-a", SessionID: id, MessageID: "assistant-a", Type: valText, Text: "foreground A"}},
+		}, nil
+	}
+
+	commitEntered := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	agent := newTestAgent(WithSessionStore(store), func(options *Options) {
+		options.beforeTerminalCommit = func() {
+			close(commitEntered)
+			<-releaseCommit
+		}
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+	require.NoError(t, agent.storeStartedSession(session))
+
+	promptDone := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "turn-a", "prompt A"))
+		promptDone <- err
+	}()
+	<-commitEntered
+
+	_, loadErr := agent.LoadSession(t.Context(), LoadSessionRequest(session.id, session.cwd))
+	require.Error(t, loadErr)
+	require.Contains(t, loadErr.Error(), valBackpressure)
+
+	conn.mu.Lock()
+	updates := append([]acp.SessionNotification(nil), conn.updates...)
+	conn.mu.Unlock()
+	var delivered strings.Builder
+	for _, notification := range updates {
+		if chunk := notification.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			delivered.WriteString(chunk.Content.Text.Text)
+		}
+	}
+	require.Equal(t, "foreground A", delivered.String())
+	require.Equal(t, "foreground A", session.foregroundPrefix())
+
+	close(releaseCommit)
+	require.NoError(t, <-promptDone)
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	var snapshot stateSnapshot
+	require.NoError(t, json.Unmarshal(entries[0], &snapshot))
+	require.NotNil(t, snapshot.Wrapper)
+	require.NotNil(t, snapshot.Wrapper.Foreground)
+	require.Equal(t, "foreground A", snapshot.Wrapper.Foreground.Text)
+	require.NotContains(t, snapshot.Wrapper.Foreground.Text, "historical B")
+	require.NoError(t, agent.Close())
 }
 
 func TestForkBindsResolvedModelBeforePublishingChild(t *testing.T) {
@@ -574,6 +663,30 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 }
 
 func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:gocyclo,maintidx // One lifecycle audit keeps every fail-closed branch explicit.
+	t.Run("caller cancellation while containment is pending", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		defer session.stopPump()
+		session.runtimeResumeWait = make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if err := session.resumeRuntimeForTurnLocked(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("pending containment cancellation = %v", err)
+		}
+	})
+
+	t.Run("failed containment poisons replacement", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		defer session.stopPump()
+		wait := make(chan struct{})
+		close(wait)
+		session.runtimeResumeWait = wait
+		session.runtimeResumeErr = errors.New("containment failed")
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "containment failed") {
+			t.Fatalf("failed containment replacement = %v", err)
+		}
+	})
+
 	t.Run("poisoned", func(t *testing.T) {
 		session, _, _ := newResumeRuntimeTestSession(t)
 		session.poisonCause = "earlier failure"
@@ -732,15 +845,17 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		}
 	})
 
-	t.Run("successful replacement drains historical channels", func(t *testing.T) {
+	t.Run("successful replacement installs a fresh pump", func(t *testing.T) {
 		session, agent, store := newResumeRuntimeTestSession(t)
 		snapshot := resumeRuntimeSnapshot(session)
 		snapshot.Terminal = &stateSnapshotTerminal{MessageID: "history-2", Role: valAssistant, Finish: "stop"}
 		replaceResumeRuntimeRecords(t, store, session.idmap, snapshot)
 		client := newFakeHermesClient()
 		client.getSession = testNativeSession("native-1")
-		client.events <- nativehermes.TurnEvent{Type: "historical"}
-		client.errs <- errors.New("historical")
+		client.messages = []nativehermes.NativeMessage{
+			{Info: nativehermes.NativeMessageInfo{ID: "history-1", SessionID: "native-1", Role: valUser}},
+			{Info: nativehermes.NativeMessageInfo{ID: "history-2", SessionID: "native-1", Role: valAssistant, Finish: valStop}},
+		}
 		installResumeRuntimeFactory(agent, client)
 		if err := session.resumeRuntimeForTurnLocked(t.Context()); err != nil {
 			t.Fatalf("resume runtime: %v", err)
@@ -751,19 +866,119 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		if terminal := session.committedTerminalState(); terminal.MessageID != "history-2" {
 			t.Fatalf("resumed terminal baseline = %#v", terminal)
 		}
-		select {
-		case event := <-client.events:
-			t.Fatalf("historical event was not drained: %#v", event)
-		default:
-		}
-		select {
-		case err := <-client.errs:
-			t.Fatalf("historical event error was not drained: %v", err)
-		default:
+		session.pumpMu.Lock()
+		pumpClient := session.pumpClient
+		pumpDone := session.pumpDone
+		session.pumpMu.Unlock()
+		managed, managedOK := pumpClient.(*managedHermesServer)
+		if !managedOK || managed.Server != client || pumpDone == nil {
+			t.Fatalf("successful replacement pump client=%T doneNil=%v", pumpClient, pumpDone == nil)
 		}
 		if err := session.Close(t.Context()); err != nil {
 			t.Fatalf("close replacement: %v", err)
 		}
+	})
+
+	t.Run("replacement lifecycle identity failure is returned", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, client)
+		oldReader := sessionIDRandReader
+		sessionIDRandReader = errorReader{err: errors.New("identity unavailable")}
+		t.Cleanup(func() { sessionIDRandReader = oldReader })
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "identity unavailable") {
+			t.Fatalf("replacement lifecycle identity = %v", err)
+		}
+		_ = client.Close(t.Context())
+	})
+
+	t.Run("replacement lifecycle snapshot failure is returned", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		connection := newRecordingAgentClient()
+		connection.updateErr = errors.New("snapshot unavailable")
+		agent.setAgentClient(connection)
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, client)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "snapshot unavailable") {
+			t.Fatalf("replacement lifecycle snapshot = %v", err)
+		}
+		_ = client.Close(t.Context())
+	})
+
+	t.Run("predecessor pump must join before successor publication", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		connection := newRecordingAgentClient()
+		agent.setAgentClient(connection)
+		replacement := newFakeHermesClient()
+		replacement.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, replacement)
+		predecessor := session.client
+		session.detachPump()
+		stuck := make(chan struct{})
+		joinEntered := make(chan struct{})
+		var joinOnce sync.Once
+		session.pumpMu.Lock()
+		session.pumpDone = stuck
+		session.pumpCancel = func() {}
+		session.pumpControlCancel = func() { joinOnce.Do(func() { close(joinEntered) }) }
+		session.pumpClient = predecessor
+		session.pumpMu.Unlock()
+
+		result := make(chan error, 1)
+		go func() { result <- session.resumeRuntimeForTurnLocked(ctx) }()
+		<-joinEntered
+		require.Zero(t, lifecycleUpdateCount(connection))
+		cancel()
+		err := <-result
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, lifecycleUpdateCount(connection))
+		require.Same(t, predecessor, session.client)
+		require.True(t, session.runtimeNeedsResume)
+		require.Equal(t, 1, replacement.closeCount())
+		close(stuck)
+		session.detachPump()
+	})
+
+	t.Run("successor snapshot follows predecessor join", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		connection := newRecordingAgentClient()
+		agent.setAgentClient(connection)
+		replacement := newFakeHermesClient()
+		replacement.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, replacement)
+		predecessor := session.client
+		session.detachPump()
+		stuck := make(chan struct{})
+		joinEntered := make(chan struct{})
+		var joinOnce sync.Once
+		session.pumpMu.Lock()
+		session.pumpDone = stuck
+		session.pumpCancel = func() {}
+		session.pumpControlCancel = func() { joinOnce.Do(func() { close(joinEntered) }) }
+		session.pumpClient = predecessor
+		session.pumpMu.Unlock()
+
+		result := make(chan error, 1)
+		go func() { result <- session.resumeRuntimeForTurnLocked(t.Context()) }()
+		<-joinEntered
+		require.Zero(t, lifecycleUpdateCount(connection))
+		close(stuck)
+		require.NoError(t, <-result)
+		require.Equal(t, 1, lifecycleUpdateCount(connection))
+		managed, ok := session.client.(*managedHermesServer)
+		require.True(t, ok)
+		require.Same(t, replacement, managed.Server)
+		require.NoError(t, session.Close(t.Context()))
 	})
 }
 
@@ -1522,7 +1737,8 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	}
 	replayErrClient := newFakeHermesClient()
 	replayErrClient.getSession = testNativeSession("native-1")
-	replayErrClient.messagesErr = errors.New("messages failed")
+	wantReplayErr := errors.New("messages failed")
+	var failedLoad *session
 	replayErrAgent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			replayErrClient.xdg = opts.ExistingXDG
@@ -1530,9 +1746,31 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 			return replayErrClient, nil
 		}
 	})
-	if _, err25 := replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err25 == nil {
-		t.Fatal("load replay error was ignored")
+	replayErrAgent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	replayConn := newRecordingAgentClient()
+	replayErrAgent.setAgentClient(replayConn)
+	replayErrClient.messagesFunc = func(context.Context, string) ([]nativehermes.NativeMessage, error) {
+		failedLoad = replayErrAgent.activeSession("session-1")
+
+		return nil, wantReplayErr
 	}
+	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd))
+	require.ErrorIs(t, err, wantReplayErr)
+	require.NotNil(t, failedLoad)
+	require.Nil(t, replayErrAgent.activeSession("session-1"))
+	require.Equal(t, 1, replayErrClient.closeCount())
+	require.True(t, failedLoad.lifecycleStream().fenced())
+	select {
+	case <-failedLoad.pumpDone:
+	default:
+		t.Fatal("failed cold replay returned before its pump joined")
+	}
+	replayErrClient.emitEvent(nativehermes.TurnEvent{Type: nativehermes.EventGatewayRaw})
+	require.Zero(t, replayConn.updateCount())
+	_, statErr := os.Stat(replayErrClient.xdg.Root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	if _, err26 := closed.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err26 == nil {
 		t.Fatal("closed agent resumed session")
@@ -3566,7 +3804,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		agent.retainNegotiatedLifecycle(negotiated)
 		installFailingLifecycleIDReader(t, 1)
 
-		_, err := agent.loadOrResumeSession(t.Context(), seed.id, seed.cwd, nil, nil, nil)
+		_, err := agent.loadOrResumeSession(t.Context(), seed.id, seed.cwd, nil, nil, nil, false)
 		require.ErrorContains(t, err, "lifecycle stream id failed")
 		require.True(t, client.closed)
 	})

@@ -15,6 +15,10 @@ as, root or non-root alike, and the adapter reports `shared_identity`.
 
 An ACP client launches `acp-go-hermes` as a subprocess and speaks ACP over its
 stdin/stdout. Stdout carries ACP JSON-RPC only; diagnostics go to stderr.
+Input is newline-delimited and framed incrementally to the ACP SDK's 10 MiB
+maximum. Oversized or unterminated frames are rejected before lifecycle request
+identity is registered or a session can open, and diagnostics never include the
+frame body.
 
 ```sh
 acp-go-hermes -path /usr/bin/hermes -scratch-dir /tmp/acp-hermes

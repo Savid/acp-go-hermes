@@ -277,6 +277,29 @@ func TestHermesACPAgentBinarySessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestHermesDirectSessionDeletionDrainsGatewayBeforeContainment(t *testing.T) {
+	requireRunIntegration(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
+	defer cancel()
+	agent := hermesacp.NewAgent(
+		hermesacp.WithExecutablePath(integrationHermesPath(t)),
+		hermesacp.WithScratchDir(t.TempDir()),
+		integrationContainmentOption(),
+	)
+	defer func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("close agent: %v", err)
+		}
+	}()
+	session, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new session: %T %v", err, err)
+	}
+	if _, err := agent.UnstableDeleteSession(ctx, hermesacp.DeleteSessionRequest(session.SessionId)); err != nil {
+		t.Fatalf("delete session: %T %#v %v", err, err, err)
+	}
+}
+
 func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	requireRunLiveTokens(t)
 

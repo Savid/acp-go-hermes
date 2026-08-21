@@ -116,8 +116,10 @@ is never adopted. On Darwin best effort, completion does not establish that a
 `session/close` captures its final eligible snapshot before stopping the native
 client, because managed client shutdown removes the isolated XDG root. Close
 still skips snapshotting while a turn, permission, elicitation, or generation
-is pending, and it always proceeds with native teardown even if the snapshot
-fails.
+is pending. When an eligible mandatory capture fails, close returns before
+native teardown or lifecycle fencing and leaves the close-only session
+addressable; a retry captures again. Once capture succeeds, its publication
+completes before the session id is detached.
 
 <Note>
 Snapshots exclude credential-bearing files and scrub credential tables from the

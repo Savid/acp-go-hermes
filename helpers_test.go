@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -146,8 +147,7 @@ type fakeHermesClient struct {
 	deleted              []string
 	closed               bool
 	closeCalls           int
-	events               chan nativehermes.TurnEvent
-	errs                 chan error
+	deliveries           chan nativehermes.TurnDelivery
 	createErr            error
 	getErr               error
 	listErr              error
@@ -181,6 +181,11 @@ type fakeHermesClient struct {
 	authDisconnected      []string
 	authDisconnectErr     error
 	providerAuthSupported *bool
+	promptCycles          uint64
+	beforePromptDispatch  func()
+	promptTerminal        *nativehermes.TurnEvent
+	omitPromptTerminal    bool
+	afterPromptTerminal   func()
 }
 
 type fakeModelSelection struct {
@@ -277,8 +282,7 @@ type fakeQuestionReject struct {
 
 func newFakeHermesClient() *fakeHermesClient {
 	return &fakeHermesClient{
-		events: make(chan nativehermes.TurnEvent, 16),
-		errs:   make(chan error, 16),
+		deliveries: make(chan nativehermes.TurnDelivery, 32),
 	}
 }
 
@@ -366,7 +370,17 @@ func (c *fakeHermesClient) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
-	if err := nativehermes.NotifyPromptDispatch(ctx); err != nil {
+	c.mu.Lock()
+	c.promptCycles++
+	promptCycle := c.promptCycles
+	cycleID := fmt.Sprintf("fake/%s/cycle-%d", id, promptCycle)
+	c.mu.Unlock()
+	if c.beforePromptDispatch != nil {
+		c.beforePromptDispatch()
+	}
+	if err := nativehermes.NotifyPromptDispatch(ctx, nativehermes.PromptDispatchInfo{
+		CycleID: cycleID, TransportGeneration: 1,
+	}); err != nil {
 		return nativehermes.NativeMessage{}, err
 	}
 
@@ -400,6 +414,27 @@ func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativ
 		}
 	}
 	c.mu.Unlock()
+
+	if !c.omitPromptTerminal {
+		copyMessage := message
+		terminal := nativehermes.TurnEvent{
+			Type:                nativehermes.EventCycleComplete,
+			TransportGeneration: 1,
+			CycleID:             cycleID,
+			Origin:              nativehermes.CycleOriginPrompt,
+			Message:             &copyMessage,
+		}
+		if c.promptTerminal != nil {
+			terminal = *c.promptTerminal
+			terminal.TransportGeneration = 1
+			terminal.CycleID = cycleID
+			terminal.Origin = nativehermes.CycleOriginPrompt
+		}
+		c.emitEvent(terminal)
+	}
+	if c.afterPromptTerminal != nil {
+		c.afterPromptTerminal()
+	}
 
 	return message, nil
 }
@@ -501,12 +536,17 @@ func (c *fakeHermesClient) RejectQuestion(_ context.Context, req nativehermes.Qu
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) Events() <-chan nativehermes.TurnEvent {
-	return c.events
+func (c *fakeHermesClient) Deliveries() <-chan nativehermes.TurnDelivery {
+	return c.deliveries
 }
 
-func (c *fakeHermesClient) EventErrors() <-chan error {
-	return c.errs
+func (c *fakeHermesClient) emitEvent(event nativehermes.TurnEvent) {
+	copyEvent := event
+	c.deliveries <- nativehermes.TurnDelivery{Event: &copyEvent}
+}
+
+func (c *fakeHermesClient) emitError(err error) {
+	c.deliveries <- nativehermes.TurnDelivery{Err: err}
 }
 
 func (c *fakeHermesClient) XDGDirs() nativehermes.XDGDirs {
@@ -593,6 +633,10 @@ type recordingAgentClient struct {
 	elicitationIgnoreContext bool
 	permErr                  error
 	elicitErr                error
+	permissionWriteErr       error
+	elicitationWriteErr      error
+	permissionBeforeReturn   func()
+	elicitationBeforeReturn  func()
 	updateErr                error
 	notifyErr                error
 }
@@ -628,6 +672,15 @@ func (c *recordingAgentClient) CreateElicitation(
 	request acp.UnstableCreateElicitationRequest,
 	scope elicitationScope,
 ) (acp.UnstableCreateElicitationResponse, error) {
+	return c.CreateElicitationRegistered(ctx, request, scope, nil)
+}
+
+func (c *recordingAgentClient) CreateElicitationRegistered(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	written chan<- error,
+) (acp.UnstableCreateElicitationResponse, error) {
 	c.mu.Lock()
 	c.elicitations = append(c.elicitations, request)
 	c.scopes = append(c.scopes, scope)
@@ -636,7 +689,15 @@ func (c *recordingAgentClient) CreateElicitation(
 	started := c.elicitationStarted
 	release := c.elicitationRelease
 	ignoreContext := c.elicitationIgnoreContext
+	writeErr := c.elicitationWriteErr
+	beforeReturn := c.elicitationBeforeReturn
 	c.mu.Unlock()
+	if written != nil {
+		written <- writeErr
+	}
+	if writeErr != nil {
+		return acp.UnstableCreateElicitationResponse{}, writeErr
+	}
 	signalTestHook(started)
 	if release != nil {
 		if ignoreContext {
@@ -650,11 +711,22 @@ func (c *recordingAgentClient) CreateElicitation(
 			return acp.UnstableCreateElicitationResponse{}, ctx.Err()
 		}
 	}
+	if beforeReturn != nil {
+		beforeReturn()
+	}
 
 	return resp, err
 }
 
 func (c *recordingAgentClient) RequestPermission(ctx context.Context, request acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return c.RequestPermissionRegistered(ctx, request, nil)
+}
+
+func (c *recordingAgentClient) RequestPermissionRegistered(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	written chan<- error,
+) (acp.RequestPermissionResponse, error) {
 	c.mu.Lock()
 	c.permissions = append(c.permissions, request)
 	resp := c.permission
@@ -662,7 +734,15 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 	started := c.permissionStarted
 	release := c.permissionRelease
 	ignoreContext := c.permissionIgnoreContext
+	writeErr := c.permissionWriteErr
+	beforeReturn := c.permissionBeforeReturn
 	c.mu.Unlock()
+	if written != nil {
+		written <- writeErr
+	}
+	if writeErr != nil {
+		return acp.RequestPermissionResponse{}, writeErr
+	}
 	signalTestHook(started)
 	if release != nil {
 		if ignoreContext {
@@ -675,6 +755,9 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 		case <-ctx.Done():
 			return acp.RequestPermissionResponse{}, ctx.Err()
 		}
+	}
+	if beforeReturn != nil {
+		beforeReturn()
 	}
 
 	return resp, err
@@ -765,6 +848,58 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,
 	})
+}
+
+const testControlCycleID = "test-control-cycle"
+
+// beginTestControlTurn obtains control ownership from a cycle-start frame
+// consumed by the permanent pump, matching the only production admission path.
+func beginTestControlTurn(t *testing.T, s *session, ctx context.Context, nonce string) context.Context {
+	t.Helper()
+
+	s.pumpMu.Lock()
+	pumpClient := s.pumpClient
+	s.pumpMu.Unlock()
+	client, ok := pumpClient.(*fakeHermesClient)
+	if !ok {
+		t.Fatal("control test requires the ordered fake Hermes source")
+	}
+	originalNonce := s.newPumpNonce
+	s.newPumpNonce = func() (string, error) { return nonce, nil }
+	if stream := s.lifecycleStream(); stream != nil {
+		if err := stream.ensureLifecycleOpened(ctx); err != nil {
+			t.Fatalf("open lifecycle source for control cycle: %v", err)
+		}
+	}
+	client.emitEvent(nativehermes.TurnEvent{
+		Type:                nativehermes.EventCycleStarted,
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+		Origin:              nativehermes.CycleOriginActivity,
+	})
+	if err := s.synchronizePump(ctx); err != nil {
+		t.Fatalf("project control cycle start: %v", err)
+	}
+	s.newPumpNonce = originalNonce
+	route := s.routeForEvent(nativehermes.TurnEvent{
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+	})
+	if route == nil {
+		t.Fatal("permanent pump did not publish control ownership")
+	}
+	t.Cleanup(func() { s.removePumpRoute(route) })
+
+	return withPumpRoute(ctx, route)
+}
+
+func testHermesQuestionRequest(id string) nativehermes.QuestionRequest {
+	return nativehermes.QuestionRequest{
+		ID:                  id,
+		SessionID:           "native-1",
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+	}
 }
 
 type errorReader struct {
@@ -890,9 +1025,11 @@ func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordin
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatalf("open lifecycle stream: %v", err)
 	}
-	turnCtx := session.beginTurn(t.Context(), "turn")
+	turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 	session.mu.Lock()
 	session.turnInFlight = true
+	session.turnEpoch = 1
+	session.turnSettlement = turnSettlementOpen
 	session.mu.Unlock()
 	if accepted {
 		if err := session.lifecycleStream().accept(turnCtx, lifecycle.Submission{

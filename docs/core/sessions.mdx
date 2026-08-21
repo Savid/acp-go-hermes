@@ -36,6 +36,17 @@ replays `session.history` to the ACP client so the host rebuilds the
 conversation. `session/resume` hydrates and resumes the same way but skips the
 replay, for hosts that only need to continue the turn stream.
 
+When the logical id is already active, load and resume reuse that exact runtime
+only while its foreground is idle. A foreground prompt or another reuse request
+holds the session-scoped admission and the overlapping request is rejected with
+`session_reuse` backpressure. For ACP transport calls, an active load starts its
+history replay only after its own response has been written. Session close stops
+reuse admission, cancels and joins any admitted load, resume, or replay, and
+returns success only after none can emit another update or persist another
+snapshot. A cold load whose replay fails after publication is retracted, its
+pump is joined, and its client and generation are contained before the failure
+returns; the durable stored session remains available for a later clean load.
+
 `session/delete` tombstones the ACP store first and hides the session id with
 that write, then cancels and settles any turn still in flight, then best-effort
 deletes native state; a native missing-session response counts as success, so
@@ -54,13 +65,15 @@ elicitation, or generation still pending are closed without a fresh snapshot.
 
 A close that completes its boundary detaches the id, which then answers
 `unknown session`. A close that fails one — a native tree it could not prove
-contained, a snapshot the store refused — reports the failure and leaves the id
-addressable, because the work it owes is still owed. Such a session admits no
-further prompt; another `session/close` re-runs the containment boundary and
-commits the snapshot the failed attempt captured, and the id is detached once
-that close succeeds. A generation root that failed containment stays quarantined
-for the life of the process whichever way the retry goes, so it can never back a
-resumed runtime again.
+contained, a mandatory capture it could not read, a snapshot the store refused —
+reports the failure and leaves the id addressable, because the work it owes is
+still owed. Such a session admits no further prompt. A capture failure returns
+before containment and retries the capture from the same live generation. A
+later-rung failure retries containment or commits the snapshot the failed attempt
+already captured, as applicable; the id is detached only after persistence
+succeeds. A generation root that failed containment stays quarantined for the
+life of the process whichever way the retry goes, so it can never back a resumed
+runtime again.
 
 Cancellation and timeout are destructive runtime boundaries. The adapter first
 interrupts Hermes, then completes the selected platform containment boundary

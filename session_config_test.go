@@ -3,7 +3,9 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -287,15 +289,6 @@ func TestUnknownModelValueTraversesActiveResume(t *testing.T) {
 	}
 }
 
-// TestUnknownModelNativeRefusalPropagates proves the wrapper returns whatever
-// Hermes answered a model mutation, unchanged and unclassified.
-//
-// The refusal is Hermes' own, reproduced rather than paraphrased: source =
-// hermes 0.20.4 (2026.8.18), measured by TestLiveModelSelectionNativeAnswers in
-// internal/hermes against a real `hermes serve`. Hermes refuses on the provider
-// and not on the model — an unadvertised model under a known provider is
-// accepted, which is why this case names an unknown provider to get a refusal
-// at all. A version bump re-measures there and this literal follows it.
 // TestMalformedModelValueRefusedByBothDoors pins the only refusal model
 // selection still makes locally, and pins that both doors make it.
 //
@@ -353,7 +346,7 @@ func TestMalformedModelValueRefusedByBothDoors(t *testing.T) {
 	}
 }
 
-func TestUnknownModelNativeRefusalPropagates(t *testing.T) {
+func TestUnknownModelNativeRefusalIsSanitized(t *testing.T) {
 	client := newFakeHermesClient()
 	wantErr := &nativehermes.RPCError{
 		Code:    5001,
@@ -365,8 +358,23 @@ func TestUnknownModelNativeRefusalPropagates(t *testing.T) {
 	agent.sessions[session.id] = session
 
 	value := "missing-provider/missing-model"
-	if _, err := agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, value)); !errors.Is(err, wantErr) {
-		t.Fatalf("native unknown-model error = %v", err)
+	_, err := agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, value))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("native refusal cause = %v, want %v", err, wantErr)
+	}
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) || requestErr.Code != -32602 {
+		t.Fatalf("model refusal = %#v, want invalid params", err)
+	}
+	wantData := map[string]any{
+		jsonFieldError: valHermesModelSelectionRefused,
+		keyField:       keyValue,
+	}
+	if !reflect.DeepEqual(requestErr.Data, wantData) {
+		t.Fatalf("model refusal data = %#v, want %#v", requestErr.Data, wantData)
+	}
+	if strings.Contains(err.Error(), wantErr.Message) {
+		t.Fatalf("model refusal leaked native text: %v", err)
 	}
 	client.mu.Lock()
 	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)

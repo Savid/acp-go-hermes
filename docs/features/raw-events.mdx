@@ -27,10 +27,9 @@ Events are then delivered as `_hermes/rawEvent` notifications, each carrying
 `sessionId`, `sequence`, `source`, and the native `event` payload. A native
 event without a payload is skipped entirely: no notification is emitted and no
 sequence number is consumed. The sequence is per-session, starts at 1, and is
-non-authoritative: a number is committed only after its notification is
-delivered successfully, so a failed delivery consumes nothing and the next
-successful event reuses that number. The stream a consumer receives is
-therefore contiguous and never carries a gap.
+claimed before delivery. A failed delivery consumes its number, so the next
+successful event advances and exposes the loss as a gap; an attempted identity
+is never reused.
 
 ## Size cap and truncation
 

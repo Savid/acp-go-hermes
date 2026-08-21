@@ -258,7 +258,6 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 			"PATH=/usr/bin:/bin",
 			"HOME=/home/operator",
 			"HERMES_HOME=/operator/real/home",
-			"HERMES_AUTH_HOME=/operator/real/credentials",
 		}
 	}
 
