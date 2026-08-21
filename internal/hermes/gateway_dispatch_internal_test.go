@@ -293,6 +293,63 @@ func TestGatewayCompletionPreservesStreamedPresentationWhitespace(t *testing.T) 
 	}
 }
 
+// TestGatewayInterruptedCompletionFinishesCancelled pins that the status hermes
+// reports for a stopped, steered, or barged-in turn settles as a cancel rather
+// than as the clean stop a successful turn reports.
+func TestGatewayInterruptedCompletionFinishesCancelled(t *testing.T) {
+	_, actor := newDirectGatewayActor()
+
+	interrupted, err := actor.messageFor(actor.newCycle(CycleOriginPrompt), Event{
+		Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"partial answer","status":"interrupted"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupted.Info.Finish != valCancelled {
+		t.Fatalf("interrupted finish = %q", interrupted.Info.Finish)
+	}
+
+	complete, err := actor.messageFor(actor.newCycle(CycleOriginPrompt), Event{
+		Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"answer","status":"complete"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete.Info.Finish != valStop {
+		t.Fatalf("complete finish = %q", complete.Info.Finish)
+	}
+}
+
+// TestGatewayBareErrorEventFailsTheCycle pins the frame hermes ends a turn with
+// when the turn dies before or outside its own terminal path: the cycle fails on
+// the error event instead of waiting for a message.complete that never comes.
+func TestGatewayBareErrorEventFailsTheCycle(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	actor.active = actor.newCycle(CycleOriginActivity)
+
+	actor.handleRaw(actor.generation, Event{
+		Type:            evtError,
+		Payload:         json.RawMessage(`{"message":"Turn cancelled before the agent was ready"}`),
+		InboundSequence: 1,
+	})
+	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("generation cause = %v", cause)
+	}
+	if actor.active != nil {
+		t.Fatalf("error event retained active=%#v", actor.active)
+	}
+	terminal := mustTurnEvent(t, server.deliveries)
+	if terminal.Type != EventCycleFailed || terminal.Message != nil {
+		t.Fatalf("error event terminal = %#v", terminal)
+	}
+
+	var failure *TurnFailureError
+	if !errors.As(terminal.Err, &failure) || failure.Cause() != CauseProvider ||
+		failure.Message() != "Turn cancelled before the agent was ready" {
+		t.Fatalf("error event failure = %#v", terminal.Err)
+	}
+}
+
 func TestGatewayCompletionCumulativeTextLimitPlusOneFailsClosed(t *testing.T) {
 	server, actor := newDirectGatewayActor()
 	cycle := actor.newCycle(CycleOriginActivity)
@@ -357,7 +414,7 @@ func TestGatewayDispatchHelpers(t *testing.T) {
 		}
 		for _, eventType := range []string{
 			evtApprovalRequest, evtClarifyRequest, evtSecretRequest, evtMessageDelta,
-			evtMessageComplete, evtSessionError, evtSudoRequest, evtThinkingDelta,
+			evtMessageComplete, evtError, evtSudoRequest, evtThinkingDelta,
 			evtTerminalReadReq, evtToolComplete, evtToolStart,
 		} {
 			if !gatewaySessionEvent(eventType) {

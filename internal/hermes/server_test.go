@@ -4306,9 +4306,9 @@ func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
 			message: "HTTP 402: This request requires more credits",
 		},
 		{
-			name: "session.error event (auth)",
+			name: "bare error event (auth)",
 			events: []Event{{
-				Type:    evtSessionError,
+				Type:    evtError,
 				Payload: json.RawMessage(`{"error":{"message":"invalid api key","statusCode":401,"providerCode":"auth_error"}}`),
 			}},
 			message:  "invalid api key",
@@ -4316,14 +4316,15 @@ func TestTurnFailureProviderErrorAtGatewayBoundary(t *testing.T) {
 			provider: "auth_error",
 		},
 		{
-			name: "session.error event (flat fields)",
+			// The shape hermes actually emits when a turn dies before or outside
+			// its own terminal path: an error event with a bare message, and no
+			// message.complete behind it.
+			name: "bare error event ends the turn",
 			events: []Event{{
-				Type:    evtSessionError,
-				Payload: json.RawMessage(`{"message":"gateway exploded","statusCode":500,"providerCode":"explode"}`),
+				Type:    evtError,
+				Payload: json.RawMessage(`{"message":"agent init failed: no provider credentials"}`),
 			}},
-			message:  "gateway exploded",
-			status:   500,
-			provider: "explode",
+			message: "agent init failed: no provider credentials",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

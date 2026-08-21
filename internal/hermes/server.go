@@ -51,6 +51,8 @@ const (
 	argPort             = "--port"
 	valOnce             = "once"
 	valUnsupported      = "unsupported"
+	valCancelled        = "cancelled"
+	valInterrupted      = "interrupted"
 	keyTitle            = "title"
 	keySessionIDSnake   = "session_id"
 	keyValue            = "value"
@@ -69,7 +71,7 @@ const (
 	evtMessageDelta       = "message.delta"
 	evtMessageComplete    = "message.complete"
 	evtMessagePartUpdated = "message.part.updated"
-	evtSessionError       = "session.error"
+	evtError              = "error"
 	evtSudoRequest        = "sudo.request"
 	evtThinkingDelta      = "thinking.delta"
 	evtTerminalReadReq    = "terminal.read.request"
@@ -1072,8 +1074,11 @@ func gatewayCompleteFailure(payload json.RawMessage) *TurnFailureError {
 	return failure
 }
 
-// gatewayEventFailure maps a session.error gateway event to a provider turn
+// gatewayEventFailure maps a bare error gateway event to a provider turn
 // failure, accepting either a nested {error:{…}} object or flat error fields.
+// Hermes ends a turn with this frame in place of message.complete whenever the
+// turn dies before or outside its own terminal path, so the frame is the only
+// thing that can settle the cycle it ends.
 func gatewayEventFailure(payload json.RawMessage) *TurnFailureError {
 	var body struct {
 		Error        *nativeError `json:"error"`
@@ -2429,6 +2434,18 @@ func gatewayCompleteText(raw json.RawMessage) string {
 	}
 
 	return payload.Text
+}
+
+// gatewayCompleteFinish reads the structured native finish a message.complete
+// event reached. Hermes reports the status of a turn a stop, a steer, or a
+// barge-in ended as "interrupted"; that is a cancel, and reporting it as the
+// clean stop the successful status names would misstate the turn's boundary.
+func gatewayCompleteFinish(raw json.RawMessage) string {
+	if strings.EqualFold(gatewayPayloadString(raw, jsonFieldStatus), valInterrupted) {
+		return valCancelled
+	}
+
+	return valStop
 }
 
 func gatewayUsageTokens(raw json.RawMessage) Tokens {

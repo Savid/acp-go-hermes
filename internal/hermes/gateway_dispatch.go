@@ -756,7 +756,7 @@ func gatewayTransportFailure(cause error) *TurnFailureError {
 func gatewaySessionEvent(eventType string) bool {
 	switch eventType {
 	case evtApprovalRequest, evtClarifyRequest, evtSecretRequest, evtMessageDelta,
-		evtMessageComplete, evtSessionError, evtSudoRequest, evtThinkingDelta,
+		evtMessageComplete, evtError, evtSudoRequest, evtThinkingDelta,
 		evtTerminalReadReq, evtToolComplete, evtToolStart:
 		return true
 	default:
@@ -1246,7 +1246,7 @@ func (a *gatewaySessionActor) handleRaw(generation uint64, event Event) {
 
 	if a.fencedPrompt != nil && a.fencedPrompt.generation == generation && gatewaySessionEvent(event.Type) {
 		if event.InboundSequence > a.fencedPrompt.watermark &&
-			(event.Type == evtMessageComplete || event.Type == evtSessionError) {
+			(event.Type == evtMessageComplete || event.Type == evtError) {
 			a.fencedPrompt = nil
 		}
 
@@ -1328,7 +1328,7 @@ func (a *gatewaySessionActor) applyEvent(cycle *gatewayCycle, event Event) error
 		a.server.declineGatewayQuestion(context.Background(), a.generation, a.live, event.Type)
 
 		return nil
-	case evtSessionError:
+	case evtError:
 		return a.completeCycle(cycle, NativeMessage{}, gatewayEventFailure(event.Payload), event)
 	case evtToolStart:
 		if err := cycle.chargeTool(event); err != nil {
@@ -1721,7 +1721,7 @@ func (a *gatewaySessionActor) messageFor(cycle *gatewayCycle, event Event) (Nati
 			ID:            cycle.messageID,
 			SessionID:     a.stored,
 			Role:          valAssistant,
-			Finish:        valStop,
+			Finish:        gatewayCompleteFinish(event.Payload),
 			Tokens:        gatewayUsageTokens(event.Payload),
 			ContextWindow: gatewayContextWindow(event.Payload),
 		},
