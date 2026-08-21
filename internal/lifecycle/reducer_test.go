@@ -346,7 +346,7 @@ func TestActivityIdentityIsImmutable(t *testing.T) {
 	}}
 
 	for _, patch := range []ActivityUpdate{
-		{ActivityID: "act-1", State: ActivityRunning, Kind: ActivityMonitor},
+		{ActivityID: "act-1", State: ActivityRunning, Kind: ActivitySubagent},
 		{ActivityID: "act-1", State: ActivityRunning, ParentID: "act-9"},
 		{ActivityID: "act-1", State: ActivityRunning, ToolCallID: "tool-9"},
 		{ActivityID: "act-1", State: ActivityRunning, Cause: CauseActivity},
@@ -536,7 +536,7 @@ func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment}))
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnnegotiatedFact, openSnapshot(),
-		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassNativeSettledBarrier}))
+		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClass("quiet-for-a-while")}))
 }
 
 // TestReducerLatchesOnTheFirstRefusal pins fail-closed on the consumer side: a
@@ -855,17 +855,16 @@ func TestAdvertisementRendersTheAnswer(t *testing.T) {
 
 	full := richConfiguration().Advertisement()
 	require.Equal(t, "process-containment", full["quiescenceSource"])
-	require.Equal(t, []string{"task", "monitor", "subagent", "goal", "other"}, full["activityKinds"])
+	require.Equal(t, []string{"task", "subagent"}, full["activityKinds"])
 	require.Equal(t, true, full["updatesOutsidePrompt"])
 }
 
-// TestProofClassIsClosedAtTwo pins that nothing outside the two proof classes is
+// TestProofClassIsClosedAtOne pins that nothing outside the sole proof class is
 // a class at all.
-func TestProofClassIsClosedAtTwo(t *testing.T) {
+func TestProofClassIsClosedAtOne(t *testing.T) {
 	t.Parallel()
 
 	require.True(t, ProofClassProcessContainment.Valid())
-	require.True(t, ProofClassNativeSettledBarrier.Valid())
 	require.False(t, ProofClass("quiet-for-a-while").Valid())
 }
 

@@ -16,9 +16,7 @@ func richConfiguration() Negotiated {
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
-		ActivityKinds: []ActivityKind{
-			ActivityTask, ActivityMonitor, ActivitySubagent, ActivityGoal, ActivityOther,
-		},
+		ActivityKinds:           []ActivityKind{ActivityTask, ActivitySubagent},
 	}
 }
 
@@ -227,7 +225,7 @@ func TestDecodeAcceptsTheWholeEventSet(t *testing.T) {
 		`{"type":"state_update","state":"idle","cycleId":"c","cause":"session"}`,
 		`{"type":"activity_update","activity":{"activityId":"a","kind":"task","state":"running","cause":"submission","originTurnId":"t","parentId":"p","toolCallId":"tool","runId":"r","progress":{"done":1}}}`,
 		`{"type":"action_update","action":{"actionId":"x","kind":"permission","state":"pending","owner":{"type":"turn","id":"t"},"runId":"r","blocksForeground":true}}`,
-		`{"type":"quiescence_update","quiescent":true,"source":"native-settled-barrier","watermark":0,"barrier":"b"}`,
+		`{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":0,"barrier":"b"}`,
 	} {
 		delivery, err := DecodeSessionUpdate(json.RawMessage(enveloped(event)), richConfiguration())
 		require.NoError(t, err, event)
