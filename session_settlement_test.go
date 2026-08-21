@@ -821,6 +821,7 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 		wantIncarnation bool
 	}{
 		{name: "registration refusal", sendErr: nativehermes.ErrGatewayAmbiguousTurn},
+		{name: "agent-origin backpressure", sendErr: nativehermes.ErrGatewayAgentBusy},
 		{name: "admission refusal", acceptErr: acceptErr},
 		{name: "missing dispatch proof"},
 		{name: "post-dispatch admission failure", acceptErr: acceptErr, dispatched: true, wantSettle: true, wantIncarnation: true},
@@ -834,6 +835,12 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 			require.Equal(t, test.wantIncarnation, run.endsIncarnation)
 		})
 	}
+
+	// Hermes running a full autonomous turn between prompts is the contention
+	// the ACP foreground already states, so the prompt is refused with the same
+	// retryable backpressure rather than mapped to a turn failure.
+	busy := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayAgentBusy, nil, false)
+	require.Equal(t, sessionForegroundBackpressure().Error(), busy.err.Error())
 
 	client := newFakeHermesClient()
 	client.closeErr = errors.New("containment failed")

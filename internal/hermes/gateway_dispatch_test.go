@@ -410,22 +410,32 @@ func TestGatewayCreateAndResumeRefuseCancelledHandshakeBindings(t *testing.T) {
 	}
 }
 
-func TestGatewayPromptWatermarkAmbiguousOverlapFailsClosed(t *testing.T) {
-	_, actor := newDirectGatewayActor()
+// TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream pins that a prompt
+// acknowledged while an autonomous cycle is still open is given back as
+// backpressure. Hermes runs whole turns between prompts; the live one keeps the
+// connection and every frame the prompt was holding.
+func TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream(t *testing.T) {
+	server, actor := newDirectGatewayActor()
 	handle := registerDirectPrompt(actor)
 	actor.handleRaw(1, Event{
 		Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"unfinished"}`),
 	})
 	actor.handleRaw(1, Event{
-		Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"new"}`),
+		Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":" and more"}`),
 	})
 
 	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
-	if !errors.Is(result.err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("overlap error = %v, want %v", result.err, ErrGatewayAmbiguousTurn)
+	if !errors.Is(result.err, ErrGatewayAgentBusy) {
+		t.Fatalf("overlap error = %v, want %v", result.err, ErrGatewayAgentBusy)
 	}
-	if prompt := <-handle.result; !errors.Is(prompt.err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("pending prompt error = %v", prompt.err)
+	if actor.prompt != nil {
+		t.Fatalf("refused prompt was retained: %#v", actor.prompt)
+	}
+	if actor.active == nil || actor.active.text.String() != "unfinished and more" {
+		t.Fatalf("autonomous cycle lost the held frames: %#v", actor.active)
+	}
+	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("busy refusal failed the generation: %v", cause)
 	}
 }
 
@@ -906,11 +916,14 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 			return nil
 		})
 		_, err := server.SendMessage(ctx, "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}})
-		if !errors.Is(err, ErrGatewayAmbiguousTurn) {
+		if !errors.Is(err, ErrGatewayAgentBusy) {
 			t.Fatalf("active autonomous registration = %v", err)
 		}
 		if calls := fake.callsFor("prompt.submit"); len(calls) != 0 || dispatches != 0 {
 			t.Fatalf("refused prompt reached submit/hook: calls=%d dispatches=%d", len(calls), dispatches)
+		}
+		if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+			t.Fatalf("busy refusal failed the generation: %v", cause)
 		}
 
 		actor.active = nil

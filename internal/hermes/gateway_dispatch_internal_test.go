@@ -656,16 +656,11 @@ func TestGatewayActorRawEdges(t *testing.T) {
 		}
 	})
 
-	t.Run("prompt and active ambiguity", func(t *testing.T) {
+	t.Run("pre-submit frame after prompt output", func(t *testing.T) {
 		_, actor := newDirectGatewayActor()
 		handle := registerDirectPrompt(actor)
 		actor.prompt.watermarkSet = true
 		actor.prompt.watermark = 5
-		actor.active = actor.newCycle(CycleOriginActivity)
-		if err := actor.routeRaw(Event{Type: evtMessageDelta, InboundSequence: 6}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-			t.Fatalf("post-submit overlap = %v", err)
-		}
-		actor.active = nil
 		actor.prompt.started = true
 		if err := actor.routeRaw(Event{Type: evtMessageDelta, InboundSequence: 4}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 			t.Fatalf("pre-submit overlap = %v", err)
@@ -1576,9 +1571,8 @@ func TestGatewayLifecycleCorrectionRemainingBranches(t *testing.T) {
 	}
 	heldActor.prompt = &gatewayCycle{
 		id: "prompt", watermarkSet: true, watermark: 1,
-		heldEvents: []Event{{Type: evtMessageDelta, InboundSequence: 2}},
+		heldEvents: []Event{{Type: evtToolStart, Payload: json.RawMessage(`{}`), InboundSequence: 2}},
 	}
-	heldActor.active = &gatewayCycle{id: "activity"}
 	if err := heldActor.releasePrompt(&gatewayPromptRelease{cycleID: "prompt"}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 		t.Fatalf("held event route failure = %v", err)
 	}

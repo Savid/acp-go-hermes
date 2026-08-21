@@ -2062,6 +2062,12 @@ func (s *hermesServer) submitGatewayTextForLive(
 	}
 
 	if watermarkResult.err != nil {
+		// Agent-origin work holding the stream releases the registration and
+		// nothing else: the autonomous turn keeps the connection it is running on.
+		if errors.Is(watermarkResult.err, ErrGatewayAgentBusy) {
+			return NativeMessage{}, errors.Join(watermarkResult.err, cancelRegistration(watermarkResult.err))
+		}
+
 		_ = failAccepted(watermarkResult.err)
 
 		return NativeMessage{}, watermarkResult.err

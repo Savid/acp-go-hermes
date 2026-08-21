@@ -708,6 +708,13 @@ func (s *session) nativeRun(
 			return promptRun{err: acceptErr}
 		}
 
+		if errors.Is(sendErr, nativehermes.ErrGatewayAgentBusy) {
+			// Hermes runs whole autonomous turns between prompts. One of them
+			// holding the native session is the same contention the ACP foreground
+			// already states, and the caller can retry it once the turn settles.
+			return promptRun{err: sessionForegroundBackpressure()}
+		}
+
 		if sendErr != nil {
 			return promptRun{err: mapTurnFailure(sendErr)}
 		}

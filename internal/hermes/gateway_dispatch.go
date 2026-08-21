@@ -33,6 +33,12 @@ var (
 	ErrGatewayMappedOverflow = errors.New("hermes mapped event overflow")
 	ErrGatewayAmbiguousTurn  = errors.New("hermes gateway turn correlation is ambiguous")
 	ErrGatewayCycleOverflow  = errors.New("hermes gateway cycle state overflow")
+
+	// ErrGatewayAgentBusy refuses a prompt because agent-origin work owns the
+	// native stream. Hermes runs whole autonomous turns between prompts, and one
+	// of them holding the session is backpressure the caller can retry, never a
+	// reason to end the incarnation running it.
+	ErrGatewayAgentBusy = errors.New("hermes gateway session is running agent-origin work")
 )
 
 type gatewayTransportDispatcher struct {
@@ -1122,7 +1128,13 @@ func (a *gatewaySessionActor) registerPrompt(registration *gatewayPromptRegistra
 		return
 	}
 
-	if a.active != nil || a.prompt != nil || a.fencedPrompt != nil {
+	if a.active != nil {
+		registration.reply <- gatewayPromptHandle{err: ErrGatewayAgentBusy}
+
+		return
+	}
+
+	if a.prompt != nil || a.fencedPrompt != nil {
 		registration.reply <- gatewayPromptHandle{err: fmt.Errorf("%w: more than one prompt is registered", ErrGatewayAmbiguousTurn)}
 
 		return
@@ -1185,10 +1197,7 @@ func (a *gatewaySessionActor) applyPromptWatermark(command *gatewayPromptWaterma
 	}
 
 	if a.active != nil {
-		err := fmt.Errorf("%w: autonomous work overlaps the acknowledged prompt", ErrGatewayAmbiguousTurn)
-		a.failClosed(err)
-
-		return gatewayPromptWatermarkResult{err: err}
+		return gatewayPromptWatermarkResult{err: a.refusePromptToAgentOrigin()}
 	}
 
 	projections := make([]*gatewayProjection, 0, len(a.projections))
@@ -1197,6 +1206,27 @@ func (a *gatewaySessionActor) applyPromptWatermark(command *gatewayPromptWaterma
 	}
 
 	return gatewayPromptWatermarkResult{projections: projections}
+}
+
+// refusePromptToAgentOrigin gives a registered prompt back to its caller as
+// backpressure because an autonomous cycle still owns the stream. Every frame
+// the prompt was holding goes to that cycle: the turn hermes is running is not
+// this adapter's to end, and a busy native session is not a broken connection.
+func (a *gatewaySessionActor) refusePromptToAgentOrigin() error {
+	held := a.prompt.heldEvents
+
+	a.prompt = nil
+	a.buffered = nil
+
+	for index := range held {
+		if err := a.routeRaw(held[index]); err != nil {
+			a.failClosed(err)
+
+			return err
+		}
+	}
+
+	return ErrGatewayAgentBusy
 }
 
 func (a *gatewaySessionActor) releasePrompt(command *gatewayPromptRelease) error {
@@ -1271,10 +1301,6 @@ func (a *gatewaySessionActor) handleRaw(generation uint64, event Event) {
 
 func (a *gatewaySessionActor) routeRaw(event Event) error {
 	if a.prompt != nil && event.InboundSequence > a.prompt.watermark {
-		if a.active != nil {
-			return fmt.Errorf("%w: post-submit frame overlaps autonomous work", ErrGatewayAmbiguousTurn)
-		}
-
 		return a.applyEvent(a.prompt, event)
 	}
 
