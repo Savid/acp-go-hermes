@@ -23,6 +23,13 @@ or with several; those bind to the permission-request identity instead, and the
 approval is presented either way. Terminal IDs and callbacks outside their exact
 active turn are still rejected without invoking the ACP permission callback.
 
+An approval that minted its own identity settles exactly as a tool-bound one
+does. Native `approval.respond` carries the session and the chosen option and
+nothing else — Hermes resolves the session's oldest waiting approval — so the
+adapter checks that the answer belongs to the exact cycle that emitted the
+request and never gates the answer on a native tool identity Hermes did not
+give it.
+
 The cycle actor keys held controls by both control kind and request ID and
 rejects a duplicate before emitting it. A native clarification whose ID equals
 an adapter-generated permission ID therefore cannot replace the permission's

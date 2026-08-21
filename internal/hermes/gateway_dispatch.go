@@ -190,7 +190,6 @@ type gatewayControlRoute struct {
 	live       string
 	cycleID    string
 	requestID  string
-	toolCallID string
 	kind       gatewayControlKind
 }
 
@@ -1460,7 +1459,6 @@ func (c *gatewayCycle) registerControl(event Event, requestID string, kind gatew
 func (a *gatewaySessionActor) controlRoute(
 	cycle *gatewayCycle,
 	requestID string,
-	toolCallID string,
 	kind gatewayControlKind,
 ) *gatewayControlRoute {
 	transport := a.transport
@@ -1472,8 +1470,7 @@ func (a *gatewaySessionActor) controlRoute(
 
 	return &gatewayControlRoute{
 		transport: transport, mappings: mappings, actor: a, generation: a.generation,
-		stored: a.stored, live: a.live, cycleID: cycle.id, requestID: requestID,
-		toolCallID: toolCallID, kind: kind,
+		stored: a.stored, live: a.live, cycleID: cycle.id, requestID: requestID, kind: kind,
 	}
 }
 
@@ -1540,20 +1537,6 @@ func (a *gatewaySessionActor) completeControl(command *gatewayControlCommand) {
 		return
 	}
 
-	if route.kind == gatewayControlPermission {
-		if route.toolCallID == "" {
-			command.completed <- fmt.Errorf("%w: permission control lost its active tool identity", ErrGatewayAmbiguousTurn)
-
-			return
-		}
-
-		if _, active := cycle.activeTools[route.toolCallID]; !active {
-			command.completed <- fmt.Errorf("%w: permission control tool is no longer active", ErrGatewayAmbiguousTurn)
-
-			return
-		}
-	}
-
 	a.server.connMu.Lock()
 	currentTransport := a.server.transport == route.transport &&
 		a.server.dispatchers[route.generation] == route.transport.dispatcher
@@ -1580,6 +1563,11 @@ func (a *gatewaySessionActor) completeControl(command *gatewayControlCommand) {
 
 	switch command.kind {
 	case gatewayControlPermission:
+		// approval.respond carries a session and a choice and nothing else:
+		// hermes resolves the session's oldest pending approval, so the cycle's
+		// own control registry above is the whole of what ownership can mean
+		// here. An approval the adapter could not attribute to a native tool
+		// still reaches the user, and the user's answer still reaches hermes.
 		err = route.transport.client.ApprovalRespond(command.ctx, route.live, command.choice, command.remember)
 	case gatewayControlQuestion:
 		err = route.transport.client.ClarifyRespond(command.ctx, route.live, route.requestID, command.answers)
@@ -1618,7 +1606,8 @@ func (a *gatewaySessionActor) mapPermission(cycle *gatewayCycle, event Event) er
 	// native tool or several. The approval binds to the sole active native tool
 	// where exactly one owns the cycle, and is otherwise its own addressable
 	// call: an approval the adapter cannot attribute is still an approval the
-	// user must answer.
+	// user must answer, and hermes settles it from the session and the choice
+	// alone, so a minted identity answers exactly as a tool-bound one does.
 	nextPermission := cycle.permissions + 1
 
 	requestID := fmt.Sprintf("%s/permission-%d", cycle.id, nextPermission)
@@ -1639,7 +1628,7 @@ func (a *gatewaySessionActor) mapPermission(cycle *gatewayCycle, event Event) er
 		CycleID:             cycle.id,
 		TransportGeneration: a.generation,
 	}
-	req.route = a.controlRoute(cycle, requestID, toolCallID, gatewayControlPermission)
+	req.route = a.controlRoute(cycle, requestID, gatewayControlPermission)
 
 	data, _ := json.Marshal(req)
 
@@ -1678,7 +1667,7 @@ func (a *gatewaySessionActor) mapQuestion(cycle *gatewayCycle, event Event) erro
 		CycleID:             cycle.id,
 		TransportGeneration: a.generation,
 	}
-	req.route = a.controlRoute(cycle, nativeID, "", gatewayControlQuestion)
+	req.route = a.controlRoute(cycle, nativeID, gatewayControlQuestion)
 
 	data, _ := json.Marshal(req)
 

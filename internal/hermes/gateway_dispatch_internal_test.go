@@ -1427,23 +1427,13 @@ func TestGatewayLifecycleCorrectionRemainingBranches(t *testing.T) {
 	baseRoute := gatewayControlRoute{
 		actor: actor, transport: server.transport, mappings: server.transport.mappings,
 		generation: 1, stored: actor.stored, live: actor.live, cycleID: cycle.id,
-		requestID: "request", toolCallID: "tool", kind: gatewayControlPermission,
+		requestID: "request", kind: gatewayControlPermission,
 	}
 	runControl := func(route gatewayControlRoute, kind gatewayControlKind) error {
 		completed := make(chan error, 1)
 		actor.completeControl(&gatewayControlCommand{route: &route, kind: kind, completed: completed})
 
 		return <-completed
-	}
-	missingTool := baseRoute
-	missingTool.toolCallID = ""
-	if err := runControl(missingTool, gatewayControlPermission); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("missing tool = %v", err)
-	}
-	inactiveTool := baseRoute
-	inactiveTool.toolCallID = "inactive"
-	if err := runControl(inactiveTool, gatewayControlPermission); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("inactive tool = %v", err)
 	}
 	staleTransport := baseRoute
 	server.dispatchers = map[uint64]*gatewayTransportDispatcher{}

@@ -140,6 +140,72 @@ func testGatewayControlRequests(
 	return *permission, *question
 }
 
+// TestGatewayMintedApprovalIdentityIsAnswerable pins the settlement half of the
+// minted permission identity. Hermes 0.20 hands an approval no request identity
+// and no tool identity, and approval.respond takes a session and a choice: an
+// approval the adapter had to mint an identity for is answered exactly as a
+// tool-bound one is, never refused for owning no native tool.
+func TestGatewayMintedApprovalIdentityIsAnswerable(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		tools []Event
+	}{
+		{name: "no active native tool"},
+		{name: "several active native tools", tools: []Event{
+			{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"tool-a","name":"edit","args":{}}`)},
+			{Type: evtToolStart, Payload: json.RawMessage(`{"tool_id":"tool-b","name":"read","args":{}}`)},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			t.Cleanup(func() { _ = server.Close(context.Background()) })
+			bindTestGatewaySession(t, server, "stored", "live-stored")
+
+			transport := server.gatewayTransport()
+			events := append(append([]Event(nil), test.tools...),
+				Event{Type: evtApprovalRequest, Payload: json.RawMessage(`{"command":"rm -rf"}`)})
+
+			var permission *PermissionRequest
+			for index := range events {
+				events[index].SessionID = "live-stored"
+				events[index].InboundSequence = uint64(index + 1)
+				if err := server.dispatchGatewayEvent(transport.dispatcher, events[index]); err != nil {
+					t.Fatalf("dispatch %s: %v", events[index].Type, err)
+				}
+			}
+			for permission == nil {
+				if event := mustTurnEvent(t, server.deliveries); event.Permission != nil {
+					permission = event.Permission
+				}
+			}
+
+			if permission.Tool.CallID != permission.ID {
+				t.Fatalf("unattributable approval did not mint its own call identity: %#v", permission)
+			}
+
+			if err := server.ReplyPermission(t.Context(), *permission, valAlways, ""); err != nil {
+				t.Fatalf("ReplyPermission on a minted identity: %v", err)
+			}
+
+			calls := fake.callsFor("approval.respond")
+			if len(calls) != 1 || calls[0].Params["choice"] != valAlways ||
+				calls[0].Params["all"] != true || calls[0].Params[fieldSessionID] != "live-stored" {
+				t.Fatalf("native approval.respond calls = %#v", calls)
+			}
+
+			// The control is settled, so the same minted identity cannot be
+			// answered twice into one native FIFO queue.
+			if err := server.ReplyPermission(t.Context(), *permission, valOnce, ""); !errors.Is(err, ErrGatewayAmbiguousTurn) {
+				t.Fatalf("repeat answer = %v", err)
+			}
+			if calls := fake.callsFor("approval.respond"); len(calls) != 1 {
+				t.Fatalf("approval.respond calls after repeat = %d, want 1", len(calls))
+			}
+		})
+	}
+}
+
 func TestGatewayDispatcherPreservesGlobalInboundPublicationOrder(t *testing.T) {
 	server := &hermesServer{
 		deliveries:     make(chan TurnDelivery, 8),
