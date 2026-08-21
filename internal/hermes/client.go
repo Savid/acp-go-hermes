@@ -809,8 +809,12 @@ func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {
 	return c.Call(ctx, "session.interrupt", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
-func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string, all bool) error {
-	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": all}, nil)
+// ApprovalRespond answers exactly one native approval: the session's oldest
+// waiting one. Hermes's `all` flag answers every approval queued on the session
+// with the same choice, including ones no host was ever shown, so this adapter
+// never sends it.
+func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string) error {
+	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": false}, nil)
 }
 
 func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID, requestID string, answer any) error {

@@ -987,7 +987,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) (returnErr error) {
 	// resolves a real session through _sess, which can trigger its deferred full
 	// agent build and runtime dependency discovery. Startup must not activate a
 	// session merely to prove that these methods exist.
-	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, missingProbeSessionID, "deny", false)); err != nil {
+	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, missingProbeSessionID, "deny")); err != nil {
 		return err
 	}
 

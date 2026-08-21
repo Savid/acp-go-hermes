@@ -220,7 +220,6 @@ type gatewayControlCommand struct {
 	route     *gatewayControlRoute
 	kind      gatewayControlKind
 	choice    string
-	remember  bool
 	answers   any
 	completed chan error
 }
@@ -1632,7 +1631,6 @@ func (s *hermesServer) completeGatewayControl(
 	route *gatewayControlRoute,
 	kind gatewayControlKind,
 	choice string,
-	remember bool,
 	answers any,
 ) error {
 	transport := s.beginGatewayTurn()
@@ -1646,7 +1644,7 @@ func (s *hermesServer) completeGatewayControl(
 	completed := make(chan error, 1)
 
 	command := &gatewayControlCommand{
-		ctx: ctx, route: route, kind: kind, choice: choice, remember: remember, answers: answers, completed: completed,
+		ctx: ctx, route: route, kind: kind, choice: choice, answers: answers, completed: completed,
 	}
 	if !route.actor.enqueue(gatewayActorMessage{control: command}) {
 		return route.actor.enqueueCause()
@@ -1716,12 +1714,20 @@ func (a *gatewaySessionActor) completeControl(command *gatewayControlCommand) {
 
 	switch command.kind {
 	case gatewayControlPermission:
-		// approval.respond carries a session and a choice and nothing else:
-		// hermes resolves the session's oldest pending approval, so the cycle's
-		// own control registry above is the whole of what ownership can mean
-		// here. An approval the adapter could not attribute to a native tool
-		// still reaches the user, and the user's answer still reaches hermes.
-		err = route.transport.client.ApprovalRespond(command.ctx, route.live, command.choice, command.remember)
+		// approval.respond carries a session and a choice and nothing else, so
+		// the cycle's own control registry above is the whole of what ownership
+		// can mean here. Recorded deviation: hermes answers the approval that
+		// was appended to the session queue first, which guarantees that exactly
+		// one queued approval is answered and does not guarantee it is the one
+		// the host was shown — the queue entry is appended under hermes's lock
+		// but the notify callback fires outside it, so two approvals raised
+		// concurrently can reach this adapter in the opposite order to the
+		// queue. This adapter presents one approval at a time and blocks its
+		// event pump on the host's answer, which bounds the window to approvals
+		// a single native turn raises concurrently but does not close it. An
+		// approval the adapter could not attribute to a native tool still
+		// reaches the user, and the user's answer still reaches hermes.
+		err = route.transport.client.ApprovalRespond(command.ctx, route.live, command.choice)
 	case gatewayControlQuestion:
 		err = route.transport.client.ClarifyRespond(command.ctx, route.live, route.requestID, command.answers)
 	default:

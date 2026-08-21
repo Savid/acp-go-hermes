@@ -190,14 +190,19 @@ func TestGatewayMintedApprovalIdentityIsAnswerable(t *testing.T) {
 				t.Fatalf("ReplyPermission on a minted identity: %v", err)
 			}
 
+			// "Always allow" is a decision about this one request. Hermes's own
+			// `all` flag answers every approval queued on the session with the
+			// same choice — including ones no host was ever shown — and the
+			// persistence "always" means is carried by the choice itself, so the
+			// adapter never sends it.
 			calls := fake.callsFor("approval.respond")
 			if len(calls) != 1 || calls[0].Params["choice"] != valAlways ||
-				calls[0].Params["all"] != true || calls[0].Params[fieldSessionID] != "live-stored" {
+				calls[0].Params["all"] != false || calls[0].Params[fieldSessionID] != "live-stored" {
 				t.Fatalf("native approval.respond calls = %#v", calls)
 			}
 
 			// The control is settled, so the same minted identity cannot be
-			// answered twice into one native FIFO queue.
+			// answered twice into one native approval queue.
 			if err := server.ReplyPermission(t.Context(), *permission, valOnce, ""); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 				t.Fatalf("repeat answer = %v", err)
 			}
@@ -1473,6 +1478,7 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 		}
 		requireGatewayClose(t, server)
 	})
+
 
 	t.Run("actor ends before watermark acknowledgement", func(t *testing.T) {
 		_, server, actor := newPromptOwnershipBoundary(t)

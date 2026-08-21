@@ -766,7 +766,7 @@ func assertClientWrappers(t *testing.T, ctx context.Context, client *Client) {
 	if err := client.Interrupt(ctx, "live"); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if err := client.ApprovalRespond(ctx, "live", "once", false); err != nil {
+	if err := client.ApprovalRespond(ctx, "live", "once"); err != nil {
 		t.Fatalf("ApprovalRespond: %v", err)
 	}
 	if err := client.ClarifyRespond(ctx, "live", "request-1", "yes"); err != nil {

@@ -1443,7 +1443,7 @@ func TestGatewayLifecycleCorrectionRemainingBranches(t *testing.T) {
 		mailbox: make(chan gatewayActorMessage, 1), terminal: make(chan error, 1), done: make(chan struct{}),
 	}
 	close(deadRoute.actor.done)
-	if err := server.completeGatewayControl(t.Context(), &deadRoute, gatewayControlPermission, "", false, nil); err == nil {
+	if err := server.completeGatewayControl(t.Context(), &deadRoute, gatewayControlPermission, "", nil); err == nil {
 		t.Fatal("dead control actor completed")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1453,7 +1453,7 @@ func TestGatewayLifecycleCorrectionRemainingBranches(t *testing.T) {
 	}
 	cancelledRoute := baseRoute
 	cancelledRoute.actor = waitingActor
-	if err := server.completeGatewayControl(ctx, &cancelledRoute, gatewayControlPermission, "", false, nil); !errors.Is(err, context.Canceled) {
+	if err := server.completeGatewayControl(ctx, &cancelledRoute, gatewayControlPermission, "", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled control = %v", err)
 	}
 
@@ -1475,7 +1475,7 @@ func TestGatewayLifecycleCorrectionRemainingBranches(t *testing.T) {
 		t.Fatal("full mailbox reported terminal queued")
 	}
 
-	if err := server.completeGatewayControl(t.Context(), nil, gatewayControlPermission, "", false, nil); !errors.Is(err, ErrGatewayAmbiguousTurn) {
+	if err := server.completeGatewayControl(t.Context(), nil, gatewayControlPermission, "", nil); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 		t.Fatalf("nil control route = %v", err)
 	}
 

@@ -2864,7 +2864,12 @@ func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionReques
 		return fmt.Errorf("%w: permission transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.completeGatewayControl(ctx, req.route, gatewayControlPermission, choice, reply == valAlways, nil)
+	// The answer settles exactly the one request the host was shown. Native
+	// approval.respond's `all` resolves every approval queued on the session
+	// with this same choice, including ones no host ever saw, and what "always"
+	// means beyond this request — the session and permanent allowlist entries
+	// hermes writes for the matched pattern — is carried by the choice itself.
+	return s.completeGatewayControl(ctx, req.route, gatewayControlPermission, choice, nil)
 }
 
 func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, answers [][]string) error {
@@ -2872,7 +2877,7 @@ func (s *hermesServer) ReplyQuestion(ctx context.Context, req QuestionRequest, a
 		return fmt.Errorf("%w: question transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", false, answers)
+	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", answers)
 }
 
 func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) error {
@@ -2880,7 +2885,7 @@ func (s *hermesServer) RejectQuestion(ctx context.Context, req QuestionRequest) 
 		return fmt.Errorf("%w: question transport identity is stale or missing", ErrGatewayAmbiguousTurn)
 	}
 
-	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", false, "")
+	return s.completeGatewayControl(ctx, req.route, gatewayControlQuestion, "", "")
 }
 
 // CreateGenerationXDGDirs creates the actual wrapper-owned writable state for
