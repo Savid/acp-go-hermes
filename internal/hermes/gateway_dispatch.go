@@ -1460,10 +1460,6 @@ func (a *gatewaySessionActor) routeRaw(event Event) error {
 		return a.applyEvent(a.prompt, event)
 	}
 
-	if a.prompt != nil && a.prompt.started {
-		return fmt.Errorf("%w: pre-submit frame arrived after prompt output", ErrGatewayAmbiguousTurn)
-	}
-
 	if a.active == nil {
 		a.active = a.newCycle(CycleOriginActivity)
 		if err := a.emitMapped(TurnEvent{

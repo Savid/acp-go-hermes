@@ -488,8 +488,7 @@ func TestGatewayActorPromptEdges(t *testing.T) {
 			server, actor := newDirectGatewayActor()
 			handle := registerDirectPrompt(actor)
 			if routeFailure {
-				actor.prompt.started = true
-				actor.buffered = []Event{{Type: evtMessageDelta, InboundSequence: 1}}
+				actor.buffered = []Event{{Type: evtToolStart, InboundSequence: 1, Payload: json.RawMessage(`{}`)}}
 			} else {
 				actor.buffered = make([]Event, gatewayActorMailboxCapacity+1)
 				for index := range actor.buffered {
@@ -656,26 +655,11 @@ func TestGatewayActorRawEdges(t *testing.T) {
 		}
 	})
 
-	t.Run("pre-submit frame after prompt output", func(t *testing.T) {
-		_, actor := newDirectGatewayActor()
-		handle := registerDirectPrompt(actor)
-		actor.prompt.watermarkSet = true
-		actor.prompt.watermark = 5
-		actor.prompt.started = true
-		if err := actor.routeRaw(Event{Type: evtMessageDelta, InboundSequence: 4}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-			t.Fatalf("pre-submit overlap = %v", err)
-		}
-		if actor.prompt.id != handle.cycleID {
-			t.Fatal("prompt changed")
-		}
-	})
-
 	t.Run("handle route failure", func(t *testing.T) {
 		server, actor := newDirectGatewayActor()
 		registerDirectPrompt(actor)
 		actor.prompt.watermarkSet = true
-		actor.prompt.started = true
-		actor.handleRaw(1, Event{Type: evtMessageDelta})
+		actor.handleRaw(1, Event{Type: evtToolStart, InboundSequence: 1, Payload: json.RawMessage(`{}`)})
 		if err := mustTurnError(t, server.deliveries); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 			t.Fatalf("route failure = %v", err)
 		}
