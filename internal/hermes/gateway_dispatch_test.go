@@ -476,11 +476,110 @@ func TestGatewayCreateAndResumeRefuseCancelledHandshakeBindings(t *testing.T) {
 	}
 }
 
-// TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream pins that a prompt
-// acknowledged while an autonomous cycle is still open is given back as
-// backpressure. Hermes runs whole turns between prompts; the live one keeps the
-// connection and every frame the prompt was holding.
-func TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream(t *testing.T) {
+// TestGatewayAbandonedCycleIsRetiredForTheTurnHermesJustStarted pins the
+// "streaming" claim against a cycle that outlived its turn. Hermes claims an
+// idle session synchronously, so the open cycle has every frame it will ever
+// get: it is stated as a cycle with no native terminal and the prompt keeps the
+// turn hermes accepted for it, rather than being disowned into that cycle.
+func TestGatewayAbandonedCycleIsRetiredForTheTurnHermesJustStarted(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	handle := registerDirectPrompt(actor)
+	actor.handleRaw(1, Event{
+		Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"unfinished"}`),
+	})
+	actor.handleRaw(1, Event{
+		Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"prompt answer"}`),
+	})
+
+	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
+	if result.err != nil || len(result.projections) != 1 {
+		t.Fatalf("streaming claim over an abandoned cycle = %#v", result)
+	}
+	if actor.prompt == nil || actor.prompt.id != handle.cycleID {
+		t.Fatalf("prompt lost the turn hermes accepted for it: %#v", actor.prompt)
+	}
+	if actor.active != nil {
+		t.Fatalf("abandoned cycle stayed open: %#v", actor.active)
+	}
+
+	started := mustTurnEvent(t, server.deliveries)
+	part := mustTurnEvent(t, server.deliveries)
+	retired := mustTurnEvent(t, server.deliveries)
+	if started.Type != EventCycleStarted || part.Type != evtMessagePartUpdated ||
+		retired.Type != EventCycleFailed || retired.Origin != CycleOriginActivity ||
+		!errors.Is(retired.Err, errGatewayCycleAbandoned) {
+		t.Fatalf("abandoned projection = %#v / %#v / %#v", started, part, retired)
+	}
+
+	if err := actor.releasePrompt(&gatewayPromptRelease{cycleID: handle.cycleID}); err != nil {
+		t.Fatalf("release prompt: %v", err)
+	}
+	promptPart := mustTurnEvent(t, server.deliveries)
+	if promptPart.CycleID != handle.cycleID || promptPart.Origin != CycleOriginPrompt {
+		t.Fatalf("prompt frame = %#v", promptPart)
+	}
+	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("retirement failed the generation: %v", cause)
+	}
+}
+
+// TestGatewayAbandonedCycleRetirementFailsClosedOnAnUnpublishableTerminal pins
+// that retirement is a stated terminal, not a bookkeeping erasure: a cycle this
+// adapter cannot publish the end of is a stream it cannot speak for.
+func TestGatewayAbandonedCycleRetirementFailsClosedOnAnUnpublishableTerminal(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	handle := registerDirectPrompt(actor)
+	actor.active = actor.newCycle(CycleOriginActivity)
+	for len(server.deliveries) < cap(server.deliveries)-1 {
+		server.deliveries <- TurnDelivery{Event: &TurnEvent{Type: EventGatewayRaw}}
+	}
+
+	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
+	if !errors.Is(result.err, ErrGatewayMappedOverflow) {
+		t.Fatalf("unpublishable retirement = %v", result.err)
+	}
+	if cause := server.transport.dispatcher.terminalCause(); !errors.Is(cause, ErrGatewayMappedOverflow) {
+		t.Fatalf("generation cause = %v", cause)
+	}
+}
+
+// TestGatewayReleasedPromptStillFailsClosedOnAnUnroutableHeldFrame pins that the
+// leniency stops at the frames themselves: a held frame the cycle taking them
+// cannot state is still a stream this adapter cannot speak for.
+func TestGatewayReleasedPromptStillFailsClosedOnAnUnroutableHeldFrame(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		disposition gatewayPromptDisposition
+	}{
+		{name: "folded into the running turn", disposition: gatewayPromptJoinedTurn},
+		{name: "queued as the next turn", disposition: gatewayPromptQueuedTurn},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, actor := newDirectGatewayActor()
+			handle := registerDirectPrompt(actor)
+			actor.handleRaw(1, Event{
+				Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"unfinished"}`),
+			})
+			actor.handleRaw(1, Event{Type: evtToolStart, InboundSequence: 7, Payload: json.RawMessage(`{}`)})
+
+			result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+				cycleID: handle.cycleID, watermark: 6, disposition: test.disposition,
+			})
+			if !errors.Is(result.err, ErrGatewayAmbiguousTurn) {
+				t.Fatalf("unroutable held frame = %v", result.err)
+			}
+			if cause := server.transport.dispatcher.terminalCause(); !errors.Is(cause, ErrGatewayAmbiguousTurn) {
+				t.Fatalf("generation cause = %v", cause)
+			}
+		})
+	}
+}
+
+// TestGatewayFoldedPromptIsReleasedToTheRunningCycle pins the redirect/steer
+// disposition against a turn this adapter is already projecting: hermes folded
+// the text into that turn, so the turn keeps every frame it was holding and the
+// prompt states an outcome no host may retry.
+func TestGatewayFoldedPromptIsReleasedToTheRunningCycle(t *testing.T) {
 	server, actor := newDirectGatewayActor()
 	handle := registerDirectPrompt(actor)
 	actor.handleRaw(1, Event{
@@ -490,72 +589,130 @@ func TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream(t *testing.T) {
 		Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":" and more"}`),
 	})
 
-	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
-	if !errors.Is(result.err, ErrGatewayAgentBusy) {
-		t.Fatalf("overlap error = %v, want %v", result.err, ErrGatewayAgentBusy)
+	result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+		cycleID: handle.cycleID, watermark: 6, disposition: gatewayPromptJoinedTurn,
+	})
+	if !errors.Is(result.err, ErrGatewayTurnAbsorbedPrompt) {
+		t.Fatalf("folded prompt = %v, want %v", result.err, ErrGatewayTurnAbsorbedPrompt)
+	}
+	if errors.Is(result.err, ErrGatewayAgentBusy) {
+		t.Fatal("an accepted prompt was reported as retryable contention")
 	}
 	if actor.prompt != nil {
-		t.Fatalf("refused prompt was retained: %#v", actor.prompt)
+		t.Fatalf("folded prompt was retained: %#v", actor.prompt)
 	}
 	if actor.active == nil || actor.active.text.String() != "unfinished and more" {
-		t.Fatalf("autonomous cycle lost the held frames: %#v", actor.active)
+		t.Fatalf("running cycle lost the held frames: %#v", actor.active)
 	}
 	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
-		t.Fatalf("busy refusal failed the generation: %v", cause)
+		t.Fatalf("folded prompt failed the generation: %v", cause)
 	}
 }
 
-// TestGatewayRefusedPromptStillFailsClosedOnAnUnroutableHeldFrame pins that the
-// leniency stops at the frames themselves: a held frame the autonomous cycle
-// cannot state is still a stream this adapter cannot speak for.
-func TestGatewayRefusedPromptStillFailsClosedOnAnUnroutableHeldFrame(t *testing.T) {
-	server, actor := newDirectGatewayActor()
-	handle := registerDirectPrompt(actor)
-	actor.handleRaw(1, Event{
-		Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"unfinished"}`),
-	})
-	actor.handleRaw(1, Event{Type: evtToolStart, InboundSequence: 7, Payload: json.RawMessage(`{}`)})
-
-	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
-	if !errors.Is(result.err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("unroutable held frame = %v", result.err)
-	}
-	if cause := server.transport.dispatcher.terminalCause(); !errors.Is(cause, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("generation cause = %v", cause)
-	}
-}
-
-func TestGatewayQueuedPromptCannotInheritLateOlderMonitorOutput(t *testing.T) {
+// TestGatewayQueuedPromptIsServedByTheTurnHermesRunsForIt pins the queued
+// disposition end to end. Hermes queues a prompt that lands on a busy session
+// and runs it as the next turn: the running turn's frames stay agent-origin
+// work, the queued turn fills the registered prompt cycle, and the user's text
+// runs exactly once.
+func TestGatewayQueuedPromptIsServedByTheTurnHermesRunsForIt(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	fake.setPromptStatus("queued")
 	fake.setPromptEvents(
-		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"old-monitor"}`)},
-		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"old-monitor"}`)},
-		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"actual-prompt"}`)},
-		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"actual-prompt"}`)},
+		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
 	)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	t.Cleanup(func() { _ = server.Close(context.Background()) })
 	bindTestGatewaySession(t, server, "stored", "live-stored")
 
-	_, err := server.SendMessage(t.Context(), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}})
-	if !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("queued prompt error = %v", err)
-	}
-
-	for {
-		select {
-		case delivery := <-server.deliveries:
-			if delivery.Err != nil {
+	activity := make(chan TurnEvent, 4)
+	prompted := make(chan TurnEvent, 8)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for delivery := range server.deliveries {
+			if delivery.Event == nil {
 				continue
 			}
-			event := turnEventFromDelivery(t, delivery)
-			if (event.Type == evtMessagePartUpdated || event.Type == EventCycleComplete) && event.Origin == CycleOriginPrompt {
-				t.Fatalf("uncorrelated older work projected under prompt: %#v", event)
+			event := *delivery.Event
+			if event.Origin == CycleOriginActivity {
+				if event.ProjectionDone != nil {
+					activity <- event
+					event.ProjectionDone(nil)
+				}
+
+				continue
 			}
-		default:
-			return
+			prompted <- event
 		}
+	}()
+
+	message, err := server.SendMessage(
+		withTestPromptDispatch(t.Context()), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}},
+	)
+	if err != nil || len(message.Parts) != 1 || message.Parts[0].Text != "queued-turn" {
+		t.Fatalf("queued SendMessage = %#v, %v", message, err)
+	}
+
+	select {
+	case running := <-activity:
+		if running.Type != EventCycleComplete || running.Message == nil ||
+			running.Message.Parts[0].Text != "running-turn" {
+			t.Fatalf("running turn projection = %#v", running)
+		}
+		if running.CycleID == message.Info.ID {
+			t.Fatal("running turn and queued prompt shared one cycle")
+		}
+	default:
+		t.Fatal("the turn hermes was already running was never projected")
+	}
+
+	if err := server.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	<-consumerDone
+	for len(prompted) > 0 {
+		event := <-prompted
+		if event.Origin != CycleOriginPrompt {
+			continue
+		}
+		if strings.Contains(string(event.Raw), "running-turn") {
+			t.Fatalf("the running turn's work was projected under the prompt: %#v", event)
+		}
+	}
+}
+
+// TestGatewayFoldedPromptStreamsTheTurnItJoined pins the redirect/steer
+// disposition in its ordinary shape: every autonomous driver marks the session
+// running before it emits a frame, so a folded prompt commonly meets a turn
+// this adapter has not seen a frame of, and that turn's output is the answer to
+// the text hermes just folded into it.
+func TestGatewayFoldedPromptStreamsTheTurnItJoined(t *testing.T) {
+	for _, status := range []string{"redirected", "steered"} {
+		t.Run(status, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			fake.setPromptStatus(status)
+			fake.setPromptEvents(
+				Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"folded answer"}`)},
+				Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"folded answer"}`)},
+			)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			t.Cleanup(func() { _ = server.Close(context.Background()) })
+			bindTestGatewaySession(t, server, "stored", "live-stored")
+
+			transport := server.gatewayTransport()
+			message, err := server.SendMessage(
+				withTestPromptDispatch(t.Context()), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}},
+			)
+			if err != nil || len(message.Parts) != 1 || message.Parts[0].Text != "folded answer" {
+				t.Fatalf("%s SendMessage = %#v, %v", status, message, err)
+			}
+			if cause := transport.dispatcher.terminalCause(); cause != nil {
+				t.Fatalf("%s status failed the generation: %v", status, cause)
+			}
+		})
 	}
 }
 
@@ -566,9 +723,12 @@ func TestGatewayUnprovenPromptResponseJoinsActorCancellationBeforeFencingTranspo
 		wantType  bool
 	}{
 		{
-			name: "unknown status",
+			// Hermes answers a typed voice stop phrase by ending the voice chat
+			// and stating no turn disposition at all. An answer this adapter
+			// cannot attribute frames by is the one thing that still fails closed.
+			name: "no stated disposition",
 			configure: func(fake *fakeGatewayServer) {
-				fake.setPromptStatus("queued")
+				fake.setPromptResult(map[string]any{"voice_stopped": true})
 			},
 		},
 		{
@@ -1095,7 +1255,7 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 
 	t.Run("cancellation command cannot be queued", func(t *testing.T) {
 		fake, server, _ := newPromptOwnershipBoundary(t)
-		fake.setPromptStatus("queued")
+		fake.setPromptResult(map[string]any{"voice_stopped": true})
 		actor := replacePromptOwnershipActor(t, server)
 		go func() {
 			binding := <-actor.mailbox
@@ -1151,14 +1311,30 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 		requireGatewayClose(t, server)
 	})
 
-	t.Run("agent-origin work claims the stream before the watermark", func(t *testing.T) {
-		_, server, actor := newPromptOwnershipBoundary(t)
+	t.Run("the running turn folds the prompt into itself", func(t *testing.T) {
+		fake, server, actor := newPromptOwnershipBoundary(t)
+		fake.setPromptStatus("redirected")
 		actor.beforeWatermark = func() { actor.active = actor.newCycle(CycleOriginActivity) }
-		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayAgentBusy) {
-			t.Fatalf("watermark busy refusal = %v", err)
+		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayTurnAbsorbedPrompt) {
+			t.Fatalf("folded prompt = %v", err)
 		}
 		if cause := server.transport.dispatcher.terminalCause(); cause != nil {
-			t.Fatalf("busy refusal failed the generation: %v", cause)
+			t.Fatalf("folded prompt failed the generation: %v", cause)
+		}
+		requireGatewayClose(t, server)
+	})
+
+	t.Run("caller cancels while the queued prompt waits for its turn", func(t *testing.T) {
+		fake, server, _ := newPromptOwnershipBoundary(t)
+		fake.setPromptStatus("queued")
+		ctx, cancel := context.WithCancel(t.Context())
+		server.beforePromptPhase = func(phase string, _ *gatewaySessionActor) {
+			if phase == promptPhaseDefer {
+				cancel()
+			}
+		}
+		if err := sendOwnershipPrompt(ctx, server); !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued wait cancellation = %v", err)
 		}
 		requireGatewayClose(t, server)
 	})

@@ -21,6 +21,7 @@ const (
 	valCancelled     = "cancelled"
 	valReject        = "reject"
 	valSessionClosed = "session closed"
+	valAbsorbedTurn  = "absorbed by running turn"
 )
 
 type turnSettlementState uint8
@@ -400,6 +401,14 @@ func (s *session) startReuseLocked(ctx context.Context) (context.Context, func()
 	}
 
 	return reuseCtx, release
+}
+
+// sessionPromptAbsorbed states a prompt Hermes folded into the turn it was
+// already running. The text was accepted, so this is not backpressure and must
+// not be retried: the running turn carries it, and that turn's output is
+// projected as agent-origin work on this same session.
+func sessionPromptAbsorbed() error {
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: valAbsorbedTurn})
 }
 
 func sessionForegroundBackpressure() error {

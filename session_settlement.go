@@ -708,6 +708,13 @@ func (s *session) nativeRun(
 			return promptRun{err: acceptErr}
 		}
 
+		if errors.Is(sendErr, nativehermes.ErrGatewayTurnAbsorbedPrompt) {
+			// Hermes folded this prompt into the turn already running. The text
+			// ran exactly once, inside that turn, and the turn projects its own
+			// output: a retry would fold the same text in a second time.
+			return promptRun{err: sessionPromptAbsorbed()}
+		}
+
 		if errors.Is(sendErr, nativehermes.ErrGatewayAgentBusy) {
 			// Hermes runs whole autonomous turns between prompts. One of them
 			// holding the native session is the same contention the ACP foreground

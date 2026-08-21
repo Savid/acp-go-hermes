@@ -37,8 +37,21 @@ var (
 	// ErrGatewayAgentBusy refuses a prompt because agent-origin work owns the
 	// native stream. Hermes runs whole autonomous turns between prompts, and one
 	// of them holding the session is backpressure the caller can retry, never a
-	// reason to end the incarnation running it.
+	// reason to end the incarnation running it. The refusal happens before
+	// submission, so retrying it cannot run the same text twice.
 	ErrGatewayAgentBusy = errors.New("hermes gateway session is running agent-origin work")
+
+	// ErrGatewayTurnAbsorbedPrompt reports a prompt hermes folded into the turn
+	// it was already running. The text is not lost and not pending: it is inside
+	// a turn whose output this adapter projects as agent-origin work. Resending
+	// it would fold the same text in a second time, so this is an outcome and
+	// never backpressure.
+	ErrGatewayTurnAbsorbedPrompt = errors.New("hermes folded the prompt into the turn already running")
+
+	// errGatewayCycleAbandoned states an agent-origin cycle that outlived the
+	// native turn which opened it. Hermes admits a prompt synchronously only for
+	// an idle session, so such a cycle has every frame it will ever get.
+	errGatewayCycleAbandoned = errors.New("hermes agent-origin cycle ended without a native terminal frame")
 )
 
 type gatewayTransportDispatcher struct {
@@ -213,15 +226,39 @@ type gatewayPromptRegistration struct {
 	cancelErr error
 }
 
+// gatewayPromptDisposition is hermes's own answer to one prompt.submit, read
+// back to the actor that has to attribute the frames which follow it.
+type gatewayPromptDisposition uint8
+
+const (
+	// gatewayPromptOwnsTurn is the "streaming" claim: hermes took an idle
+	// session for this exact prompt and the turn that follows is this prompt's.
+	gatewayPromptOwnsTurn gatewayPromptDisposition = iota
+
+	// gatewayPromptQueuedTurn is the "queued" claim: a turn is already running,
+	// and hermes will run this prompt as the next one.
+	gatewayPromptQueuedTurn
+
+	// gatewayPromptJoinedTurn is the "redirected"/"steered" claim: hermes folded
+	// this prompt's text into the turn it is already running.
+	gatewayPromptJoinedTurn
+)
+
 type gatewayPromptWatermark struct {
-	cycleID   string
-	watermark uint64
-	reply     chan gatewayPromptWatermarkResult
+	cycleID     string
+	watermark   uint64
+	disposition gatewayPromptDisposition
+	reply       chan gatewayPromptWatermarkResult
 }
 
 type gatewayPromptWatermarkResult struct {
 	projections []*gatewayProjection
-	err         error
+
+	// deferral carries the second half of a queued prompt's admission: the
+	// registered cycle claims nothing until the running turn ends, and this
+	// reports the projections that turn left behind when it does.
+	deferral <-chan gatewayPromptWatermarkResult
+	err      error
 }
 
 type gatewayPromptRelease struct {
@@ -338,6 +375,8 @@ type gatewayCycle struct {
 	watermark        uint64
 	watermarkSet     bool
 	held             bool
+	deferred         bool
+	deferral         chan gatewayPromptWatermarkResult
 	heldEvents       []Event
 	started          bool
 	text             strings.Builder
@@ -1195,23 +1234,91 @@ func (a *gatewaySessionActor) applyPromptWatermark(command *gatewayPromptWaterma
 		}
 	}
 
-	if a.active != nil {
-		return gatewayPromptWatermarkResult{err: a.refusePromptToAgentOrigin()}
+	switch command.disposition {
+	case gatewayPromptQueuedTurn:
+		return a.deferPromptToQueuedTurn()
+	case gatewayPromptJoinedTurn:
+		if a.active != nil {
+			return gatewayPromptWatermarkResult{err: a.releasePromptToLiveCycle()}
+		}
+	case gatewayPromptOwnsTurn:
+		if a.active != nil {
+			if err := a.retireAbandonedCycle(); err != nil {
+				a.failClosed(err)
+
+				return gatewayPromptWatermarkResult{err: err}
+			}
+		}
 	}
 
+	return gatewayPromptWatermarkResult{projections: a.pendingProjections()}
+}
+
+func (a *gatewaySessionActor) pendingProjections() []*gatewayProjection {
 	projections := make([]*gatewayProjection, 0, len(a.projections))
 	for projection := range a.projections {
 		projections = append(projections, projection)
 	}
 
-	return gatewayPromptWatermarkResult{projections: projections}
+	return projections
 }
 
-// refusePromptToAgentOrigin gives a registered prompt back to its caller as
-// backpressure because an autonomous cycle still owns the stream. Every frame
-// the prompt was holding goes to that cycle: the turn hermes is running is not
-// this adapter's to end, and a busy native session is not a broken connection.
-func (a *gatewaySessionActor) refusePromptToAgentOrigin() error {
+// deferPromptToQueuedTurn adopts hermes's decision to run this prompt as the
+// next turn. Hermes queued the text because a turn is already running, so the
+// registered cycle claims nothing while that turn streams: every frame it was
+// holding, and every frame until that turn's native terminal, is agent-origin
+// work. The prompt is neither lost nor resubmitted — it is the turn hermes runs
+// when it drains the queue.
+func (a *gatewaySessionActor) deferPromptToQueuedTurn() gatewayPromptWatermarkResult {
+	cycle := a.prompt
+	cycle.deferred = true
+	cycle.deferral = make(chan gatewayPromptWatermarkResult, 1)
+	deferral := cycle.deferral
+
+	held := cycle.heldEvents
+	cycle.heldEvents = nil
+
+	for index := range held {
+		// The running turn's own terminal can be in this batch. Everything after
+		// it belongs to the turn hermes drains the queue to run, so it goes back
+		// to being held until the prompt is released.
+		if !cycle.deferred {
+			cycle.heldEvents = append(cycle.heldEvents, held[index:]...)
+
+			break
+		}
+
+		if err := a.routeRaw(held[index]); err != nil {
+			a.failClosed(err)
+
+			return gatewayPromptWatermarkResult{err: err}
+		}
+	}
+
+	return gatewayPromptWatermarkResult{deferral: deferral}
+}
+
+// resumeDeferredPrompt hands a queued prompt the turn boundary it was waiting
+// for. The agent-origin cycle that owned the stream has stated its native
+// terminal, so the frames after it are the turn hermes drained the queue to run.
+func (a *gatewaySessionActor) resumeDeferredPrompt() {
+	if a.prompt == nil || a.prompt.deferral == nil {
+		return
+	}
+
+	deferral := a.prompt.deferral
+	a.prompt.deferral = nil
+	a.prompt.deferred = false
+
+	deferral <- gatewayPromptWatermarkResult{projections: a.pendingProjections()}
+}
+
+// releasePromptToLiveCycle reports a prompt hermes folded into the turn already
+// running. That turn owns every frame the prompt was holding and every frame
+// that follows, including the answer to the text just folded in: the prompt has
+// no turn of its own to register, and resubmitting it would fold the same text
+// in twice.
+func (a *gatewaySessionActor) releasePromptToLiveCycle() error {
 	held := a.prompt.heldEvents
 
 	a.prompt = nil
@@ -1225,7 +1332,16 @@ func (a *gatewaySessionActor) refusePromptToAgentOrigin() error {
 		}
 	}
 
-	return ErrGatewayAgentBusy
+	return ErrGatewayTurnAbsorbedPrompt
+}
+
+// retireAbandonedCycle closes out an agent-origin cycle that outlived the turn
+// which opened it. Hermes claims an idle session synchronously and a busy one
+// never answers "streaming", so this cycle already holds every frame it will
+// ever get: it is stated as a cycle with no native terminal instead of being
+// left open to swallow the turn this prompt just started.
+func (a *gatewaySessionActor) retireAbandonedCycle() error {
+	return a.completeCycle(a.active, NativeMessage{}, errGatewayCycleAbandoned, Event{})
 }
 
 func (a *gatewaySessionActor) releasePrompt(command *gatewayPromptRelease) error {
@@ -1284,7 +1400,7 @@ func (a *gatewaySessionActor) handleRaw(generation uint64, event Event) {
 		return
 	}
 
-	if a.prompt != nil && a.prompt.held && event.InboundSequence > a.prompt.watermark {
+	if a.prompt != nil && a.prompt.held && !a.prompt.deferred && event.InboundSequence > a.prompt.watermark {
 		a.prompt.heldEvents = append(a.prompt.heldEvents, event)
 		if len(a.prompt.heldEvents) > gatewayActorMailboxCapacity {
 			a.failClosed(ErrGatewayActorOverflow)
@@ -1299,7 +1415,7 @@ func (a *gatewaySessionActor) handleRaw(generation uint64, event Event) {
 }
 
 func (a *gatewaySessionActor) routeRaw(event Event) error {
-	if a.prompt != nil && event.InboundSequence > a.prompt.watermark {
+	if a.prompt != nil && !a.prompt.deferred && event.InboundSequence > a.prompt.watermark {
 		return a.applyEvent(a.prompt, event)
 	}
 
@@ -1797,6 +1913,8 @@ func (a *gatewaySessionActor) completeCycle(cycle *gatewayCycle, message NativeM
 
 	if a.active == cycle {
 		a.active = nil
+
+		a.resumeDeferredPrompt()
 	}
 
 	// A provider-declared failure is a normal cycle outcome. Only failure to
@@ -1888,6 +2006,11 @@ func (a *gatewaySessionActor) queueLatchedTerminal() {
 }
 
 func (a *gatewaySessionActor) failCycles(err error) {
+	if a.prompt != nil && a.prompt.deferral != nil {
+		a.prompt.deferral <- gatewayPromptWatermarkResult{err: err}
+		a.prompt.deferral = nil
+	}
+
 	seen := make(map[*gatewayCycle]struct{}, 2)
 
 	for _, cycle := range []*gatewayCycle{a.active, a.prompt} {

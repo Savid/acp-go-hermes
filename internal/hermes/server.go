@@ -82,6 +82,7 @@ const (
 	promptPhaseSubmit      = "submit"
 	promptPhaseSynchronize = "synchronize"
 	promptPhaseWatermark   = "watermark"
+	promptPhaseDefer       = "defer"
 	promptPhaseRelease     = "release"
 	promptPhaseResult      = "result"
 )
@@ -1988,9 +1989,10 @@ func (s *hermesServer) submitGatewayTextForLive(
 		return NativeMessage{}, errors.Join(err, cancelErr)
 	}
 
-	if submit.Status != "streaming" {
+	disposition, stated := gatewayPromptDispositionFor(submit.Status)
+	if !stated {
 		ambiguity := fmt.Errorf(
-			"%w: prompt.submit returned status %q instead of immediate stream ownership",
+			"%w: prompt.submit returned status %q instead of a stated native disposition",
 			ErrGatewayAmbiguousTurn,
 			submit.Status,
 		)
@@ -2030,7 +2032,9 @@ func (s *hermesServer) submitGatewayTextForLive(
 
 	watermarkReply := make(chan gatewayPromptWatermarkResult, 1)
 
-	command := &gatewayPromptWatermark{cycleID: handle.cycleID, watermark: watermark, reply: watermarkReply}
+	command := &gatewayPromptWatermark{
+		cycleID: handle.cycleID, watermark: watermark, disposition: disposition, reply: watermarkReply,
+	}
 
 	if s.beforePromptPhase != nil {
 		s.beforePromptPhase(promptPhaseWatermark, actor)
@@ -2061,10 +2065,30 @@ func (s *hermesServer) submitGatewayTextForLive(
 		return NativeMessage{}, ErrGatewayDisconnected
 	}
 
+	if watermarkResult.deferral != nil {
+		// Hermes queued this prompt as its next turn. The registration stays open
+		// across the turn running now, so the queued prompt is served exactly
+		// once, by the native turn hermes runs for it. Every way the actor can
+		// end fails its cycles, and that resolves this wait with the cause, so
+		// the only other outcome here is the caller's own cancellation.
+		if s.beforePromptPhase != nil {
+			s.beforePromptPhase(promptPhaseDefer, actor)
+		}
+
+		select {
+		case watermarkResult = <-watermarkResult.deferral:
+		case <-ctx.Done():
+			cancelErr := failAccepted(ctx.Err())
+
+			return NativeMessage{}, errors.Join(ctx.Err(), cancelErr)
+		}
+	}
+
 	if watermarkResult.err != nil {
-		// Agent-origin work holding the stream releases the registration and
-		// nothing else: the autonomous turn keeps the connection it is running on.
-		if errors.Is(watermarkResult.err, ErrGatewayAgentBusy) {
+		// A turn that folded this prompt into itself releases the registration
+		// and nothing else: the turn hermes is running keeps the connection, and
+		// carries the text this prompt would otherwise send a second time.
+		if errors.Is(watermarkResult.err, ErrGatewayTurnAbsorbedPrompt) {
 			return NativeMessage{}, errors.Join(watermarkResult.err, cancelRegistration(watermarkResult.err))
 		}
 
@@ -2153,6 +2177,27 @@ func (s *hermesServer) submitGatewayTextForLive(
 		_ = failAccepted(ctx.Err())
 
 		return NativeMessage{}, ctx.Err()
+	}
+}
+
+// gatewayPromptDispositionFor reads hermes's own answer to one prompt.submit.
+// Only an idle session answers "streaming". A busy one never does: hermes
+// queues the text as its next turn, or folds it into the turn already running
+// by redirecting or steering that turn. Every autonomous driver marks the
+// session running before it emits a frame, so a prompt can meet a turn this
+// adapter has not seen a single frame of, and none of those answers is a broken
+// connection. An answer outside this vocabulary states nothing this adapter can
+// attribute frames by, and only that fails closed.
+func gatewayPromptDispositionFor(status string) (gatewayPromptDisposition, bool) {
+	switch status {
+	case "streaming":
+		return gatewayPromptOwnsTurn, true
+	case "queued":
+		return gatewayPromptQueuedTurn, true
+	case "redirected", "steered":
+		return gatewayPromptJoinedTurn, true
+	default:
+		return gatewayPromptOwnsTurn, false
 	}
 }
 

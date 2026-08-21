@@ -822,6 +822,7 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 	}{
 		{name: "registration refusal", sendErr: nativehermes.ErrGatewayAmbiguousTurn},
 		{name: "agent-origin backpressure", sendErr: nativehermes.ErrGatewayAgentBusy},
+		{name: "absorbed by the running turn", sendErr: nativehermes.ErrGatewayTurnAbsorbedPrompt},
 		{name: "admission refusal", acceptErr: acceptErr},
 		{name: "missing dispatch proof"},
 		{name: "post-dispatch admission failure", acceptErr: acceptErr, dispatched: true, wantSettle: true, wantIncarnation: true},
@@ -841,6 +842,13 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 	// retryable backpressure rather than mapped to a turn failure.
 	busy := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayAgentBusy, nil, false)
 	require.Equal(t, sessionForegroundBackpressure().Error(), busy.err.Error())
+
+	// A prompt Hermes folded into the turn already running is accepted work,
+	// not contention: it is stated as its own outcome so no host retries text
+	// that is already inside a live turn.
+	absorbed := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayTurnAbsorbedPrompt, nil, false)
+	require.Equal(t, sessionPromptAbsorbed().Error(), absorbed.err.Error())
+	require.NotEqual(t, sessionForegroundBackpressure().Error(), absorbed.err.Error())
 
 	client := newFakeHermesClient()
 	client.closeErr = errors.New("containment failed")
