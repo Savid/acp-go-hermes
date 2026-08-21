@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -880,26 +882,101 @@ func TestGatewayTerminalBypassesSaturatedOrdinaryActorMailbox(t *testing.T) {
 }
 
 // TestGatewayPendingHandshakeRetentionStaysBounded pins that retention for a
-// handshake in flight is bounded and that reaching the bound costs the
-// generation nothing: another native session's traffic must not be able to
-// close the transport that owns the process.
+// handshake in flight is bounded per native session as well as per transport,
+// that reaching either bound costs the generation nothing — another native
+// session's traffic must not be able to close the transport that owns the
+// process — and that a frame the retention drops is stated rather than lost in
+// silence.
 func TestGatewayPendingHandshakeRetentionStaysBounded(t *testing.T) {
 	server, _ := newDirectGatewayActor()
+	overflows := &recordingLogHandler{}
+	server.log = slog.New(overflows)
 	dispatcher := server.transport.dispatcher
 	dispatcher.pendingHandshakes[1] = gatewayHandshakeCreate
-	for index := 0; index <= gatewayPendingFrameCapacity; index++ {
-		if err := server.dispatchGatewayEvent(dispatcher, Event{
-			Type: evtMessageDelta, SessionID: "unbound-live", InboundSequence: uint64(index + 1),
-		}); err != nil {
-			t.Fatalf("retained frame %d = %v", index, err)
+
+	retain := func(live string, count int) {
+		t.Helper()
+		for index := range count {
+			if err := server.dispatchGatewayEvent(dispatcher, Event{
+				Type: evtMessageDelta, SessionID: live, InboundSequence: uint64(index + 1),
+			}); err != nil {
+				t.Fatalf("%s retained frame %d = %v", live, index, err)
+			}
 		}
 	}
+
+	// One mirrored child run cannot spend more than its own share, so the
+	// budget the session being bound is waiting to claim survives it.
+	retain("mirrored-child", gatewayPendingFrameLiveCapacity+1)
+	if got := len(dispatcher.pendingFrames["mirrored-child"]); got != gatewayPendingFrameLiveCapacity {
+		t.Fatalf("one live id retained %d frames", got)
+	}
+	if dispatcher.pendingFrameCount != gatewayPendingFrameLiveCapacity {
+		t.Fatalf("live-id overflow grew the transport buffer to %d", dispatcher.pendingFrameCount)
+	}
+
+	for index := range gatewayPendingFrameCapacity/gatewayPendingFrameLiveCapacity - 1 {
+		retain(fmt.Sprintf("mirrored-sibling-%d", index), gatewayPendingFrameLiveCapacity)
+	}
+	retain("late-live", 1)
 	if dispatcher.pendingFrameCount != gatewayPendingFrameCapacity {
-		t.Fatalf("overflow grew pending buffer to %d", dispatcher.pendingFrameCount)
+		t.Fatalf("transport overflow grew pending buffer to %d", dispatcher.pendingFrameCount)
+	}
+	if _, retained := dispatcher.pendingFrames["late-live"]; retained {
+		t.Fatal("a frame past the transport bound was retained")
 	}
 	if cause := dispatcher.terminalCause(); cause != nil {
 		t.Fatalf("retention bound failed the generation: %v", cause)
 	}
+
+	if bounds := overflows.attributes("bound"); len(bounds) != 2 ||
+		bounds[0] != "live_session" || bounds[1] != "transport" {
+		t.Fatalf("stated retention overflows = %#v", bounds)
+	}
+
+	// The observability seam is optional: an embedder without a logger drops
+	// the same frame and says nothing.
+	server.log = nil
+	retain("late-live", 1)
+	if len(overflows.attributes("bound")) != 2 {
+		t.Fatal("a dropped frame was stated without a logger")
+	}
+}
+
+type recordingLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *recordingLogHandler) WithGroup(string) slog.Handler { return h }
+
+func (h *recordingLogHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record)
+
+	return nil
+}
+
+func (h *recordingLogHandler) attributes(key string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	values := []string{}
+	for _, record := range h.records {
+		record.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == key {
+				values = append(values, attr.Value.String())
+			}
+
+			return true
+		})
+	}
+
+	return values
 }
 
 func TestGatewayStaleTransportGenerationDoesNotProjectAfterResume(t *testing.T) {

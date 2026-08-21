@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -12,8 +13,16 @@ import (
 )
 
 const (
-	gatewayActorMailboxCapacity   = 256
-	gatewayPendingFrameCapacity   = 256
+	gatewayActorMailboxCapacity = 256
+	gatewayPendingFrameCapacity = 256
+
+	// gatewayPendingFrameLiveCapacity bounds one native session's share of the
+	// retention budget. Hermes mirrors watched child runs onto live ids this
+	// adapter never bound, and they arrive on the same transport as the session
+	// being bound: no single live id may spend more than a quarter of what the
+	// bind is waiting to claim.
+	gatewayPendingFrameLiveCapacity = 64
+
 	gatewayMappedDeliveryCapacity = 256
 
 	// Cycle budgets bind state retained outside the actor mailbox. The mailbox
@@ -849,12 +858,26 @@ func (s *hermesServer) dispatchGatewayEventWithOrder(
 		// A handshake still in flight has not published its live id, so a frame
 		// naming no bound session may yet belong to the session being bound. It
 		// is retained only while a handshake can still claim it, and only while
-		// that retention stays inside its bound.
-		if len(dispatcher.pendingHandshakes) == 0 || dispatcher.pendingFrameCount >= gatewayPendingFrameCapacity {
+		// that retention stays inside its bounds.
+		if len(dispatcher.pendingHandshakes) == 0 {
 			return nil
 		}
 
-		dispatcher.pendingFrames[event.SessionID] = append(dispatcher.pendingFrames[event.SessionID], event)
+		retained := dispatcher.pendingFrames[event.SessionID]
+
+		if len(retained) >= gatewayPendingFrameLiveCapacity {
+			s.observeRetentionOverflow(event, len(retained), "live_session")
+
+			return nil
+		}
+
+		if dispatcher.pendingFrameCount >= gatewayPendingFrameCapacity {
+			s.observeRetentionOverflow(event, dispatcher.pendingFrameCount, "transport")
+
+			return nil
+		}
+
+		dispatcher.pendingFrames[event.SessionID] = append(retained, event)
 		dispatcher.pendingFrameCount++
 
 		return nil
@@ -868,6 +891,24 @@ func (s *hermesServer) dispatchGatewayEventWithOrder(
 	}
 
 	return nil
+}
+
+// observeRetentionOverflow states a frame the handshake retention could not
+// hold. The drop is deliberate — a bind waiting for its own frames must not be
+// closed by another native session's traffic — but a silent drop leaves the
+// session being bound short of frames with nothing to read it from. The frame
+// body is never logged; the bound that refused it and the depth are.
+func (s *hermesServer) observeRetentionOverflow(event Event, depth int, bound string) {
+	if s.log == nil {
+		return
+	}
+
+	s.log.Debug("hermes gateway handshake retention overflowed",
+		slog.String("classification", "handshake_retention_overflow"),
+		slog.String("bound", bound),
+		slog.String("event_type", event.Type),
+		slog.Int("retained", depth),
+	)
 }
 
 func (s *hermesServer) enqueueGatewayEvent(

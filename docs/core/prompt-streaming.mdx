@@ -292,4 +292,8 @@ One Hermes connection carries more than this session's turns. Hermes fans
 session-less change broadcasts to every connected peer and mirrors a watched
 child run onto a live ID this adapter never bound; neither names a turn the
 adapter owns, so both are dropped, as is a retained frame no handshake can
-still claim and a frame arriving once the retention bound is reached.
+still claim. Retention is bounded twice — 256 frames per transport and 64 per
+native session — so no mirrored run can spend the budget the session being
+bound is waiting to claim. A frame either bound refuses is dropped without
+failing the generation, and is stated on the debug log with the bound that
+refused it; frame bodies are never logged.
