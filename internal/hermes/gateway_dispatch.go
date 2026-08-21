@@ -33,7 +33,6 @@ var (
 	ErrGatewayMappedOverflow = errors.New("hermes mapped event overflow")
 	ErrGatewayAmbiguousTurn  = errors.New("hermes gateway turn correlation is ambiguous")
 	ErrGatewayCycleOverflow  = errors.New("hermes gateway cycle state overflow")
-	ErrGatewayTextConflict   = errors.New("hermes completion conflicts with its streamed prefix")
 )
 
 type gatewayTransportDispatcher struct {
@@ -1703,12 +1702,7 @@ func (a *gatewaySessionActor) messageFor(cycle *gatewayCycle, event Event) (Nati
 		return NativeMessage{}, ErrGatewayCycleOverflow
 	}
 
-	suffix, err := gatewayCompletionSuffix(completeText, streamedText)
-	if err != nil {
-		return NativeMessage{}, err
-	}
-
-	if err := cycle.chargeText(suffix); err != nil {
+	if err := cycle.chargeText(gatewayCompletionSuffix(completeText, streamedText)); err != nil {
 		return NativeMessage{}, err
 	}
 
@@ -1735,20 +1729,26 @@ func (a *gatewaySessionActor) messageFor(cycle *gatewayCycle, event Event) (Nati
 	}, nil
 }
 
-func gatewayCompletionSuffix(complete string, streamed string) (string, error) {
-	if streamed == "" {
-		return complete, nil
+// gatewayCompletionSuffix reports the text a completion adds beyond the deltas
+// the cycle already carried. Hermes streams interim commentary through the same
+// delta stream the final answer arrives on while message.complete carries the
+// final answer alone, so a completion is under no obligation to extend the
+// concatenated deltas: text the stream already ended with adds nothing, and any
+// other completion is charged whole rather than judged a conflict.
+func gatewayCompletionSuffix(complete string, streamed string) string {
+	if streamed == "" || complete == "" {
+		return complete
 	}
 
-	if complete == streamed {
-		return "", nil
+	if suffix, ok := strings.CutPrefix(complete, streamed); ok {
+		return suffix
 	}
 
-	if strings.HasPrefix(complete, streamed) {
-		return strings.TrimPrefix(complete, streamed), nil
+	if strings.HasSuffix(strings.TrimSpace(streamed), strings.TrimSpace(complete)) {
+		return ""
 	}
 
-	return "", ErrGatewayTextConflict
+	return complete
 }
 
 func (a *gatewaySessionActor) completeCycle(cycle *gatewayCycle, message NativeMessage, cycleErr error, event Event) error {

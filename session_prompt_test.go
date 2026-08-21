@@ -907,12 +907,13 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 		complete string
 		streamed string
 		want     string
-		wantErr  bool
 	}{
 		{name: "completion only", complete: "final answer", want: "final answer"},
+		{name: "empty completion", streamed: "narration"},
 		{name: "fully streamed", complete: "final answer", streamed: "final answer"},
 		{name: "completion suffix", complete: "final answer", streamed: "final ", want: "answer"},
-		{name: "inconsistent completion", complete: "replacement", streamed: "already sent", wantErr: true},
+		{name: "narrated tool turn", complete: "final answer", streamed: "Reading the file.\n\nfinal answer\n"},
+		{name: "answer the stream never carried", complete: "replacement", streamed: "already sent", want: "replacement"},
 	}
 
 	for _, test := range tests {
@@ -925,13 +926,6 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 				Text:         test.complete,
 				StreamedText: test.streamed,
 			})
-			if test.wantErr {
-				require.ErrorContains(t, err, "conflicts with its streamed prefix")
-				require.Nil(t, updates)
-				require.Empty(t, delivered)
-
-				return
-			}
 			require.NoError(t, err)
 			if delivered != test.want {
 				t.Fatalf("delivered text = %q, want %q", delivered, test.want)
@@ -965,13 +959,13 @@ func TestDeliveredCompletionSuffixIsTheRecordedForegroundPrefix(t *testing.T) {
 		{MessageID: "message-1", Type: valText, Text: "final answer", StreamedText: "final "},
 		// A repeated full completion has no append-only suffix.
 		{MessageID: "message-1", Type: valText, Text: "final answer", StreamedText: "final answer"},
+		// A narrated turn ends its delta stream with the final response, so the
+		// completion that repeats it has nothing left to deliver.
+		{MessageID: "message-1", Type: valText, Text: "final answer", StreamedText: "narration. final answer\n"},
 	}
 	for _, part := range parts {
 		require.NoError(t, session.emitPartUpdates(t.Context(), valAssistant, part))
 	}
-	require.ErrorContains(t, session.emitPartUpdates(t.Context(), valAssistant, nativehermes.Part{
-		MessageID: "message-1", Type: valText, Text: "replacement", StreamedText: "final answer",
-	}), "conflicts with its streamed prefix")
 
 	conn.mu.Lock()
 	updates := append([]acp.SessionNotification(nil), conn.updates...)

@@ -218,28 +218,61 @@ func TestGatewayCycleLimitPlusOneFailsAndContainsGeneration(t *testing.T) {
 	}
 }
 
-func TestGatewayConflictingCompletionFailsClosedEndToEnd(t *testing.T) {
+// TestGatewayNarratedTurnCompletesOnItsFinalResponse pins the emission shape a
+// narrated tool turn produces: the delta stream carries interim commentary and
+// then the answer, while message.complete carries the final response alone. The
+// completion extends nothing, and the cycle still completes cleanly.
+func TestGatewayNarratedTurnCompletesOnItsFinalResponse(t *testing.T) {
 	server, actor := newDirectGatewayActor()
 	cycle := actor.newCycle(CycleOriginActivity)
-	cycle.text.WriteString("visible prefix")
-	cycle.textBytes = len("visible prefix")
+	cycle.text.WriteString("Let me read that file.\n\nThe file says PATH_OK.\n")
+	cycle.textBytes = cycle.text.Len()
 	actor.active = cycle
 
 	actor.handleRaw(actor.generation, Event{
-		Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"replacement"}`), InboundSequence: 2,
+		Type:            evtMessageComplete,
+		Payload:         json.RawMessage(`{"text":"The file says PATH_OK.","status":"complete"}`),
+		InboundSequence: 2,
 	})
-	if cause := server.transport.dispatcher.terminalCause(); !errors.Is(cause, ErrGatewayTextConflict) {
+	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
 		t.Fatalf("generation cause = %v", cause)
 	}
-	if actor.active != nil || len(actor.terminal) != 1 {
-		t.Fatalf("conflict retained active=%#v terminal=%d", actor.active, len(actor.terminal))
+	if actor.active != nil || len(actor.terminal) != 0 {
+		t.Fatalf("completion retained active=%#v terminal=%d", actor.active, len(actor.terminal))
 	}
 	terminal := mustTurnEvent(t, server.deliveries)
-	if terminal.Type != EventCycleFailed || !errors.Is(terminal.Err, ErrGatewayTextConflict) || terminal.Message != nil {
-		t.Fatalf("conflicting completion terminal = %#v", terminal)
+	if terminal.Type != EventCycleComplete || terminal.Err != nil || terminal.Message == nil {
+		t.Fatalf("narrated completion terminal = %#v", terminal)
 	}
-	if err := mustTurnError(t, server.deliveries); !errors.Is(err, ErrGatewayTextConflict) {
-		t.Fatalf("conflicting completion transport error = %v", err)
+	if terminal.Message.Info.Finish != valStop {
+		t.Fatalf("narrated completion finish = %q", terminal.Message.Info.Finish)
+	}
+	part := terminal.Message.Parts[len(terminal.Message.Parts)-1]
+	if part.Text != "The file says PATH_OK." || part.StreamedText != cycle.text.String() {
+		t.Fatalf("narrated completion part = %#v", part)
+	}
+}
+
+// TestGatewayCompletionSuffixReadsTheDeltaStreamLeniently pins the fragment a
+// completion adds for every shape hermes can produce, none of which is a
+// conflict.
+func TestGatewayCompletionSuffixReadsTheDeltaStreamLeniently(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		complete string
+		streamed string
+		want     string
+	}{
+		{name: "no stream", complete: "final answer", want: "final answer"},
+		{name: "empty completion", streamed: "commentary"},
+		{name: "fully streamed", complete: "final answer", streamed: "final answer"},
+		{name: "completion extends the stream", complete: "final answer", streamed: "final ", want: "answer"},
+		{name: "narrated turn", complete: "the answer", streamed: "narration. the answer\n"},
+		{name: "answer the stream never carried", complete: "the answer", streamed: "an abandoned attempt", want: "the answer"},
+	} {
+		if got := gatewayCompletionSuffix(test.complete, test.streamed); got != test.want {
+			t.Fatalf("%s: suffix = %q, want %q", test.name, got, test.want)
+		}
 	}
 }
 

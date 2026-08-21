@@ -572,11 +572,7 @@ func partUpdates(role string, part nativehermes.Part) ([]acp.SessionUpdate, stri
 	messageID := part.MessageID
 	switch part.Type {
 	case valText:
-		text, err := unstreamedText(part.Text, part.StreamedText)
-		if err != nil {
-			return nil, "", err
-		}
-
+		text := unstreamedText(part.Text, part.StreamedText)
 		if text == "" {
 			return nil, "", nil
 		}
@@ -611,20 +607,26 @@ func partUpdates(role string, part nativehermes.Part) ([]acp.SessionUpdate, stri
 	}
 }
 
-func unstreamedText(complete string, streamed string) (string, error) {
-	if streamed == "" {
-		return complete, nil
+// unstreamedText reports the one fragment a completion adds beyond the text the
+// delta stream already delivered. Hermes narrates a tool turn through the same
+// delta stream its final answer arrives on, so a completion is under no
+// obligation to extend the concatenated deltas: a completion the stream already
+// ended with has nothing left to deliver, and any other completion is delivered
+// whole rather than lost to a prefix rule the native side never promised.
+func unstreamedText(complete string, streamed string) string {
+	if streamed == "" || complete == "" {
+		return complete
 	}
 
-	if complete == streamed {
-		return "", nil
+	if suffix, ok := strings.CutPrefix(complete, streamed); ok {
+		return suffix
 	}
 
-	if strings.HasPrefix(complete, streamed) {
-		return strings.TrimPrefix(complete, streamed), nil
+	if strings.HasSuffix(strings.TrimSpace(streamed), strings.TrimSpace(complete)) {
+		return ""
 	}
 
-	return "", errors.New("hermes completion conflicts with its streamed prefix")
+	return complete
 }
 
 type hermesToolState struct {
