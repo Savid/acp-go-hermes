@@ -623,20 +623,26 @@ func TestGatewayTerminalBypassesSaturatedOrdinaryActorMailbox(t *testing.T) {
 	}
 }
 
-func TestGatewayPendingHandshakeOverflowFailsClosed(t *testing.T) {
+// TestGatewayPendingHandshakeRetentionStaysBounded pins that retention for a
+// handshake in flight is bounded and that reaching the bound costs the
+// generation nothing: another native session's traffic must not be able to
+// close the transport that owns the process.
+func TestGatewayPendingHandshakeRetentionStaysBounded(t *testing.T) {
 	server, _ := newDirectGatewayActor()
 	dispatcher := server.transport.dispatcher
 	dispatcher.pendingHandshakes[1] = gatewayHandshakeCreate
 	for index := 0; index <= gatewayPendingFrameCapacity; index++ {
-		_ = server.dispatchGatewayEvent(dispatcher, Event{
+		if err := server.dispatchGatewayEvent(dispatcher, Event{
 			Type: evtMessageDelta, SessionID: "unbound-live", InboundSequence: uint64(index + 1),
-		})
-	}
-	if err := mustTurnError(t, server.deliveries); !errors.Is(err, ErrGatewayInputOverflow) {
-		t.Fatalf("pending overflow = %v", err)
+		}); err != nil {
+			t.Fatalf("retained frame %d = %v", index, err)
+		}
 	}
 	if dispatcher.pendingFrameCount != gatewayPendingFrameCapacity {
 		t.Fatalf("overflow grew pending buffer to %d", dispatcher.pendingFrameCount)
+	}
+	if cause := dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("retention bound failed the generation: %v", cause)
 	}
 }
 

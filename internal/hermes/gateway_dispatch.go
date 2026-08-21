@@ -618,7 +618,7 @@ func (s *hermesServer) handleGatewayHandshake(
 
 		command.reply <- gatewayHandshakeResult{state: gatewayHandshakeTombstoned}
 
-		s.failUnmatchedGatewayFrames(dispatcher)
+		dropUnmatchedGatewayFrames(dispatcher)
 
 		return
 	}
@@ -671,24 +671,22 @@ func (s *hermesServer) handleGatewayHandshake(
 
 	command.reply <- gatewayHandshakeResult{state: gatewayHandshakeCommitted}
 
-	s.failUnmatchedGatewayFrames(dispatcher)
+	dropUnmatchedGatewayFrames(dispatcher)
 }
 
-func (s *hermesServer) failUnmatchedGatewayFrames(dispatcher *gatewayTransportDispatcher) {
+// dropUnmatchedGatewayFrames releases the frames retained for a handshake that
+// can no longer claim them. With no handshake left in flight, a frame naming a
+// native session this adapter never bound names another session's work — a
+// mirrored child run, a scheduled turn — and this adapter has nothing to say
+// about it.
+func dropUnmatchedGatewayFrames(dispatcher *gatewayTransportDispatcher) {
 	if len(dispatcher.pendingHandshakes) != 0 || dispatcher.pendingFrameCount == 0 {
 		return
 	}
 
-	for live := range dispatcher.pendingFrames {
-		s.failGatewayGeneration(dispatcher.generation, fmt.Errorf(
-			"%w: buffered event names unmatched native session %q in generation %d",
-			ErrGatewayAmbiguousTurn,
-			live,
-			dispatcher.generation,
-		))
+	clear(dispatcher.pendingFrames)
 
-		return
-	}
+	dispatcher.pendingFrameCount = 0
 }
 
 func (s *hermesServer) synchronizeGatewayWatermark(
@@ -777,7 +775,11 @@ func (s *hermesServer) dispatchGatewayEventWithOrder(
 	event Event,
 	ordered bool,
 ) error {
-	if !gatewaySessionEvent(event.Type) && event.SessionID == "" {
+	// Hermes broadcasts session-less change events to every connected peer and
+	// mirrors a watched child run onto a live id this adapter never bound.
+	// Neither names a turn this adapter owns, so neither is this adapter's to
+	// act on.
+	if event.SessionID == "" {
 		return nil
 	}
 
@@ -800,39 +802,18 @@ func (s *hermesServer) dispatchGatewayEventWithOrder(
 	mappings.mu.Unlock()
 
 	if actor == nil {
-		if event.SessionID != "" {
-			if len(dispatcher.pendingHandshakes) == 0 {
-				s.failGatewayGeneration(dispatcher.generation, fmt.Errorf(
-					"%w: event %q names unmatched native session %q in generation %d",
-					ErrGatewayAmbiguousTurn,
-					event.Type,
-					event.SessionID,
-					dispatcher.generation,
-				))
-
-				return ErrGatewayAmbiguousTurn
-			}
-
-			if dispatcher.pendingFrameCount >= gatewayPendingFrameCapacity {
-				s.failGatewayGeneration(dispatcher.generation, ErrGatewayInputOverflow)
-
-				return ErrGatewayInputOverflow
-			}
-
-			dispatcher.pendingFrames[event.SessionID] = append(dispatcher.pendingFrames[event.SessionID], event)
-			dispatcher.pendingFrameCount++
-
+		// A handshake still in flight has not published its live id, so a frame
+		// naming no bound session may yet belong to the session being bound. It
+		// is retained only while a handshake can still claim it, and only while
+		// that retention stays inside its bound.
+		if len(dispatcher.pendingHandshakes) == 0 || dispatcher.pendingFrameCount >= gatewayPendingFrameCapacity {
 			return nil
 		}
 
-		s.failGatewayGeneration(dispatcher.generation, fmt.Errorf(
-			"%w: event %q is missing exact native session identity in generation %d",
-			ErrGatewayAmbiguousTurn,
-			event.Type,
-			dispatcher.generation,
-		))
+		dispatcher.pendingFrames[event.SessionID] = append(dispatcher.pendingFrames[event.SessionID], event)
+		dispatcher.pendingFrameCount++
 
-		return ErrGatewayAmbiguousTurn
+		return nil
 	}
 
 	if err := s.enqueueGatewayEvent(actor, event, dispatcher.generation, ordered); err != nil {

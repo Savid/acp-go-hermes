@@ -424,26 +424,43 @@ func TestGatewayDispatchHelpers(t *testing.T) {
 	})
 }
 
+// TestGatewayDispatchRoutingEdges pins the frames one connection carries that
+// name no turn this adapter owns. Hermes fans session-less change broadcasts to
+// every peer and mirrors a watched child run onto its own live id, so both
+// reach a connection whose only business is this session's turns — and neither
+// is a reason to close it.
 func TestGatewayDispatchRoutingEdges(t *testing.T) {
-	t.Run("global unknown is ignored but unmatched session fails closed", func(t *testing.T) {
-		server, _ := newDirectGatewayActor()
-		_ = server.dispatchGatewayEvent(server.transport.dispatcher, Event{Type: "unknown"})
-		_ = server.dispatchGatewayEvent(server.transport.dispatcher, Event{Type: evtMessageDelta, SessionID: "missing"})
-		if len(server.deliveries) != 1 {
-			t.Fatal("unmatched session did not fail closed")
+	t.Run("a session-less broadcast is not this adapter's", func(t *testing.T) {
+		server, actor := newDirectGatewayActor()
+		for _, event := range []Event{
+			{Type: "skin.changed"},
+			{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"orphan"}`)},
+		} {
+			if err := server.dispatchGatewayEvent(server.transport.dispatcher, event); err != nil {
+				t.Fatalf("session-less %q = %v", event.Type, err)
+			}
+		}
+		if len(server.deliveries) != 0 || len(actor.terminal) != 0 || len(actor.mailbox) != 0 {
+			t.Fatal("session-less broadcast reached the session")
 		}
 	})
 
-	t.Run("empty session refuses even with one actor", func(t *testing.T) {
+	t.Run("another native session's mirror is not this adapter's", func(t *testing.T) {
 		server, actor := newDirectGatewayActor()
-		if err := server.dispatchGatewayEvent(server.transport.dispatcher, Event{Type: evtMessageDelta}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-			t.Fatalf("missing session identity = %v", err)
+		for _, event := range []Event{
+			{Type: evtMessageDelta, SessionID: "child-live", Payload: json.RawMessage(`{"text":"child"}`)},
+			{Type: evtMessageComplete, SessionID: "child-live", Payload: json.RawMessage(`{"text":"child summary"}`)},
+			{Type: "session.info", SessionID: "cron-live"},
+		} {
+			if err := server.dispatchGatewayEvent(server.transport.dispatcher, event); err != nil {
+				t.Fatalf("unbound %q = %v", event.Type, err)
+			}
 		}
-		if err := mustTurnError(t, server.deliveries); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-			t.Fatalf("ambiguity = %v", err)
+		if len(server.deliveries) != 0 || len(actor.terminal) != 0 || len(actor.mailbox) != 0 {
+			t.Fatal("an unbound native session reached this one")
 		}
-		if len(actor.terminal) != 1 {
-			t.Fatal("existing actor was not fenced")
+		if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+			t.Fatalf("unbound native session failed the generation: %v", cause)
 		}
 	})
 }
@@ -1246,9 +1263,12 @@ func TestGatewayHandshakeBindingRejectsAmbiguityWithoutPublishingAnActor(t *test
 	unmatched, _ := newDirectGatewayActor()
 	unmatched.transport.dispatcher.pendingFrames["foreign-live"] = []Event{{Type: evtMessageDelta}}
 	unmatched.transport.dispatcher.pendingFrameCount = 1
-	unmatched.failUnmatchedGatewayFrames(unmatched.transport.dispatcher)
-	if err := mustTurnError(t, unmatched.deliveries); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("unmatched binding = %v", err)
+	dropUnmatchedGatewayFrames(unmatched.transport.dispatcher)
+	if len(unmatched.transport.dispatcher.pendingFrames) != 0 || unmatched.transport.dispatcher.pendingFrameCount != 0 {
+		t.Fatalf("retained frames for an unbound native session: %#v", unmatched.transport.dispatcher.pendingFrames)
+	}
+	if cause := unmatched.transport.dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("unmatched frames failed the generation: %v", cause)
 	}
 
 	if got := server.actorForTransportSession(nil, "stored", "live"); got != nil {
