@@ -6,7 +6,7 @@
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",
-    "activityKinds": ["task", "subagent"]
+    "activityKinds": ["task"]
   },
   "input": [
     {
@@ -32,7 +32,7 @@
                 },
                 {
                   "activityId": "act-1",
-                  "kind": "goal",
+                  "kind": "subagent",
                   "state": "running",
                   "cause": "submission",
                   "originTurnId": "turn-1"
