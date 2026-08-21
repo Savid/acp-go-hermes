@@ -2055,7 +2055,10 @@ func TestHermesGatewayCompletionOnlyText(t *testing.T) {
 	}
 }
 
-func TestHermesGatewayApprovalAmbiguityFailsClosed(t *testing.T) {
+// TestHermesGatewayApprovalDuringParallelToolsReachesTheHost pins the shape a
+// hermes turn running tools concurrently produces: the approval callback names
+// no tool, and the turn it blocks still completes with the approval delivered.
+func TestHermesGatewayApprovalDuringParallelToolsReachesTheHost(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeGatewayServer(t)
@@ -2068,18 +2071,27 @@ func TestHermesGatewayApprovalAmbiguityFailsClosed(t *testing.T) {
 	server := newGatewayBackedHermesServer(t, fake, "")
 	bindTestGatewaySession(t, server, "stored", "live-stored")
 
-	if _, err := server.SendMessage(withTestPromptDispatch(t.Context()), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("SendMessage error = %v, want %v", err, ErrGatewayAmbiguousTurn)
+	if _, err := server.SendMessage(withTestPromptDispatch(t.Context()), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
+
+	projected := 0
 	for len(server.deliveries) > 0 {
 		delivery := <-server.deliveries
 		if delivery.Err != nil {
 			continue
 		}
 		event := turnEventFromDelivery(t, delivery)
-		if event.Type == evtApprovalRequest {
-			t.Fatalf("ambiguous permission was projected: %#v", event)
+		if event.Type != evtApprovalRequest {
+			continue
 		}
+		projected++
+		if event.Permission == nil || event.Permission.Tool.CallID != event.Permission.ID {
+			t.Fatalf("unattributable permission = %#v", event.Permission)
+		}
+	}
+	if projected != 1 {
+		t.Fatalf("projected %d approvals, want 1", projected)
 	}
 }
 

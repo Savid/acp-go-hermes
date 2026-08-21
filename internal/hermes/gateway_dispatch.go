@@ -1604,14 +1604,14 @@ func (a *gatewaySessionActor) emitPart(cycle *gatewayCycle, part Part, event Eve
 }
 
 func (a *gatewaySessionActor) mapPermission(cycle *gatewayCycle, event Event) error {
-	toolCallID := uniqueGatewayToolCallID(cycle.activeTools)
-	if toolCallID == "" {
-		return fmt.Errorf("%w: permission has no unique active tool call", ErrGatewayAmbiguousTurn)
-	}
-
-	// Hermes 0.20 approval.request has no request identity. The actor mints one
-	// inside the exact cycle after proving one active native tool owns the
-	// callback; the native tool_id remains solely the ACP toolCallId.
+	// Hermes 0.20 approval.request has no request identity, so the actor mints
+	// one inside the exact cycle. It has no tool identity either, and hermes
+	// emits tool.start only for a progress-enabled surface and runs tool calls
+	// concurrently, so a callback can reach an adapter that sees no active
+	// native tool or several. The approval binds to the sole active native tool
+	// where exactly one owns the cycle, and is otherwise its own addressable
+	// call: an approval the adapter cannot attribute is still an approval the
+	// user must answer.
 	nextPermission := cycle.permissions + 1
 
 	requestID := fmt.Sprintf("%s/permission-%d", cycle.id, nextPermission)
@@ -1620,6 +1620,8 @@ func (a *gatewaySessionActor) mapPermission(cycle *gatewayCycle, event Event) er
 	}
 
 	cycle.permissions = nextPermission
+
+	toolCallID := firstNonEmpty(uniqueGatewayToolCallID(cycle.activeTools), requestID)
 
 	req := PermissionRequest{
 		ID:                  requestID,

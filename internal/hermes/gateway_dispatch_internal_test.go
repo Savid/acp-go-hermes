@@ -687,22 +687,47 @@ func TestGatewayActorMappingEdges(t *testing.T) {
 		t.Fatalf("ignored: %v", err)
 	}
 
-	if err := actor.mapPermission(cycle, Event{}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("permission ambiguity = %v", err)
-	}
 	if err := actor.mapQuestion(cycle, Event{}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
 		t.Fatalf("question ambiguity = %v", err)
-	}
-
-	cycle.activeTools["tool-1"] = struct{}{}
-	cycle.activeTools["tool-2"] = struct{}{}
-	if err := actor.mapPermission(cycle, Event{}); !errors.Is(err, ErrGatewayAmbiguousTurn) {
-		t.Fatalf("permission multi-tool ambiguity = %v", err)
 	}
 
 	part := Part{State: json.RawMessage(`{`)}
 	if err := actor.emitPart(cycle, part, Event{}); err == nil {
 		t.Fatal("invalid part JSON succeeded")
+	}
+}
+
+// TestGatewayPermissionBindsOnlyAnUnambiguousTool pins that an approval reaches
+// the host whatever the adapter can see of the cycle's native tools: hermes
+// emits tool.start only for a progress-enabled surface and runs tools
+// concurrently, so no active tool and several are both ordinary.
+func TestGatewayPermissionBindsOnlyAnUnambiguousTool(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	cycle := actor.newCycle(CycleOriginActivity)
+
+	if err := actor.mapPermission(cycle, Event{}); err != nil {
+		t.Fatalf("permission with no active tool: %v", err)
+	}
+
+	cycle.activeTools["tool-1"] = struct{}{}
+	if err := actor.mapPermission(cycle, Event{}); err != nil {
+		t.Fatalf("permission with one active tool: %v", err)
+	}
+
+	cycle.activeTools["tool-2"] = struct{}{}
+	if err := actor.mapPermission(cycle, Event{}); err != nil {
+		t.Fatalf("permission with parallel active tools: %v", err)
+	}
+
+	want := []string{cycle.id + "/permission-1", "tool-1", cycle.id + "/permission-3"}
+	for index, wantTool := range want {
+		event := mustTurnEvent(t, server.deliveries)
+		if event.Type != evtApprovalRequest || event.Permission == nil {
+			t.Fatalf("delivery %d = %#v", index, event)
+		}
+		if event.Permission.Tool.CallID != wantTool {
+			t.Fatalf("delivery %d tool call = %q, want %q", index, event.Permission.Tool.CallID, wantTool)
+		}
 	}
 }
 
