@@ -22,6 +22,7 @@ const (
 	valReject        = "reject"
 	valSessionClosed = "session closed"
 	valAbsorbedTurn  = "absorbed by running turn"
+	valQueuedTurn    = "queued as the session's next native turn"
 )
 
 type turnSettlementState uint8
@@ -409,6 +410,15 @@ func (s *session) startReuseLocked(ctx context.Context) (context.Context, func()
 // projected as agent-origin work on this same session.
 func sessionPromptAbsorbed() error {
 	return acp.NewInvalidRequest(map[string]any{jsonFieldError: valAbsorbedTurn})
+}
+
+// sessionPromptQueuedTurn states a prompt Hermes queued as the session's next
+// native turn, run by a turn this adapter could not pick out of the stream. The
+// text was accepted, so this is not backpressure and must not be retried:
+// Hermes runs it, and the turn that runs it is projected as agent-origin work
+// on this same session.
+func sessionPromptQueuedTurn() error {
+	return acp.NewInvalidRequest(map[string]any{jsonFieldError: valQueuedTurn})
 }
 
 func sessionForegroundBackpressure() error {

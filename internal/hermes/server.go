@@ -69,6 +69,7 @@ const (
 	evtClarifyRequest     = "clarify.request"
 	evtSecretRequest      = "secret.request"
 	evtMessageDelta       = "message.delta"
+	evtMessageStart       = "message.start"
 	evtMessageComplete    = "message.complete"
 	evtMessagePartUpdated = "message.part.updated"
 	evtError              = "error"
@@ -2094,10 +2095,12 @@ func (s *hermesServer) submitGatewayTextForLive(
 	}
 
 	if watermarkResult.err != nil {
-		// A turn that folded this prompt into itself releases the registration
-		// and nothing else: the turn hermes is running keeps the connection, and
-		// carries the text this prompt would otherwise send a second time.
-		if errors.Is(watermarkResult.err, ErrGatewayTurnAbsorbedPrompt) {
+		// A turn that folded this prompt into itself, and a queued turn this
+		// adapter could not pick out of the stream, both release the registration
+		// and nothing else: hermes runs the text either way, and the connection
+		// stays up to carry the turn that runs it.
+		if errors.Is(watermarkResult.err, ErrGatewayTurnAbsorbedPrompt) ||
+			errors.Is(watermarkResult.err, ErrGatewayPromptQueuedAsNextTurn) {
 			return NativeMessage{}, errors.Join(watermarkResult.err, cancelRegistration(watermarkResult.err))
 		}
 

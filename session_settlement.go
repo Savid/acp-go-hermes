@@ -715,6 +715,14 @@ func (s *session) nativeRun(
 			return promptRun{err: sessionPromptAbsorbed()}
 		}
 
+		if errors.Is(sendErr, nativehermes.ErrGatewayPromptQueuedAsNextTurn) {
+			// Hermes queued this prompt as the session's next native turn and ran
+			// it in a turn that announced no start of its own. The text runs
+			// exactly once, and the turn running it projects as agent-origin work:
+			// a retry would run the same text a second time.
+			return promptRun{err: sessionPromptQueuedTurn()}
+		}
+
 		if errors.Is(sendErr, nativehermes.ErrGatewayAgentBusy) {
 			// Hermes runs whole autonomous turns between prompts. One of them
 			// holding the native session is the same contention the ACP foreground

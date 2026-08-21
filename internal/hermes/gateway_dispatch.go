@@ -57,6 +57,18 @@ var (
 	// never backpressure.
 	ErrGatewayTurnAbsorbedPrompt = errors.New("hermes folded the prompt into the turn already running")
 
+	// ErrGatewayPromptQueuedAsNextTurn reports a prompt hermes queued as the
+	// session's next native turn whose turn this adapter cannot pick out of the
+	// stream. Hermes announces every turn it starts with a payload-less
+	// message.start and drains a queued prompt ahead of every other follow-up,
+	// so the first turn announced after the queueing is that prompt's. A turn
+	// that opens with no announcement at all is neither provably that turn nor
+	// provably agent-origin work, and the frames go to the cycle that can be
+	// stated — an agent-origin one. The text is not lost: hermes runs it. It is
+	// simply not this prompt's to project, and resending it would run the same
+	// text twice, so this is an outcome and never backpressure.
+	ErrGatewayPromptQueuedAsNextTurn = errors.New("hermes queued the prompt as the session's next native turn")
+
 	// errGatewayCycleAbandoned states an agent-origin cycle that outlived the
 	// native turn which opened it. Hermes admits a prompt synchronously only for
 	// an idle session, so such a cycle has every frame it will ever get.
@@ -358,12 +370,20 @@ type gatewaySessionActor struct {
 	mailboxMu      sync.Mutex
 	terminalQueued bool
 
-	generation      uint64
-	live            string
-	transport       *gatewayTransport
-	cycles          uint64
-	active          *gatewayCycle
-	prompt          *gatewayCycle
+	generation uint64
+	live       string
+	transport  *gatewayTransport
+	cycles     uint64
+	active     *gatewayCycle
+	prompt     *gatewayCycle
+
+	// turnBoundary and turnTerminal are the native turn's edges as the stream
+	// states them: the inbound sequence of the last message.start hermes
+	// announced, and of the last frame that ended a cycle. A native turn is open
+	// here exactly when the boundary is the later of the two.
+	turnBoundary uint64
+	turnTerminal uint64
+
 	fencedPrompt    *gatewayPromptTombstone
 	buffered        []Event
 	projections     map[*gatewayProjection]struct{}
@@ -380,24 +400,29 @@ type gatewayCycle struct {
 	registrationID string
 	result         chan gatewayCycleResult
 
-	watermark        uint64
-	watermarkSet     bool
-	held             bool
-	deferred         bool
-	deferral         chan gatewayPromptWatermarkResult
-	heldEvents       []Event
-	started          bool
-	text             strings.Builder
-	textBytes        int
-	activeTools      map[string]struct{}
-	toolStates       map[string]gatewayActiveTool
-	toolParts        []Part
-	toolCount        int
-	toolDataBytes    int
-	controls         map[gatewayControlIdentity]struct{}
-	controlCount     int
-	controlDataBytes int
-	permissions      uint64
+	watermark    uint64
+	watermarkSet bool
+	held         bool
+	deferred     bool
+
+	// awaitsRunningTurn marks a deferred prompt whose queueing was still inside
+	// an open native turn. That turn's frames are agent-origin work; once it
+	// ends, the only turn left to open is the one hermes drains the queue for.
+	awaitsRunningTurn bool
+	deferral          chan gatewayPromptWatermarkResult
+	heldEvents        []Event
+	started           bool
+	text              strings.Builder
+	textBytes         int
+	activeTools       map[string]struct{}
+	toolStates        map[string]gatewayActiveTool
+	toolParts         []Part
+	toolCount         int
+	toolDataBytes     int
+	controls          map[gatewayControlIdentity]struct{}
+	controlCount      int
+	controlDataBytes  int
+	permissions       uint64
 }
 
 func (s *hermesServer) installGatewayDispatcher(client *Client) uint64 {
@@ -1304,14 +1329,22 @@ func (a *gatewaySessionActor) pendingProjections() []*gatewayProjection {
 }
 
 // deferPromptToQueuedTurn adopts hermes's decision to run this prompt as the
-// next turn. Hermes queued the text because a turn is already running, so the
-// registered cycle claims nothing while that turn streams: every frame it was
-// holding, and every frame until that turn's native terminal, is agent-origin
-// work. The prompt is neither lost nor resubmitted — it is the turn hermes runs
-// when it drains the queue.
+// next turn. Hermes queued the text because a turn was running, so the
+// registered cycle claims nothing until hermes announces the turn it drains the
+// queue for: every frame before that announcement is agent-origin work. The
+// prompt is neither lost nor resubmitted — it is the turn hermes runs when it
+// drains the queue.
+//
+// Whether the queued-behind turn is still this adapter's to project is a fact
+// the stream already carries. Hermes clears its running flag long after it emits
+// a turn's terminal frame — a goal judge, a speech flush and persistence run in
+// between — so a prompt is commonly queued behind a turn whose terminal this
+// adapter has already spent. That turn is over here, and waiting for a terminal
+// it will never see again is what hung the prompt.
 func (a *gatewaySessionActor) deferPromptToQueuedTurn() gatewayPromptWatermarkResult {
 	cycle := a.prompt
 	cycle.deferred = true
+	cycle.awaitsRunningTurn = a.active != nil || a.turnBoundary > a.turnTerminal
 	cycle.deferral = make(chan gatewayPromptWatermarkResult, 1)
 	deferral := cycle.deferral
 
@@ -1319,10 +1352,15 @@ func (a *gatewaySessionActor) deferPromptToQueuedTurn() gatewayPromptWatermarkRe
 	cycle.heldEvents = nil
 
 	for index := range held {
-		// The running turn's own terminal can be in this batch. Everything after
-		// it belongs to the turn hermes drains the queue to run, so it goes back
-		// to being held until the prompt is released.
-		if !cycle.deferred {
+		// Hermes can announce the queued turn before this acknowledgement is
+		// applied: message.start carries no payload, so it is never held, and by
+		// now it is a recorded boundary. Everything past it is the prompt's, and
+		// goes back to being held until the prompt is released.
+		if a.turnBoundary > cycle.watermark && held[index].InboundSequence > a.turnBoundary {
+			a.resumeDeferredPrompt()
+		}
+
+		if a.prompt == cycle && !cycle.deferred {
 			cycle.heldEvents = append(cycle.heldEvents, held[index:]...)
 
 			break
@@ -1335,12 +1373,30 @@ func (a *gatewaySessionActor) deferPromptToQueuedTurn() gatewayPromptWatermarkRe
 		}
 	}
 
+	if a.prompt == cycle && a.turnBoundary > cycle.watermark {
+		a.resumeDeferredPrompt()
+	}
+
 	return gatewayPromptWatermarkResult{deferral: deferral}
 }
 
-// resumeDeferredPrompt hands a queued prompt the turn boundary it was waiting
-// for. The agent-origin cycle that owned the stream has stated its native
-// terminal, so the frames after it are the turn hermes drained the queue to run.
+// observeTurnStart records the boundary hermes states before it runs a turn.
+// message.start carries no payload at all — no request id, no origin, no text —
+// so the only thing it states is that the frames after it belong to a turn that
+// had not started before it. That is exactly what a deferred prompt needs:
+// hermes drains a queued prompt ahead of every follow-up turn it could run
+// instead, so the first turn announced after the prompt was queued is the
+// prompt's own.
+func (a *gatewaySessionActor) observeTurnStart(sequence uint64) {
+	a.turnBoundary = sequence
+
+	if a.prompt != nil && a.prompt.deferred && sequence > a.prompt.watermark {
+		a.resumeDeferredPrompt()
+	}
+}
+
+// resumeDeferredPrompt hands a queued prompt the turn hermes just announced for
+// it. Every frame from here is the prompt's turn.
 func (a *gatewaySessionActor) resumeDeferredPrompt() {
 	if a.prompt == nil || a.prompt.deferral == nil {
 		return
@@ -1351,6 +1407,24 @@ func (a *gatewaySessionActor) resumeDeferredPrompt() {
 	a.prompt.deferred = false
 
 	deferral <- gatewayPromptWatermarkResult{projections: a.pendingProjections()}
+}
+
+// abandonDeferredPrompt answers a queued prompt with a turn that opened without
+// being announced. The turn hermes queued this prompt behind is over here, so an
+// unannounced turn is neither provably that one nor provably the prompt's, and
+// the prompt states an outcome no host may retry rather than waiting on an
+// announcement that may never come or claiming frames it cannot prove are its.
+func (a *gatewaySessionActor) abandonDeferredPrompt() {
+	cycle := a.prompt
+	deferral := cycle.deferral
+
+	cycle.deferral = nil
+	cycle.deferred = false
+
+	a.prompt = nil
+	a.buffered = nil
+
+	deferral <- gatewayPromptWatermarkResult{err: ErrGatewayPromptQueuedAsNextTurn}
 }
 
 // releasePromptToLiveCycle reports a prompt hermes folded into the turn already
@@ -1420,6 +1494,10 @@ func (a *gatewaySessionActor) handleRaw(generation uint64, event Event) {
 	}
 
 	if !gatewaySessionEvent(event.Type) {
+		if event.Type == evtMessageStart {
+			a.observeTurnStart(event.InboundSequence)
+		}
+
 		if err := a.emitMapped(TurnEvent{
 			Type:                EventGatewayRaw,
 			Raw:                 event.Raw,
@@ -1460,6 +1538,15 @@ func (a *gatewaySessionActor) routeRaw(event Event) error {
 	}
 
 	if a.active == nil {
+		// A turn opening here stated no start of its own. While a queued prompt
+		// is still waiting for the turn hermes drains its queue for, and the turn
+		// it was queued behind has already ended, that is a turn this adapter
+		// cannot attribute either way: the prompt is answered and the frames go
+		// to the cycle that can be stated.
+		if a.prompt != nil && a.prompt.deferred && !a.prompt.awaitsRunningTurn {
+			a.abandonDeferredPrompt()
+		}
+
 		a.active = a.newCycle(CycleOriginActivity)
 		if err := a.emitMapped(TurnEvent{
 			Type:                EventCycleStarted,
@@ -1487,6 +1574,8 @@ func (a *gatewaySessionActor) applyEvent(cycle *gatewayCycle, event Event) error
 
 		return nil
 	case evtError:
+		a.turnTerminal = event.InboundSequence
+
 		return a.completeCycle(cycle, NativeMessage{}, gatewayEventFailure(event.Payload), event)
 	case evtToolStart:
 		if err := cycle.chargeTool(event); err != nil {
@@ -1553,6 +1642,8 @@ func (a *gatewaySessionActor) applyEvent(cycle *gatewayCycle, event Event) error
 
 		return a.emitPart(cycle, part, event)
 	case evtMessageComplete:
+		a.turnTerminal = event.InboundSequence
+
 		if failure := gatewayCompleteFailure(event.Payload); failure != nil {
 			return a.completeCycle(cycle, NativeMessage{}, failure, event)
 		}
@@ -1957,7 +2048,13 @@ func (a *gatewaySessionActor) completeCycle(cycle *gatewayCycle, message NativeM
 	if a.active == cycle {
 		a.active = nil
 
-		a.resumeDeferredPrompt()
+		// The turn a queued prompt was queued behind has ended. What the prompt
+		// owns starts at the next turn hermes announces, not here: hermes drains
+		// its queue only after this turn's thread releases the session, and the
+		// frames in between are still that turn's.
+		if a.prompt != nil && a.prompt.deferred {
+			a.prompt.awaitsRunningTurn = false
+		}
 	}
 
 	// A provider-declared failure is a normal cycle outcome. Only failure to

@@ -27,7 +27,7 @@ refusing an accepted prompt:
 | `prompt.submit` status | What Hermes did | What the prompt does |
 |---|---|---|
 | `streaming` | claimed an idle session for this prompt | streams the turn that follows |
-| `queued` | a turn is running; this prompt is the next one | waits for that turn's native terminal, then streams its own turn |
+| `queued` | a turn is running; this prompt is the next one | waits for the turn Hermes announces next, then streams it |
 | `redirected`, `steered` | folded this text into the turn already running | reports the running turn as the owner of the answer |
 
 A status outside that vocabulary states nothing frames can be attributed by, and
@@ -38,10 +38,24 @@ cycle is projected as an agent-origin cycle and must finish projection before
 the prompt is released. Only Hermes's own answer, never the adapter's view of
 the stream, decides who owns the frames above the watermark:
 
-- Under `queued`, every frame up to the running turn's native terminal is
-  agent-origin work; the registered cycle claims nothing until that terminal
-  arrives, and Hermes drains its queue into the turn that fills the cycle. The
-  prompt runs exactly once, when Hermes runs it.
+- Under `queued`, every frame up to the start of the next native turn is
+  agent-origin work; the registered cycle claims nothing until Hermes announces
+  that turn, and Hermes drains its queue into the turn that fills the cycle. The
+  prompt runs exactly once, when Hermes runs it. Hermes announces every turn it
+  starts with a payload-less `message.start`, and it drains a queued prompt
+  ahead of every follow-up turn it could run instead, so the first turn
+  announced after the prompt was queued is that prompt's own. The announcement,
+  not the running turn's terminal, is the boundary: Hermes emits a turn's
+  terminal frame and only then — after a goal judge, a speech flush and
+  persistence — releases the session and drains its queue, so a prompt is
+  commonly queued behind a turn whose terminal this adapter has already
+  projected, and there is no further terminal to wait for. A turn that opens
+  with no announcement at all, once the turn the prompt was queued behind has
+  ended, is neither provably that prompt's turn nor provably agent-origin work:
+  the prompt states a `queued as the session's next native turn` outcome, the
+  frames project as agent-origin, and nothing waits on an announcement that may
+  never come. Hermes runs the text either way, so that outcome is never
+  retryable backpressure.
 - Under `redirected` or `steered`, the running turn carries the text and the
   answer to it. Where that turn is a cycle this adapter already projects, the
   prompt states an `absorbed by running turn` outcome and every frame it held

@@ -823,6 +823,7 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 		{name: "registration refusal", sendErr: nativehermes.ErrGatewayAmbiguousTurn},
 		{name: "agent-origin backpressure", sendErr: nativehermes.ErrGatewayAgentBusy},
 		{name: "absorbed by the running turn", sendErr: nativehermes.ErrGatewayTurnAbsorbedPrompt},
+		{name: "queued as the next native turn", sendErr: nativehermes.ErrGatewayPromptQueuedAsNextTurn},
 		{name: "admission refusal", acceptErr: acceptErr},
 		{name: "missing dispatch proof"},
 		{name: "post-dispatch admission failure", acceptErr: acceptErr, dispatched: true, wantSettle: true, wantIncarnation: true},
@@ -849,6 +850,14 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 	absorbed := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayTurnAbsorbedPrompt, nil, false)
 	require.Equal(t, sessionPromptAbsorbed().Error(), absorbed.err.Error())
 	require.NotEqual(t, sessionForegroundBackpressure().Error(), absorbed.err.Error())
+
+	// A prompt Hermes queued as the session's next native turn, run by a turn
+	// that announced no start of its own, is accepted work too: Hermes runs the
+	// text, so the outcome is stated rather than offered back for a retry that
+	// would run it twice.
+	queued := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, nativehermes.ErrGatewayPromptQueuedAsNextTurn, nil, false)
+	require.Equal(t, sessionPromptQueuedTurn().Error(), queued.err.Error())
+	require.NotEqual(t, sessionForegroundBackpressure().Error(), queued.err.Error())
 
 	client := newFakeHermesClient()
 	client.closeErr = errors.New("containment failed")

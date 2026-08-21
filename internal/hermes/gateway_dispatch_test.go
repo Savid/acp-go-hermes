@@ -617,92 +617,223 @@ func TestGatewayFoldedPromptIsReleasedToTheRunningCycle(t *testing.T) {
 }
 
 // TestGatewayQueuedPromptIsServedByTheTurnHermesRunsForIt pins the queued
-// disposition end to end. Hermes queues a prompt that lands on a busy session
-// and runs it as the next turn: the running turn's frames stay agent-origin
-// work, the queued turn fills the registered prompt cycle, and the user's text
-// runs exactly once.
+// disposition end to end, through both orderings the native gateway produces.
+// Hermes queues a prompt that lands on a busy session and runs it as the next
+// turn: the running turn's frames stay agent-origin work, the queued turn fills
+// the registered prompt cycle, and the user's text runs exactly once. The turn
+// hermes queued behind can still be streaming when the prompt is admitted, or —
+// because hermes releases the session only after a goal judge, a speech flush
+// and persistence follow its terminal frame — already be finished here.
 func TestGatewayQueuedPromptIsServedByTheTurnHermesRunsForIt(t *testing.T) {
-	fake := newFakeGatewayServer(t)
-	fake.setPromptStatus("queued")
-	fake.setPromptEvents(
-		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"running-turn"}`)},
-		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"running-turn"}`)},
-		Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
-		Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
-	)
-	server := newGatewayBackedHermesServer(t, fake, "")
-	t.Cleanup(func() { _ = server.Close(context.Background()) })
-	bindTestGatewaySession(t, server, "stored", "live-stored")
+	runningDelta := Event{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"running-turn"}`)}
+	runningComplete := Event{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"running-turn"}`)}
+	queuedTurn := []Event{
+		{Type: evtMessageStart},
+		{Type: evtMessageDelta, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+		{Type: evtMessageComplete, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+	}
 
-	activity := make(chan TurnEvent, 4)
-	prompted := make(chan TurnEvent, 8)
-	consumerDone := make(chan struct{})
-	go func() {
-		defer close(consumerDone)
-		for delivery := range server.deliveries {
-			if delivery.Event == nil {
-				continue
-			}
-			event := *delivery.Event
-			if event.Origin == CycleOriginActivity {
-				if event.ProjectionDone != nil {
-					activity <- event
-					event.ProjectionDone(nil)
+	for _, test := range []struct {
+		name   string
+		before []Event
+		after  []Event
+	}{
+		{
+			name:   "the running turn's terminal is still ahead of the prompt",
+			before: []Event{{Type: evtMessageStart}},
+			after:  append([]Event{runningDelta, runningComplete}, queuedTurn...),
+		},
+		{
+			name:   "the running turn's terminal is already behind the prompt",
+			before: []Event{{Type: evtMessageStart}, runningDelta, runningComplete},
+			after:  queuedTurn,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeGatewayServer(t)
+			fake.setPromptStatus("queued")
+			fake.setPromptBeforeResult(test.before...)
+			fake.setPromptEvents(test.after...)
+			server := newGatewayBackedHermesServer(t, fake, "")
+			t.Cleanup(func() { _ = server.Close(context.Background()) })
+			bindTestGatewaySession(t, server, "stored", "live-stored")
+
+			activity := make(chan TurnEvent, 8)
+			prompted := make(chan TurnEvent, 16)
+			consumerDone := make(chan struct{})
+			go func() {
+				defer close(consumerDone)
+				for delivery := range server.deliveries {
+					if delivery.Event == nil || delivery.Event.Type == EventGatewayRaw {
+						continue
+					}
+					event := *delivery.Event
+					if event.Origin == CycleOriginActivity {
+						if event.ProjectionDone != nil {
+							activity <- event
+							event.ProjectionDone(nil)
+						}
+
+						continue
+					}
+					prompted <- event
 				}
+			}()
 
-				continue
+			message, err := server.SendMessage(
+				withTestPromptDispatch(t.Context()), "stored",
+				MessageRequest{Parts: []map[string]any{{"text": "prompt"}}},
+			)
+			if err != nil || len(message.Parts) != 1 || message.Parts[0].Text != "queued-turn" {
+				t.Fatalf("queued SendMessage = %#v, %v", message, err)
 			}
-			prompted <- event
-		}
-	}()
 
-	message, err := server.SendMessage(
-		withTestPromptDispatch(t.Context()), "stored", MessageRequest{Parts: []map[string]any{{"text": "prompt"}}},
-	)
-	if err != nil || len(message.Parts) != 1 || message.Parts[0].Text != "queued-turn" {
-		t.Fatalf("queued SendMessage = %#v, %v", message, err)
-	}
+			select {
+			case running := <-activity:
+				if running.Type != EventCycleComplete || running.Message == nil ||
+					running.Message.Parts[0].Text != "running-turn" {
+					t.Fatalf("running turn projection = %#v", running)
+				}
+				if running.CycleID == message.Info.ID {
+					t.Fatal("running turn and queued prompt shared one cycle")
+				}
+			default:
+				t.Fatal("the turn hermes was already running was never projected")
+			}
 
-	select {
-	case running := <-activity:
-		if running.Type != EventCycleComplete || running.Message == nil ||
-			running.Message.Parts[0].Text != "running-turn" {
-			t.Fatalf("running turn projection = %#v", running)
-		}
-		if running.CycleID == message.Info.ID {
-			t.Fatal("running turn and queued prompt shared one cycle")
-		}
-	default:
-		t.Fatal("the turn hermes was already running was never projected")
-	}
-
-	if err := server.Close(t.Context()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	<-consumerDone
-	for len(prompted) > 0 {
-		event := <-prompted
-		if event.Origin != CycleOriginPrompt {
-			continue
-		}
-		if strings.Contains(string(event.Raw), "running-turn") {
-			t.Fatalf("the running turn's work was projected under the prompt: %#v", event)
-		}
+			if err := server.Close(t.Context()); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			<-consumerDone
+			if len(activity) != 0 {
+				t.Fatalf("the queued turn was projected as agent-origin work: %#v", <-activity)
+			}
+			for len(prompted) > 0 {
+				event := <-prompted
+				if event.Origin != CycleOriginPrompt {
+					continue
+				}
+				if strings.Contains(string(event.Raw), "running-turn") {
+					t.Fatalf("the running turn's work was projected under the prompt: %#v", event)
+				}
+			}
+		})
 	}
 }
 
-// TestGatewayQueuedPromptHoldsEveryFramePastTheRunningTurnsTerminal pins the
-// boundary inside one batch of held frames: the running turn's terminal can
-// arrive with the queued turn's first frames behind it, and those frames are
-// the prompt's — held until it is released, never spent on the cycle that just
-// ended.
-func TestGatewayQueuedPromptHoldsEveryFramePastTheRunningTurnsTerminal(t *testing.T) {
+// TestGatewayQueuedPromptTakesTheTurnHermesAnnouncesForIt drives the queued
+// disposition through both orderings hermes can produce. Hermes emits a turn's
+// terminal frame and only then — after a goal judge, a speech flush and
+// persistence — releases the session and drains its queue, so a prompt is
+// queued sometimes while the running turn's terminal is still ahead of the
+// adapter and commonly once it is already behind. The prompt takes the turn
+// hermes announces for it either way, and never the tail of the turn it was
+// queued behind.
+func TestGatewayQueuedPromptTakesTheTurnHermesAnnouncesForIt(t *testing.T) {
+	t.Run("the terminal and the queued turn's start share one held batch", func(t *testing.T) {
+		server, actor := newDirectGatewayActor()
+		handle := registerDirectPrompt(actor)
+		for _, event := range []Event{
+			{Type: evtMessageStart, InboundSequence: 5},
+			{Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+			{Type: evtMessageComplete, InboundSequence: 8, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+			{Type: evtMessageStart, InboundSequence: 9},
+			{Type: evtMessageDelta, InboundSequence: 10, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+		} {
+			actor.handleRaw(1, event)
+		}
+
+		result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+			cycleID: handle.cycleID, watermark: 6, disposition: gatewayPromptQueuedTurn,
+		})
+		if result.err != nil || result.deferral == nil {
+			t.Fatalf("queued watermark = %#v", result)
+		}
+
+		requireQueuedPromptResumed(t, actor, result.deferral, 1)
+		if len(actor.prompt.heldEvents) != 1 {
+			t.Fatalf("queued prompt held frames = %#v", actor.prompt.heldEvents)
+		}
+		requireRunningTurnProjection(t, server, handle.cycleID)
+		requireQueuedTurnProjection(t, server, actor, handle.cycleID)
+	})
+
+	t.Run("the running turn's terminal is still ahead of the prompt", func(t *testing.T) {
+		server, actor := newDirectGatewayActor()
+		handle := registerDirectPrompt(actor)
+		actor.handleRaw(1, Event{Type: evtMessageStart, InboundSequence: 5})
+
+		result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+			cycleID: handle.cycleID, watermark: 6, disposition: gatewayPromptQueuedTurn,
+		})
+		if result.err != nil || result.deferral == nil || !actor.prompt.awaitsRunningTurn {
+			t.Fatalf("queued watermark = %#v / %#v", result, actor.prompt)
+		}
+
+		for _, event := range []Event{
+			{Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+			{Type: evtMessageComplete, InboundSequence: 8, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		} {
+			actor.handleRaw(1, event)
+		}
+		select {
+		case resumed := <-result.deferral:
+			t.Fatalf("the running turn's terminal alone resumed the queued prompt: %#v", resumed)
+		default:
+		}
+
+		actor.handleRaw(1, Event{Type: evtMessageStart, InboundSequence: 9})
+		requireQueuedPromptResumed(t, actor, result.deferral, 1)
+
+		actor.handleRaw(1, Event{
+			Type: evtMessageDelta, InboundSequence: 10, Payload: json.RawMessage(`{"text":"queued-turn"}`),
+		})
+		requireRunningTurnProjection(t, server, handle.cycleID)
+		requireQueuedTurnProjection(t, server, actor, handle.cycleID)
+	})
+
+	t.Run("the running turn's terminal is already behind the prompt", func(t *testing.T) {
+		server, actor := newDirectGatewayActor()
+		handle := registerDirectPrompt(actor)
+		for _, event := range []Event{
+			{Type: evtMessageStart, InboundSequence: 3},
+			{Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+			{Type: evtMessageComplete, InboundSequence: 5, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		} {
+			actor.handleRaw(1, event)
+		}
+
+		result := actor.applyPromptWatermark(&gatewayPromptWatermark{
+			cycleID: handle.cycleID, watermark: 6, disposition: gatewayPromptQueuedTurn,
+		})
+		if result.err != nil || result.deferral == nil || actor.prompt.awaitsRunningTurn {
+			t.Fatalf("queued watermark = %#v / %#v", result, actor.prompt)
+		}
+		requireRunningTurnProjection(t, server, handle.cycleID)
+
+		actor.handleRaw(1, Event{Type: evtMessageStart, InboundSequence: 7})
+		requireQueuedPromptResumed(t, actor, result.deferral, 1)
+
+		actor.handleRaw(1, Event{
+			Type: evtMessageDelta, InboundSequence: 8, Payload: json.RawMessage(`{"text":"queued-turn"}`),
+		})
+		requireQueuedTurnProjection(t, server, actor, handle.cycleID)
+	})
+}
+
+// TestGatewayQueuedPromptAnswersAnUnannouncedTurnInsteadOfWaiting pins the
+// bound on the deferral. Hermes announces every turn it starts, so a turn that
+// opens with no announcement, after the turn this prompt was queued behind has
+// already ended, is neither provably the queued turn nor provably agent-origin
+// work. The prompt states an outcome no host may retry, the frames project as
+// agent-origin, and nothing waits on an announcement that may never come.
+func TestGatewayQueuedPromptAnswersAnUnannouncedTurnInsteadOfWaiting(t *testing.T) {
 	server, actor := newDirectGatewayActor()
 	handle := registerDirectPrompt(actor)
 	for _, event := range []Event{
-		{Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"running-turn"}`)},
-		{Type: evtMessageComplete, InboundSequence: 8, Payload: json.RawMessage(`{"text":"running-turn"}`)},
-		{Type: evtMessageDelta, InboundSequence: 9, Payload: json.RawMessage(`{"text":"queued-turn"}`)},
+		{Type: evtMessageStart, InboundSequence: 3},
+		{Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"running-turn"}`)},
+		{Type: evtMessageComplete, InboundSequence: 5, Payload: json.RawMessage(`{"text":"running-turn"}`)},
 	} {
 		actor.handleRaw(1, event)
 	}
@@ -713,37 +844,99 @@ func TestGatewayQueuedPromptHoldsEveryFramePastTheRunningTurnsTerminal(t *testin
 	if result.err != nil || result.deferral == nil {
 		t.Fatalf("queued watermark = %#v", result)
 	}
+	requireRunningTurnProjection(t, server, handle.cycleID)
+
+	actor.handleRaw(1, Event{
+		Type: evtMessageDelta, InboundSequence: 7, Payload: json.RawMessage(`{"text":"unannounced"}`),
+	})
+
+	var answered gatewayPromptWatermarkResult
+	select {
+	case answered = <-result.deferral:
+	default:
+		t.Fatal("an unannounced turn left the queued prompt waiting")
+	}
+	if !errors.Is(answered.err, ErrGatewayPromptQueuedAsNextTurn) {
+		t.Fatalf("unannounced turn outcome = %v", answered.err)
+	}
+	if errors.Is(answered.err, ErrGatewayAgentBusy) {
+		t.Fatal("an accepted prompt was reported as retryable contention")
+	}
+	if actor.prompt != nil {
+		t.Fatalf("answered prompt was retained: %#v", actor.prompt)
+	}
+	if actor.active == nil || actor.active.origin != CycleOriginActivity ||
+		actor.active.id == handle.cycleID || actor.active.text.String() != "unannounced" {
+		t.Fatalf("unannounced turn projection = %#v", actor.active)
+	}
+	if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+		t.Fatalf("unannounced turn failed the generation: %v", cause)
+	}
+}
+
+func requireQueuedPromptResumed(
+	t *testing.T,
+	actor *gatewaySessionActor,
+	deferral <-chan gatewayPromptWatermarkResult,
+	projections int,
+) {
+	t.Helper()
 
 	var resumed gatewayPromptWatermarkResult
 	select {
-	case resumed = <-result.deferral:
+	case resumed = <-deferral:
 	default:
-		t.Fatal("the running turn's terminal did not resume the queued prompt")
+		t.Fatal("the announced queued turn did not resume the prompt")
 	}
-	if resumed.err != nil || len(resumed.projections) != 1 {
+	if resumed.err != nil || len(resumed.projections) != projections {
 		t.Fatalf("resumed queued prompt = %#v", resumed)
 	}
-	if actor.prompt == nil || actor.prompt.deferred || len(actor.prompt.heldEvents) != 1 {
+	if actor.prompt == nil || actor.prompt.deferred {
 		t.Fatalf("queued prompt state = %#v", actor.prompt)
 	}
 	if actor.active != nil {
-		t.Fatalf("running cycle outlived its terminal: %#v", actor.active)
+		t.Fatalf("the queued turn was minted as agent-origin work: %#v", actor.active)
 	}
+}
 
-	started := mustTurnEvent(t, server.deliveries)
-	part := mustTurnEvent(t, server.deliveries)
-	completed := mustTurnEvent(t, server.deliveries)
+// nextMappedTurnEvent skips the raw republication of a frame the actor maps to
+// no cycle. message.start is one: it carries no payload, so it states a turn
+// boundary and nothing a cycle could project.
+func nextMappedTurnEvent(tb testing.TB, deliveries <-chan TurnDelivery) TurnEvent {
+	tb.Helper()
+
+	for {
+		if event := mustTurnEvent(tb, deliveries); event.Type != EventGatewayRaw {
+			return event
+		}
+	}
+}
+
+func requireRunningTurnProjection(t *testing.T, server *hermesServer, promptCycleID string) {
+	t.Helper()
+	started := nextMappedTurnEvent(t, server.deliveries)
+	part := nextMappedTurnEvent(t, server.deliveries)
+	completed := nextMappedTurnEvent(t, server.deliveries)
 	if started.Origin != CycleOriginActivity || part.Origin != CycleOriginActivity ||
 		completed.Type != EventCycleComplete || completed.Message == nil ||
-		completed.Message.Parts[0].Text != "running-turn" || completed.CycleID == handle.cycleID {
+		completed.Message.Parts[0].Text != "running-turn" || completed.CycleID == promptCycleID {
 		t.Fatalf("running turn projection = %#v / %#v / %#v", started, part, completed)
 	}
+}
 
-	if err := actor.releasePrompt(&gatewayPromptRelease{cycleID: handle.cycleID}); err != nil {
+func requireQueuedTurnProjection(
+	t *testing.T,
+	server *hermesServer,
+	actor *gatewaySessionActor,
+	promptCycleID string,
+) {
+	t.Helper()
+	if err := actor.releasePrompt(&gatewayPromptRelease{cycleID: promptCycleID}); err != nil {
 		t.Fatalf("release queued prompt: %v", err)
 	}
-	promptPart := mustTurnEvent(t, server.deliveries)
-	if promptPart.Origin != CycleOriginPrompt || promptPart.CycleID != handle.cycleID ||
+
+	promptPart := nextMappedTurnEvent(t, server.deliveries)
+	if promptPart.Origin != CycleOriginPrompt || promptPart.CycleID != promptCycleID ||
 		!strings.Contains(actor.prompt.text.String(), "queued-turn") {
 		t.Fatalf("queued turn projection = %#v", promptPart)
 	}
@@ -1480,14 +1673,28 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 	})
 
 	t.Run("actor ends while the queued prompt waits for its turn", func(t *testing.T) {
-		fake, server, actor := newPromptOwnershipBoundary(t)
+		fake, server, _ := newPromptOwnershipBoundary(t)
 		fake.setPromptStatus("queued")
-		server.beforePromptPhase = func(phase string, _ *gatewaySessionActor) {
-			if phase != promptPhaseDefer {
-				return
+		actor := replacePromptOwnershipActor(t, server)
+		go func() {
+			binding := <-actor.mailbox
+			actor.live = binding.bind.live
+			actor.generation = binding.bind.generation
+			close(binding.bind.done)
+			registration := <-actor.mailbox
+			actor.registerPrompt(registration.register)
+			// A deferral nothing will ever answer: the queued prompt is left
+			// waiting on the turn hermes never announces, and only the actor
+			// ending under it can end the wait.
+			watermark := <-actor.mailbox
+			watermark.watermark.reply <- gatewayPromptWatermarkResult{
+				deferral: make(chan gatewayPromptWatermarkResult),
 			}
-			actor.mailbox <- gatewayActorMessage{stop: true}
-			<-actor.done
+		}()
+		server.beforePromptPhase = func(phase string, _ *gatewaySessionActor) {
+			if phase == promptPhaseDefer {
+				close(actor.done)
+			}
 		}
 		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayDisconnected) {
 			t.Fatalf("queued wait actor loss = %v", err)
