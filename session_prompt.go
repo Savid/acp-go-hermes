@@ -1558,6 +1558,7 @@ func (s *session) emitRawHermesEvent(ctx context.Context, event nativehermes.Tur
 	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		return err
 	}
+
 	s.rawSeq = sequence
 
 	return nil

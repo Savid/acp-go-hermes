@@ -296,8 +296,9 @@ func (s *session) resolvePromptProjection(route *pumpCycleRoute, err error) {
 
 func (s *session) promptForegroundSettlementPending() bool {
 	s.pumpMu.Lock()
-	settlement := s.pumpForegroundSettle
 	defer s.pumpMu.Unlock()
+
+	settlement := s.pumpForegroundSettle
 
 	if settlement == nil {
 		return false

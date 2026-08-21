@@ -105,6 +105,7 @@ func (t *turnSettlement) complete() {
 		}
 
 		close(t.done)
+
 		if t.notify != nil {
 			t.notify()
 		}
