@@ -439,6 +439,26 @@ func TestGatewayPromptRefusedWhileAgentOriginWorkOwnsTheStream(t *testing.T) {
 	}
 }
 
+// TestGatewayRefusedPromptStillFailsClosedOnAnUnroutableHeldFrame pins that the
+// leniency stops at the frames themselves: a held frame the autonomous cycle
+// cannot state is still a stream this adapter cannot speak for.
+func TestGatewayRefusedPromptStillFailsClosedOnAnUnroutableHeldFrame(t *testing.T) {
+	server, actor := newDirectGatewayActor()
+	handle := registerDirectPrompt(actor)
+	actor.handleRaw(1, Event{
+		Type: evtMessageDelta, InboundSequence: 4, Payload: json.RawMessage(`{"text":"unfinished"}`),
+	})
+	actor.handleRaw(1, Event{Type: evtToolStart, InboundSequence: 7, Payload: json.RawMessage(`{}`)})
+
+	result := actor.applyPromptWatermark(&gatewayPromptWatermark{cycleID: handle.cycleID, watermark: 6})
+	if !errors.Is(result.err, ErrGatewayAmbiguousTurn) {
+		t.Fatalf("unroutable held frame = %v", result.err)
+	}
+	if cause := server.transport.dispatcher.terminalCause(); !errors.Is(cause, ErrGatewayAmbiguousTurn) {
+		t.Fatalf("generation cause = %v", cause)
+	}
+}
+
 func TestGatewayQueuedPromptCannotInheritLateOlderMonitorOutput(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	fake.setPromptStatus("queued")
@@ -1061,6 +1081,18 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 		}
 		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayActorOverflow) {
 			t.Fatalf("watermark overflow = %v", err)
+		}
+		requireGatewayClose(t, server)
+	})
+
+	t.Run("agent-origin work claims the stream before the watermark", func(t *testing.T) {
+		_, server, actor := newPromptOwnershipBoundary(t)
+		actor.beforeWatermark = func() { actor.active = actor.newCycle(CycleOriginActivity) }
+		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayAgentBusy) {
+			t.Fatalf("watermark busy refusal = %v", err)
+		}
+		if cause := server.transport.dispatcher.terminalCause(); cause != nil {
+			t.Fatalf("busy refusal failed the generation: %v", cause)
 		}
 		requireGatewayClose(t, server)
 	})

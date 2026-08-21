@@ -568,13 +568,13 @@ func (s *session) validateNativeMessageSession(ctx context.Context, message nati
 // same fragment as the durable foreground prefix, so a completion cannot be
 // mirrored once to ACP as a suffix and a second time to storage as the full
 // message.
-func partUpdates(role string, part nativehermes.Part) ([]acp.SessionUpdate, string, error) {
+func partUpdates(role string, part nativehermes.Part) ([]acp.SessionUpdate, string) {
 	messageID := part.MessageID
 	switch part.Type {
 	case valText:
 		text := unstreamedText(part.Text, part.StreamedText)
 		if text == "" {
-			return nil, "", nil
+			return nil, ""
 		}
 
 		text = strings.ToValidUTF8(text, "\uFFFD")
@@ -584,26 +584,26 @@ func partUpdates(role string, part nativehermes.Part) ([]acp.SessionUpdate, stri
 				SessionUpdate: "user_message_chunk",
 				MessageId:     &messageID,
 				Content:       acp.TextBlock(text),
-			}}}, "", nil
+			}}}, ""
 		}
 
 		return []acp.SessionUpdate{{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
 			SessionUpdate: "agent_message_chunk",
 			MessageId:     &messageID,
 			Content:       acp.TextBlock(text),
-		}}}, text, nil
+		}}}, text
 	case valReasoning:
 		if part.Text == "" {
-			return nil, "", nil
+			return nil, ""
 		}
 
 		return []acp.SessionUpdate{{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
 			SessionUpdate: "agent_thought_chunk",
 			MessageId:     &messageID,
 			Content:       acp.TextBlock(part.Text),
-		}}}, "", nil
+		}}}, ""
 	default:
-		return nil, "", nil
+		return nil, ""
 	}
 }
 
@@ -642,11 +642,7 @@ func (s *session) emitPartUpdates(ctx context.Context, role string, part nativeh
 		return s.emitToolPartUpdate(ctx, part)
 	}
 
-	updates, deliveredText, err := partUpdates(role, part)
-	if err != nil {
-		return err
-	}
-
+	updates, deliveredText := partUpdates(role, part)
 	for _, update := range updates {
 		if err := s.emitUpdate(ctx, update); err != nil {
 			return err

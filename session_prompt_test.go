@@ -920,13 +920,12 @@ func TestPartUpdatesReconcilesHermesCompleteText(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			updates, delivered, err := partUpdates(valAssistant, nativehermes.Part{
+			updates, delivered := partUpdates(valAssistant, nativehermes.Part{
 				MessageID:    "message-1",
 				Type:         valText,
 				Text:         test.complete,
 				StreamedText: test.streamed,
 			})
-			require.NoError(t, err)
 			if delivered != test.want {
 				t.Fatalf("delivered text = %q, want %q", delivered, test.want)
 			}
@@ -2528,10 +2527,10 @@ func testEmptyAndMalformedEventMapperBranches(t *testing.T, ctx context.Context,
 	if part, err := embeddedResourceHermesPart(emptyResource, &imagePromptBudget{}); err == nil || part != nil {
 		t.Fatalf("empty embeddedResourceHermesPart = %#v err=%v", part, err)
 	}
-	if updates, delivered, err := partUpdates("assistant", nativehermes.Part{Type: "text"}); err != nil || updates != nil || delivered != "" {
+	if updates, delivered := partUpdates("assistant", nativehermes.Part{Type: "text"}); updates != nil || delivered != "" {
 		t.Fatalf("empty text updates = %#v", updates)
 	}
-	if updates, delivered, err := partUpdates("assistant", nativehermes.Part{Type: "reasoning"}); err != nil || updates != nil || delivered != "" {
+	if updates, delivered := partUpdates("assistant", nativehermes.Part{Type: "reasoning"}); updates != nil || delivered != "" {
 		t.Fatalf("empty reasoning updates = %#v", updates)
 	}
 }
