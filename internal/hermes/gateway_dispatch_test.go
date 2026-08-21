@@ -1479,6 +1479,35 @@ func TestGatewayPromptSubmissionFailsAtEveryLostOwnershipBoundary(t *testing.T) 
 		requireGatewayClose(t, server)
 	})
 
+	t.Run("actor ends while the queued prompt waits for its turn", func(t *testing.T) {
+		fake, server, actor := newPromptOwnershipBoundary(t)
+		fake.setPromptStatus("queued")
+		server.beforePromptPhase = func(phase string, _ *gatewaySessionActor) {
+			if phase != promptPhaseDefer {
+				return
+			}
+			actor.mailbox <- gatewayActorMessage{stop: true}
+			<-actor.done
+		}
+		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayDisconnected) {
+			t.Fatalf("queued wait actor loss = %v", err)
+		}
+		requireGatewayClose(t, server)
+	})
+
+	t.Run("closed signal wins while the queued prompt waits for its turn", func(t *testing.T) {
+		fake, server, _ := newPromptOwnershipBoundary(t)
+		fake.setPromptStatus("queued")
+		server.beforePromptPhase = func(phase string, _ *gatewaySessionActor) {
+			if phase == promptPhaseDefer {
+				server.admissionOnce.Do(func() { close(server.closed) })
+			}
+		}
+		if err := sendOwnershipPrompt(t.Context(), server); !errors.Is(err, ErrGatewayDisconnected) {
+			t.Fatalf("queued wait closed signal = %v", err)
+		}
+		requireGatewayClose(t, server)
+	})
 
 	t.Run("actor ends before watermark acknowledgement", func(t *testing.T) {
 		_, server, actor := newPromptOwnershipBoundary(t)

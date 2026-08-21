@@ -2068,19 +2068,28 @@ func (s *hermesServer) submitGatewayTextForLive(
 	if watermarkResult.deferral != nil {
 		// Hermes queued this prompt as its next turn. The registration stays open
 		// across the turn running now, so the queued prompt is served exactly
-		// once, by the native turn hermes runs for it. Every way the actor can
-		// end fails its cycles, and that resolves this wait with the cause, so
-		// the only other outcome here is the caller's own cancellation.
+		// once, by the native turn hermes runs for it. This wait ends on the
+		// actor's answer, on the actor or server ending under it, or on the
+		// caller's own cancellation — never on the deferral channel alone.
 		if s.beforePromptPhase != nil {
 			s.beforePromptPhase(promptPhaseDefer, actor)
 		}
 
 		select {
 		case watermarkResult = <-watermarkResult.deferral:
+		case <-actor.done:
+			cause := gatewayDispatcherCause(transport.dispatcher)
+			cause = failAccepted(cause)
+
+			return NativeMessage{}, gatewayTransportFailure(cause)
 		case <-ctx.Done():
 			cancelErr := failAccepted(ctx.Err())
 
 			return NativeMessage{}, errors.Join(ctx.Err(), cancelErr)
+		case <-s.closed:
+			_ = failAccepted(ErrGatewayDisconnected)
+
+			return NativeMessage{}, ErrGatewayDisconnected
 		}
 	}
 

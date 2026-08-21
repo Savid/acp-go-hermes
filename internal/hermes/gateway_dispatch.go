@@ -2051,6 +2051,7 @@ func (a *gatewaySessionActor) queueLatchedTerminal() {
 func (a *gatewaySessionActor) failCycles(err error) {
 	if a.prompt != nil && a.prompt.deferral != nil {
 		a.prompt.deferral <- gatewayPromptWatermarkResult{err: err}
+
 		a.prompt.deferral = nil
 	}
 
