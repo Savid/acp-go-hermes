@@ -13,13 +13,15 @@ A native `approval.request` gateway event maps to an ACP
 `session/request_permission` request. The adapter presents three options:
 
 Hermes 0.20.0's session-keyed `approval.request` payload has no request or tool
-identifier. The adapter therefore takes the exact native `tool_id` from the
-active `tool.start` event and uses it only as the ACP `toolCallId`. The owning
-actor derives a separate adapter-owned permission-request identity inside that
-exact cycle. It never treats a command string or that adapter identity as a tool
-identity. Exactly one tool must be active when the approval arrives. Missing or
-ambiguous active-tool correlation, terminal IDs, and callbacks outside their
-exact active turn are rejected without invoking the ACP permission callback.
+identifier. The owning actor derives an adapter-owned permission-request
+identity inside the exact cycle, and never treats a command string as a tool
+identity. Where exactly one native tool is active, the adapter takes that exact
+native `tool_id` and uses it only as the ACP `toolCallId`. Hermes emits
+`tool.start` only for a progress-enabled surface and runs tool calls
+concurrently, so an approval also reaches the adapter with no active native tool
+or with several; those bind to the permission-request identity instead, and the
+approval is presented either way. Terminal IDs and callbacks outside their exact
+active turn are still rejected without invoking the ACP permission callback.
 
 The cycle actor keys held controls by both control kind and request ID and
 rejects a duplicate before emitting it. A native clarification whose ID equals

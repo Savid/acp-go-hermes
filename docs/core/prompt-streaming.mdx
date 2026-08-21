@@ -25,19 +25,23 @@ prompt ownership.
 
 Frames at or below the response watermark are older work. A complete older
 cycle is projected as an agent-origin cycle and must finish projection before
-the prompt is released. An older cycle that remains open at the admission
-boundary is an overlap and fails the incarnation closed. Only after the
-`streaming` claim and those checks do later frames enter the registered prompt
-cycle. This guarantee depends on Hermes's serialized prompt admission: a busy
-session must not report `streaming`.
+the prompt is released. An older cycle still open at the admission boundary owns
+the stream: the prompt is refused with `session_foreground` backpressure, every
+frame it was holding goes to that cycle, and the incarnation running it is left
+alone. Only after the `streaming` claim and those checks do later frames enter
+the registered prompt cycle. This guarantee depends on Hermes's serialized prompt
+admission: a busy session must not report `streaming`.
 
 Permissions and clarification requests inherit ownership only from that same
 actor-selected cycle. The mapped callback carries the exact cycle ID and
 transport generation; missing, stale, metadata-only, or cross-generation
 identity is refused instead of being assigned to the current prompt. Hermes
-clarifications are correlated only by the native `request_id`, and tool
-permissions require the one exact active native tool call ID. These rules are
-identical for prompt-origin and agent-origin cycles.
+clarifications are correlated only by the native `request_id`. A Hermes approval
+carries no tool identity of its own, and Hermes emits `tool.start` only for a
+progress-enabled surface and runs tool calls concurrently, so an approval binds
+to the one active native tool call where exactly one owns the cycle and is
+otherwise its own addressable `toolCallId`. These rules are identical for
+prompt-origin and agent-origin cycles.
 
 The actor also bounds processed state independently of its 256-frame mailbox.
 One cycle may project at most 10 MiB of cumulative text, 256 tool events with
@@ -164,12 +168,16 @@ native request a handoff block builds is identical to the one the same bytes
 build embedded — and the host may delete the file as soon as the prompt call
 returns.
 
-Hermes' authoritative `message.complete` text is reconciled with the prefix
-already emitted by `message.delta`. The adapter emits only a missing completion
-suffix, accepts a completion-only response, and suppresses duplicate or
-conflicting terminal text instead of replaying it to the ACP client. That exact
-delivered suffix is also the text appended to the durable foreground prefix;
-the completion is never mirrored a second time in storage.
+Hermes' authoritative `message.complete` text is reconciled with the text
+already emitted by `message.delta`. Hermes narrates a tool turn through the same
+delta stream its answer arrives on while `message.complete` carries the final
+response alone, so the completion is not required to extend the concatenated
+deltas. A completion that extends them delivers only its suffix, a completion the
+delta stream already ended with delivers nothing, a completion-only response is
+delivered whole, and a final response the stream never carried is delivered
+rather than dropped. That exact delivered fragment is also the text appended to
+the durable foreground prefix; the completion is never mirrored a second time in
+storage.
 
 The stored foreground text is capped at 64 KiB. Truncation keeps the largest
 complete UTF-8 prefix that fits the byte bound; once the bound cuts a delivered
@@ -218,6 +226,11 @@ not complete, the prompt fails and the session is poisoned instead of reporting
 a normal timeout or cancellation.
 </Note>
 
+A turn Hermes itself ends with `status: "interrupted"` — a native stop, steer,
+or barge-in — also returns the `cancelled` stop reason rather than the clean end
+of turn a successful completion reports. That is a native terminal, not a client
+cancel: it commits the cancelled boundary and leaves the incarnation running.
+
 After cancellation, timeout, transport failure, or outbound update failure
 whose selected containment boundary completed, the next authorized prompt
 waits for that containment latch, then lazily materializes exactly one fresh
@@ -245,5 +258,10 @@ open a generation-scoped pending handshake before their RPC: unknown-live
 frames are buffered to a fixed bound until the response supplies the exact
 watermark and IDs. Create delivers all matched frames once. Resume suppresses
 only replay residue at or below its response watermark and delivers later work
-once. Buffer overflow, an unmatched live ID, or an invalid binding fails the
-generation closed.
+once. An invalid binding fails the generation closed.
+
+One Hermes connection carries more than this session's turns. Hermes fans
+session-less change broadcasts to every connected peer and mirrors a watched
+child run onto a live ID this adapter never bound; neither names a turn the
+adapter owns, so both are dropped, as is a retained frame no handshake can
+still claim and a frame arriving once the retention bound is reached.
