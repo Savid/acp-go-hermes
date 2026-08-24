@@ -10,9 +10,8 @@ import (
 	"sync"
 	"time"
 
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
-
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
@@ -58,6 +57,8 @@ type Agent struct {
 	containmentErr     error
 	constructions      sync.WaitGroup
 	constructing       int
+	constructionSeq    uint64
+	constructionCancel map[uint64]context.CancelCauseFunc
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
@@ -66,6 +67,11 @@ type Agent struct {
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+	lifecycleAnswer    lifecycle.Negotiated
+
+	streamOpenMu   sync.Mutex
+	streamOpens    []*deferredStreamOpen
+	streamOpenWait sync.WaitGroup
 
 	sharedConfigMu          sync.Mutex
 	sharedConfigInitialized bool
@@ -113,17 +119,18 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	agent := &Agent{
-		options:         options,
-		log:             log,
-		optionsErr:      optionsErr,
-		observe:         observe,
-		sessions:        make(map[acp.SessionId]*session),
-		deleted:         make(map[acp.SessionId]struct{}),
-		deleteCleanup:   make(map[acp.SessionId]deleteCleanupRecord),
-		incompleteRoots: make(map[acp.SessionId]map[string]struct{}),
-		clientCalls:     make(chan struct{}, limits.MaxConcurrentClientCalls),
-		containmentMode: mode,
-		ambientEnv:      ambientEnvironment(),
+		options:            options,
+		log:                log,
+		optionsErr:         optionsErr,
+		observe:            observe,
+		sessions:           make(map[acp.SessionId]*session),
+		deleted:            make(map[acp.SessionId]struct{}),
+		deleteCleanup:      make(map[acp.SessionId]deleteCleanupRecord),
+		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
+		constructionCancel: make(map[uint64]context.CancelCauseFunc),
+		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
+		containmentMode:    mode,
+		ambientEnv:         ambientEnvironment(),
 	}
 	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	// Invalid option combinations must be side-effect free. In particular,
@@ -196,9 +203,30 @@ func (a *Agent) Close() error {
 func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
+	constructionCancellations := make([]context.CancelCauseFunc, 0, len(a.constructionCancel))
+	for _, cancel := range a.constructionCancel {
+		constructionCancellations = append(constructionCancellations, cancel)
+	}
+	conn := a.conn
 	a.mu.Unlock()
+	for _, cancel := range constructionCancellations {
+		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage}))
+	}
 
+	a.cancelStreamOpens()
+	var err error
 	a.constructions.Wait()
+	if preparer, ok := conn.(interface{ PrepareTransportClose(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, preparer.PrepareTransportClose(ctx))
+		cancel()
+	}
+	a.awaitStreamOpens()
+	if closer, ok := conn.(interface{ CloseTransport(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err = errors.Join(err, closer.CloseTransport(ctx))
+		cancel()
+	}
 
 	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
@@ -207,19 +235,33 @@ func (a *Agent) close() error {
 	}
 
 	a.sessions = make(map[acp.SessionId]*session)
-	a.conn = nil
 	a.mu.Unlock()
 
-	var err error
-
+	// The shutdown ladder applies identically here, and that includes the durable
+	// rung: an embedded shutdown owes every commit a wire session/close would have
+	// made, rather than dropping retained state along with the wrapper. The
+	// connection is already gone, so the boundary's emission rungs have nowhere to
+	// speak; its containment proof and its commits run exactly as they do on the
+	// wire, and a commit the store refuses fails this close.
 	for _, session := range sessions {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		closeErr := session.Close(ctx)
+
+		session.prepareClose()
+
+		waitErr := session.awaitSettlement(ctx)
+
+		session.lifecycleMu.Lock()
+		closeErr := session.settleClosedSession(ctx)
+		session.lifecycleMu.Unlock()
+
 		a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
-		err = errors.Join(err, closeErr)
+		err = errors.Join(err, waitErr, closeErr)
 
 		cancel()
 	}
+	a.mu.Lock()
+	a.conn = nil
+	a.mu.Unlock()
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	a.mu.Lock()
 	err = errors.Join(err, a.containmentErr)
@@ -228,28 +270,108 @@ func (a *Agent) close() error {
 	return err
 }
 
-func (a *Agent) beginSessionConstruction() error {
+func (a *Agent) beginActiveReuse(ctx context.Context, id acp.SessionId) (*session, context.Context, func(), error) {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	existing := a.sessions[id]
+	a.mu.Unlock()
+	if existing == nil {
+		return nil, nil, nil, nil
+	}
+
+	admissionCtx, release, err := existing.beginReuse(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
+		hook(admissionCtx)
+	}
+
+	return existing, admissionCtx, release, nil
+}
+
+type activeReuseAdmissionHookKey struct{}
+
+func (a *Agent) completeActiveReuse(
+	ctx context.Context,
+	id acp.SessionId,
+	existing *session,
+	replay bool,
+	release func(),
+) (*deferredStreamOpen, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	if a.closed || context.Cause(ctx) != nil {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	}
-	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
+	if a.sessions[id] != existing {
+		return nil, unknownSessionError()
 	}
 
-	a.constructing++
-	a.constructions.Add(1)
+	owed, deferred, err := a.deferStreamOpenLocked(ctx, existing)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil
+	identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
+	if deferred && orderedResponse && identity.token != "" {
+		owed.afterResponse = func() {
+			var replayErr error
+			if replay {
+				replayErr = existing.replayMessages(ctx)
+			}
+			release()
+			if replayErr != nil {
+				existing.failReuseAfterResponse(replayErr)
+			}
+		}
+		owed.onCancel = release
+	}
+
+	return owed, nil
 }
 
-func (a *Agent) endSessionConstruction() {
+func (a *Agent) beginSessionConstruction(ctx context.Context) (context.Context, func(), error) {
 	a.mu.Lock()
-	a.constructing--
+
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
+		a.mu.Unlock()
+
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
+	}
+
+	a.constructionSeq++
+	constructionID := a.constructionSeq
+	constructionCtx, cancel := context.WithCancelCause(ctx)
+	a.constructionCancel[constructionID] = cancel
+	a.constructing++
+	a.constructions.Add(1)
 	a.mu.Unlock()
-	a.constructions.Done()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			a.mu.Lock()
+			delete(a.constructionCancel, constructionID)
+			a.constructing--
+			a.mu.Unlock()
+			cancel(nil)
+			a.constructions.Done()
+		})
+	}
+
+	return constructionCtx, release, nil
 }
 
 // optionsError reports a construction-time option failure as the uniform
@@ -271,6 +393,14 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		return acp.InitializeResponse{}, err
 	}
 
+	// The lifecycle answer is resolved before anything else this handshake
+	// records, so a malformed offer is refused before the connection adopts a
+	// client capability set it would then have to unwind.
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
@@ -288,7 +418,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		valElicitation: map[string]any{
 			"unstable": true,
-			"scope":    string(nativehermes.PermissionRouteSession),
+			"scope":    "session",
 			"tracks":   "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{
@@ -312,6 +442,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	capabilityMeta[routeMetaKey] = map[string]any{keyVersions: []int{routeVersion}}
 
 	return acp.InitializeResponse{
+		Meta:            lifecycleMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
@@ -341,20 +472,47 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 	}, nil
 }
 
+// Authenticate advertises no method, so every call is refused. The reserved
+// lifecycle literal is inspected first: a request naming a key this surface
+// never carries is malformed before it is unauthenticated.
 func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
+
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
-func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, error) {
+func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.LogoutResponse{}, err
+	}
+
 	return acp.LogoutResponse{}, nil
 }
 
-func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+// SetSessionMode carries no native mode surface, so it answers method-not-found.
+// The lifecycle refusal still precedes that answer, for the same reason
+// Authenticate's does.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	// Every extension route inspects the reserved lifecycle literal before its
+	// own side effects or its own refusal. An unconfigured provider-auth leg
+	// answers method-not-found, and a family literal is never foreign, so the
+	// refusal that names the key has to come first or a host would learn the
+	// leg is absent instead of learning its request was malformed.
+	if err := rejectLifecycleRawMeta(params); err != nil {
 		return nil, err
 	}
 
@@ -408,6 +566,10 @@ func (a *Agent) sessionStoreContext(ctx context.Context) (context.Context, conte
 }
 
 func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
+	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
+		return func() {}, nil
+	}
+
 	select {
 	case a.clientCalls <- struct{}{}:
 		return func() { <-a.clientCalls }, nil
@@ -416,6 +578,25 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	default:
 		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "client_calls"})
 	}
+}
+
+type clientCallLeaseKey struct{}
+
+type clientCallLease struct {
+	agent *Agent
+}
+
+func (a *Agent) beginClientOperation(ctx context.Context) (context.Context, func(), error) {
+	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
+		return ctx, func() {}, nil
+	}
+
+	release, err := a.acquireClientCall(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return context.WithValue(ctx, clientCallLeaseKey{}, &clientCallLease{agent: a}), release, nil
 }
 
 func (a *Agent) session(id acp.SessionId) (*session, error) {
@@ -447,12 +628,53 @@ func (a *Agent) activeSession(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
+// storeStartedSession publishes one fully prepared session under its id, and it
+// is the only place an id becomes live. Every reason the id may not be published
+// is re-read here, under the lock that installs it: the entry checks ran before a
+// hydration, an ownership acquisition, and a `hermes serve` launch that take as
+// long as they take, so a verdict reached there is only a guess by the time there
+// is something to install.
+//
+// The deletion tombstone is the reason that guess is load-bearing. A delete that
+// completes while a load or resume is preparing wins, however far the preparation
+// got: the marker is re-read here and the replacement is refused, and the marker
+// is never cleared as a side effect of installing. Clearing it would un-hide the
+// id for every later reader and let the next publish rewrite the very row the
+// delete removed, since the durable publish guard is that same marker.
 func (a *Agent) storeStartedSession(session *session) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	return a.storeStartedSessionLocked(session)
+}
+
+func (a *Agent) storeStartedSessionWithOpening(ctx context.Context, session *session) (*deferredStreamOpen, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	owed, _, err := a.deferStreamOpenLocked(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.storeStartedSessionLocked(session); err != nil {
+		a.abandonStreamOpen(owed)
+
+		return nil, err
+	}
+
+	return owed, nil
+}
+
+func (a *Agent) storeStartedSessionLocked(session *session) error {
 	if a.closed {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
+	}
+
+	if _, deleted := a.deleted[session.id]; deleted {
+		return unknownSessionError()
 	}
 
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
@@ -460,12 +682,11 @@ func (a *Agent) storeStartedSession(session *session) error {
 	}
 
 	a.sessions[session.id] = session
-	delete(a.deleted, session.id)
 
-	// This is the one place an id becomes live, so it is where both tombstones
-	// are cleared. session/close leaves the durable snapshot in place, so the
-	// same id can be hydrated again, and a provider-auth closed mark that
-	// outlived the reopen would refuse every leg on it for the agent's life.
+	// This is the one place an id becomes live, so it is where the provider-auth
+	// closed mark is cleared. session/close leaves the durable snapshot in place,
+	// so the same id can be hydrated again, and a closed mark that outlived the
+	// reopen would refuse every leg on it for the agent's life.
 	if a.providerAuth != nil {
 		a.providerAuth.reopenSession(session.id)
 	}
@@ -473,6 +694,30 @@ func (a *Agent) storeStartedSession(session *session) error {
 	a.observe.AddActiveSession(context.Background(), 1)
 
 	return nil
+}
+
+// refuseStartedSession tears down a fully prepared session the install lock
+// refused and answers with the refusal itself. Nothing else can reach that
+// session — it never became live, so no id names it and no close will ever be
+// addressed to it — which is why the launched process, its scratch generation,
+// and its ownership claims are released here.
+//
+// The refusal is returned unwrapped: the SDK maps a handler error onto its
+// JSON-RPC error by type assertion, so joining a teardown result into it would
+// answer a tombstoned id with an internal error rather than the uniform
+// unknown-session error every other door gives it. A teardown that could not
+// prove containment is recorded on the agent, which is where that verdict is
+// reported from.
+func (a *Agent) refuseStartedSession(ctx context.Context, session *session, refusal error) error {
+	closeErr := session.Close(context.Background())
+
+	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
+	a.log.DebugContext(ctx, "close a Hermes session the install refused",
+		slog.String(jsonFieldError, refusal.Error()),
+		slog.Any(jsonFieldCause, closeErr),
+	)
+
+	return refusal
 }
 
 func (a *Agent) removeSessionIf(id acp.SessionId, target *session) bool {

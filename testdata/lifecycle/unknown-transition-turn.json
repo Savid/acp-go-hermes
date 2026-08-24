@@ -1,0 +1,71 @@
+{
+  "name": "unknown-transition-turn",
+  "purpose": "Exactly two events open a turn: an acceptance, and an activity-caused running transition bearing a turn the stream has not introduced. A session-caused transition reports the foreground moving for a reason the host did not cause, which is never a reason to invent an owner for it, so its turn must already be open and a fresh one is refused.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-1",
+              "turnId": "turn-1",
+              "cause": "session"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "unknown_entity",
+    "atInput": 1,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 1,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 0},
+      "closed": false
+    }
+  }
+}

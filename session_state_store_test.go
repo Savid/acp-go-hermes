@@ -20,16 +20,18 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
-		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
+		t.Fatalf("create session XDG generation: %v", err)
 	}
 	dbPath := filepath.Join(xdg.Root, "state.db")
 	seedSQLiteStore(t, dbPath)
@@ -37,7 +39,6 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	client.todos = []nativehermes.Todo{{ID: "todo-1", Content: "Remember", Status: "pending", Priority: "medium"}}
 	agent := newTestAgent(WithSessionStore(store))
 	session := testSession(agent, client)
 	if err2 := session.snapshotToStore(ctx); err2 != nil {
@@ -51,7 +52,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	if err3 := os.RemoveAll(xdg.Root); err3 != nil {
 		t.Fatalf("remove original xdg: %v", err3)
 	}
-	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
+	restored, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatalf("create restored xdg: %v", err)
 	}
@@ -74,26 +75,31 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	}
 }
 
-func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testing.T) {
+// TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive pins
+// what a shared-home session does with a native state archive written by an
+// isolated per-session home: it hydrates the metadata without restoring that
+// archive into the shared residence, and its own next snapshot removes the
+// archive from the store rather than carrying it forward.
+func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *testing.T) {
 	ctx := t.Context()
 	store := NewInMemorySessionStore()
-	legacyXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "legacy")
+	isolatedXDG, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedSQLiteStore(t, filepath.Join(legacyXDG.Root, "state.db"))
-	legacyClient := newFakeHermesClient()
-	legacyClient.xdg = legacyXDG
-	legacySession := testSession(newTestAgent(WithSessionStore(store)), legacyClient)
-	if err := legacySession.snapshotToStore(ctx); err != nil {
-		t.Fatalf("write legacy snapshot: %v", err)
+	seedSQLiteStore(t, filepath.Join(isolatedXDG.Root, "state.db"))
+	isolatedClient := newFakeHermesClient()
+	isolatedClient.xdg = isolatedXDG
+	isolatedSession := testSession(newTestAgent(WithSessionStore(store)), isolatedClient)
+	if err := isolatedSession.snapshotToStore(ctx); err != nil {
+		t.Fatalf("write per-session-home snapshot: %v", err)
 	}
-	legacyEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
-	if err != nil || len(legacyEntries) == 0 {
-		t.Fatalf("legacy archive entries = %d, err=%v", len(legacyEntries), err)
+	isolatedEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
+	if err != nil || len(isolatedEntries) == 0 {
+		t.Fatalf("per-session-home archive entries = %d, err=%v", len(isolatedEntries), err)
 	}
 
-	wrapperXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-wrapper")
+	wrapperXDG, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +108,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testi
 		t.Fatalf("metadata-only hydrate snapshot=%#v ok=%t err=%v", snapshot, ok, err)
 	}
 	if _, err := os.Stat(filepath.Join(wrapperXDG.Root, "state.db")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy native archive restored into shared wrapper: %v", err)
+		t.Fatalf("per-session-home native archive restored into shared wrapper: %v", err)
 	}
 
 	sharedHome := t.TempDir()
@@ -123,7 +129,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testi
 	}
 	entries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: stateDBSubpath})
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("legacy state-db archive was not purged: entries=%d err=%v", len(entries), err)
+		t.Fatalf("per-session-home state-db archive was not purged: entries=%d err=%v", len(entries), err)
 	}
 	mainEntries, err := store.Load(ctx, SessionKey{SessionID: "session-1", Subpath: SessionStoreMainSubpath})
 	if err != nil || len(mainEntries) == 0 {
@@ -151,7 +157,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesLegacyNativeArchive(t *testi
 			}
 		}
 	}
-	emptyWrapper, err := nativehermes.CreateXDGDirs(t.TempDir(), "shared-empty-wrapper")
+	emptyWrapper, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +337,9 @@ func assertArchiveEntryDecodeFailures(t *testing.T) {
 func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
-		t.Fatalf("nativehermes.CreateXDGDirs: %v", err)
+		t.Fatalf("create session XDG generation: %v", err)
 	}
 	for name, body := range map[string]string{
 		"state.db":     "main",
@@ -373,7 +379,7 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	if err7 := os.RemoveAll(xdg.Root); err7 != nil {
 		t.Fatal(err7)
 	}
-	restored, err := nativehermes.CreateXDGDirs(root, "session-1-restored")
+	restored, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +454,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 
 func TestHydrateStateFromStoreErrors(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +496,7 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +576,7 @@ func TestHydrateStateDBArchiveFaults(t *testing.T) {
 
 func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +801,7 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 
 func TestHydrateStateFromStoreFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := nativehermes.CreateXDGDirs(t.TempDir(), "hydrate")
+	xdg, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1364,7 +1370,7 @@ func restoreStateStoreSeams(t *testing.T) {
 func snapshotFaultSession(t *testing.T) *session {
 	t.Helper()
 	root := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(root, "session-1")
+	xdg, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1893,4 +1899,110 @@ func TestSnapshotJournalAndStoreReconciliationEdges(t *testing.T) {
 	if err == nil {
 		t.Fatal("replacement subkey listing failure ignored")
 	}
+}
+
+func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
+	t.Run("closed turn", func(t *testing.T) {
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		session.closed = true
+		_, err := session.captureSnapshotLocked(t.Context(), &terminalSnapshotRequirement{})
+		require.ErrorContains(t, err, "closed")
+	})
+
+	t.Run("settled archive read", func(t *testing.T) {
+		storeErr := errors.New("archive unavailable")
+		agent := newTestAgent(WithSessionStore(&errorSessionStore{err: storeErr}))
+		session := testSession(agent, newFakeHermesClient())
+		requirement := &terminalSnapshotRequirement{
+			nativeUnavailable: true,
+			settlementCapture: true,
+			foreground: stateSnapshotForeground{
+				StreamID: "stream", TurnID: "turn", CapturedAtUnixMilli: 1,
+				Outcome: string(lifecycle.OutcomeFailed),
+			},
+		}
+		_, err := session.captureSnapshotLocked(t.Context(), requirement)
+		require.ErrorIs(t, err, storeErr)
+	})
+
+	t.Run("cancel after serialization", func(t *testing.T) {
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		ctx, cancel := context.WithCancel(t.Context())
+		originalMarshal := stateJSONMarshal
+		t.Cleanup(func() { stateJSONMarshal = originalMarshal })
+		calls := 0
+		stateJSONMarshal = func(value any) ([]byte, error) {
+			calls++
+			encoded, err := json.Marshal(value)
+			if calls == 2 {
+				cancel()
+			}
+
+			return encoded, err
+		}
+
+		_, err := session.captureSnapshotLocked(ctx, nil)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+// TestShippedResumeExampleFixtureHydrates reads the fixture the resume example
+// ships and drives it through session/load's own reader. The example's README
+// and the get-started guide both promise that file loads as-is, and nothing but
+// this test stands between that promise and a store-shape change: the fixture is
+// data, so no compiler notices when the shape it was written in retires.
+//
+// Hydration is also where the promise is either kept or broken. A fixture whose
+// snapshot names no state-db archive leaves the runtime root empty, and the
+// resume behind session/load then asks a gateway that has never heard of the
+// native session, so the archive is restored and inspected here.
+func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("examples", "resume-from-file", "session.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.GreaterOrEqual(t, len(lines), 3, "the fixture is a snapshot, its archive chunks, and an id mapping")
+
+	mainEntry := SessionStoreEntry(lines[0])
+	idmapEntry := SessionStoreEntry(lines[len(lines)-1])
+
+	archiveEntries := make([]SessionStoreEntry, 0, len(lines)-2)
+	for _, line := range lines[1 : len(lines)-1] {
+		archiveEntries = append(archiveEntries, SessionStoreEntry(line))
+	}
+
+	var shipped stateSnapshot
+	require.NoError(t, json.Unmarshal(mainEntry, &shipped))
+
+	sessionID := shipped.Session.SessionID
+	require.NotEmpty(t, sessionID, "the fixture names no session id")
+
+	store := NewInMemorySessionStore()
+	mainKey := SessionKey{SessionID: sessionID, Subpath: SessionStoreMainSubpath}
+	require.NoError(t, store.Replace(t.Context(), mainKey, []SessionStoreReplacement{
+		{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
+		{Key: SessionKey{SessionID: sessionID, Subpath: stateDBSubpath}, Entries: archiveEntries},
+		{Key: SessionKey{SessionID: sessionID, Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
+	}))
+
+	root := t.TempDir()
+
+	idmap, snapshot, ok, err := hydrateStateFromStore(t.Context(), store, sessionID, nativehermes.XDGDirs{Root: root})
+	require.NoError(t, err)
+	require.True(t, ok, "session/load would answer unknown_session for the shipped fixture")
+	require.Equal(t, sessionID, idmap.SessionID)
+	require.Equal(t, idmap.NativeSessionID, snapshot.Session.NativeSessionID)
+	require.Contains(t, snapshot.Archives, "state-db", "the shipped fixture names no native archive to restore")
+
+	restored, err := os.ReadFile(filepath.Join(root, fileStateDB))
+	require.NoError(t, err, "the shipped archive restored no Hermes database")
+	require.True(t, bytes.HasPrefix(restored, []byte("SQLite format 3\x00")), "the restored Hermes database is not SQLite")
+
+	// A shipped fixture cannot name a directory that exists on the reader's
+	// machine, and load refuses a snapshot whose cwd disagrees with the request.
+	require.Empty(t, snapshot.Session.Cwd, "a shipped fixture binds no cwd")
+
+	terminal, err := InspectSessionStoreTerminalState(sessionID, []SessionStoreEntry{mainEntry})
+	require.NoError(t, err)
+	require.Equal(t, SessionStoreTerminalState{}, terminal, "the fixture settles no turn of its own")
 }

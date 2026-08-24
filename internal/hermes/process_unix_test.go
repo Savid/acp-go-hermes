@@ -85,7 +85,7 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 		}
 	}
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "lease-child")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestReapLeaseKillsSigtermIgnoringChild(t *testing.T) {
 		_ = cmd.Process.Kill()
 		t.Fatal(err)
 	}
-	if !leaseMatchesProcess(leasePath, lease) {
+	if !leaseMatchesProcess(lease) {
 		_ = cmd.Process.Kill()
 		t.Fatal("child lease did not match live process")
 	}
@@ -211,7 +211,7 @@ func TestHermesProcessSignalBranches(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	xdg, err := CreateXDGDirs(root, "lease-log")
+	xdg, err := CreateGenerationXDGDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}

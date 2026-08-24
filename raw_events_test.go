@@ -42,8 +42,8 @@ func enabledRawSession(t *testing.T, agent *Agent, conn *recordingAgentClient, i
 func emitRaw(t *testing.T, session *session, raw string) {
 	t.Helper()
 
-	if err := session.handleEvent(context.Background(), nativehermes.TurnEvent{Type: "native.custom", Raw: json.RawMessage(raw)}); err != nil {
-		t.Fatalf("handleEvent: %v", err)
+	if err := session.emitRawHermesEvent(context.Background(), nativehermes.TurnEvent{Type: "native.custom", Raw: json.RawMessage(raw)}); err != nil {
+		t.Fatalf("emitRawHermesEvent: %v", err)
 	}
 }
 
@@ -321,10 +321,12 @@ func TestRawEventEmitterRejectsUnboundedStructuralEnvelope(t *testing.T) {
 	}
 }
 
-func TestRawEventSequenceCommitsOnlyAfterSuccessfulDelivery(t *testing.T) {
+func TestRawEventSequenceReusesCandidateAfterFailedDelivery(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	session := enabledRawSession(t, agent, conn, "session-1")
+
+	emitRaw(t, session, `{"type":"first"}`)
 
 	conn.notifyErr = errors.New("delivery failed")
 	err := session.emitRawHermesEvent(context.Background(), nativehermes.TurnEvent{
@@ -334,8 +336,8 @@ func TestRawEventSequenceCommitsOnlyAfterSuccessfulDelivery(t *testing.T) {
 	if !errors.Is(err, conn.notifyErr) {
 		t.Fatalf("failed delivery error = %v, want %v", err, conn.notifyErr)
 	}
-	if session.rawSeq != 0 {
-		t.Fatalf("failed delivery consumed sequence %d, want 0", session.rawSeq)
+	if session.rawSeq != 1 {
+		t.Fatalf("failed delivery consumed sequence %d, want 1", session.rawSeq)
 	}
 
 	conn.notifyErr = nil
@@ -343,17 +345,19 @@ func TestRawEventSequenceCommitsOnlyAfterSuccessfulDelivery(t *testing.T) {
 	emitRaw(t, session, `{"type":"next"}`)
 
 	exts := conn.extensionsFor(RawEventMethod)
-	if len(exts) != 3 {
-		t.Fatalf("rawEvent delivery attempts = %d, want 3", len(exts))
+	if len(exts) != 4 {
+		t.Fatalf("rawEvent delivery attempts = %d, want 4", len(exts))
 	}
-	want := []int64{1, 1, 2}
+	// The recorder sees the failed attempt and the next event reusing its
+	// candidate. A real consumer receives the contiguous sequence 1, 2, 3.
+	want := []int64{1, 2, 2, 3}
 	for index, ext := range exts {
 		if sequence := rawEventPayload(t, ext)[keySequence]; sequence != want[index] {
 			t.Fatalf("sequence[%d] = %v, want %d", index, sequence, want[index])
 		}
 	}
-	if session.rawSeq != 2 {
-		t.Fatalf("committed sequence = %d, want 2", session.rawSeq)
+	if session.rawSeq != 3 {
+		t.Fatalf("delivered sequence = %d, want 3", session.rawSeq)
 	}
 }
 
@@ -388,9 +392,9 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 		}, nil
 	}
 
-	// Deliver a raw event mid-turn; its emit fails on the wire but must not
-	// abort the authoritative turn.
-	client.events <- nativehermes.TurnEvent{Type: "native.custom", Raw: json.RawMessage(`{"type":"native.custom"}`)}
+	// Deliver a raw event mid-turn; its observational failure must not alter the
+	// authoritative prompt outcome.
+	client.emitEvent(nativehermes.TurnEvent{Type: nativehermes.EventGatewayRaw, Raw: json.RawMessage(`{"type":"native.custom"}`)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -422,12 +426,8 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 
 	select {
 	case out := <-done:
-		if out.err != nil {
-			t.Fatalf("raw emit failure aborted the turn: %v", out.err)
-		}
-
-		if out.resp.StopReason != acp.StopReasonEndTurn {
-			t.Fatalf("stop reason = %q, want end_turn", out.resp.StopReason)
+		if out.err != nil || out.resp.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("raw failure altered prompt result = %#v, %v", out.resp, out.err)
 		}
 	case <-ctx.Done():
 		t.Fatal("prompt did not return")

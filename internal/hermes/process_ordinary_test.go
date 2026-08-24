@@ -28,9 +28,7 @@ func TestOrdinaryEnvironmentScrubsPrivateAndManagedState(t *testing.T) {
 		envRuntimeID:                     "forged-runtime",
 		envScratchRoot:                   "/forged/scratch",
 		"HERMES_HOME":                    "/operator/real/home",
-		"HERMES_AUTH_HOME":               "/operator/real/credentials",
 		"HERMES_DASHBOARD_SESSION_TOKEN": "forged-token",
-		"hermes_auth_home":               "/operator/real/credentials",
 		"":                               "empty key",
 		"BAD=KEY":                        "invalid",
 		"NUL\x00KEY":                     "invalid",
@@ -52,7 +50,6 @@ func TestOrdinaryEnvironmentOverlayCannotReintroduceScrubbedState(t *testing.T) 
 		map[string]string{
 			"MODEL":                          "sonnet",
 			"PATH":                           "/opt/bin",
-			"HERMES_AUTH_HOME":               "/operator/real/credentials",
 			privateSupervisorEnvPrefix + "X": "spoofed",
 		},
 	)

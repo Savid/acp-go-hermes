@@ -51,19 +51,23 @@ func TestSharedHomeVersionProbeIsFreshAfterSamePathReplacement(t *testing.T) {
 	if err := ensureExecutableVersion(t.Context(), executable, options); err != nil {
 		t.Fatalf("replacement shared version probe: %v", err)
 	}
-	if got := executableVersion(executable); got != "0.21.0" {
-		t.Fatalf("replacement version = %q, want 0.21.0", got)
+	// A below-minimum replacement must be refused: only a fresh probe of the
+	// replaced binary can observe the downgrade, so this refusal is the proof
+	// that no shared-home start inherits an earlier verdict for the same path.
+	writeImmediateVersionScript(t, executable, "0.19.0")
+	if err := ensureExecutableVersion(t.Context(), executable, options); err == nil || !strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("below-minimum replacement error = %v", err)
 	}
 }
 
-func TestSharedHomeSkipsMutatingGatewayCompatibilityProbe(t *testing.T) {
+func TestSharedHomeSkipsMutatingGatewayMethodProbe(t *testing.T) {
 	restoreProcessSeams(t)
 	executable := filepath.Join(t.TempDir(), "hermes-unprobed")
 	if !gatewayMethodProbeNeeded(ProcessOptions{}, executable) {
-		t.Fatal("ordinary process unexpectedly skipped the compatibility probe")
+		t.Fatal("ordinary process unexpectedly skipped the required-method probe")
 	}
 	if gatewayMethodProbeNeeded(ProcessOptions{SharedHome: true}, executable) {
-		t.Fatal("shared-home process would run the mutating compatibility probe")
+		t.Fatal("shared-home process would run the mutating required-method probe")
 	}
 
 	process, err := Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
@@ -73,56 +77,10 @@ func TestSharedHomeSkipsMutatingGatewayCompatibilityProbe(t *testing.T) {
 		Timeout:        10 * time.Second,
 	}))
 	if err != nil {
-		t.Fatalf("shared-home Start invoked the mutating compatibility probe: %v", err)
+		t.Fatalf("shared-home Start invoked the mutating required-method probe: %v", err)
 	}
 	if err := process.Close(t.Context()); err != nil {
 		t.Fatalf("close shared-home process: %v", err)
-	}
-}
-
-func TestSharedHomeVersionBindingPrecedesConfigPreparation(t *testing.T) {
-	restoreProcessSeams(t)
-	home := t.TempDir()
-	if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(home, hermesConfigFileName)
-	if err := os.WriteFile(configPath, []byte("operator: unchanged\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	executable := filepath.Join(t.TempDir(), "hermes")
-	writeImmediateVersionScript(t, executable, "0.21.0")
-	prepared := false
-	options := darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath: executable,
-		Home:           home,
-		SharedHome:     true,
-		ScratchParent:  t.TempDir(),
-		PrepareSharedHome: func(context.Context, string) error {
-			prepared = true
-
-			return os.WriteFile(configPath, []byte("mutated\n"), 0o600)
-		},
-	})
-	// darwinTestProcessOptions normally substitutes a disposable Home to keep
-	// unrelated tests isolated; this test intentionally exercises the exact
-	// pre-bound durable residence.
-	options.Home = home
-	if _, err := Start(t.Context(), options); err == nil || !strings.Contains(err.Error(), "bound to Hermes 0.20.0") {
-		t.Fatalf("mixed-version start error = %v", err)
-	}
-	if prepared {
-		t.Fatal("config preparation ran before mixed-version rejection")
-	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "operator: unchanged\n" {
-		t.Fatalf("operator config changed: %q", data)
-	}
-	if _, err := os.Stat(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("config fingerprint appeared before version rejection: %v", err)
 	}
 }
 
@@ -301,9 +259,8 @@ func TestAbandonedVersionProbeDoesNotFailTheStartsWaitingOnIt(t *testing.T) {
 
 // TestVersionProbeSurvivesAStartThatFailsAfterIt proves the version marker
 // records what the probe proved rather than whether the whole start succeeded.
-// A start refused at spawn used to discard the proof and re-spawn a second
-// --version process on the next attempt, which is an extra native process sat
-// in front of every retry on an already contended host.
+// A start refused at spawn keeps the proof, so a retry on an already contended
+// host spawns no second --version process in front of it.
 func TestVersionProbeSurvivesAStartThatFailsAfterIt(t *testing.T) {
 	restoreProcessSeams(t)
 

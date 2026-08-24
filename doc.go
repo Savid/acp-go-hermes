@@ -16,6 +16,9 @@
 //
 // Hosts should use [Serve] for the JSON-RPC transport; hosts that embed the
 // agent directly construct one with [NewAgent] and the same [Option] values.
+// A direct prompt error caused by gateway loss matches [ErrGatewayDisconnected]
+// and retains its exact native cause; Serve converts that chain to bounded,
+// secret-safe ACP error data at the wire boundary.
 // Hermes authentication and provider credentials remain owned by native
 // Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
 // beneath the scratch parent from [WithScratchDir]. [WithSharedHermesHome]

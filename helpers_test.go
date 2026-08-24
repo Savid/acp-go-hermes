@@ -2,6 +2,8 @@ package hermesacp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -125,19 +128,16 @@ type fakeHermesClient struct {
 	persistedSessions []nativehermes.Session
 	forkSession       nativehermes.Session
 	messages          []nativehermes.NativeMessage
-	todos             []nativehermes.Todo
 	providers         nativehermes.ProvidersResponse
 
 	configProviderCalls int
 	setModelCalls       []fakeModelSelection
 	setModelErr         error
 
-	pendingPermissions []nativehermes.PermissionRequest
-	permissionReplies  []fakePermissionReply
-	pendingQuestions   []nativehermes.QuestionRequest
-	questionReplies    []fakeQuestionReply
-	questionRejects    []fakeQuestionReject
-	getSessionIDs      []string
+	permissionReplies []fakePermissionReply
+	questionReplies   []fakeQuestionReply
+	questionRejects   []fakeQuestionReject
+	getSessionIDs     []string
 
 	createSessionFunc func(context.Context, string) (nativehermes.Session, error)
 	sendMessage       func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error)
@@ -147,8 +147,7 @@ type fakeHermesClient struct {
 	deleted              []string
 	closed               bool
 	closeCalls           int
-	events               chan nativehermes.TurnEvent
-	errs                 chan error
+	deliveries           chan nativehermes.TurnDelivery
 	createErr            error
 	getErr               error
 	listErr              error
@@ -159,10 +158,7 @@ type fakeHermesClient struct {
 	abortErr             error
 	forkErr              error
 	forkCalls            int
-	todosErr             error
 	providersErr         error
-	permissionsErr       error
-	questionsErr         error
 	replyErr             error
 	closeErr             error
 	reloadErr            error
@@ -185,6 +181,11 @@ type fakeHermesClient struct {
 	authDisconnected      []string
 	authDisconnectErr     error
 	providerAuthSupported *bool
+	promptCycles          uint64
+	beforePromptDispatch  func()
+	promptTerminal        *nativehermes.TurnEvent
+	omitPromptTerminal    bool
+	afterPromptTerminal   func()
 }
 
 type fakeModelSelection struct {
@@ -264,7 +265,6 @@ func (c *fakeHermesClient) AuthCancelFlow(_ context.Context, nativeSessionID str
 type fakePermissionReply struct {
 	sessionID string
 	requestID string
-	route     nativehermes.PermissionRoute
 	reply     string
 	message   string
 }
@@ -272,20 +272,17 @@ type fakePermissionReply struct {
 type fakeQuestionReply struct {
 	sessionID string
 	requestID string
-	route     nativehermes.QuestionRoute
 	answers   [][]string
 }
 
 type fakeQuestionReject struct {
 	sessionID string
 	requestID string
-	route     nativehermes.QuestionRoute
 }
 
 func newFakeHermesClient() *fakeHermesClient {
 	return &fakeHermesClient{
-		events: make(chan nativehermes.TurnEvent, 16),
-		errs:   make(chan error, 16),
+		deliveries: make(chan nativehermes.TurnDelivery, 32),
 	}
 }
 
@@ -373,6 +370,20 @@ func (c *fakeHermesClient) ReloadMCP(ctx context.Context, id string) error {
 }
 
 func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+	c.mu.Lock()
+	c.promptCycles++
+	promptCycle := c.promptCycles
+	cycleID := fmt.Sprintf("fake/%s/cycle-%d", id, promptCycle)
+	c.mu.Unlock()
+	if c.beforePromptDispatch != nil {
+		c.beforePromptDispatch()
+	}
+	if err := nativehermes.NotifyPromptDispatch(ctx, nativehermes.PromptDispatchInfo{
+		CycleID: cycleID, TransportGeneration: 1,
+	}); err != nil {
+		return nativehermes.NativeMessage{}, err
+	}
+
 	var (
 		message nativehermes.NativeMessage
 		err     error
@@ -403,6 +414,27 @@ func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativ
 		}
 	}
 	c.mu.Unlock()
+
+	if !c.omitPromptTerminal {
+		copyMessage := message
+		terminal := nativehermes.TurnEvent{
+			Type:                nativehermes.EventCycleComplete,
+			TransportGeneration: 1,
+			CycleID:             cycleID,
+			Origin:              nativehermes.CycleOriginPrompt,
+			Message:             &copyMessage,
+		}
+		if c.promptTerminal != nil {
+			terminal = *c.promptTerminal
+			terminal.TransportGeneration = 1
+			terminal.CycleID = cycleID
+			terminal.Origin = nativehermes.CycleOriginPrompt
+		}
+		c.emitEvent(terminal)
+	}
+	if c.afterPromptTerminal != nil {
+		c.afterPromptTerminal()
+	}
 
 	return message, nil
 }
@@ -445,10 +477,6 @@ func (c *fakeHermesClient) forkCallCount() int {
 	return c.forkCalls
 }
 
-func (c *fakeHermesClient) Todos(context.Context, string) ([]nativehermes.Todo, error) {
-	return append([]nativehermes.Todo(nil), c.todos...), c.todosErr
-}
-
 func (c *fakeHermesClient) ConfigProviders(context.Context) (nativehermes.ProvidersResponse, error) {
 	c.mu.Lock()
 	c.configProviderCalls++
@@ -475,16 +503,11 @@ func (c *fakeHermesClient) configProviderCallCount() int {
 	return c.configProviderCalls
 }
 
-func (c *fakeHermesClient) PendingPermissions(context.Context) ([]nativehermes.PermissionRequest, error) {
-	return append([]nativehermes.PermissionRequest(nil), c.pendingPermissions...), c.permissionsErr
-}
-
 func (c *fakeHermesClient) ReplyPermission(_ context.Context, req nativehermes.PermissionRequest, reply string, message string) error {
 	c.mu.Lock()
 	c.permissionReplies = append(c.permissionReplies, fakePermissionReply{
 		sessionID: req.SessionID,
 		requestID: req.ID,
-		route:     req.Route(),
 		reply:     reply,
 		message:   message,
 	})
@@ -493,17 +516,13 @@ func (c *fakeHermesClient) ReplyPermission(_ context.Context, req nativehermes.P
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) PendingQuestions(context.Context) ([]nativehermes.QuestionRequest, error) {
-	return append([]nativehermes.QuestionRequest(nil), c.pendingQuestions...), c.questionsErr
-}
-
 func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req nativehermes.QuestionRequest, answers [][]string) error {
 	copied := make([][]string, len(answers))
 	for i := range answers {
 		copied[i] = append([]string(nil), answers[i]...)
 	}
 	c.mu.Lock()
-	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, route: req.Route(), answers: copied})
+	c.questionReplies = append(c.questionReplies, fakeQuestionReply{sessionID: req.SessionID, requestID: req.ID, answers: copied})
 	c.mu.Unlock()
 
 	return c.replyErr
@@ -511,18 +530,23 @@ func (c *fakeHermesClient) ReplyQuestion(_ context.Context, req nativehermes.Que
 
 func (c *fakeHermesClient) RejectQuestion(_ context.Context, req nativehermes.QuestionRequest) error {
 	c.mu.Lock()
-	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID, route: req.Route()})
+	c.questionRejects = append(c.questionRejects, fakeQuestionReject{sessionID: req.SessionID, requestID: req.ID})
 	c.mu.Unlock()
 
 	return c.replyErr
 }
 
-func (c *fakeHermesClient) Events() <-chan nativehermes.TurnEvent {
-	return c.events
+func (c *fakeHermesClient) Deliveries() <-chan nativehermes.TurnDelivery {
+	return c.deliveries
 }
 
-func (c *fakeHermesClient) EventErrors() <-chan error {
-	return c.errs
+func (c *fakeHermesClient) emitEvent(event nativehermes.TurnEvent) {
+	copyEvent := event
+	c.deliveries <- nativehermes.TurnDelivery{Event: &copyEvent}
+}
+
+func (c *fakeHermesClient) emitError(err error) {
+	c.deliveries <- nativehermes.TurnDelivery{Err: err}
 }
 
 func (c *fakeHermesClient) XDGDirs() nativehermes.XDGDirs {
@@ -609,6 +633,10 @@ type recordingAgentClient struct {
 	elicitationIgnoreContext bool
 	permErr                  error
 	elicitErr                error
+	permissionWriteErr       error
+	elicitationWriteErr      error
+	permissionBeforeReturn   func()
+	elicitationBeforeReturn  func()
 	updateErr                error
 	notifyErr                error
 }
@@ -644,6 +672,15 @@ func (c *recordingAgentClient) CreateElicitation(
 	request acp.UnstableCreateElicitationRequest,
 	scope elicitationScope,
 ) (acp.UnstableCreateElicitationResponse, error) {
+	return c.CreateElicitationRegistered(ctx, request, scope, nil)
+}
+
+func (c *recordingAgentClient) CreateElicitationRegistered(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+	written chan<- error,
+) (acp.UnstableCreateElicitationResponse, error) {
 	c.mu.Lock()
 	c.elicitations = append(c.elicitations, request)
 	c.scopes = append(c.scopes, scope)
@@ -652,7 +689,15 @@ func (c *recordingAgentClient) CreateElicitation(
 	started := c.elicitationStarted
 	release := c.elicitationRelease
 	ignoreContext := c.elicitationIgnoreContext
+	writeErr := c.elicitationWriteErr
+	beforeReturn := c.elicitationBeforeReturn
 	c.mu.Unlock()
+	if written != nil {
+		written <- writeErr
+	}
+	if writeErr != nil {
+		return acp.UnstableCreateElicitationResponse{}, writeErr
+	}
 	signalTestHook(started)
 	if release != nil {
 		if ignoreContext {
@@ -666,11 +711,22 @@ func (c *recordingAgentClient) CreateElicitation(
 			return acp.UnstableCreateElicitationResponse{}, ctx.Err()
 		}
 	}
+	if beforeReturn != nil {
+		beforeReturn()
+	}
 
 	return resp, err
 }
 
 func (c *recordingAgentClient) RequestPermission(ctx context.Context, request acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return c.RequestPermissionRegistered(ctx, request, nil)
+}
+
+func (c *recordingAgentClient) RequestPermissionRegistered(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	written chan<- error,
+) (acp.RequestPermissionResponse, error) {
 	c.mu.Lock()
 	c.permissions = append(c.permissions, request)
 	resp := c.permission
@@ -678,7 +734,15 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 	started := c.permissionStarted
 	release := c.permissionRelease
 	ignoreContext := c.permissionIgnoreContext
+	writeErr := c.permissionWriteErr
+	beforeReturn := c.permissionBeforeReturn
 	c.mu.Unlock()
+	if written != nil {
+		written <- writeErr
+	}
+	if writeErr != nil {
+		return acp.RequestPermissionResponse{}, writeErr
+	}
 	signalTestHook(started)
 	if release != nil {
 		if ignoreContext {
@@ -691,6 +755,9 @@ func (c *recordingAgentClient) RequestPermission(ctx context.Context, request ac
 		case <-ctx.Done():
 			return acp.RequestPermissionResponse{}, ctx.Err()
 		}
+	}
+	if beforeReturn != nil {
+		beforeReturn()
 	}
 
 	return resp, err
@@ -760,7 +827,7 @@ func signalTestHook(ch chan struct{}) {
 }
 
 func testNativeSession(id string) nativehermes.Session {
-	native := nativehermes.Session{ID: id, Title: "Test", Agent: "build"}
+	native := nativehermes.Session{ID: id, Title: "Test"}
 	native.Model.ProviderID = "openai"
 	native.Model.ModelID = "gpt-test"
 	native.Time.Updated = 1_700_000_000_000
@@ -772,7 +839,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 	if client.xdg.Root == "" {
 		root, err := os.MkdirTemp("", "acp-go-hermes-test-*")
 		if err == nil {
-			client.xdg, _ = nativehermes.CreateXDGDirs(root, "session-1")
+			client.xdg, _ = testGenerationXDG(root)
 		}
 	}
 
@@ -781,6 +848,58 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,
 	})
+}
+
+const testControlCycleID = "test-control-cycle"
+
+// beginTestControlTurn obtains control ownership from a cycle-start frame
+// consumed by the permanent pump, matching the only production admission path.
+func beginTestControlTurn(t *testing.T, s *session, ctx context.Context, nonce string) context.Context {
+	t.Helper()
+
+	s.pumpMu.Lock()
+	pumpClient := s.pumpClient
+	s.pumpMu.Unlock()
+	client, ok := pumpClient.(*fakeHermesClient)
+	if !ok {
+		t.Fatal("control test requires the ordered fake Hermes source")
+	}
+	originalNonce := s.newPumpNonce
+	s.newPumpNonce = func() (string, error) { return nonce, nil }
+	if stream := s.lifecycleStream(); stream != nil {
+		if err := stream.ensureLifecycleOpened(ctx); err != nil {
+			t.Fatalf("open lifecycle source for control cycle: %v", err)
+		}
+	}
+	client.emitEvent(nativehermes.TurnEvent{
+		Type:                nativehermes.EventCycleStarted,
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+		Origin:              nativehermes.CycleOriginActivity,
+	})
+	if err := s.synchronizePump(ctx); err != nil {
+		t.Fatalf("project control cycle start: %v", err)
+	}
+	s.newPumpNonce = originalNonce
+	route := s.routeForEvent(nativehermes.TurnEvent{
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+	})
+	if route == nil {
+		t.Fatal("permanent pump did not publish control ownership")
+	}
+	t.Cleanup(func() { s.removePumpRoute(route) })
+
+	return withPumpRoute(ctx, route)
+}
+
+func testHermesQuestionRequest(id string) nativehermes.QuestionRequest {
+	return nativehermes.QuestionRequest{
+		ID:                  id,
+		SessionID:           "native-1",
+		CycleID:             testControlCycleID,
+		TransportGeneration: 1,
+	}
 }
 
 type errorReader struct {
@@ -859,4 +978,91 @@ func (s sessionOperationFaultStore) ListSubkeys(ctx context.Context, key Session
 	}
 
 	return s.base.ListSubkeys(ctx, key)
+}
+
+// lifecycleFailingAgentClient fails the failAt-th lifecycle envelope delivery,
+// exercising the fence path a stream takes when one event cannot be delivered.
+type lifecycleFailingAgentClient struct {
+	*recordingAgentClient
+	failAt int
+	seen   int
+}
+
+func (c *lifecycleFailingAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if _, lifecycleUpdate := notification.Meta[lifecycle.MetaKey]; lifecycleUpdate {
+		c.seen++
+		if c.seen == c.failAt {
+			return errors.New("lifecycle delivery failed")
+		}
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+// treeInventoryServer reports a configurable provider-tree vacancy verdict so
+// quiescence certification can be tested against both proved and unproved
+// vacancy.
+type treeInventoryServer struct {
+	*fakeHermesClient
+	vacant bool
+}
+
+func (s treeInventoryServer) ProviderTreeVacant() (bool, bool) { return s.vacant, true }
+
+// newLifecycleActionSession opens a negotiated lifecycle stream inside an
+// in-flight turn, accepting the submission only when accepted is true.
+func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordingAgentClient, context.Context) {
+	t.Helper()
+
+	agent := newTestAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	session := testSession(agent, newFakeHermesClient())
+	if err := session.openLifecycleStream(); err != nil {
+		t.Fatalf("open lifecycle stream: %v", err)
+	}
+	turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
+	session.mu.Lock()
+	session.turnInFlight = true
+	session.turnEpoch = 1
+	session.turnSettlement = turnSettlementOpen
+	session.mu.Unlock()
+	if accepted {
+		if err := session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
+			SubmissionID: "submission", ClientNonce: "nonce",
+		}); err != nil {
+			t.Fatalf("accept lifecycle submission: %v", err)
+		}
+	}
+
+	return session, conn, turnCtx
+}
+
+func setLifecycleDeliveryError(conn *recordingAgentClient) {
+	conn.mu.Lock()
+	conn.updateErr = errors.New("lifecycle delivery failed")
+	conn.mu.Unlock()
+}
+
+func sessionTurnEpoch(session *session) uint64 {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	return session.turnEpoch
+}
+
+// testGenerationXDG mints one runtime generation under parent the way the
+// adapter does. The adapter's scratch parent always exists by the time a
+// generation is minted under it, so a test standing in for the adapter creates
+// the parent first.
+func testGenerationXDG(parent string) (nativehermes.XDGDirs, error) {
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nativehermes.XDGDirs{}, err
+	}
+
+	return nativehermes.CreateGenerationXDGDirs(parent)
 }

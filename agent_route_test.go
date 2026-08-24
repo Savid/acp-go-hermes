@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRouteEnvelopeHardCutover(t *testing.T) {
+func TestRouteEnvelopeCurrentShape(t *testing.T) {
 	ctx := withTurnRoute(context.Background(), "turn-old")
 	require.Equal(t, turnRouteMeta("turn-old"), turnRouteMetaFromContext(ctx))
 	require.Nil(t, turnRouteMetaFromContext(context.Background()))

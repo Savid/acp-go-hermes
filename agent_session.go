@@ -37,7 +37,12 @@ var acquireSharedSessionSetLock = func(
 	return nativehermes.AcquireSharedSessionSetLock(ctx, home, mode)
 }
 
+//nolint:gocyclo // NewSession is one ordered launch, journal, and publication transaction.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_ acp.NewSessionResponse, returnErr error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -71,10 +76,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 	}
 
 	id := acp.SessionId(idValue)
-	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
+	if constructionErr != nil {
 		return acp.NewSessionResponse{}, constructionErr
 	}
-	defer a.endSessionConstruction()
+	defer finishConstruction()
+	ctx = constructionCtx
 
 	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, nativehermes.XDGDirs{}, params.McpServers)
 	if err != nil {
@@ -155,11 +162,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 
 		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
-	if err := a.claimSharedNativeSession(client, native.ID); err != nil {
+	if claimErr := a.claimSharedNativeSession(client, native.ID); claimErr != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
 		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
-		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
+		return acp.NewSessionResponse{}, errors.Join(claimErr, closeErr)
 	}
 
 	idmap := idmapRecord{
@@ -170,6 +177,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, params.McpServers, native, client, meta, idmap)
 	session.operationJournal = journal
+	if streamErr := session.openLifecycleStream(); streamErr != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+		return acp.NewSessionResponse{}, errors.Join(streamErr, closeErr)
+	}
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
 		if errors.Is(err, errSessionStoreCommitUnknown) {
 			closeErr := session.Close(context.Background())
@@ -181,14 +194,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 
 		return acp.NewSessionResponse{}, errors.Join(err, cleanupErr)
 	}
-	if err := a.storeStartedSession(session); err != nil {
+	if _, err := a.storeStartedSessionWithOpening(ctx, session); err != nil {
 		// The exact store bundle is already committed. Close only the live
 		// runtime; deleting native state here would invalidate durable metadata
 		// that another Agent can safely load.
-		closeErr := session.Close(context.Background())
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
+		return acp.NewSessionResponse{}, a.refuseStartedSession(ctx, session, err)
 	}
 	sessionPublished = true
 	session.operationJournal = nil
@@ -235,12 +245,8 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta)
+	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta, true)
 	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-
-	if err := session.replayMessages(ctx); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
 
@@ -255,7 +261,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta)
+	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta, false)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
@@ -266,6 +272,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}, nil
 }
 
+//nolint:gocyclo // Load/resume is one ordered hydration, ownership, launch, and publication transaction.
 func (a *Agent) loadOrResumeSession(
 	ctx context.Context,
 	id acp.SessionId,
@@ -273,7 +280,12 @@ func (a *Agent) loadOrResumeSession(
 	additionalDirectories []string,
 	mcpServers []acp.McpServer,
 	metaMap map[string]any,
+	replay bool,
 ) (_ *session, returnErr error) {
+	if err := rejectLifecycleMeta(metaMap); err != nil {
+		return nil, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -295,7 +307,8 @@ func (a *Agent) loadOrResumeSession(
 	}
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
+			slog.String("classification", "deleted_session_cleanup_failed"))
 	}
 
 	if err := validateSessionStartPaths(cwd, additionalDirectories); err != nil {
@@ -315,17 +328,47 @@ func (a *Agent) loadOrResumeSession(
 	// already-active session instead of starting a second `hermes serve`.
 	// session/load replays on the reused session (LoadSession calls
 	// replayMessages); session/resume returns without replay.
-	if existing := a.activeSession(id); existing != nil {
+	existing, reuseCtx, releaseReuse, reuseErr := a.beginActiveReuse(ctx, id)
+	if reuseErr != nil {
+		return nil, reuseErr
+	}
+	if existing != nil {
+		if context.Cause(reuseCtx) != nil {
+			releaseReuse()
+
+			return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
+		}
 		if applyErr := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta); applyErr != nil {
+			releaseReuse()
+
 			return nil, applyErr
+		}
+		identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
+		orderedResponse = orderedResponse && identity.token != "" && existing.lifecycleStream() != nil
+		if replay && !orderedResponse {
+			if replayErr := existing.replayMessages(reuseCtx); replayErr != nil {
+				releaseReuse()
+
+				return nil, replayErr
+			}
+		}
+		if _, openErr := a.completeActiveReuse(reuseCtx, id, existing, replay, releaseReuse); openErr != nil {
+			releaseReuse()
+
+			return nil, openErr
+		}
+		if !orderedResponse {
+			releaseReuse()
 		}
 
 		return existing, nil
 	}
-	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
+	if constructionErr != nil {
 		return nil, constructionErr
 	}
-	defer a.endSessionConstruction()
+	defer finishConstruction()
+	ctx = constructionCtx
 
 	if incompleteErr := a.rejectIncompleteHermesSession(id); incompleteErr != nil {
 		return nil, incompleteErr
@@ -414,25 +457,101 @@ func (a *Agent) loadOrResumeSession(
 
 	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
 
-	session.committedTerminal = publicTerminalState(snapshot.Terminal)
-	if err := a.storeStartedSession(session); err != nil {
-		closeErr := session.Close(context.Background())
+	session.committed = committedStateFromSnapshot(snapshot)
+	if streamErr := session.openLifecycleStream(); streamErr != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
 		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
 
-		return nil, errors.Join(err, closeErr)
+		return nil, errors.Join(streamErr, closeErr)
+	}
+
+	var replayCtx context.Context
+	releaseReplay := func() {}
+	if replay {
+		replayCtx, releaseReplay = session.beginInitialReuse(ctx)
+	}
+
+	owed, err := a.storeStartedSessionWithOpening(ctx, session)
+	if err != nil {
+		releaseReplay()
+
+		return nil, a.refuseStartedSession(ctx, session, err)
+	}
+	if replay {
+		replayErr := session.replayMessages(replayCtx)
+		releaseReplay()
+		if replayErr != nil {
+			a.abandonStreamOpen(owed)
+			cleanupErr := a.cleanupFailedLoadedSession(session)
+
+			return nil, errors.Join(replayErr, cleanupErr)
+		}
 	}
 
 	return session, nil
+}
+
+// cleanupFailedLoadedSession retracts a cold load that failed after publication.
+// The durable session remains resumable, but this incarnation is fenced,
+// deregistered, drained, and contained before the failed request returns.
+func (a *Agent) cleanupFailedLoadedSession(session *session) error {
+	if a.removeSessionIf(session.id, session) {
+		a.observe.AddActiveSession(context.Background(), -1)
+	}
+
+	session.lifecycleStream().fence()
+	session.prepareClose()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionSettlementTimeout)
+	waitErr := session.awaitSettlement(ctx)
+
+	session.lifecycleMu.Lock()
+	closeErr := session.closeLocked(ctx, false)
+	session.lifecycleMu.Unlock()
+	cancel()
+
+	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
+
+	return errors.Join(waitErr, closeErr)
+}
+
+// failReuseAfterResponse contains an active session whose post-response replay
+// failed. The response has already crossed the wire, so the only truthful
+// recovery is to fence and retract that incarnation.
+func (s *session) failReuseAfterResponse(replayErr error) {
+	s.lifecycleStream().fence()
+	s.prepareClose()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionSettlementTimeout)
+	waitErr := s.awaitSettlement(ctx)
+
+	s.lifecycleMu.Lock()
+	closeErr := s.closeLocked(ctx, false)
+	s.lifecycleMu.Unlock()
+	cancel()
+
+	if s.agent.removeSessionIf(s.id, s) {
+		s.agent.observe.AddActiveSession(context.Background(), -1)
+	}
+	s.agent.recordIncompleteContainment(closeErr, s.id, hermesServerRoot(s.client))
+	s.agent.log.DebugContext(context.Background(), "contain Hermes session after replay failure",
+		slog.String("classification", "session_replay_failed"),
+		slog.Bool("replay_failure", replayErr != nil),
+		slog.Bool("settlement_failure", waitErr != nil),
+		slog.Bool("containment_failure", closeErr != nil),
+	)
 }
 
 // resumeRuntimeForTurnLocked rebuilds a fenced session runtime from the last
 // committed store snapshot. toolMu and cancelMu are held by the caller, so the
 // old prompt has fully released the per-session token and Close cannot cross
 // installation of the replacement runtime.
+//
+//nolint:gocyclo // Runtime replacement keeps every fail-closed identity, hydration, ownership, and publication branch in one transaction.
 func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr error) {
 	s.mu.Lock()
 	needsResume := s.runtimeNeedsResume
-	closed := s.closed
+	resumeWait := s.runtimeResumeWait
+	resumeErr := s.runtimeResumeErr
+	closed := s.closed || s.lifecycleClosing
 	poisonErr := s.poisonedErrorLocked()
 	id := s.id
 	cwd := s.cwd
@@ -446,6 +565,20 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 	s.mu.Unlock()
 
+	if needsResume && resumeWait != nil {
+		select {
+		case <-resumeWait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		s.mu.Lock()
+		resumeErr = s.runtimeResumeErr
+		poisonErr = s.poisonedErrorLocked()
+		closed = s.closed || s.lifecycleClosing
+		s.mu.Unlock()
+	}
+
 	if poisonErr != nil {
 		return poisonErr
 	}
@@ -456,6 +589,9 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 
 	if !needsResume {
 		return nil
+	}
+	if resumeErr != nil {
+		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", resumeErr.Error())
 	}
 	if err := s.agent.rejectIncompleteHermesSession(id); err != nil {
 		return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
@@ -562,6 +698,24 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		return errors.Join(driftErr, closeErr)
 	}
 
+	// Build the replacement lifecycle identity while it is still private. Its
+	// snapshot and native projection remain gated until the predecessor pump is
+	// joined and the complete successor tuple is installed.
+	replacementStream, err := s.prepareLifecycleStream(false)
+	if err != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+		return errors.Join(err, closeErr)
+	}
+	if err := s.detachPumpContext(ctx); err != nil {
+		closeErr := closeHermesClientAfterStartupFailure(client)
+		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+		return errors.Join(err, closeErr)
+	}
+	s.resetProjectionGate()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -573,25 +727,43 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 
 	s.client = client
-	s.committedTerminal = publicTerminalState(snapshot.Terminal)
-	s.runtimeNeedsResume = false
+	s.committed = committedStateFromSnapshot(snapshot)
 	s.mcpReloadComplete = false
-	s.suppressNextBacklog = false
+	s.startPump(client)
+	s.runtimeNeedsResume = false
+	s.runtimeResumeWait = nil
+	s.runtimeResumeErr = nil
+	// Publish the stream last. Any reader that can observe it therefore also
+	// observes the already-installed client, committed snapshot, pump, and
+	// cleared resume latch; projection is still gated until publishProjection.
+	s.streamMu.Lock()
+	s.stream = replacementStream
+	s.streamMu.Unlock()
 	s.mu.Unlock()
 
-	// A resumed gateway may enqueue historical events before the first new
-	// prompt. They describe the already-committed checkpoint and must never be
-	// rebound to the new turn route.
-	for {
-		select {
-		case <-client.Events():
-			continue
-		case <-client.EventErrors():
-			continue
-		default:
-			return nil
+	if err := replacementStream.ensureLifecycleOpened(ctx); err != nil {
+		replacementStream.fence()
+		closeErr := closeHermesClientAfterStartupFailure(client)
+		pumpCtx, pumpCancel := context.WithTimeout(context.Background(), closeTimeout)
+		pumpErr := s.detachPumpContext(pumpCtx)
+		pumpCancel()
+		failure := errors.Join(err, closeErr, pumpErr)
+		s.agent.recordIncompleteContainment(failure, id, hermesServerRoot(client))
+
+		s.mu.Lock()
+		if s.client == client {
+			s.runtimeNeedsResume = true
+			s.runtimeResumeWait = nil
+			s.runtimeResumeErr = failure
 		}
+		s.mu.Unlock()
+
+		return failure
 	}
+
+	replacementStream.publishProjection()
+
+	return nil
 }
 
 func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, meta sessionMeta) error {
@@ -616,11 +788,26 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 		return lifecycleMismatch(hermesExtraPathDirsOptionPath)
 	}
 
-	if meta.Model != "" && meta.Model != modelSelectionValue(snapshot.providerID, snapshot.modelID) {
-		return lifecycleMismatch("_meta.hermes.options.model")
+	// A shape refusal, not a value gate. The gate this door used to carry asked
+	// a value question — is this the model already bound? — and answered no for
+	// every model Hermes would have taken. This asks only whether the string can
+	// name a selection at all, and it has to: an active resume sends nothing to
+	// Hermes, so the value survives as this session's provider and model and
+	// nothing else. An unqualified one splits into no provider, leaves a nil
+	// selector, and lets the next prompt run on the previously bound model while
+	// the config option echoes back what the host asked for — a silent wrong
+	// answer where the config door, reading the same predicate before its own
+	// native call, refuses. Session creation refuses nothing here: session.create
+	// carries model and provider as separate fields, so an unqualified value is
+	// representable there and Hermes resolves it itself.
+	if meta.Model != "" && nativehermes.ModelSelectionShapeError(meta.Model) != nil {
+		return unsupportedField(hermesModelOptionPath)
 	}
 
 	existing.mu.Lock()
+	if meta.Model != "" {
+		existing.providerID, existing.modelID = splitModelValue(meta.Model, "", "")
+	}
 	existing.rawMessages = meta.RawMessages
 	existing.mu.Unlock()
 
@@ -676,12 +863,17 @@ func canonicalMCPServers(servers []acp.McpServer) []string {
 }
 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
 	if err := a.ensureOpen(); err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
+			slog.String("classification", "deleted_session_cleanup_failed"))
 	}
 
 	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
@@ -767,35 +959,52 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 }
 
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
 
+	// Close stops admitting prompts, then waits for the turn in flight to settle
+	// wholly. The wait is the boundary: a close that returned while a commit or
+	// a terminal emission was still owed would report a contained session over
+	// durable state nobody had finished writing. The settlement's own verdict
+	// was already delivered to the prompt that produced it, so it is not
+	// re-reported here.
+	session.prepareClose()
+	waitErr := session.awaitSettlement(ctx)
+
 	session.lifecycleMu.Lock()
-
-	skipSnapshot := session.snapshotBlockedReason() != ""
-
-	var snapshotErr error
-	if !skipSnapshot {
-		snapshotErr = session.snapshotToStoreLocked(context.WithoutCancel(ctx), nil, nil)
-	}
-
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-	closeErr := session.closeLocked(closeCtx, false)
-
-	closeCancel()
+	closeErr := session.settleClosedSession(ctx)
 	session.lifecycleMu.Unlock()
 	a.recordIncompleteContainment(closeErr, params.SessionId, session.client.XDGDirs().Root)
+
+	// The id is detached only by a close that completed its boundary. A close
+	// that failed one — a tree it could not prove contained, a commit the store
+	// refused — has left work owed on this session, and dropping the id would
+	// leave that work with no name to reach it by: the host would be answered
+	// unknown_session on the very retry the failure asks for. The session stays
+	// addressable, admits no further prompt, and a later close runs the boundary
+	// again.
+	if err := errors.Join(waitErr, closeErr); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
 
 	if a.removeSessionIf(params.SessionId, session) {
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	return acp.CloseSessionResponse{}, errors.Join(snapshotErr, closeErr)
+	return acp.CloseSessionResponse{}, nil
 }
 
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
 	ctx = a.observe.Extract(ctx, params.Meta)
 
 	if params.SessionId == "" {
@@ -803,64 +1012,43 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	}
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
+			slog.String("classification", "deleted_session_cleanup_failed"))
 	}
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
 	a.mu.Unlock()
-	if session != nil {
-		// Hold the lifecycle barrier from the active-turn check through the
-		// store tombstone and native deletion. A prompt must not become active
-		// after the check, and an already-active prompt is refused before any
-		// durable state is mutated.
-		session.lifecycleMu.Lock()
-		session.cancelMu.Lock()
-		session.mu.Lock()
-		active := session.cancel != nil && session.turnEpoch > 0
-		session.mu.Unlock()
-		session.cancelMu.Unlock()
-		if active {
-			session.lifecycleMu.Unlock()
-
-			return acp.UnstableDeleteSessionResponse{}, errors.New("cannot delete a Hermes session while a prompt is active; cancel the prompt first")
-		}
-	}
 
 	record := a.deleteCleanupRecord(params.SessionId, session)
-	storeCtx, cancel := sessionStoreWriteContext(ctx)
-	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(params.SessionId)})
 
-	cancel()
-
+	// The tombstone is the first thing this delete does. An active turn is
+	// something delete cancels and settles, never a ground to refuse on, so
+	// nothing about the session's state is inspected ahead of the durable write
+	// that makes the id unaddressable.
+	installed, err := a.tombstoneSession(ctx, params.SessionId, session)
 	if err != nil {
-		if session != nil {
-			session.lifecycleMu.Unlock()
-		}
-
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
-
-	a.mu.Lock()
-	if session == nil || a.sessions[params.SessionId] == session {
-		delete(a.sessions, params.SessionId)
-	}
-
-	a.deleted[params.SessionId] = struct{}{}
-	a.mu.Unlock()
 
 	if record.SessionID != "" {
 		a.rememberDeleteCleanup(record)
 	}
 
-	if session != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = session.closeLocked(closeCtx, true)
+	var settleErr error
 
-		closeCancel()
-		session.lifecycleMu.Unlock()
-		a.recordIncompleteContainment(err, params.SessionId, record.XDGRoot)
-		a.observe.AddActiveSession(ctx, -1)
+	if session != nil {
+		settleErr, err = a.closeDeletedSession(ctx, params.SessionId, session, record.XDGRoot)
+	}
+
+	if installed != nil && installed != session {
+		// A load or resume that passed its own tombstone check installed in the
+		// window between the map read above and this tombstone. The id names
+		// nothing now, so nothing else will ever reach that runtime: this delete
+		// owns its teardown exactly as it owns the one it read.
+		lateSettleErr, lateErr := a.closeDeletedSession(ctx, params.SessionId, installed, hermesServerRoot(installed.client))
+		settleErr = errors.Join(settleErr, lateSettleErr)
+		err = errors.Join(err, lateErr)
 	}
 
 	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
@@ -874,7 +1062,81 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	cleanupErr := a.cleanupDeletedSession(record)
 	a.forgetDeleteCleanupIfDone(record.SessionID)
 
-	return acp.UnstableDeleteSessionResponse{}, errors.Join(err, cleanupErr)
+	return acp.UnstableDeleteSessionResponse{}, errors.Join(settleErr, err, cleanupErr)
+}
+
+// tombstoneSession makes one delete durable and hides the id with it, before
+// the delete cancels anything or tears anything down. The whole step runs under
+// the session's lifecycle barrier, which is the same barrier every durable
+// commit holds: a settlement already publishing finishes first and the tombstone
+// removes what it wrote, and a settlement that has not started yet finds the id
+// tombstoned and publishes nothing. Neither order lets a late write recreate a
+// row the tombstone cleared.
+//
+// A store that refuses the write leaves the session fully addressable. There is
+// no tombstone, so there is nothing to hide behind, and the delete's idempotence
+// is what makes a retry the right answer.
+//
+// The session the id actually named at that instant is returned, which is not
+// always the one the delete read: an install that won the race to the lock is
+// still live, and nothing but this delete can reach it once the marker is set.
+func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session *session) (*session, error) {
+	if session != nil {
+		session.lifecycleMu.Lock()
+		defer session.lifecycleMu.Unlock()
+	}
+
+	storeCtx, cancel := sessionStoreWriteContext(ctx)
+	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(id)})
+
+	cancel()
+
+	if err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	installed := a.sessions[id]
+
+	delete(a.sessions, id)
+
+	a.deleted[id] = struct{}{}
+	a.mu.Unlock()
+
+	return installed, nil
+}
+
+// closeDeletedSession runs the shutdown ladder one deleted session owes. Delete
+// serializes after settlement: admission closes, the turn in flight is
+// cancelled, and the settlement it owes completes before the teardown touches
+// the runtime that settlement is still writing through. The commit that
+// settlement makes lands on a tombstoned id, so it publishes nothing and cannot
+// recreate the row this delete removed.
+func (a *Agent) closeDeletedSession(
+	ctx context.Context,
+	id acp.SessionId,
+	session *session,
+	root string,
+) (settleErr error, closeErr error) {
+	session.prepareDelete()
+
+	settleErr = session.awaitSettlement(ctx)
+
+	session.lifecycleMu.Lock()
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr = session.closeLocked(closeCtx, true)
+
+	closeCancel()
+	// A deleted session has no resumable snapshot to commit, so it states no
+	// quiescence fact: the row this delete tombstoned is exactly the state a fact
+	// would have to stand on. The incarnation still ends here.
+	session.lifecycleStream().fence()
+	session.lifecycleMu.Unlock()
+	a.recordIncompleteContainment(closeErr, id, root)
+	a.observe.AddActiveSession(ctx, -1)
+
+	return settleErr, closeErr
 }
 
 //nolint:gocyclo // Fork is one ordered parent/branch/journal/store publication transaction.
@@ -897,10 +1159,12 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
-	if constructionErr := a.beginSessionConstruction(); constructionErr != nil {
+	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
+	if constructionErr != nil {
 		return acp.UnstableForkSessionResponse{}, constructionErr
 	}
-	defer a.endSessionConstruction()
+	defer finishConstruction()
+	ctx = constructionCtx
 
 	parent, err := a.session(params.SessionId)
 	if err != nil {
@@ -1138,6 +1402,15 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, servers, native, client, meta, idmap)
 	session.operationJournal = journal
+	if err := session.openLifecycleStream(); err != nil {
+		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
+		if errors.Is(cleanupErr, nativehermes.ErrProcessContainmentIncomplete) {
+			cleanupNativeChild = false
+		}
+
+		return acp.UnstableForkSessionResponse{}, errors.Join(err, cleanupErr)
+	}
+
 	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
 		if errors.Is(err, errSessionStoreCommitUnknown) {
 			cleanupNativeChild = false
@@ -1154,11 +1427,8 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, errors.Join(err, cleanupErr)
 	}
 	cleanupNativeChild = false
-	if err := a.storeStartedSession(session); err != nil {
-		closeErr := session.Close(context.Background())
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
+	if _, err := a.storeStartedSessionWithOpening(ctx, session); err != nil {
+		return acp.UnstableForkSessionResponse{}, a.refuseStartedSession(ctx, session, err)
 	}
 	sessionPublished = true
 	session.operationJournal = nil
@@ -1258,7 +1528,6 @@ func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.Sess
 
 	start := nativehermes.StartOptions{
 		ACPSessionID:             nativehermes.ACPSessionIDString(id),
-		Root:                     a.homeRoot(),
 		ScratchParent:            parent,
 		Cwd:                      cwd,
 		ExecutablePath:           a.options.ExecutablePath,
@@ -1396,11 +1665,12 @@ type deleteCleanupRecord struct {
 	XDGRoot   string
 }
 
+// deleteCleanupRecord names what a delete still owes the filesystem. The root
+// is the one the session's own runtime holds: a generation root is minted per
+// incarnation under the scratch parent and is not derivable from the session
+// id, so a session with no live client leaves nothing to remove.
 func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCleanupRecord {
-	record := deleteCleanupRecord{
-		SessionID: id,
-		XDGRoot:   filepath.Join(a.homeRoot(), nativehermes.SafePathName(string(id))),
-	}
+	record := deleteCleanupRecord{SessionID: id}
 	if session == nil {
 		return record
 	}
@@ -1432,7 +1702,14 @@ func (a *Agent) forgetDeleteCleanupIfDone(id acp.SessionId) {
 		return
 	}
 
-	record := a.deleteCleanupRecord(id, nil)
+	a.mu.Lock()
+	record, remembered := a.deleteCleanup[id]
+	a.mu.Unlock()
+
+	if !remembered {
+		return
+	}
+
 	if _, err := os.Stat(record.XDGRoot); err == nil {
 		return
 	}
@@ -1483,14 +1760,6 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	}
 
 	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))
-}
-
-// homeRoot returns the parent directory under which isolated per-session
-// Hermes homes are created, rooted at the resolved scratch parent. Home is an
-// unsupported option (rejected before any session is established), so it never
-// participates in this path.
-func (a *Agent) homeRoot() string {
-	return filepath.Join(scratchParent(a.options.ScratchDir), valACPGoHermes)
 }
 
 // rejectInvalidConfiguration fails session establishment on agent configuration

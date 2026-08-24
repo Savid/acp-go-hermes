@@ -3,8 +3,8 @@ title: Updates
 description: The session/update notification variants the adapter emits during a turn.
 ---
 
-During a turn the adapter maps native gateway events to ACP `session/update`
-notifications.
+The adapter maps native gateway events to ACP `session/update` notifications
+during prompt turns and while the session is between prompts.
 
 ## Update variants
 
@@ -13,7 +13,6 @@ notifications.
 | User and agent message chunks | `message.delta` and echoed user content. |
 | Thought chunks | `thinking.delta` reasoning events. |
 | Tool calls | Native tool-call events. |
-| Plan updates | Native plan events. |
 | Config option updates | Model/config option changes. |
 | Usage updates | Token data from completion payloads. |
 
@@ -21,3 +20,36 @@ Usage updates carry token counts and no terminal message identity. The durable
 terminal identity belongs to the successful `session/prompt` response after
 its snapshot commit. Text chunks originate from `message.delta`; reasoning
 chunks from `thinking.delta` — see [Prompt streaming](/docs/core/prompt-streaming).
+
+## Lifecycle envelopes
+
+When the `acp-go.dev/lifecycle` extension is negotiated at initialize (see
+[Metadata](/docs/reference/meta#lifecycle-extension)), lifecycle envelopes
+ride only identity-only `session_info_update` notifications. Each envelope
+names one stream incarnation and a contiguous sequence. The first event is a
+complete `lifecycle_snapshot`; later events are `prompt_accepted`,
+`state_update`, `action_update`, and, after a proven containment boundary,
+`quiescence_update`. Hermes emits no `activity_update`.
+
+Sequence numbers are claimed before delivery. A delivery failure fences that
+incarnation rather than reusing its sequence. Exact retransmission is
+idempotent; gaps, conflicting duplicates, stale incarnations, malformed event
+shapes, and post-terminal mutation fail closed.
+
+Prompt completion proves only foreground `idle`. A workflow can rely on
+quiescence only when the initialize answer advertises authoritative quiescence
+and a later `quiescence_update` covers the final lifecycle watermark. Cancel,
+close, runtime loss, and timeout end the native incarnation; active work is
+contained before its stream is fenced.
+
+Native output that arrives while no prompt owns the session opens an
+agent-origin foreground turn: `running` carries `cause: "activity"` and no
+`prompt_accepted` event, ordinary text/tool/action updates follow in gateway
+order, and the turn returns to `idle` only after its durable terminal snapshot
+commits. This is foreground lifecycle state, not an `activity_update`; the
+adapter continues to advertise `activityKinds: []`.
+
+Permission and elicitation callbacks remain blockers of whichever foreground
+cycle the permanent dispatcher assigned them to. Their updates retain that
+cycle's cause (`submission` or `activity`), and the adapter refuses any callback
+that does not carry the exact cycle and transport-generation identity.

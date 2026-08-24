@@ -11,11 +11,10 @@ import (
 )
 
 // TestHermesSupervisorRefusalReasonReachesTheGuardian proves the whole point of
-// the terminal readiness frame. The liveness supervisor's refusal reason used to
-// exist only as a stderr line nobody correlated, so the guardian — the reader on
-// the other end of the status pipe — saw the pipe close and reported the same
-// wordless verdict whatever the cause. Publishing the frame and reading it back
-// is what turns that into a named refusal.
+// the terminal readiness frame. A stderr line nobody correlates leaves the
+// guardian — the reader on the other end of the status pipe — with a closed
+// pipe and one wordless verdict whatever the cause. The refusal reason travels
+// in the frame, and reading it back is what makes the verdict a named refusal.
 func TestHermesSupervisorRefusalReasonReachesTheGuardian(t *testing.T) {
 	const reason = "fork/exec /usr/bin/hermes: no such file or directory"
 

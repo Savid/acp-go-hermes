@@ -70,7 +70,7 @@ def main() -> None:
     release_b = threading.Event()
     failures: list[BaseException] = []
 
-    def forced_resolve(*, workdir, default_cwd, session_key=None):
+    def forced_resolve(*, workdir, default_cwd, session_key=None, env_type=None):
         if default_cwd == str(WORK_A):
             a_at_resolve.set()
             if not b_claimed_owner.wait(timeout=5):
@@ -83,6 +83,7 @@ def main() -> None:
             workdir=workdir,
             default_cwd=default_cwd,
             session_key=session_key,
+            env_type=env_type,
         )
 
     def run(task_id: str, filename: str) -> None:

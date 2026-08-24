@@ -1,0 +1,90 @@
+{
+  "name": "false-quiescence-uncovered-turnless-idle",
+  "purpose": "The floor a positive quiescence fact must clear is raised by every reduced delivery, not only by the ones that name a turn, an activity, or an action. A session-caused idle restatement names none of them and begins no live work, so it leaves the certification question untouched — and it still moves the stream forward, so a proof whose watermark stops one sequence short of it claims a boundary earlier than something the reducer has already reduced. Nothing in that delivery tells a reducer its emitter meant it to fall outside the boundary, so the floor rises and the proof is disproved.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "state_update",
+              "state": "idle",
+              "cycleId": "cyc-0",
+              "cause": "session"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 3,
+            "event": {
+              "type": "quiescence_update",
+              "quiescent": true,
+              "source": "process-containment",
+              "watermark": 1
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "false_quiescence",
+    "atInput": 2,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 2,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

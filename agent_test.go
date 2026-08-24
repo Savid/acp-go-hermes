@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -221,7 +222,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 		agent.deleteCleanup["deleted"] = deleteCleanupRecord{SessionID: "deleted", XDGRoot: cleanupRoot}
 		done := make(chan error, 1)
 		go func() {
-			_, err := agent.loadOrResumeSession(context.Background(), "load", t.TempDir(), nil, nil, nil)
+			_, err := agent.loadOrResumeSession(context.Background(), "load", t.TempDir(), nil, nil, nil, false)
 			done <- err
 		}()
 		<-entered
@@ -238,7 +239,12 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 	})
 }
 
-func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
+// A containment verdict is terminal for the agent's life: the wrapper cannot
+// forget a tree it failed to prove empty, whatever happens to the session
+// afterwards. The id that failed the boundary stays addressable, because the
+// boundary is still owed, and the embedded shutdown still reports the verdict
+// its sweep re-reaches.
+func TestFailedContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
 	agent := newTestAgent()
@@ -247,11 +253,11 @@ func TestRemovedSessionContainmentEvidenceRemainsTerminal(t *testing.T) {
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.Nil(t, agent.activeSession(session.id))
+	require.NotNil(t, agent.activeSession(session.id), "the failed boundary detached the id its retry needs")
 	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 }
 
-func TestServePreservesContainmentEvidenceAfterSessionRemoval(t *testing.T) {
+func TestServePreservesContainmentEvidenceAfterFailedClose(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrProcessContainmentIncomplete
 	agent := newTestAgent()
@@ -279,6 +285,81 @@ func TestServePreservesContainmentEvidenceAfterSessionRemoval(t *testing.T) {
 	<-started
 	cancel()
 	require.ErrorIs(t, <-result, ErrProcessContainmentIncomplete)
+}
+
+func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
+	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{
+		MaxActiveSessions: 2, MaxConcurrentClientCalls: 1,
+	}))
+	session := testSession(agent, newFakeHermesClient())
+	agent.sessions[session.id] = session
+	_, _, firstRelease, err := agent.beginActiveReuse(t.Context(), session.id)
+	require.NoError(t, err)
+	if _, _, _, err := agent.beginActiveReuse(t.Context(), session.id); err == nil {
+		t.Fatal("reuse admission ignored its bound")
+	}
+	firstRelease()
+
+	existing, reuseCtx, release, reuseErr := agent.beginActiveReuse(t.Context(), session.id)
+	require.NoError(t, reuseErr)
+	require.Same(t, session, existing)
+	agent.mu.Lock()
+	delete(agent.sessions, session.id)
+	agent.mu.Unlock()
+	if _, err := agent.completeActiveReuse(reuseCtx, session.id, session, false, release); err == nil {
+		t.Fatal("replaced active session completed reuse")
+	}
+	release()
+
+	leaseCtx := context.WithValue(t.Context(), clientCallLeaseKey{}, &clientCallLease{agent: agent})
+	operationCtx, releaseOperation, operationErr := agent.beginClientOperation(leaseCtx)
+	require.NoError(t, operationErr)
+	require.Equal(t, leaseCtx, operationCtx)
+	releaseOperation()
+	agent.clientCalls <- struct{}{}
+	if _, _, err := agent.beginClientOperation(t.Context()); err == nil {
+		t.Fatal("client operation ignored backpressure")
+	}
+	<-agent.clientCalls
+
+	closed := newTestAgent()
+	require.NoError(t, closed.Close())
+	if _, err := closed.storeStartedSessionWithOpening(t.Context(), session); err == nil {
+		t.Fatal("closed agent stored a started session")
+	}
+
+	bounded := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{
+		MaxActiveSessions: 1, MaxConcurrentClientCalls: 1,
+	}))
+	bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	first := testSession(bounded, newFakeHermesClient())
+	require.NoError(t, first.openLifecycleStream())
+	require.NoError(t, bounded.storeStartedSession(first))
+	second := testSession(bounded, newFakeHermesClient())
+	require.NoError(t, second.openLifecycleStream())
+	owed, storeErr := bounded.storeStartedSessionWithOpening(lifecycleRequestContext(t.Context(), 91), second)
+	if storeErr == nil || owed != nil {
+		t.Fatalf("bounded session store = owed %#v, err %v", owed, storeErr)
+	}
+	require.Empty(t, bounded.streamOpens, "failed started-session install retained its opening")
+
+	deferredBounded := newTestAgent()
+	deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	deferred := testSession(deferredBounded, newFakeHermesClient())
+	require.NoError(t, deferred.openLifecycleStream())
+	for index := 0; index < maxDeferredStreamOpens; index++ {
+		deferredBounded.streamOpens = append(deferredBounded.streamOpens, &deferredStreamOpen{
+			state: deferredStreamOpenPending,
+		})
+	}
+	if got, err := deferredBounded.storeStartedSessionWithOpening(lifecycleRequestContext(t.Context(), 92), deferred); err == nil || got != nil {
+		t.Fatalf("deferred opening backpressure = owed %#v, err %v", got, err)
+	}
+	deferredBounded.streamOpens = nil
 }
 
 func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {

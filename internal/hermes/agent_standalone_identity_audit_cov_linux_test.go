@@ -394,7 +394,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			want: "gid 62644 is duplicated by uids",
 		},
 		{
-			name: "owner with an incompatible retained marker",
+			name: "owner with a conflicting retained marker",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
 				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
@@ -404,7 +404,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 				)
 				agentStandaloneCovWriteCleanMarker(t, directory, 62647, 62648, "not-the-owner-digest")
 			},
-			want: "incompatible retained marker",
+			want: "conflicting retained marker",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -669,7 +669,7 @@ func TestAgentStandaloneCovPriorDispositionRequiresTheExactRetainedMarker(t *tes
 		agentStandaloneCovWriteCleanMarker(t, directory, owner.UID, owner.GID, "another-session")
 		require.ErrorContains(t,
 			validateAgentStandalonePriorDisposition(directory, owner, ownerUID, ownerGID),
-			"incompatible retained ACTIVE marker",
+			"conflicting retained ACTIVE marker",
 		)
 	})
 

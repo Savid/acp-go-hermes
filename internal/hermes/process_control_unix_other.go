@@ -13,6 +13,7 @@ type processContainment struct {
 	proof             <-chan bool
 	closeFn           func() error
 	descendantCountFn func() (int, bool)
+	treeVacantFn      func() (bool, bool)
 	direct            *directChildWait
 	completeFn        func(time.Duration) error
 }

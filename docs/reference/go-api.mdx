@@ -24,6 +24,12 @@ loop would otherwise return normally or with context cancellation. A host that
 receives it must retain or quarantine any resources the native process tree may
 still reach.
 
+`ErrGatewayDisconnected` is the stable `errors.Is` discriminator for loss of
+the Hermes gateway. Direct `Agent` calls preserve both that sentinel and the
+exact native transport cause in the Go error chain. The stream transport
+converts the error only at the ACP response boundary, where native messages and
+arbitrary error text are intentionally omitted.
+
 ## Agent options
 
 | Option | Purpose |
@@ -65,9 +71,8 @@ processes receive neither capability nor descriptor.
 `WithProviderAuthRoot` enables the values-free provider-auth ledger only when
 `WithSharedHermesHome` also names the official native credential residence.
 The adapter never exposes a public credential type and never reads, copies, or
-returns native credential bytes. Shared mode binds one exact Hermes version and
-one managed MCP/seed configuration to a durable local filesystem; mismatches
-fail before launch. Because one adapter holds the home root exclusively, the
+returns native credential bytes. Shared mode binds one managed MCP/seed
+configuration to a durable local filesystem; a mismatch fails before launch. Because one adapter holds the home root exclusively, the
 native `auth.json` in that residence has exactly one writing adapter at a time
 even when separate ledger roots name the same residence, and within that adapter
 the per-provider fence is keyed by the residence too, so agents configured with
@@ -134,8 +139,9 @@ option leaves every handoff-form block rejected as `invalid_handoff` and the
 capability unadvertised.
 
 `RuntimeContainmentMode` reports `authoritative`, `shared_identity`,
-`best_effort`, or `unavailable`. Embedded hosts can observe it through the
-runtime-resource hooks. `shared_identity` is the ordinary default reported on
+`best_effort`, or `unavailable`. Embedded hosts read the resolved mode from
+`Agent.ContainmentMode()`, and the `ObserveContainment` runtime-resource hook
+reports it once at agent construction. `shared_identity` is the ordinary default reported on
 every supported platform when `WithProcessIsolation` is omitted; it is
 non-authoritative, so it publishes no provider-descendant snapshots and makes no
 whole-tree quiescence or credential-separation claim. Best-effort snapshots are
@@ -164,6 +170,13 @@ Session requests take options such as `WithSessionMCPServers`,
 `WithSessionAdditionalDirectories`, `WithSessionMeta`, `WithSessionHermesOptions`,
 and `WithSessionRawEvents`.
 
+`WithSessionMeta` and `WithListSessionsMeta` carry host-supplied `_meta` maps.
+The `acp-go.dev/*` namespace is reserved: its envelopes are stamped by this
+package and read by every consumer, so a caller key inside it is refused rather
+than merged or overwritten. Neither builder returns an error, so the refusal is
+a panic — passing a reserved key is a program naming a namespace that is not its
+own. Host namespaces and `_meta.hermes` merge as before.
+
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
 nonce of at most 4096 bytes for every turn. `CancelRequest(sessionID,
@@ -172,7 +185,8 @@ omitting the route envelope when given an empty or oversized nonce, so the
 adapter rejects the resulting request.
 
 `RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`.
+`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
+`ObserveContainment`.
 Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
 callbacks leave standalone operation unbounded. Hermes reserves the isolated
 session home before creating it, holds the native permit for the one

@@ -1,0 +1,70 @@
+{
+  "name": "session-running-omits-turn",
+  "purpose": "A running foreground is a turn running, so no update may assert one with no turn to own it. A session-caused transition may omit its turn on an idle or a requires_action, never on a running: the omission is a structural defect in the event, judged before any name is resolved, so it is malformed_envelope rather than unknown_entity — a token that reports a name the stream cannot resolve has nothing to report when the event carries no name at all. The refusal is structural, so it touches nothing: the standing certification is still standing at the moment of refusal.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "state_update",
+              "state": "running",
+              "cycleId": "cyc-1",
+              "cause": "session"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 1,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 1,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 0},
+      "closed": false
+    }
+  }
+}

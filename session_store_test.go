@@ -8,6 +8,76 @@ import (
 	"testing"
 )
 
+// TestInMemoryStoreEnforcesTombstoneFinality pins the store's own last word on a
+// deleted id. Both writing verbs answer it: neither `Append` nor `Replace` may
+// clear a tombstone it did not create, because the deleted state is the answer
+// every reader of this store is owed and an adapter-level deletion marker is
+// only one process's memory of it.
+func TestInMemoryStoreEnforcesTombstoneFinality(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	idmap := SessionKey{SessionID: "s1", Subpath: "idmap"}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"sessionId":"s1"}`)}},
+	}); err != nil {
+		t.Fatalf("seed replace: %v", err)
+	}
+	if err := store.Delete(ctx, main); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"sessionId":"s1"}`)}},
+	}); err != nil {
+		t.Fatalf("replace over a tombstone must succeed without writing: %v", err)
+	}
+	if err := store.Append(ctx, main, []SessionStoreEntry{json.RawMessage(`{"appended":true}`)}); err != nil {
+		t.Fatalf("append over a tombstone must succeed without writing: %v", err)
+	}
+
+	for _, key := range []SessionKey{main, idmap} {
+		loaded, err := store.Load(ctx, key)
+		if err != nil {
+			t.Fatalf("load %q: %v", key.Subpath, err)
+		}
+		if len(loaded) != 0 {
+			t.Fatalf("a write cleared a tombstone it did not create at %q: %#v", key.Subpath, loaded)
+		}
+	}
+
+	sessions, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("a tombstoned session was listed after a later write: %#v", sessions)
+	}
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	if err != nil {
+		t.Fatalf("ListSubkeys: %v", err)
+	}
+	if len(subkeys) != 0 {
+		t.Fatalf("a tombstoned session listed subkeys after a later write: %#v", subkeys)
+	}
+
+	// A different session is untouched by the tombstone on this one.
+	other := SessionKey{SessionID: "s2", Subpath: SessionStoreMainSubpath}
+	if replaceErr := store.Replace(ctx, other, []SessionStoreReplacement{
+		{Key: other, Entries: []SessionStoreEntry{json.RawMessage(`{"format":"hermes-state-db-v1"}`)}},
+	}); replaceErr != nil {
+		t.Fatalf("replace an untombstoned session: %v", replaceErr)
+	}
+	loaded, err := store.Load(ctx, other)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("untombstoned session load = %#v err=%v", loaded, err)
+	}
+}
+
 func TestInMemoryStoreReplaceTombstonesUnlistedSubpaths(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
@@ -281,6 +351,55 @@ func TestInMemoryStoreReplaceValidation(t *testing.T) {
 		{Key: SessionKey{SessionID: "s1", Subpath: "empty"}, Entries: nil},
 	}); err != nil {
 		t.Fatalf("replace with empty subkey: %v", err)
+	}
+}
+
+// TestInMemoryStoreReplaceRefusesDuplicateKeys pins the store's answer to a
+// generation that states one key twice. The two entry lists are two different
+// contents for the same key and the call carries no rule for choosing between
+// them, so the whole write is refused and the refusal names the key. Keeping the
+// last one would commit a generation the caller never asked for, and the caller
+// would never learn its write was ambiguous.
+func TestInMemoryStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
+	idmap := SessionKey{SessionID: "s1", Subpath: "idmap"}
+
+	if err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":1}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":1}`)}},
+	}); err != nil {
+		t.Fatalf("seed replace: %v", err)
+	}
+
+	err := store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":2}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":2}`)}},
+		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":3}`)}},
+	})
+	if err == nil {
+		t.Fatal("replace accepted a key listed more than once")
+	}
+	if !strings.Contains(err.Error(), `"idmap"`) {
+		t.Fatalf("duplicate-key refusal = %v, want the duplicated key named", err)
+	}
+
+	// The refusal is the whole write's: no part of the ambiguous generation
+	// reached the store.
+	entries, loadErr := store.Load(ctx, idmap)
+	if loadErr != nil {
+		t.Fatalf("load subkey: %v", loadErr)
+	}
+	if len(entries) != 1 || string(entries[0]) != `{"idmap":1}` {
+		t.Fatalf("subkey entries = %s, want the seeded generation", entries)
+	}
+	mainEntries, loadErr := store.Load(ctx, main)
+	if loadErr != nil {
+		t.Fatalf("load main: %v", loadErr)
+	}
+	if len(mainEntries) != 1 || string(mainEntries[0]) != `{"generation":1}` {
+		t.Fatalf("main entries = %s, want the seeded generation", mainEntries)
 	}
 }
 

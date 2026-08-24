@@ -12,6 +12,13 @@ type providerProcessInventory interface {
 	ProviderDescendantCount() (int, bool)
 }
 
+// providerTreeInventory is the whole-tree vacancy proof a close-fenced
+// quiescence fact reads. Only a boundary that enumerates its complete descendant
+// tree implements it; every weaker boundary answers that it has no observation.
+type providerTreeInventory interface {
+	ProviderTreeVacant() (bool, bool)
+}
+
 type providerProcessTracker struct {
 	mu         sync.Mutex
 	hooks      RuntimeResourceHooks

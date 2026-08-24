@@ -1,0 +1,109 @@
+{
+  "name": "retransmission-compares-decoded-values",
+  "purpose": "Exact retransmission is judged on decoded values, never on encoded bytes: key order and insignificant whitespace are not differences. A reducer comparing bytes would refuse a legal retransmission of the snapshot that opened the stream, so both a reordered snapshot and a reordered delta are suppressed wholesale and change nothing.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "sequence": 1,
+            "event": {
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0},
+              "actions": [],
+              "activities": [],
+              "foreground": {"cycleId": "cyc-0", "state": "idle"},
+              "type": "lifecycle_snapshot"
+            },
+            "streamId": "strm-1",
+            "version": 1
+          }
+        },
+        "update": {"sessionUpdate": "session_info_update"},
+        "sessionId": "sess-1"
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 2,
+            "event": {
+              "turnId": "turn-1",
+              "clientNonce": "non-1",
+              "submissionId": "sub-1",
+              "type": "prompt_accepted"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 2,
+      "suppressedRetransmissions": 2,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false, "invalidatedAt": 2},
+      "closed": false
+    }
+  }
+}

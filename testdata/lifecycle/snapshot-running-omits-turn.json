@@ -1,0 +1,50 @@
+{
+  "name": "snapshot-running-omits-turn",
+  "purpose": "The foreground presence rule binds in both directions. An idle foreground carrying a turn is malformed, and so is a running one carrying none: a snapshot that resumes mid-turn introduces the turn it reports, and every reference a later delta makes to that turn resolves against it. A running foreground with neither turnId nor origin asserts a live cycle no turn owns, which is a state no stream may reach and one a resumed projection could never repair — the whole assertion is refused rather than projected as a foreground nothing introduced.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

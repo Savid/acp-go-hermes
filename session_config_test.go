@@ -2,8 +2,10 @@ package hermesacp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -16,20 +18,7 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 		ID:   "openai",
 		Name: "OpenAI",
 		Models: map[string]nativehermes.ProviderModel{
-			"gpt-test": {
-				ID:   "gpt-test",
-				Name: "GPT Test",
-				Limit: map[string]any{
-					"context": float64(1000),
-					"output":  float64(200),
-				},
-				Reasoning:  true,
-				ToolCall:   true,
-				Modalities: nativehermes.ProviderModelModalities{Input: []string{"image", "pdf"}},
-				Options: map[string]any{
-					"reasoningEffort": map[string]any{"options": []any{"low", "medium"}},
-				},
-			},
+			"gpt-test": {ID: "gpt-test", Name: "GPT Test"},
 		},
 	}}}
 	option := modelConfigOption(sessionSnapshot{}, providers)
@@ -47,21 +36,11 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 	if value.Value != "openai/gpt-test" {
 		t.Fatalf("value = %s", value.Value)
 	}
+	// The model catalogue answers an id and a name and nothing else, so the
+	// published metadata is exactly the qualified model id.
 	meta, metaOK := value.Meta[hermesMetaKey].(map[string]any)
-	if !metaOK || meta["contextWindow"] != 1000 || meta["maxOutputTokens"] != 200 {
-		t.Fatalf("limits meta = %#v", value.Meta)
-	}
-	if got := meta["modelId"]; got != "openai/gpt-test" {
-		t.Fatalf("modelId = %#v", got)
-	}
-	if _, exists := meta["capabilities"]; exists {
-		t.Fatalf("capabilities metadata survived hard cutover: %#v", meta)
-	}
-	if got := meta["supportedEffortLevels"]; !containsStringAny(got, "low") || !containsStringAny(got, "medium") {
-		t.Fatalf("effort meta = %#v", got)
-	}
-	if len(meta) != 4 {
-		t.Fatalf("model metadata schema = %#v", meta)
+	if !metaOK || len(meta) != 1 || meta["modelId"] != "openai/gpt-test" {
+		t.Fatalf("model metadata schema = %#v", value.Meta)
 	}
 }
 
@@ -102,13 +81,7 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	client := newFakeHermesClient()
 	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{
 		{ID: "", Models: map[string]nativehermes.ProviderModel{"skip": {}}},
-		{ID: "p", Models: map[string]nativehermes.ProviderModel{
-			"m": {
-				Limit:      map[string]any{"context": int(42), "output": json.Number("7")},
-				Modalities: nativehermes.ProviderModelModalities{Input: []string{"audio", "video"}},
-				Options:    map[string]any{"reasoningEffort": []any{"medium"}},
-			},
-		}},
+		{ID: "p", Models: map[string]nativehermes.ProviderModel{"m": {}}},
 	}}
 	agent := newTestAgent()
 	conn := newRecordingAgentClient()
@@ -142,9 +115,6 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, "unknown", "x")); err == nil {
 		t.Fatal("unknown config id accepted")
 	}
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "missing/model")); err == nil {
-		t.Fatal("unknown model accepted")
-	}
 	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, acp.SessionConfigId("mode"), "missing")); err == nil {
 		t.Fatal("mode config option accepted")
 	}
@@ -162,24 +132,6 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	if empty := modelConfigOption(sessionSnapshot{}, nativehermes.ProvidersResponse{}); empty.Select != nil {
 		t.Fatalf("empty model option = %#v", empty)
 	}
-	efforts := supportedEfforts(client.providers.Providers[1].Models["m"])
-	if len(efforts) != 1 || efforts[0] != "medium" {
-		t.Fatalf("supportedEfforts = %#v", efforts)
-	}
-	efforts = supportedEfforts(nativehermes.ProviderModel{Options: map[string]any{
-		"temperature":     []any{"ignored"},
-		"reasoningEffort": []string{"low", "", "high"},
-		"effortOptions":   map[string]any{"values": []any{"medium"}},
-	}})
-	if len(efforts) != 3 || efforts[0] != "high" || efforts[1] != "low" || efforts[2] != "medium" {
-		t.Fatalf("normalized efforts = %#v", efforts)
-	}
-	if values := optionStringValues(map[string]any{"unknown": []any{"x"}}); values != nil {
-		t.Fatalf("unknown option values = %#v", values)
-	}
-	if values := optionStringValues(42); values != nil {
-		t.Fatalf("numeric option values = %#v", values)
-	}
 	if unstableConfigOptions(nil) != nil {
 		t.Fatal("empty unstable config options returned non-nil")
 	}
@@ -196,11 +148,8 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	}
 }
 
-// TestSetSessionConfigOptionReadsModelOptionsOnce pins the cost of one model
-// selection at exactly one native enumeration. A host probes model support by
-// selecting models under a short per-probe budget, and this call used to read
-// the whole provider catalogue twice — once to validate the value and once to
-// answer — for a mutation that happens entirely inside the wrapper.
+// TestSetSessionConfigOptionReadsModelOptionsOnce pins the cost of publishing
+// the post-mutation menu at exactly one native enumeration.
 func TestSetSessionConfigOptionReadsModelOptionsOnce(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
@@ -241,61 +190,230 @@ func TestSetSessionConfigOptionReadsModelOptionsOnce(t *testing.T) {
 	if sess.currentModel() != "p/two" {
 		t.Fatalf("current model = %q, want p/two", sess.currentModel())
 	}
-
-	// A refused enumeration is still a rejected value rather than a silent
-	// selection, and it too costs exactly one read.
-	client.providersErr = errors.New("gateway refused")
-	before = client.configProviderCallCount()
-
-	if _, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sess.id, configModel, "p/one")); err == nil {
-		t.Fatal("a refused enumeration accepted a model selection")
-	}
-
-	if reads := client.configProviderCallCount() - before; reads != 1 {
-		t.Fatalf("refused model.options reads = %d, want 1", reads)
-	}
-
-	if sess.currentModel() != "p/two" {
-		t.Fatalf("a refused enumeration changed the model to %q", sess.currentModel())
-	}
 }
 
-func TestHasConfigValueUngroupedAndMissing(t *testing.T) {
-	ctx := context.Background()
+func TestUnknownModelValueTraversesEstablishmentMutationAndPrompt(t *testing.T) {
+	ctx := t.Context()
 	client := newFakeHermesClient()
-	// Empty providers with a current model yields an ungrouped fallback option.
-	agent := newTestAgent()
-	sess := testSession(agent, client)
-	sess.providerID = "openai"
-	sess.modelID = "gpt-test"
+	client.createSession = testNativeSession("native-unknown-model")
+	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
+		ID: "provider", Models: map[string]nativehermes.ProviderModel{"menu-model": {ID: "menu-model"}},
+	}}}
+	var promptModel *nativehermes.ModelSelector
+	client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		promptModel = req.Model
 
-	options := sess.configOptions(ctx)
-	if !hasConfigValue(options, configModel, "openai/gpt-test") {
-		t.Fatal("current ungrouped model value not found")
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID: "assistant-unknown-model", SessionID: id, Role: "assistant", Finish: "stop",
+		}}, nil
 	}
-	if hasConfigValue(options, configModel, "openai/other") {
-		t.Fatal("absent ungrouped model value reported present")
+
+	var establishmentModel string
+	agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			establishmentModel = start.DefaultModel
+			var err error
+			client.xdg, err = testGenerationXDG(start.ScratchParent)
+
+			return client, err
+		}
+	})
+	cwd := t.TempDir()
+	establishmentValue := "provider/unlisted-at-establishment"
+	created, err := agent.NewSession(ctx, NewSessionRequest(cwd, WithSessionHermesOptions(HermesOptions{
+		Model: establishmentValue,
+	})))
+	if err != nil {
+		t.Fatalf("establish unknown model: %v", err)
 	}
-	if hasConfigValue(options, acp.SessionConfigId("mode"), "anything") {
-		t.Fatal("non-model config id matched")
+	if establishmentModel != establishmentValue || len(created.ConfigOptions) != 1 ||
+		created.ConfigOptions[0].Select.CurrentValue != acp.SessionConfigValueId(establishmentValue) {
+		t.Fatalf("establishment model=%q options=%#v", establishmentModel, created.ConfigOptions)
+	}
+
+	mutationValue := "provider/unlisted-at-mutation"
+	selected, err := agent.SetSessionConfigOption(ctx, SetModelRequest(created.SessionId, mutationValue))
+	if err != nil {
+		t.Fatalf("mutate unknown model: %v", err)
+	}
+	client.mu.Lock()
+	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)
+	client.mu.Unlock()
+	if len(setCalls) != 1 || setCalls[0] != (fakeModelSelection{sessionID: "native-unknown-model", value: mutationValue}) {
+		t.Fatalf("native model selections = %#v", setCalls)
+	}
+	if len(selected.ConfigOptions) != 1 || selected.ConfigOptions[0].Select.CurrentValue != acp.SessionConfigValueId(mutationValue) {
+		t.Fatalf("selected options = %#v", selected.ConfigOptions)
+	}
+
+	if _, promptErr := agent.Prompt(ctx, TextPromptRequest(created.SessionId, "unknown-model-prompt", "continue")); promptErr != nil {
+		t.Fatalf("prompt unknown model: %v", promptErr)
+	}
+	if promptModel == nil || promptModel.ProviderID != "provider" || promptModel.ModelID != "unlisted-at-mutation" {
+		t.Fatalf("prompt model = %#v", promptModel)
 	}
 }
 
-func containsStringAny(value any, want string) bool {
-	values, _ := value.([]string)
-	for _, value := range values {
-		if value == want {
-			return true
-		}
+func TestUnknownModelValueTraversesActiveResume(t *testing.T) {
+	client := newFakeHermesClient()
+	client.providers = nativehermes.ProvidersResponse{Providers: []nativehermes.ProviderInfo{{
+		ID: "provider", Models: map[string]nativehermes.ProviderModel{"menu-model": {ID: "menu-model"}},
+	}}}
+	var promptModel *nativehermes.ModelSelector
+	client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		promptModel = req.Model
+
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID: "assistant-resumed-model", SessionID: id, Role: "assistant", Finish: "stop",
+		}}, nil
 	}
-	anyValues, _ := value.([]any)
-	for _, value := range anyValues {
-		if value == want {
-			return true
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	agent.sessions[session.id] = session
+
+	value := "provider/unlisted-at-active-resume"
+	response, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(session.id, session.cwd, WithSessionHermesOptions(HermesOptions{
+		Model: value,
+	})))
+	if err != nil {
+		t.Fatalf("resume unknown model: %v", err)
+	}
+	if len(response.ConfigOptions) != 1 || response.ConfigOptions[0].Select.CurrentValue != acp.SessionConfigValueId(value) {
+		t.Fatalf("resumed options = %#v", response.ConfigOptions)
+	}
+	if _, promptErr := agent.Prompt(t.Context(), TextPromptRequest(session.id, "active-resumed-model-prompt", "continue")); promptErr != nil {
+		t.Fatalf("prompt resumed unknown model: %v", promptErr)
+	}
+	if promptModel == nil || promptModel.ProviderID != "provider" || promptModel.ModelID != "unlisted-at-active-resume" {
+		t.Fatalf("resumed prompt model = %#v", promptModel)
+	}
+}
+
+// TestMalformedModelValueRefusedByBothDoors pins the only refusal model
+// selection still makes locally, and pins that both doors make it.
+//
+// The question is the value's shape and never which models exist: a value that
+// is not provider-qualified cannot become a provider and a model, so no door
+// can carry one. The active-resume door has to answer it itself — nothing that
+// door accepts reaches Hermes, so a value it degraded would leave the next
+// prompt running on the previously bound model while the config option echoed
+// back the value the host asked for. The config door reads the same predicate
+// before its native call, so the two answer alike and neither spends a gateway
+// round trip on a string Hermes could not parse either.
+func TestMalformedModelValueRefusedByBothDoors(t *testing.T) {
+	client := newFakeHermesClient()
+	client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		if req.Model == nil || req.Model.ProviderID != "provider" || req.Model.ModelID != "bound-model" {
+			t.Errorf("prompt after refused selections carried model %#v", req.Model)
 		}
+
+		return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{
+			ID: "assistant-bound-model", SessionID: id, Role: "assistant", Finish: "stop",
+		}}, nil
+	}
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	session.providerID, session.modelID = "provider", "bound-model"
+	agent.sessions[session.id] = session
+
+	for _, malformed := range []string{
+		"bare-model", "provider/", "/model", "provider/two words", "provider/--flag", "--flag/model",
+	} {
+		_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(session.id, session.cwd,
+			WithSessionHermesOptions(HermesOptions{Model: malformed})))
+		requireUnsupportedField(t, err, hermesModelOptionPath, "active resume "+strconv.Quote(malformed))
+
+		_, err = agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, malformed))
+		requireUnsupportedField(t, err, keyValue, "config door "+strconv.Quote(malformed))
 	}
 
-	return false
+	// Neither door moved the session, and neither spent a native mutation on a
+	// value it had already refused.
+	if session.currentModel() != "provider/bound-model" {
+		t.Fatalf("current model after refused selections = %q", session.currentModel())
+	}
+	client.mu.Lock()
+	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)
+	client.mu.Unlock()
+	if len(setCalls) != 0 {
+		t.Fatalf("native model selections after refusals = %#v", setCalls)
+	}
+
+	// The bound model is what the next prompt still names, checked inside the
+	// native send above.
+	if _, err := agent.Prompt(t.Context(), TextPromptRequest(session.id, "bound-model-prompt", "continue")); err != nil {
+		t.Fatalf("prompt after refused selections: %v", err)
+	}
+}
+
+func TestUnknownModelNativeRefusalIsSanitized(t *testing.T) {
+	client := newFakeHermesClient()
+	wantErr := &nativehermes.RPCError{
+		Code:    5001,
+		Message: "Unknown provider 'missing-provider'. Check 'hermes model' for available providers, or define it in config.yaml under 'providers:'.",
+	}
+	client.setModelErr = wantErr
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	agent.sessions[session.id] = session
+
+	value := "missing-provider/missing-model"
+	_, err := agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, value))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("native refusal cause = %v, want %v", err, wantErr)
+	}
+	var requestErr *acp.RequestError
+	if !errors.As(err, &requestErr) || requestErr.Code != -32602 {
+		t.Fatalf("model refusal = %#v, want invalid params", err)
+	}
+	wantData := map[string]any{
+		jsonFieldError: valHermesModelSelectionRefused,
+		keyField:       keyValue,
+	}
+	if !reflect.DeepEqual(requestErr.Data, wantData) {
+		t.Fatalf("model refusal data = %#v, want %#v", requestErr.Data, wantData)
+	}
+	if strings.Contains(err.Error(), wantErr.Message) {
+		t.Fatalf("model refusal leaked native text: %v", err)
+	}
+	client.mu.Lock()
+	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)
+	client.mu.Unlock()
+	if len(setCalls) != 1 || setCalls[0].value != value {
+		t.Fatalf("native model selections = %#v", setCalls)
+	}
+	if reads := client.configProviderCallCount(); reads != 0 {
+		t.Fatalf("model.options reads after native refusal = %d, want 0", reads)
+	}
+}
+
+func TestModelSelectionSurvivesCatalogueReadFailure(t *testing.T) {
+	client := newFakeHermesClient()
+	client.providersErr = errors.New("model.options unavailable")
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	agent.sessions[session.id] = session
+
+	value := "provider/unlisted-without-menu"
+	response, err := agent.SetSessionConfigOption(t.Context(), SetModelRequest(session.id, value))
+	if err != nil {
+		t.Fatalf("set model while menu unavailable: %v", err)
+	}
+	if response.ConfigOptions != nil {
+		t.Fatalf("unavailable menu = %#v", response.ConfigOptions)
+	}
+	if session.currentModel() != value {
+		t.Fatalf("current model = %q, want %q", session.currentModel(), value)
+	}
+	client.mu.Lock()
+	setCalls := append([]fakeModelSelection(nil), client.setModelCalls...)
+	client.mu.Unlock()
+	if len(setCalls) != 1 || setCalls[0].value != value {
+		t.Fatalf("native model selections = %#v", setCalls)
+	}
+	if reads := client.configProviderCallCount(); reads != 1 {
+		t.Fatalf("model.options reads = %d, want 1", reads)
+	}
 }
 
 func TestSetSessionConfigNativeSetterFailure(t *testing.T) {

@@ -16,9 +16,23 @@ import (
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
+
+func TestFailedPostResponseReplayRetractsAndContainsItsSession(t *testing.T) {
+	agent := newTestAgent()
+	client := newFakeHermesClient()
+	s := testSession(agent, client)
+	agent.sessions[s.id] = s
+
+	s.failReuseAfterResponse(errors.New("replay failed"))
+
+	require.Nil(t, agent.activeSession(s.id))
+	require.Equal(t, 1, client.closeCount())
+}
 
 // toggleReplaceStore wraps InMemorySessionStore and can be switched to fail all
 // Replace calls, simulating a disk-full/store outage after native success.
@@ -82,6 +96,83 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 	if agent.activeSession(forked.SessionId) == nil || len(parentClient.deleted) != 0 {
 		t.Fatalf("committed fork registration/deletion = %#v/%#v", agent.activeSession(forked.SessionId), parentClient.deleted)
 	}
+}
+
+func TestActiveLoadReplayFailureReturnsExactCause(t *testing.T) {
+	want := errors.New("active replay failed")
+	client := newFakeHermesClient()
+	client.messagesErr = want
+	agent := newTestAgent()
+	session := testSession(agent, client)
+	require.NoError(t, agent.storeStartedSession(session))
+
+	_, err := agent.LoadSession(t.Context(), LoadSessionRequest(session.id, session.cwd))
+	require.ErrorIs(t, err, want)
+}
+
+func TestActiveLoadCannotReplayAcrossForegroundPrompt(t *testing.T) {
+	store := NewInMemorySessionStore()
+	client := newFakeHermesClient()
+	client.getSession = testNativeSession("native-1")
+	client.messages = []nativehermes.NativeMessage{{
+		Info:  nativehermes.NativeMessageInfo{ID: historyMessageID(0), SessionID: "native-1", Role: valAssistant},
+		Parts: []nativehermes.Part{{ID: "history-b-part", SessionID: "native-1", MessageID: historyMessageID(0), Type: valText, Text: "historical B"}},
+	}}
+	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		return nativehermes.NativeMessage{
+			Info:  nativehermes.NativeMessageInfo{ID: "assistant-a", SessionID: id, Role: valAssistant, Finish: valStop},
+			Parts: []nativehermes.Part{{ID: "part-a", SessionID: id, MessageID: "assistant-a", Type: valText, Text: "foreground A"}},
+		}, nil
+	}
+
+	commitEntered := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	agent := newTestAgent(WithSessionStore(store), func(options *Options) {
+		options.beforeTerminalCommit = func() {
+			close(commitEntered)
+			<-releaseCommit
+		}
+	})
+	conn := newRecordingAgentClient()
+	agent.setAgentClient(conn)
+	session := testSession(agent, client)
+	require.NoError(t, agent.storeStartedSession(session))
+
+	promptDone := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "turn-a", "prompt A"))
+		promptDone <- err
+	}()
+	<-commitEntered
+
+	_, loadErr := agent.LoadSession(t.Context(), LoadSessionRequest(session.id, session.cwd))
+	require.Error(t, loadErr)
+	require.Contains(t, loadErr.Error(), valBackpressure)
+
+	conn.mu.Lock()
+	updates := append([]acp.SessionNotification(nil), conn.updates...)
+	conn.mu.Unlock()
+	var delivered strings.Builder
+	for _, notification := range updates {
+		if chunk := notification.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			delivered.WriteString(chunk.Content.Text.Text)
+		}
+	}
+	require.Equal(t, "foreground A", delivered.String())
+	require.Equal(t, "foreground A", session.foregroundPrefix())
+
+	close(releaseCommit)
+	require.NoError(t, <-promptDone)
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	var snapshot stateSnapshot
+	require.NoError(t, json.Unmarshal(entries[0], &snapshot))
+	require.NotNil(t, snapshot.Wrapper)
+	require.NotNil(t, snapshot.Wrapper.Foreground)
+	require.Equal(t, "foreground A", snapshot.Wrapper.Foreground.Text)
+	require.NotContains(t, snapshot.Wrapper.Foreground.Text, "historical B")
+	require.NoError(t, agent.Close())
 }
 
 func TestForkBindsResolvedModelBeforePublishingChild(t *testing.T) {
@@ -264,7 +355,7 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	createClient.closeErr = errors.New("close boom")
 	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-			xdg, err := nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+			xdg, err := testGenerationXDG(opts.ScratchParent)
 			if err != nil {
 				return nil, err
 			}
@@ -324,7 +415,7 @@ func TestForkSnapshotFailureLeavesNoOrphan(t *testing.T) {
 			xdg := opts.ExistingXDG
 			if xdg.Root == "" {
 				var err error
-				xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -393,7 +484,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 				xdg := opts.ExistingXDG
 				if xdg.Root == "" {
 					var err error
-					xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+					xdg, err = testGenerationXDG(opts.ScratchParent)
 					if err != nil {
 						return nil, err
 					}
@@ -462,7 +553,7 @@ func TestAgentSessionLifecycleConfigDeleteAndForkLineage(t *testing.T) {
 		filepath.Dir(parent.xdg.Root) != agent.options.ScratchDir ||
 		!strings.HasPrefix(filepath.Base(parent.xdg.Root), "acp-go-hermes-runtime-") ||
 		!strings.HasPrefix(filepath.Base(child.xdg.Root), "acp-go-hermes-runtime-") {
-		t.Fatalf("xdg roots parent=%#v child=%#v home=%q", parent.xdg, child.xdg, agent.homeRoot())
+		t.Fatalf("xdg roots parent=%#v child=%#v scratch=%q", parent.xdg, child.xdg, agent.options.ScratchDir)
 	}
 }
 
@@ -504,7 +595,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	root := t.TempDir()
 	store := NewInMemorySessionStore()
 	sourceClient := newFakeHermesClient()
-	sourceXDG, err := nativehermes.CreateXDGDirs(root, "source")
+	sourceXDG, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,6 +663,30 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 }
 
 func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:gocyclo,maintidx // One lifecycle audit keeps every fail-closed branch explicit.
+	t.Run("caller cancellation while containment is pending", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		defer session.stopPump()
+		session.runtimeResumeWait = make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if err := session.resumeRuntimeForTurnLocked(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("pending containment cancellation = %v", err)
+		}
+	})
+
+	t.Run("failed containment poisons replacement", func(t *testing.T) {
+		session, _, _ := newResumeRuntimeTestSession(t)
+		defer session.stopPump()
+		wait := make(chan struct{})
+		close(wait)
+		session.runtimeResumeWait = wait
+		session.runtimeResumeErr = errors.New("containment failed")
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "containment failed") {
+			t.Fatalf("failed containment replacement = %v", err)
+		}
+	})
+
 	t.Run("poisoned", func(t *testing.T) {
 		session, _, _ := newResumeRuntimeTestSession(t)
 		session.poisonCause = "earlier failure"
@@ -730,15 +845,17 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		}
 	})
 
-	t.Run("successful replacement drains historical channels", func(t *testing.T) {
+	t.Run("successful replacement installs a fresh pump", func(t *testing.T) {
 		session, agent, store := newResumeRuntimeTestSession(t)
 		snapshot := resumeRuntimeSnapshot(session)
 		snapshot.Terminal = &stateSnapshotTerminal{MessageID: "history-2", Role: valAssistant, Finish: "stop"}
 		replaceResumeRuntimeRecords(t, store, session.idmap, snapshot)
 		client := newFakeHermesClient()
 		client.getSession = testNativeSession("native-1")
-		client.events <- nativehermes.TurnEvent{Type: "historical"}
-		client.errs <- errors.New("historical")
+		client.messages = []nativehermes.NativeMessage{
+			{Info: nativehermes.NativeMessageInfo{ID: "history-1", SessionID: "native-1", Role: valUser}},
+			{Info: nativehermes.NativeMessageInfo{ID: "history-2", SessionID: "native-1", Role: valAssistant, Finish: valStop}},
+		}
 		installResumeRuntimeFactory(agent, client)
 		if err := session.resumeRuntimeForTurnLocked(t.Context()); err != nil {
 			t.Fatalf("resume runtime: %v", err)
@@ -749,19 +866,119 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		if terminal := session.committedTerminalState(); terminal.MessageID != "history-2" {
 			t.Fatalf("resumed terminal baseline = %#v", terminal)
 		}
-		select {
-		case event := <-client.events:
-			t.Fatalf("historical event was not drained: %#v", event)
-		default:
-		}
-		select {
-		case err := <-client.errs:
-			t.Fatalf("historical event error was not drained: %v", err)
-		default:
+		session.pumpMu.Lock()
+		pumpClient := session.pumpClient
+		pumpDone := session.pumpDone
+		session.pumpMu.Unlock()
+		managed, managedOK := pumpClient.(*managedHermesServer)
+		if !managedOK || managed.Server != client || pumpDone == nil {
+			t.Fatalf("successful replacement pump client=%T doneNil=%v", pumpClient, pumpDone == nil)
 		}
 		if err := session.Close(t.Context()); err != nil {
 			t.Fatalf("close replacement: %v", err)
 		}
+	})
+
+	t.Run("replacement lifecycle identity failure is returned", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, client)
+		oldReader := sessionIDRandReader
+		sessionIDRandReader = errorReader{err: errors.New("identity unavailable")}
+		t.Cleanup(func() { sessionIDRandReader = oldReader })
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "identity unavailable") {
+			t.Fatalf("replacement lifecycle identity = %v", err)
+		}
+		_ = client.Close(t.Context())
+	})
+
+	t.Run("replacement lifecycle snapshot failure is returned", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		connection := newRecordingAgentClient()
+		connection.updateErr = errors.New("snapshot unavailable")
+		agent.setAgentClient(connection)
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, client)
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "snapshot unavailable") {
+			t.Fatalf("replacement lifecycle snapshot = %v", err)
+		}
+		_ = client.Close(t.Context())
+	})
+
+	t.Run("predecessor pump must join before successor publication", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		connection := newRecordingAgentClient()
+		agent.setAgentClient(connection)
+		replacement := newFakeHermesClient()
+		replacement.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, replacement)
+		predecessor := session.client
+		session.detachPump()
+		stuck := make(chan struct{})
+		joinEntered := make(chan struct{})
+		var joinOnce sync.Once
+		session.pumpMu.Lock()
+		session.pumpDone = stuck
+		session.pumpCancel = func() {}
+		session.pumpControlCancel = func() { joinOnce.Do(func() { close(joinEntered) }) }
+		session.pumpClient = predecessor
+		session.pumpMu.Unlock()
+
+		result := make(chan error, 1)
+		go func() { result <- session.resumeRuntimeForTurnLocked(ctx) }()
+		<-joinEntered
+		require.Zero(t, lifecycleUpdateCount(connection))
+		cancel()
+		err := <-result
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, lifecycleUpdateCount(connection))
+		require.Same(t, predecessor, session.client)
+		require.True(t, session.runtimeNeedsResume)
+		require.Equal(t, 1, replacement.closeCount())
+		close(stuck)
+		session.detachPump()
+	})
+
+	t.Run("successor snapshot follows predecessor join", func(t *testing.T) {
+		session, agent, _ := newResumeRuntimeTestSession(t)
+		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		connection := newRecordingAgentClient()
+		agent.setAgentClient(connection)
+		replacement := newFakeHermesClient()
+		replacement.getSession = testNativeSession("native-1")
+		installResumeRuntimeFactory(agent, replacement)
+		predecessor := session.client
+		session.detachPump()
+		stuck := make(chan struct{})
+		joinEntered := make(chan struct{})
+		var joinOnce sync.Once
+		session.pumpMu.Lock()
+		session.pumpDone = stuck
+		session.pumpCancel = func() {}
+		session.pumpControlCancel = func() { joinOnce.Do(func() { close(joinEntered) }) }
+		session.pumpClient = predecessor
+		session.pumpMu.Unlock()
+
+		result := make(chan error, 1)
+		go func() { result <- session.resumeRuntimeForTurnLocked(t.Context()) }()
+		<-joinEntered
+		require.Zero(t, lifecycleUpdateCount(connection))
+		close(stuck)
+		require.NoError(t, <-result)
+		require.Equal(t, 1, lifecycleUpdateCount(connection))
+		managed, ok := session.client.(*managedHermesServer)
+		require.True(t, ok)
+		require.Same(t, replacement, managed.Server)
+		require.NoError(t, session.Close(t.Context()))
 	})
 }
 
@@ -860,7 +1077,7 @@ func installResumeRuntimeFactory(agent *Agent, client *fakeHermesClient) {
 	}
 }
 
-func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
+func TestCloseSessionWaitsForPendingTurnSettlement(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
@@ -898,15 +1115,15 @@ func TestCloseSessionSkipsSnapshotWhileTurnPending(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("prompt did not finish after close")
 	}
-	if got := store.replaceCount(); got != 0 {
-		t.Fatalf("close wrote snapshot during blocked turn: %d", got)
+	if got := store.replaceCount(); got != 1 {
+		t.Fatalf("settlement Replace count = %d, want 1", got)
 	}
 }
 
 func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	xdg, createErr := nativehermes.CreateXDGDirs(root, "close-snapshot")
+	xdg, createErr := testGenerationXDG(root)
 	if createErr != nil {
 		t.Fatal(createErr)
 	}
@@ -936,9 +1153,7 @@ func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
 	}
 }
 
-// TestSnapshotFencedAfterAcquireTurn parks a turn after acquireTurn but before
-// beginTurn and asserts no Replace happens (HW3 turn-in-flight snapshot fence).
-func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
+func TestCloseWaitsForAdmittedTurnBeforeSnapshot(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
@@ -948,7 +1163,7 @@ func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
 
-	release, err := session.acquireTurn(ctx)
+	release, settlement, err := session.acquireTurn(ctx)
 	if err != nil {
 		t.Fatalf("acquireTurn: %v", err)
 	}
@@ -958,13 +1173,48 @@ func TestSnapshotFencedAfterAcquireTurn(t *testing.T) {
 	if err := session.snapshotToStore(ctx); err == nil {
 		t.Fatal("snapshot ran while turn in flight")
 	}
-	if _, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id}); err != nil {
-		t.Fatalf("CloseSession: %v", err)
+	closeDone := make(chan error, 1)
+	go func() {
+		_, closeErr := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+		closeDone <- closeErr
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		session.mu.Lock()
+		closing := session.lifecycleClosing
+		session.mu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CloseSession did not close prompt admission")
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, _, prepareErr := session.preparePromptTurn(ctx, "close-admission"); prepareErr == nil ||
+		!strings.Contains(prepareErr.Error(), valSessionClosed) {
+		t.Fatalf("turn admitted after CloseSession: %v", prepareErr)
+	}
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("CloseSession did not wait for admitted turn: %v", closeErr)
+	default:
 	}
 	if got := store.replaceCount(); got != 0 {
-		t.Fatalf("Replace happened while turn in flight: %d", got)
+		t.Fatalf("Replace happened before turn settlement: %d", got)
 	}
+
 	release()
+	settlement.complete()
+	if closeErr := <-closeDone; closeErr != nil {
+		t.Fatalf("CloseSession: %v", closeErr)
+	}
+	if got := store.replaceCount(); got != 1 {
+		t.Fatalf("post-settlement Replace count = %d, want 1", got)
+	}
 	if reason := session.snapshotBlockedReason(); reason != "" {
 		t.Fatalf("fence not cleared after release: %q", reason)
 	}
@@ -1003,7 +1253,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 			xdg := opts.ExistingXDG
 			if xdg.Root == "" {
 				var err error
-				xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1076,8 +1326,6 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
 	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}, ExtraPathDirs: []string{secondPathDir, firstPathDir}})))
 	requireLifecycleMismatch(t, err, hermesExtraPathDirsOptionPath)
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/other", Env: map[string]string{"A": "B"}, ExtraPathDirs: extraPathDirs})))
-	requireLifecycleMismatch(t, err, "_meta.hermes.options.model")
 	if factoryCalls != 1 {
 		t.Fatalf("invalid active load/resume started a native process: %d", factoryCalls)
 	}
@@ -1182,7 +1430,7 @@ func TestAgentSessionLifecycleErrorBranches(t *testing.T) {
 		createErrClient.createErr = errors.New("create failed")
 		agent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
-				createErrClient.xdg, _ = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				createErrClient.xdg, _ = testGenerationXDG(opts.ScratchParent)
 
 				return createErrClient, nil
 			}
@@ -1228,7 +1476,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
 	sourceClient := newFakeHermesClient()
-	sourceXDG, err := nativehermes.CreateXDGDirs(root, "source")
+	sourceXDG, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1434,10 +1682,10 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	queued <- struct{}{}
 	cancelled, cancelAcquire := context.WithCancel(ctx)
 	cancelAcquire()
-	if _, err := defaultSession.acquireTurn(cancelled); !errors.Is(err, context.Canceled) {
+	if _, _, err := defaultSession.acquireTurn(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled acquireTurn error = %v", err)
 	}
-	if _, err := defaultSession.acquireTurn(ctx); err == nil {
+	if _, _, err := defaultSession.acquireTurn(ctx); err == nil {
 		t.Fatal("prompt backpressure was not enforced")
 	}
 	<-queued
@@ -1458,7 +1706,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 		func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				var err error
-				createClient.xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				createClient.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1476,7 +1724,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 
 	store := NewInMemorySessionStore()
 	sourceClient := newFakeHermesClient()
-	sourceXDG, err := nativehermes.CreateXDGDirs(t.TempDir(), "source")
+	sourceXDG, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1489,7 +1737,8 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	}
 	replayErrClient := newFakeHermesClient()
 	replayErrClient.getSession = testNativeSession("native-1")
-	replayErrClient.messagesErr = errors.New("messages failed")
+	wantReplayErr := errors.New("messages failed")
+	var failedLoad *session
 	replayErrAgent := newTestAgent(WithSessionStore(store), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			replayErrClient.xdg = opts.ExistingXDG
@@ -1497,9 +1746,31 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 			return replayErrClient, nil
 		}
 	})
-	if _, err25 := replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd)); err25 == nil {
-		t.Fatal("load replay error was ignored")
+	replayErrAgent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	})
+	replayConn := newRecordingAgentClient()
+	replayErrAgent.setAgentClient(replayConn)
+	replayErrClient.messagesFunc = func(context.Context, string) ([]nativehermes.NativeMessage, error) {
+		failedLoad = replayErrAgent.activeSession("session-1")
+
+		return nil, wantReplayErr
 	}
+	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("session-1", cwd))
+	require.ErrorIs(t, err, wantReplayErr)
+	require.NotNil(t, failedLoad)
+	require.Nil(t, replayErrAgent.activeSession("session-1"))
+	require.Equal(t, 1, replayErrClient.closeCount())
+	require.True(t, failedLoad.lifecycleStream().fenced())
+	select {
+	case <-failedLoad.pumpDone:
+	default:
+		t.Fatal("failed cold replay returned before its pump joined")
+	}
+	replayErrClient.emitEvent(nativehermes.TurnEvent{Type: nativehermes.EventGatewayRaw})
+	require.Zero(t, replayConn.updateCount())
+	_, statErr := os.Stat(replayErrClient.xdg.Root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	if _, err26 := closed.ResumeSession(ctx, ResumeSessionRequest("session-1", cwd)); err26 == nil {
 		t.Fatal("closed agent resumed session")
@@ -1532,7 +1803,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 		t.Fatal("unstable fork accepted invalid meta")
 	}
 
-	validTarget, err := nativehermes.CreateXDGDirs(t.TempDir(), "target")
+	validTarget, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1541,7 +1812,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	}
 	restoreStateStoreSeams(t)
 	stateRemoveAll = func(string) error { return errors.New("remove failed") }
-	validSource, err := nativehermes.CreateXDGDirs(t.TempDir(), "source")
+	validSource, err := testGenerationXDG(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1565,7 +1836,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				defaultModel = opts.DefaultModel
 				var err error
-				defaultClient.xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				defaultClient.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1597,7 +1868,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 		agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				var err error
-				client.xdg, err = nativehermes.CreateXDGDirs(opts.Root, string(opts.ACPSessionID))
+				client.xdg, err = testGenerationXDG(opts.ScratchParent)
 				if err != nil {
 					return nil, err
 				}
@@ -1717,7 +1988,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("delete refuses live prompt before store or native mutation", func(t *testing.T) {
+	t.Run("delete tombstones before it inspects the session", func(t *testing.T) {
 		client := newFakeHermesClient()
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSessionStore(store))
@@ -1729,17 +2000,17 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		if err := store.Replace(ctx, SessionKey{SessionID: string(session.id)}, []SessionStoreReplacement{{Key: SessionKey{SessionID: string(session.id)}, Entries: []SessionStoreEntry{entry}}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err == nil || !strings.Contains(err.Error(), "prompt is active") {
-			t.Fatalf("active delete error = %v", err)
+		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err != nil {
+			t.Fatalf("delete over a live cancel func = %v", err)
 		}
-		if len(client.deleted) != 0 {
+		if len(client.deleted) != 1 {
 			t.Fatalf("native delete attempts = %#v", client.deleted)
 		}
-		if _, ok := agent.sessions[session.id]; !ok {
-			t.Fatal("active delete removed in-memory session")
+		if _, ok := agent.sessions[session.id]; ok {
+			t.Fatal("delete left the in-memory session addressable")
 		}
-		if _, err := store.Load(ctx, SessionKey{SessionID: string(session.id)}); err != nil {
-			t.Fatalf("active delete removed store state: %v", err)
+		if entries, err := store.Load(ctx, SessionKey{SessionID: string(session.id)}); err != nil || len(entries) != 0 {
+			t.Fatalf("delete left store state behind: %d entries, err=%v", len(entries), err)
 		}
 	})
 
@@ -1762,7 +2033,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		for _, name := range []string{"list", "load", "resume", "delete"} {
 			t.Run(name, func(t *testing.T) {
 				agent := newTestAgent(WithScratchDir(root))
-				xdg, err := nativehermes.CreateXDGDirs(root, name)
+				xdg, err := testGenerationXDG(root)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1793,6 +2064,333 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 	})
 }
 
+// TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow pins the delete
+// order: the tombstone is durable first and the id is hidden with it, then the
+// active turn is cancelled and settled, then the runtime is torn down. An active
+// prompt is a thing delete settles, not a ground to refuse on — and the commit
+// that settlement owes lands after the tombstone, so it must publish nothing.
+func TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow(t *testing.T) {
+	client := newFakeHermesClient()
+	started := make(chan struct{})
+	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+	entries, err := store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "durable row missing before delete")
+
+	type promptOutcome struct {
+		resp acp.PromptResponse
+		err  error
+	}
+
+	promptDone := make(chan promptOutcome, 1)
+
+	go func() {
+		resp, promptErr := session.Prompt(context.Background(), TextPromptRequest(session.id, "delete-active", "hang"))
+		promptDone <- promptOutcome{resp: resp, err: promptErr}
+	}()
+	<-started
+
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err, "delete refused an active prompt")
+
+	out := <-promptDone
+	require.NoError(t, out.err)
+	require.Equal(t, acp.StopReasonCancelled, out.resp.StopReason, "delete did not cancel the active turn")
+
+	// The settlement's terminal commit ran after the tombstone. Nothing it wrote
+	// may clear a tombstone it did not create.
+	entries, err = store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a post-tombstone commit recreated the deleted row")
+
+	require.True(t, agent.isDeleted(session.id))
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "delete left the session addressable")
+
+	listed, err := agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.NoError(t, err)
+
+	for _, info := range listed.Sessions {
+		require.NotEqual(t, session.id, info.SessionId, "deleted session was listed")
+	}
+
+	// Deleting the same id again silently succeeds.
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err, "delete was not idempotent")
+}
+
+// TestInstallRefusesATombstoneItDidNotCreate pins the install lock's own
+// tombstone re-check. The entry check a load or resume ran is only a guess by
+// the time there is something to install, and the marker it re-reads is the
+// same one the durable publish guard reads: an install that cleared it would
+// un-hide the id and let the next commit rewrite the row the delete removed.
+func TestInstallRefusesATombstoneItDidNotCreate(t *testing.T) {
+	client := newFakeHermesClient()
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	entries, err := store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "durable row missing before delete")
+
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.NoError(t, err)
+	require.True(t, agent.isDeleted(session.id), "the delete set the tombstone marker")
+
+	// Exactly what a load, resume, or fork that started before the delete does
+	// when it finally reaches its install step.
+	late := testSession(agent, newFakeHermesClient())
+	late.id = session.id
+
+	installErr := agent.storeStartedSession(late)
+	require.Error(t, installErr, "a late install published a tombstoned id")
+
+	var refusal *acp.RequestError
+	require.ErrorAs(t, installErr, &refusal)
+	require.Equal(t, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID,
+	}), refusal, "a tombstoned id answers with the uniform unknown-session refusal")
+
+	require.True(t, agent.isDeleted(session.id), "a late install cleared a tombstone it did not create")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "a refused install left the id live")
+
+	// The durable guard is that same marker, so it still holds.
+	require.NoError(t, late.snapshotToStore(t.Context()))
+
+	entries, err = store.Load(t.Context(), key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the deleted row was durably resurrected")
+
+	listed, err := agent.ListSessions(t.Context(), ListSessionsRequest())
+	require.NoError(t, err)
+
+	for _, info := range listed.Sessions {
+		require.NotEqual(t, session.id, info.SessionId, "a deleted session was listed after a late install")
+	}
+}
+
+// TestLoadLosingTheRaceToADeleteInstallsNothing drives the same rule through the
+// whole load transaction: the delete completes after the scratch reservation,
+// the generation, the archive hydration, the native-owner acquisition, and the
+// runtime launch have all happened. However far the preparation got, the delete
+// wins — the prepared replacement is torn down and the caller is told what every
+// other door tells it about a deleted id.
+func TestLoadLosingTheRaceToADeleteInstallsNothing(t *testing.T) {
+	ctx := t.Context()
+	cwd := t.TempDir()
+	store := validHydrateStore(t, ctx)
+	loaded := newFakeHermesClient()
+	loaded.getSession = testNativeSession("n")
+
+	var (
+		agent      *Agent
+		deleteOnce sync.Once
+		deleteErr  error
+	)
+
+	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+			loaded.xdg = opts.ExistingXDG
+			deleteOnce.Do(func() {
+				_, deleteErr = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+			})
+
+			return loaded, nil
+		}
+	})
+
+	_, err := agent.LoadSession(ctx, LoadSessionRequest("s", cwd))
+	require.NoError(t, deleteErr, "the delete this load raced failed")
+	require.Error(t, err, "a load that lost the race to a delete installed its session")
+
+	var refusal *acp.RequestError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID,
+	}), refusal, "a deleted id must be wire-indistinguishable from one that never existed")
+
+	require.True(t, agent.isDeleted("s"), "the losing install cleared the deletion marker")
+	require.Positive(t, loaded.closeCount(), "the prepared replacement was left running")
+
+	agent.mu.Lock()
+	_, live := agent.sessions["s"]
+	agent.mu.Unlock()
+	require.False(t, live, "a refused install left the session addressable")
+
+	entries, loadErr := store.Load(ctx, SessionKey{SessionID: "s"})
+	require.NoError(t, loadErr)
+	require.Empty(t, entries, "the deleted row was durably resurrected")
+}
+
+// TestLoadRacingDeleteResurrectsNothing races the two for real. Either order is
+// legal — a load that installed before the tombstone landed keeps the id, and
+// the delete then closes it as the active session it is — but no interleaving
+// may leave a live session, or a durable row, behind a tombstoned id.
+func TestLoadRacingDeleteResurrectsNothing(t *testing.T) {
+	cwd := t.TempDir()
+
+	for attempt := range 8 {
+		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) {
+			ctx := t.Context()
+			store := validHydrateStore(t, ctx)
+			loaded := newFakeHermesClient()
+			loaded.getSession = testNativeSession("n")
+			agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+				options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+					loaded.xdg = opts.ExistingXDG
+
+					return loaded, nil
+				}
+			})
+
+			start := make(chan struct{})
+			var wait sync.WaitGroup
+
+			wait.Add(2)
+
+			go func() {
+				defer wait.Done()
+				<-start
+				_, _ = agent.LoadSession(ctx, LoadSessionRequest("s", cwd))
+			}()
+
+			go func() {
+				defer wait.Done()
+				<-start
+				_, _ = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+			}()
+
+			close(start)
+			wait.Wait()
+
+			require.True(t, agent.isDeleted("s"), "the delete's marker did not survive the race")
+
+			agent.mu.Lock()
+			_, live := agent.sessions["s"]
+			agent.mu.Unlock()
+			require.False(t, live, "a tombstoned id was left naming a live session")
+
+			entries, loadErr := store.Load(ctx, SessionKey{SessionID: "s"})
+			require.NoError(t, loadErr)
+			require.Empty(t, entries, "the deleted row was durably resurrected")
+
+			listed, listErr := agent.ListSessions(ctx, ListSessionsRequest())
+			require.NoError(t, listErr)
+			require.Empty(t, listed.Sessions, "a deleted session was listed after the race")
+		})
+	}
+}
+
+// installOnDeleteStore installs a session under the deleted id at the exact
+// instant the tombstone is being made durable — the window between the delete's
+// read of the active set and the lock that hides the id.
+type installOnDeleteStore struct {
+	*InMemorySessionStore
+	once    sync.Once
+	install func()
+}
+
+func (s *installOnDeleteStore) Delete(ctx context.Context, key SessionKey) error {
+	s.once.Do(s.install)
+
+	return s.InMemorySessionStore.Delete(ctx, key)
+}
+
+// TestDeleteClosesASessionInstalledInsideItsTombstoneWindow pins the other side
+// of the same race. An install that reached the lock first is legal, and the id
+// it published is the one this delete is about: the delete owns its teardown,
+// because once the marker is set nothing else can ever reach that runtime.
+func TestDeleteClosesASessionInstalledInsideItsTombstoneWindow(t *testing.T) {
+	client := newFakeHermesClient()
+
+	var (
+		agent *Agent
+		late  *session
+	)
+
+	store := &installOnDeleteStore{InMemorySessionStore: NewInMemorySessionStore()}
+	store.install = func() {
+		agent.mu.Lock()
+		agent.sessions[late.id] = late
+		agent.mu.Unlock()
+	}
+
+	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	late = testSession(agent, client)
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(late.id))
+	require.NoError(t, err)
+
+	require.True(t, agent.isDeleted(late.id))
+	require.Positive(t, client.closeCount(), "the delete left a live runtime behind a tombstoned id")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[late.id]
+	agent.mu.Unlock()
+	require.False(t, live, "a tombstoned id was left naming a live session")
+}
+
+// TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden pins the tail of
+// the same order: a teardown that fails is reported, but only after the
+// tombstone is durable, and the session stays hidden either way.
+func TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden(t *testing.T) {
+	client := newFakeHermesClient()
+	client.closeErr = errors.New("runtime close failed")
+	store := NewInMemorySessionStore()
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()))
+	session := testSession(agent, client)
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	key := SessionKey{SessionID: string(session.id)}
+	require.NoError(t, session.snapshotToStore(t.Context()))
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(session.id))
+	require.ErrorIs(t, err, client.closeErr, "teardown error was not surfaced")
+
+	require.True(t, agent.isDeleted(session.id), "failed teardown left the session untombstoned")
+
+	entries, loadErr := store.Load(t.Context(), key)
+	require.NoError(t, loadErr)
+	require.Empty(t, entries, "failed teardown left the durable row behind")
+
+	agent.mu.Lock()
+	_, live := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.False(t, live, "failed teardown left the session addressable")
+}
+
 func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
@@ -1804,8 +2402,11 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 			t.Fatalf("empty cleanup record was remembered: %#v", agent.deleteCleanup)
 		}
 		agent.forgetDeleteCleanupIfDone("")
+		// An id nothing is remembered for is nothing to forget, and its runtime
+		// root is not derivable from the id: only the remembered record names it.
+		agent.forgetDeleteCleanupIfDone("never-remembered")
 
-		xdg, err := nativehermes.CreateXDGDirs(agent.homeRoot(), "keep")
+		xdg, err := testGenerationXDG(agent.options.ScratchDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1813,6 +2414,12 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 		agent.forgetDeleteCleanupIfDone("keep")
 		if _, ok := agent.deleteCleanup["keep"]; !ok {
 			t.Fatal("cleanup metadata was forgotten while XDG root still existed")
+		}
+
+		agent.deleteCleanup["gone"] = deleteCleanupRecord{SessionID: "gone", XDGRoot: filepath.Join(xdg.Root, "removed")}
+		agent.forgetDeleteCleanupIfDone("gone")
+		if _, ok := agent.deleteCleanup["gone"]; ok {
+			t.Fatal("cleanup metadata survived a runtime root that is already gone")
 		}
 
 		cancelled, cancel := context.WithCancel(ctx)
@@ -1828,7 +2435,7 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 		for _, name := range []string{"list", "load", "delete"} {
 			t.Run("entrypoint retry error "+name, func(t *testing.T) {
 				entryAgent := newTestAgent(WithScratchDir(t.TempDir()))
-				entryXDG, err := nativehermes.CreateXDGDirs(entryAgent.options.ScratchDir, name)
+				entryXDG, err := testGenerationXDG(entryAgent.options.ScratchDir)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1866,7 +2473,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 
 		parentClient := newFakeHermesClient()
 		parentClient.forkSession = testNativeSession("native-child")
-		parentClient.xdg, _ = nativehermes.CreateXDGDirs(t.TempDir(), "parent")
+		parentClient.xdg, _ = testGenerationXDG(t.TempDir())
 		parentAgent := newTestAgent()
 		parent := testSession(parentAgent, parentClient)
 		parentAgent.sessions[parent.id] = parent
@@ -1889,7 +2496,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		if parentClient.forkCallCount() != forkCalls+1 || len(parentClient.deleted) == 0 || parentClient.deleted[len(parentClient.deleted)-1] != "native-child" {
 			t.Fatal("post-branch clone failure did not compensate the durable child")
 		}
-		parentClient.xdg, _ = nativehermes.CreateXDGDirs(t.TempDir(), "parent")
+		parentClient.xdg, _ = testGenerationXDG(t.TempDir())
 
 		factoryErrAgent := newTestAgent(func(options *Options) {
 			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -2283,16 +2890,7 @@ func testProviders() nativehermes.ProvidersResponse {
 		ID:   "openai",
 		Name: "OpenAI",
 		Models: map[string]nativehermes.ProviderModel{
-			"gpt-test": {
-				ID:   "gpt-test",
-				Name: "GPT Test",
-				Limit: map[string]any{
-					"context": float64(1000),
-					"output":  float64(200),
-				},
-				Reasoning: true,
-				ToolCall:  true,
-			},
+			"gpt-test":  {ID: "gpt-test", Name: "GPT Test"},
 			"gpt-other": {ID: "gpt-other", Name: "GPT Other"},
 		},
 	}}}
@@ -3135,4 +3733,104 @@ func TestAdmitSharedHermesConfigSurfacesRedactionFailure(t *testing.T) {
 	if err := agent.admitSharedHermesConfig(nil); !errors.Is(err, wantErr) {
 		t.Fatalf("redaction error = %v", err)
 	}
+}
+
+type failNthIDReader struct {
+	reads  int
+	failAt int
+}
+
+func (r *failNthIDReader) Read(buffer []byte) (int, error) {
+	r.reads++
+	if r.reads == r.failAt {
+		return 0, errors.New("lifecycle stream id failed")
+	}
+
+	for index := range buffer {
+		buffer[index] = byte(r.reads + index)
+	}
+
+	return len(buffer), nil
+}
+
+func installFailingLifecycleIDReader(t *testing.T, failAt int) {
+	t.Helper()
+
+	original := sessionIDRandReader
+	t.Cleanup(func() { sessionIDRandReader = original })
+	sessionIDRandReader = &failNthIDReader{failAt: failAt}
+}
+
+func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
+	negotiated := lifecycle.Negotiated{
+		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+	}
+
+	t.Run("new", func(t *testing.T) {
+		client := newFakeHermesClient()
+		client.createSession = testNativeSession("native-new")
+		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				xdg, err := testGenerationXDG(opts.ScratchParent)
+				if err != nil {
+					return nil, err
+				}
+				client.xdg = xdg
+
+				return client, nil
+			}
+		})
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 2)
+
+		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.True(t, client.closed)
+	})
+
+	t.Run("load", func(t *testing.T) {
+		store := NewInMemorySessionStore()
+		client := newFakeHermesClient()
+		client.getSession = testNativeSession("native-1")
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				client.xdg = opts.ExistingXDG
+
+				return client, nil
+			}
+		})
+		seed := testSession(agent, newFakeHermesClient())
+		require.NoError(t, seed.snapshotToStore(t.Context()))
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 1)
+
+		_, err := agent.loadOrResumeSession(t.Context(), seed.id, seed.cwd, nil, nil, nil, false)
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.True(t, client.closed)
+	})
+
+	t.Run("fork with incomplete cleanup", func(t *testing.T) {
+		parentClient := newFakeHermesClient()
+		parentClient.forkSession = testNativeSession("native-child")
+		childClient := newFakeHermesClient()
+		childClient.getSession = testNativeSession("native-child")
+		childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
+				childClient.xdg = opts.ExistingXDG
+
+				return childClient, nil
+			}
+		})
+		parent := testSession(agent, parentClient)
+		agent.sessions[parent.id] = parent
+		agent.retainNegotiatedLifecycle(negotiated)
+		installFailingLifecycleIDReader(t, 2)
+
+		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{
+			SessionId: parent.id, Cwd: t.TempDir(),
+		})
+		require.ErrorContains(t, err, "lifecycle stream id failed")
+		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
+	})
 }

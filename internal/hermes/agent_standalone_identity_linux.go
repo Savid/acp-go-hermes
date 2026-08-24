@@ -2027,7 +2027,7 @@ func validateAgentStandaloneMarkerBindings(
 		if owner, bound := owners[uid]; bound {
 			ownerDigest := agentStandaloneOwnerDigest(owner)
 			if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
-				return fmt.Errorf("standalone owner uid %d has an incompatible retained marker", uid)
+				return fmt.Errorf("standalone owner uid %d has a conflicting retained marker", uid)
 			}
 
 			continue
@@ -2692,7 +2692,7 @@ func validateAgentStandaloneRetainedActiveDisposition(
 
 	ownerDigest := agentStandaloneOwnerDigest(owner)
 	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.OwnerDigest != ownerDigest || len(marker.Paths) != 0 {
-		return errors.New("standalone owner has an incompatible retained ACTIVE marker")
+		return errors.New("standalone owner has a conflicting retained ACTIVE marker")
 	}
 
 	return nil

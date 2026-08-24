@@ -37,7 +37,7 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	executable := filepath.Join(dir, "hermes")
 	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700))
 	isolation := &ProcessIsolation{
-		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one", "HERMES_AUTH_HOME": "/legacy/base"},
+		UID: 11, GID: 22, BaseEnvironment: map[string]string{"PATH": dir, "BASE": "one"},
 		StandaloneOwnerID: standaloneTestOwnerID, StandaloneStateRoot: standaloneTestStateRoot,
 	}
 	// Entering through the mode selector is what proves the explicit arm: an
@@ -46,22 +46,20 @@ func TestProcessIsolationEnvironmentIdentityAndLookup(t *testing.T) {
 	environment, err := processLaunchEnvironment(ProcessOptions{
 		Isolation:          isolation,
 		AmbientEnvironment: map[string]string{"AMBIENT_ISOLATION_CANARY": "must-not-leak"},
-		Env:                map[string]string{"BASE": "two", "EXPLICIT": "yes", "hermes_auth_home": "/legacy/overlay"},
+		Env:                map[string]string{"BASE": "two", "EXPLICIT": "yes"},
 	})
 	require.NoError(t, err)
 	require.Contains(t, environment, "BASE=two")
 	require.Contains(t, environment, "EXPLICIT=yes")
 	require.NotContains(t, environment, "AMBIENT_ISOLATION_CANARY=must-not-leak")
-	require.Empty(t, envValueFold(environment, envHermesAuthHome, true))
 	sessionEnvironment, err := processSessionLaunchEnvironment(ProcessOptions{
 		Isolation:  isolation,
 		Env:        map[string]string{"STATIC": "base"},
-		SessionEnv: map[string]string{"SESSION": "carrier", "HERMES_AUTH_HOME": "/legacy/session"},
+		SessionEnv: map[string]string{"SESSION": "carrier"},
 	})
 	require.NoError(t, err)
 	require.Contains(t, sessionEnvironment, "STATIC=base")
 	require.Contains(t, sessionEnvironment, "SESSION=carrier")
-	require.Empty(t, envValueFold(sessionEnvironment, envHermesAuthHome, true))
 	resolved, err := lookPathInEnvironment("hermes", environment)
 	require.NoError(t, err)
 	require.Equal(t, executable, resolved)

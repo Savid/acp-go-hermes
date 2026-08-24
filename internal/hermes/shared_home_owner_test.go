@@ -393,8 +393,16 @@ func TestSharedHomeRootIsRetainedWhenCloseContainmentIsUnproven(t *testing.T) {
 		t.Fatalf("close error = %v", closeErr)
 	}
 
-	if _, err := AcquireSharedHomeOwner(home); err == nil || !strings.Contains(err.Error(), "home root is already claimed") {
-		t.Fatalf("home root after an unproven close = %v", err)
+	typed, ok := server.(*hermesServer)
+	if !ok {
+		t.Fatalf("server type = %T", server)
+	}
+	owner, err := AcquireSharedHomeOwner(home)
+	if err != nil || owner != typed.sharedHomeOwner {
+		t.Fatalf("unproven close lost its process-local home owner: owner=%p want=%p err=%v", owner, typed.sharedHomeOwner, err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatalf("release verification reference: %v", err)
 	}
 	if _, err := acquireSharedACPSessionOwner(home, "unproven-close"); err == nil || !strings.Contains(err.Error(), "already active") {
 		t.Fatalf("session claim after an unproven close = %v", err)

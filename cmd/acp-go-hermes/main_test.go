@@ -105,7 +105,11 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	}
 }
 
-func TestRunContainmentAndRemovedDarwinFlag(t *testing.T) {
+// TestRunContainmentDispatchAndUndefinedFlag pins two rules of the entrypoint's
+// argument handling: the containment subcommand is dispatched rather than parsed
+// as flags, and a flag this binary does not define is refused with the parser's
+// own diagnostic instead of being ignored.
+func TestRunContainmentDispatchAndUndefinedFlag(t *testing.T) {
 	restore := replaceGlobals(t)
 	defer restore()
 	var stdout, stderr bytes.Buffer
@@ -114,11 +118,11 @@ func TestRunContainmentAndRemovedDarwinFlag(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if code := run(context.Background(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
-		t.Fatalf("removed Darwin flag code = %d", code)
+	if code := run(context.Background(), []string{"-not-a-flag"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
+		t.Fatalf("undefined flag code = %d", code)
 	}
 	if !strings.Contains(stderr.String(), "flag provided but not defined") {
-		t.Fatalf("removed Darwin flag stderr = %q", stderr.String())
+		t.Fatalf("undefined flag stderr = %q", stderr.String())
 	}
 }
 

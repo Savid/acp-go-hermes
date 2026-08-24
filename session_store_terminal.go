@@ -10,12 +10,21 @@ import (
 	"strings"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 )
 
-// SessionStoreTerminalState is the durable terminal assistant identity from one
-// committed hermes-state-db-v1 main snapshot.
+// SessionStoreTerminalState is the durable foreground boundary of one committed
+// hermes-state-db-v1 main snapshot: the terminal assistant identity the native
+// archive holds, and the truthful outcome the wrapper recorded for the last
+// accepted turn.
+//
+// MessageID is empty until a turn completes a finished assistant row. Outcome
+// and StopReason are empty until an accepted turn settles; StopReason stays
+// empty when Outcome is `failed`, because no ACP v1 stop reason names a failure.
 type SessionStoreTerminalState struct {
-	MessageID string
+	MessageID  string
+	Outcome    string
+	StopReason string
 }
 
 // InspectSessionStoreTerminalState validates exactly one current-format main
@@ -63,7 +72,7 @@ func InspectSessionStoreTerminalState(
 		return SessionStoreTerminalState{}, fmt.Errorf("validate Hermes session-store main snapshot: %w", err)
 	}
 
-	return publicTerminalState(snapshot.Terminal), nil
+	return publicTerminalState(snapshot.Terminal, snapshot.Wrapper.Foreground), nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {
@@ -151,7 +160,40 @@ func validateStateSnapshotRequiredSections(snapshot stateSnapshot) error {
 		return errors.New("wrapper section is required")
 	}
 
+	if err := validateStateSnapshotForeground(snapshot.Wrapper.Foreground); err != nil {
+		return err
+	}
+
 	return validateStateSnapshotTerminal(snapshot.Terminal)
+}
+
+// validateStateSnapshotForeground rejects a recorded foreground boundary that
+// could not have happened: an unnamed incarnation or turn, an outcome outside the
+// closed set, and a stop reason that either contradicts a failure or is missing
+// where the outcome requires one.
+func validateStateSnapshotForeground(foreground *stateSnapshotForeground) error {
+	if foreground == nil {
+		return nil
+	}
+
+	if (foreground.StreamID == "") != (foreground.TurnID == "") || foreground.CapturedAtUnixMilli <= 0 {
+		return errors.New("recorded foreground boundary is missing its incarnation identity")
+	}
+
+	if !lifecycle.Outcome(foreground.Outcome).Valid() {
+		return fmt.Errorf("recorded foreground outcome %q is unsupported", foreground.Outcome)
+	}
+
+	failed := lifecycle.Outcome(foreground.Outcome) == lifecycle.OutcomeFailed
+	if failed != (foreground.StopReason == "") {
+		return errors.New("recorded foreground boundary states a stop reason its outcome does not")
+	}
+
+	if !failed && !lifecycle.ValidStopReason(foreground.StopReason) {
+		return fmt.Errorf("recorded foreground stop reason %q is unsupported", foreground.StopReason)
+	}
+
+	return nil
 }
 
 func validHistoryMessageID(messageID string) bool {
@@ -212,25 +254,44 @@ func validateTerminalTransition(
 	return nil
 }
 
-func publicTerminalState(terminal *stateSnapshotTerminal) SessionStoreTerminalState {
-	if terminal == nil {
-		return SessionStoreTerminalState{}
+func publicTerminalState(
+	terminal *stateSnapshotTerminal,
+	foreground *stateSnapshotForeground,
+) SessionStoreTerminalState {
+	state := SessionStoreTerminalState{}
+	if terminal != nil {
+		state.MessageID = terminal.MessageID
 	}
 
-	return SessionStoreTerminalState{MessageID: terminal.MessageID}
+	if foreground != nil {
+		state.Outcome = foreground.Outcome
+		state.StopReason = foreground.StopReason
+	}
+
+	return state
 }
 
 func (s *session) committedTerminalState() SessionStoreTerminalState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	terminal := s.committedTerminal
+	terminal := s.committed.terminal
 
 	return terminal
 }
 
+// terminalResponseMeta reports the durable boundary the prompt response is
+// ordered against: the committed assistant identity plus the outcome the store
+// recorded for that turn. StopReason is omitted where none names the outcome.
 func terminalResponseMeta(terminal SessionStoreTerminalState) map[string]any {
-	return map[string]any{
-		hermesMetaKey: map[string]any{keyMessageID: terminal.MessageID},
+	hermes := map[string]any{
+		keyMessageID:  terminal.MessageID,
+		keyOutcome:    lifecycle.Outcome(terminal.Outcome),
+		keyStopReason: terminal.StopReason,
 	}
+	if terminal.StopReason == "" {
+		delete(hermes, keyStopReason)
+	}
+
+	return map[string]any{hermesMetaKey: hermes}
 }

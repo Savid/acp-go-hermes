@@ -1,0 +1,74 @@
+{
+  "name": "carrier-precedes-ordering",
+  "purpose": "Carrier legality is structural: the envelope rides its carrier, so the carrier is classified before ordering is checked. A carrier a conformant client may coalesce is no evidence that the sequence it claims was ever delivered, so this reports the illegal carrier even though the same frame also skips a sequence.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 1,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "idle", "cycleId": "cyc-0"},
+              "activities": [],
+              "actions": [],
+              "quiescence": {"quiescent": true, "source": "process-containment", "watermark": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "tool-1",
+          "status": "in_progress"
+        },
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 4,
+            "event": {
+              "type": "prompt_accepted",
+              "submissionId": "sub-1",
+              "clientNonce": "non-1",
+              "turnId": "turn-1"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "illegal_carrier",
+    "atInput": 1,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 1,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "idle", "cycleId": "cyc-0"},
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": true, "source": "process-containment", "watermark": 0},
+      "closed": false
+    }
+  }
+}

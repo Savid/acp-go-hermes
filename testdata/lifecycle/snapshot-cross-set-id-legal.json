@@ -1,0 +1,100 @@
+{
+  "name": "snapshot-cross-set-id-legal",
+  "purpose": "Uniqueness is per set because activities and actions are distinct id spaces. The same opaque string naming an activity in one set and an action in the other is two entities, not a collision: a sibling minting both from one native counter is emitting a legal stream. The snapshot reduces, and the later patches prove the two were never conflated — the action resolves while the activity stays live, and each reaches its own state.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "ent-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                }
+              ],
+              "actions": [
+                {
+                  "actionId": "ent-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "turn", "id": "turn-1"},
+                  "blocksForeground": false
+                }
+              ],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 13,
+            "event": {
+              "type": "action_update",
+              "action": {"actionId": "ent-1", "state": "accepted"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 14,
+            "event": {
+              "type": "activity_update",
+              "activity": {"activityId": "ent-1", "state": "completed"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "accepted",
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 14,
+      "suppressedRetransmissions": 0,
+      "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1"},
+      "turns": [{"turnId": "turn-1", "origin": "submission", "terminal": false}],
+      "activities": [{"activityId": "ent-1", "kind": "task", "state": "completed", "originTurnId": "turn-1"}],
+      "actions": [{"actionId": "ent-1", "kind": "permission", "state": "accepted", "owner": {"type": "turn", "id": "turn-1"}, "blocksForeground": false}],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

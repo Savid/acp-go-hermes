@@ -51,7 +51,7 @@ func containmentMode(options Options) RuntimeContainmentMode {
 }
 
 func validateContainmentOptions(options Options) error {
-	// The two explicit options name incompatible boundaries: an explicit
+	// The two explicit options name mutually exclusive boundaries: an explicit
 	// hardened identity policy cannot be downgraded to a process-group
 	// approximation, so asking for both is a configuration error rather than a
 	// precedence question.

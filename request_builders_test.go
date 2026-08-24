@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -191,7 +192,8 @@ func TestPromptMappingHelpers(t *testing.T) {
 		t.Fatalf("usage = %#v", usage)
 	}
 	for _, reason := range []string{"length", "cancelled", "refusal", "stop"} {
-		if stopReasonFromHermes(reason) == "" {
+		stopReason, _, mapped := terminalOutcomeFromHermes(reason)
+		if !mapped || stopReason == "" {
 			t.Fatalf("empty stop reason for %q", reason)
 		}
 	}
@@ -205,27 +207,11 @@ func TestPromptMappingHelpers(t *testing.T) {
 			t.Fatalf("empty tool kind for %q", tool)
 		}
 	}
-	for _, priority := range []string{"high", "low", "medium"} {
-		if planPriority(priority) == "" {
-			t.Fatalf("empty plan priority for %q", priority)
-		}
-	}
-	for _, status := range []string{"completed", "in_progress", "pending"} {
-		if planStatus(status) == "" {
-			t.Fatalf("empty plan status for %q", status)
-		}
-	}
 	if questionElicitationMessage([]nativehermes.QuestionInfo{{Question: "Only?"}}) != "Only?" {
 		t.Fatal("single question message mismatch")
 	}
 	if got := questionOptionSchemas([]nativehermes.QuestionOption{{Label: ""}, {Label: "A"}}); len(got) != 1 {
 		t.Fatalf("questionOptionSchemas = %#v", got)
-	}
-	if req, ok := eventQuestion(json.RawMessage(`{"request":{"id":"q","sessionID":"s"}}`)); !ok || req.ID != "q" {
-		t.Fatalf("eventQuestion wrapper = %#v ok=%v", req, ok)
-	}
-	if _, ok := eventQuestion(json.RawMessage(`{}`)); ok {
-		t.Fatal("empty event question parsed")
 	}
 }
 
@@ -308,7 +294,7 @@ func TestAgentConnectionHelpers(t *testing.T) {
 	if requestError(ctx, errors.New("boom")).Code != -32603 {
 		t.Fatal("generic error did not map to internal error")
 	}
-	gate := newConnectionInputGate(strings.NewReader("x"))
+	gate := newConnectionInputGate(strings.NewReader("x\n"))
 	gate.open()
 	buf := make([]byte, 1)
 	if n, err := gate.Read(buf); n != 1 || err != nil || string(buf) != "x" {
@@ -409,7 +395,20 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	if _, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{}); err == nil {
 		t.Fatal("SetSessionMode accepted")
 	}
-	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id}); err != nil {
+	// An unrouted cancel authorizes nothing, so it neither cancels the session
+	// nor reaches the gateway.
+	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id}); err == nil {
+		t.Fatal("unrouted Cancel was applied")
+	}
+	if session.wasCancelled() || client.abortCount() != 0 {
+		t.Fatal("unrouted Cancel touched session/client")
+	}
+	session.mu.Lock()
+	session.turnNonce = "builder-turn"
+	session.turnEpoch = 1
+	session.turnInFlight = true
+	session.mu.Unlock()
+	if err := agent.Cancel(ctx, acp.CancelNotification{SessionId: session.id, Meta: turnRouteMeta("builder-turn")}); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
 	if !session.wasCancelled() && client.abortCount() == 0 {
@@ -436,4 +435,55 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	if _, err := io.Copy(io.Discard, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestBuildersRejectReservedCallerMeta pins the one place a family-global
+// reserved literal can reach a request this package builds. `acp-go.dev/*` is
+// stamped by this package and read by every sibling, so a host key inside it is
+// refused rather than merged (which would put a host value where a reader
+// expects a family envelope) or overwritten (which would silently discard what
+// the host asked for).
+func TestBuildersRejectReservedCallerMeta(t *testing.T) {
+	reserved := []string{
+		routeMetaKey,
+		handoffMetaKey,
+		mediaEnvelopeMetaKey,
+		lifecycle.MetaKey,
+		"acp-go.dev/notYetInvented",
+	}
+
+	for _, key := range reserved {
+		meta := map[string]any{key: map[string]any{"version": 1}}
+
+		requireBuilderRejection(t, key, func() { WithSessionMeta(meta) })
+		requireBuilderRejection(t, key, func() { WithListSessionsMeta(meta) })
+	}
+
+	// A host's own namespace, and this adapter's, are merged as before.
+	allowed := map[string]any{"host.example/trace": "t", hermesMetaKey: map[string]any{"options": map[string]any{}}}
+	request := NewSessionRequest("/tmp/project", WithSessionMeta(allowed))
+	if request.Meta["host.example/trace"] != "t" {
+		t.Fatalf("caller meta was not merged: %#v", request.Meta)
+	}
+	listed := ListSessionsRequest(WithListSessionsMeta(allowed))
+	if listed.Meta["host.example/trace"] != "t" {
+		t.Fatalf("caller list meta was not merged: %#v", listed.Meta)
+	}
+}
+
+func requireBuilderRejection(t *testing.T, key string, build func()) {
+	t.Helper()
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("builder accepted the reserved caller meta key %q", key)
+		}
+		message, ok := recovered.(string)
+		if !ok || !strings.Contains(message, key) {
+			t.Fatalf("builder rejection did not name %q: %#v", key, recovered)
+		}
+	}()
+
+	build()
 }

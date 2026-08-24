@@ -25,8 +25,13 @@ agent := hermesacp.NewAgent(
 `WithSessionStoreLoadTimeout` bounds each store read; it defaults to 10
 seconds. Snapshot capture and commit — including native history reads through
 the atomic `Replace` — and `session/delete` tombstones run under a separate
-fixed 60-second bound, so they do not inherit the store-read budget. The
-`SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
+fixed 60-second bound, so they do not inherit the store-read budget. A commit
+that would land on an already-tombstoned session id publishes nothing, so a
+turn settling behind a `session/delete` never issues a `Replace` that clears a
+tombstone it did not create. One `Replace` states each key's whole content
+exactly once: a replacement list naming the same key twice is refused with an
+error naming that key, never settled by list position. The `SessionStore`
+interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
 `ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
 
 ## Snapshot shape
@@ -111,8 +116,10 @@ is never adopted. On Darwin best effort, completion does not establish that a
 `session/close` captures its final eligible snapshot before stopping the native
 client, because managed client shutdown removes the isolated XDG root. Close
 still skips snapshotting while a turn, permission, elicitation, or generation
-is pending, and it always proceeds with native teardown even if the snapshot
-fails.
+is pending. When an eligible mandatory capture fails, close returns before
+native teardown or lifecycle fencing and leaves the close-only session
+addressable; a retry captures again. Once capture succeeds, its publication
+completes before the session id is detached.
 
 <Note>
 Snapshots exclude credential-bearing files and scrub credential tables from the

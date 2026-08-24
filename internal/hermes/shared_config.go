@@ -24,7 +24,6 @@ import (
 const (
 	sharedConfigLockName        = "config.lock"
 	sharedConfigFingerprintName = "config.sha256"
-	sharedHermesVersionName     = "version"
 	sharedMCPSecretEnvPrefix    = "ACP_GO_HERMES_MCP_"
 )
 
@@ -118,35 +117,6 @@ func validateSharedHermesDotEnv(home string, files map[string]string) error {
 	}
 
 	return nil
-}
-
-func bindSharedHermesVersion(ctx context.Context, home string, version string) error {
-	if version == "" {
-		return errors.New("shared Hermes home requires an exactly probed Hermes version")
-	}
-
-	return withHermesConfigLock(ctx, home, func(control string) error {
-		path := filepath.Join(control, sharedHermesVersionName)
-
-		current, err := os.ReadFile(path)
-		if err == nil {
-			if string(current) != version {
-				return fmt.Errorf("shared Hermes home is bound to Hermes %s, not %s", current, version)
-			}
-
-			return nil
-		}
-
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read shared Hermes version binding: %w", err)
-		}
-
-		if err := sharedAtomicWriteFile(path, []byte(version), 0o600); err != nil {
-			return fmt.Errorf("commit shared Hermes version binding: %w", err)
-		}
-
-		return nil
-	})
 }
 
 func validateSharedHermesConfigFile(home string) error {

@@ -120,6 +120,15 @@ func (s *managedHermesServer) ProviderDescendantCount() (int, bool) {
 	return inventory.ProviderDescendantCount()
 }
 
+func (s *managedHermesServer) ProviderTreeVacant() (bool, bool) {
+	inventory, ok := s.Server.(providerTreeInventory)
+	if !ok {
+		return false, false
+	}
+
+	return inventory.ProviderTreeVacant()
+}
+
 func (s *managedHermesServer) ProviderAuthSupported() bool {
 	if s.providerAuthSupported {
 		return true

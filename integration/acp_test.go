@@ -277,6 +277,29 @@ func TestHermesACPAgentBinarySessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestHermesDirectSessionDeletionDrainsGatewayBeforeContainment(t *testing.T) {
+	requireRunIntegration(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
+	defer cancel()
+	agent := hermesacp.NewAgent(
+		hermesacp.WithExecutablePath(integrationHermesPath(t)),
+		hermesacp.WithScratchDir(t.TempDir()),
+		integrationContainmentOption(),
+	)
+	defer func() {
+		if err := agent.Close(); err != nil {
+			t.Errorf("close agent: %v", err)
+		}
+	}()
+	session, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new session: %T %v", err, err)
+	}
+	if _, err := agent.UnstableDeleteSession(ctx, hermesacp.DeleteSessionRequest(session.SessionId)); err != nil {
+		t.Fatalf("delete session: %T %#v %v", err, err, err)
+	}
+}
+
 func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	requireRunLiveTokens(t)
 
@@ -346,7 +369,11 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 
-	permissionPrompt := envOrDefault("ACP_GO_HERMES_PERMISSION_PROMPT", "Your only task this turn is to run a single shell command. As your very first action, and without emitting any explanatory prose, call your terminal tool exactly once to run this exact command verbatim, without modifying, wrapping, or substituting any part of it: chmod 777 acp-permission-probe.txt . Do not ask any clarifying question, do not describe what you are about to do, and do not use any other tool: issue exactly one terminal tool call with that exact command, then stop.")
+	// Narration is deliberately allowed here. Hermes streams a turn's interim
+	// commentary through the same delta stream its final response arrives on
+	// while message.complete carries the final response alone, so a narrated
+	// tool turn is the ordinary shape this probe has to survive.
+	permissionPrompt := envOrDefault("ACP_GO_HERMES_PERMISSION_PROMPT", "Your only task this turn is to run a single shell command. Call your terminal tool exactly once to run this exact command verbatim, without modifying, wrapping, or substituting any part of it: chmod 777 acp-permission-probe.txt . Do not ask any clarifying question and do not use any other tool: issue exactly one terminal tool call with that exact command, then stop.")
 	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-permission", permissionPrompt)); err != nil {
 		t.Fatalf("permission prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}
@@ -354,7 +381,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 		t.Fatalf("native Hermes prompt did not emit approval.request; adapter surfaced no permission request for a dangerous terminal command; updates:\n%s\nagentText:\n%s\nstderr:\n%s", client.updatesSummary(), client.agentText(), agent.stderrString())
 	}
 
-	questionPrompt := envOrDefault("ACP_GO_HERMES_QUESTION_PROMPT", `Before doing anything else, you MUST use your question tool to ask the user exactly one question: "Continue?" offering the two options "Yes" and "No". Do not answer, explain, or take any other action until you have asked this question through the question tool and received the user's selection. After you receive the answer, stop.`)
+	questionPrompt := envOrDefault("ACP_GO_HERMES_QUESTION_PROMPT", `You MUST use your question tool to ask the user exactly one question: "Continue?" offering the two options "Yes" and "No". Take no other action until you have asked this question through the question tool and received the user's selection. After you receive the answer, stop.`)
 	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-question", questionPrompt)); err != nil {
 		t.Fatalf("question prompt: %v\nstderr:\n%s", err, agent.stderrString())
 	}

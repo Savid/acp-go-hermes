@@ -1,0 +1,59 @@
+{
+  "name": "snapshot-dangling-parent",
+  "purpose": "A snapshot's references resolve inside the snapshot. An activity naming a parent absent from the snapshot's own sets is refused rather than reduced as unattached state: there is no carve-out for a parent terminalized before the stream opened, because a nonterminal child of a terminal parent is a state no stream may assert. A refused snapshot opens nothing, so the projection is untouched.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 7,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "act-2",
+                  "kind": "subagent",
+                  "state": "running",
+                  "parentId": "act-1",
+                  "cause": "activity",
+                  "originTurnId": "turn-1"
+                }
+              ],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "unknown_entity",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

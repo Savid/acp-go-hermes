@@ -1,0 +1,65 @@
+{
+  "name": "snapshot-duplicate-activity",
+  "purpose": "A snapshot's activities are a set, not a list: one activityId names one activity. A snapshot listing the same id twice asserts two current states for one entity, and there is no reading that recovers which one is meant — not even here, where the two entries are identical, because a whole-state assertion is judged whole or not at all rather than repaired by deduplication. It is malformed, and a refused snapshot opens nothing.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                },
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                }
+              ],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

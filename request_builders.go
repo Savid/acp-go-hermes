@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
 
 const (
+	// reservedMetaNamespace is the family-global literal namespace. Everything
+	// under it is stamped by this package and read by every sibling, so no caller
+	// meta map may name it.
+	reservedMetaNamespace = "acp-go.dev/"
+
 	metaOptionsKey       = "options"
 	metaModelKey         = "model"
 	metaEnvKey           = "env"
@@ -126,7 +132,18 @@ func WithSessionAdditionalDirectories(paths ...string) SessionRequestOption {
 	}
 }
 
+// WithSessionMeta merges host-supplied metadata into a session lifecycle
+// request's `_meta`. The `acp-go.dev/*` namespace is family-global and reserved:
+// its envelopes are stamped by this package and read by every sibling, so a
+// caller key inside it is refused rather than merged or overwritten. A merged
+// one would put a host's value where a reader expects a family envelope; an
+// overwritten one would silently discard what the host asked for. Neither is a
+// request this builder can honestly produce, and there is no return value to
+// carry the refusal, so it panics — the caller is a program naming a namespace
+// that is not its own.
 func WithSessionMeta(meta map[string]any) SessionRequestOption {
+	rejectReservedCallerMeta("WithSessionMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(config *sessionRequestConfig) {
@@ -259,11 +276,28 @@ func WithListSessionsCursor(cursor string) ListSessionsRequestOption {
 	}
 }
 
+// WithListSessionsMeta merges host-supplied metadata into a `session/list`
+// request's `_meta`, on the same reserved-namespace terms as
+// [WithSessionMeta].
 func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption {
+	rejectReservedCallerMeta("WithListSessionsMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(req *acp.ListSessionsRequest) {
 		req.Meta = mergeAnyMap(req.Meta, cloned)
+	}
+}
+
+// rejectReservedCallerMeta refuses a caller `_meta` map that names the
+// family-global reserved namespace. The set of `acp-go.dev/*` literals is closed
+// and every one of them is stamped by this package, so the whole prefix is
+// refused: a key nobody stamps today is still not the caller's to claim.
+func rejectReservedCallerMeta(builder string, meta map[string]any) {
+	for key := range meta {
+		if strings.HasPrefix(key, reservedMetaNamespace) {
+			panic(builder + ": reserved family meta key " + key)
+		}
 	}
 }
 

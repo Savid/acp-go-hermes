@@ -2,6 +2,7 @@
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -28,34 +29,114 @@ const (
 	// killing the turn on a short read; it stays bounded (16 MiB) so a hostile
 	// or wedged gateway cannot drive us out of memory with one giant frame.
 	readLimitBytes = 16 * 1024 * 1024
+
+	gatewayEventDeliveryCapacity = 256
 )
 
 type Client struct {
-	conn   *websocket.Conn
-	events chan Event
-	errs   chan error
-	done   chan struct{}
+	conn       *websocket.Conn
+	deliveries chan GatewayDelivery
+	done       chan struct{}
 
-	nextID  atomic.Int64
-	writeMu sync.Mutex
+	nextID   atomic.Int64
+	sequence atomic.Uint64
+	writeMu  sync.Mutex
 
-	mu      sync.Mutex
-	pending map[int64]chan rpcResponse
-	closed  bool
+	mu       sync.Mutex
+	pending  map[int64]chan rpcResponse
+	closed   bool
+	terminal error
+	close    *clientCloseAttempt
+
+	beforeCallWait        func()
+	beforeDoneResultCheck func()
+	closeTransport        func(websocket.StatusCode, string) error
+}
+
+type clientCloseAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 type Event struct {
-	Type      string          `json:"type"`
-	SessionID string          `json:"session_id,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	Raw       json.RawMessage `json:"-"`
+	Type            string          `json:"type"`
+	SessionID       string          `json:"session_id,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Raw             json.RawMessage `json:"-"`
+	InboundSequence uint64          `json:"-"`
 }
 
+// GatewayDelivery is the gateway reader's single ordered output. A delivery
+// contains exactly one event or terminal error; clean EOF closes the channel.
+type GatewayDelivery struct {
+	Event *Event
+	Err   error
+}
+
+// GatewayWatermark identifies one response frame in a transport generation.
+// The server adds the generation when it installs the connection; Sequence is
+// the monotonic position assigned by the WebSocket reader to every inbound text
+// frame, including events and responses.
+type GatewayWatermark struct {
+	TransportGeneration uint64
+	Sequence            uint64
+}
+
+var ErrGatewayInputOverflow = errors.New("hermes gateway input overflow")
+
 type rpcResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *RPCError       `json:"error,omitempty"`
+	JSONRPC  string          `json:"jsonrpc"`
+	ID       int64           `json:"id"`
+	Result   json.RawMessage `json:"result,omitempty"`
+	Error    *RPCError       `json:"error,omitempty"`
+	sequence uint64
+}
+
+// decodeKnownRPCResponse validates the response shape before a pending call can
+// observe it. Presence is checked from raw object members: omitempty-backed Go
+// fields cannot distinguish an absent result from result:null, or an absent
+// error from error:null, and those distinctions decide whether an action RPC
+// may terminalize successfully.
+func decodeKnownRPCResponse(data []byte, sequence uint64) (rpcResponse, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return rpcResponse{}, err
+	}
+
+	var response rpcResponse
+	if err := json.Unmarshal(object["jsonrpc"], &response.JSONRPC); err != nil || response.JSONRPC != jsonrpcVersion {
+		return rpcResponse{}, errors.New("hermes JSON-RPC response has invalid version")
+	}
+
+	if err := json.Unmarshal(object["id"], &response.ID); err != nil {
+		return rpcResponse{}, fmt.Errorf("decode Hermes JSON-RPC response id: %w", err)
+	}
+
+	result, hasResult := object["result"]
+	errorValue, hasError := object["error"]
+
+	if hasResult == hasError {
+		return rpcResponse{}, errors.New("hermes JSON-RPC response requires exactly one of result or error")
+	}
+
+	if hasError {
+		var rpcErr *RPCError
+		if err := json.Unmarshal(errorValue, &rpcErr); err != nil {
+			return rpcResponse{}, fmt.Errorf("decode Hermes JSON-RPC response error: %w", err)
+		}
+
+		if rpcErr == nil {
+			return rpcResponse{}, errors.New("hermes JSON-RPC response error must be an object")
+		}
+
+		response.Error = rpcErr
+	} else {
+		response.Result = append(response.Result[:0], result...)
+	}
+
+	response.sequence = sequence
+
+	return response, nil
 }
 
 type RPCError struct {
@@ -84,6 +165,12 @@ type rpcRequest struct {
 	Params  any    `json:"params,omitempty"`
 }
 
+type rpcErrorEnvelope struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Error   RPCError        `json:"error"`
+}
+
 func Dial(ctx context.Context, url string, header http.Header) (*Client, error) {
 	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: header})
 	if resp != nil && resp.Body != nil {
@@ -101,62 +188,75 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 	conn.SetReadLimit(readLimitBytes)
 
 	client := &Client{
-		conn:    conn,
-		events:  make(chan Event, 256),
-		errs:    make(chan error, 8),
-		done:    make(chan struct{}),
-		pending: make(map[int64]chan rpcResponse),
+		conn:           conn,
+		deliveries:     make(chan GatewayDelivery, gatewayEventDeliveryCapacity+1),
+		done:           make(chan struct{}),
+		pending:        make(map[int64]chan rpcResponse),
+		closeTransport: conn.Close,
 	}
 	go client.readLoop() //nolint:gosec // WebSocket reader owns the connection lifetime, not the dial context.
 
 	return client, nil
 }
 
-func (c *Client) Events() <-chan Event {
-	return c.events
-}
-
-func (c *Client) Errors() <-chan error {
-	return c.errs
+func (c *Client) Deliveries() <-chan GatewayDelivery {
+	return c.deliveries
 }
 
 // Done is closed when the read loop exits, i.e. when the underlying WebSocket
 // connection has terminated (normal close or disconnect). It carries no value
 // and never blocks a producer, so a supervisor can watch it without competing
-// with Events/Errors consumers.
+// with ordered delivery consumers.
 func (c *Client) Done() <-chan struct{} {
 	return c.done
 }
 
 func (c *Client) Close(status websocket.StatusCode, reason string) error {
 	c.mu.Lock()
-	if c.closed {
+	if attempt := c.close; attempt != nil {
 		c.mu.Unlock()
+		<-attempt.done
 
-		return nil
+		return attempt.err
 	}
 
+	attempt := &clientCloseAttempt{done: make(chan struct{})}
+	c.close = attempt
 	c.closed = true
-	pending := c.pending
 	c.pending = map[int64]chan rpcResponse{}
 	c.mu.Unlock()
 
-	for _, ch := range pending {
-		close(ch)
-	}
+	attempt.err = c.closeTransport(status, reason)
 
-	return c.conn.Close(status, reason)
+	c.mu.Lock()
+	close(attempt.done)
+	c.mu.Unlock()
+
+	return attempt.err
 }
 
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
+	_, err := c.call(ctx, method, params, out)
+
+	return err
+}
+
+func (c *Client) call(ctx context.Context, method string, params any, out any) (uint64, error) {
+	watermark, _, _, err := c.callWithWriteState(ctx, method, params, out)
+
+	return watermark, err
+}
+
+func (c *Client) callWithWriteState(ctx context.Context, method string, params any, out any) (uint64, bool, bool, error) {
 	id := c.nextID.Add(1)
 	respCh := make(chan rpcResponse, 1)
 
 	c.mu.Lock()
 	if c.closed {
+		cause := c.terminal
 		c.mu.Unlock()
 
-		return errors.New("hermes client closed")
+		return 0, false, false, gatewayTransportCause(cause)
 	}
 
 	c.pending[id] = respCh
@@ -171,7 +271,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 		Params:  params,
 	})
 	if err != nil {
-		return err
+		return 0, false, false, err
 	}
 
 	c.writeMu.Lock()
@@ -179,30 +279,46 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	c.writeMu.Unlock()
 
 	if err != nil {
-		return err
+		return 0, false, false, gatewayTransportCause(err)
 	}
 
-	select {
-	case resp, ok := <-respCh:
-		if !ok {
-			return errors.New("hermes client closed")
-		}
-
+	resolve := func(resp rpcResponse) (uint64, bool, bool, error) {
 		if resp.Error != nil {
-			return resp.Error
+			return resp.sequence, true, true, resp.Error
 		}
 
 		if out == nil {
-			return nil
+			return resp.sequence, true, true, nil
 		}
 
-		if len(resp.Result) == 0 {
-			return nil
+		if err := json.Unmarshal(resp.Result, out); err != nil {
+			return resp.sequence, true, false, err
 		}
 
-		return json.Unmarshal(resp.Result, out)
+		return resp.sequence, true, true, nil
+	}
+
+	if c.beforeCallWait != nil {
+		c.beforeCallWait()
+	}
+
+	select {
+	case resp := <-respCh:
+		return resolve(resp)
+	case <-c.done:
+		if c.beforeDoneResultCheck != nil {
+			c.beforeDoneResultCheck()
+		}
+
+		select {
+		case resp := <-respCh:
+			return resolve(resp)
+		default:
+		}
+
+		return 0, true, false, gatewayTransportCause(c.terminalCause())
 	case <-ctx.Done():
-		return ctx.Err()
+		return 0, true, false, ctx.Err()
 	}
 }
 
@@ -212,20 +328,54 @@ func (c *Client) forget(id int64) {
 	c.mu.Unlock()
 }
 
+// claimPending is the response linearization point. The first structurally
+// classified response for an outstanding id atomically removes its waiter;
+// duplicates and late responses therefore find no channel and can never block
+// the sole reader.
+func (c *Client) claimPending(id int64) chan rpcResponse {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	waiter := c.pending[id]
+	delete(c.pending, id)
+
+	return waiter
+}
+
+func (c *Client) publishTerminal(err error) {
+	c.mu.Lock()
+
+	first := c.terminal == nil
+	if c.terminal == nil {
+		c.terminal = err
+	}
+	c.mu.Unlock()
+
+	if !first {
+		return
+	}
+
+	select {
+	case c.deliveries <- GatewayDelivery{Err: err}:
+	default:
+	}
+}
+
+func (c *Client) terminalCause() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.terminal
+}
+
 func (c *Client) readLoop() {
 	defer func() {
 		c.mu.Lock()
 		c.closed = true
-		pending := c.pending
 		c.pending = map[int64]chan rpcResponse{}
 		c.mu.Unlock()
 
-		for _, ch := range pending {
-			close(ch)
-		}
-
-		close(c.events)
-		close(c.errs)
+		close(c.deliveries)
 		close(c.done)
 	}()
 
@@ -236,10 +386,7 @@ func (c *Client) readLoop() {
 				return
 			}
 
-			select {
-			case c.errs <- err:
-			default:
-			}
+			c.publishTerminal(err)
 
 			return
 		}
@@ -248,76 +395,147 @@ func (c *Client) readLoop() {
 			continue
 		}
 
-		var probe struct {
-			ID     *int64           `json:"id,omitempty"`
-			Method string           `json:"method,omitempty"`
-			Params *json.RawMessage `json:"params,omitempty"`
+		sequence := c.sequence.Add(1)
+
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil || object == nil {
+			if err == nil {
+				err = errors.New("hermes gateway JSON-RPC frame must be an object")
+			}
+
+			c.publishTerminal(err)
+
+			return
 		}
-		if err := json.Unmarshal(data, &probe); err != nil {
+
+		methodValue, hasMethod := object["method"]
+		idValue, hasID := object["id"]
+
+		if hasMethod {
+			var method string
+			if err := json.Unmarshal(methodValue, &method); err != nil || method == "" {
+				c.publishTerminal(errors.New("hermes gateway JSON-RPC request has invalid method"))
+
+				return
+			}
+
+			params, hasParams := object["params"]
+			if method == methodEvent && !hasID && hasParams {
+				var event Event
+				if err := json.Unmarshal(params, &event); err != nil {
+					c.publishTerminal(err)
+
+					return
+				}
+
+				event.Raw = append(event.Raw[:0], data...)
+
+				event.InboundSequence = sequence
+
+				if len(c.deliveries) >= cap(c.deliveries)-1 {
+					c.publishTerminal(ErrGatewayInputOverflow)
+
+					return
+				}
+
+				c.deliveries <- GatewayDelivery{Event: &event}
+
+				continue
+			}
+
+			// A method member makes this a peer-to-client request or notification,
+			// even when its id collides with one of our outbound calls. It can never
+			// satisfy that call. Requests receive an explicit Method Not Found;
+			// unsupported notifications have no response by JSON-RPC definition.
+			if hasID && !isNullJSON(idValue) {
+				_ = c.rejectUnsupportedRequest(idValue)
+			}
+
+			continue
+		}
+
+		if hasID {
+			var id int64
+			if err := json.Unmarshal(idValue, &id); err != nil {
+				c.publishTerminal(fmt.Errorf("decode Hermes JSON-RPC response id: %w", err))
+
+				return
+			}
+
+			waiter := c.claimPending(id)
+			if waiter == nil {
+				continue
+			}
+
+			resp, responseErr := decodeKnownRPCResponse(data, sequence)
+			if responseErr != nil {
+				c.publishTerminal(responseErr)
+
+				return
+			}
+
 			select {
-			case c.errs <- err:
+			case waiter <- resp:
 			default:
 			}
 
 			continue
 		}
 
-		if probe.ID != nil {
-			var resp rpcResponse
-			if err := json.Unmarshal(data, &resp); err != nil {
-				select {
-				case c.errs <- err:
-				default:
-				}
+		c.publishTerminal(errors.New("hermes gateway JSON-RPC frame has neither method nor id"))
 
-				continue
-			}
-
-			c.mu.Lock()
-			ch := c.pending[resp.ID]
-			c.mu.Unlock()
-
-			if ch != nil {
-				ch <- resp
-			}
-
-			continue
-		}
-
-		if probe.Method == methodEvent && probe.Params != nil {
-			var event Event
-			if err := json.Unmarshal(*probe.Params, &event); err != nil {
-				select {
-				case c.errs <- err:
-				default:
-				}
-
-				continue
-			}
-
-			event.Raw = append(event.Raw[:0], data...)
-			select {
-			case c.events <- event:
-			default:
-			}
-		}
+		return
 	}
 }
 
+func (c *Client) rejectUnsupportedRequest(id json.RawMessage) bool {
+	if err := c.writeUnsupportedRequest(id); err != nil {
+		c.publishTerminal(err)
+		_ = c.conn.CloseNow()
+
+		return false
+	}
+
+	return true
+}
+
+func isNullJSON(value json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+}
+
+func (c *Client) writeUnsupportedRequest(id json.RawMessage) error {
+	data, _ := json.Marshal(rpcErrorEnvelope{
+		JSONRPC: jsonrpcVersion,
+		ID:      append(json.RawMessage(nil), id...),
+		Error:   RPCError{Code: -32601, Message: "Method not found"},
+	}) // id is a member of an already-decoded JSON object and the other fields have fixed encodings.
+
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+
+	c.writeMu.Lock()
+	err := c.conn.Write(ctx, websocket.MessageText, data)
+	c.writeMu.Unlock()
+
+	return err
+}
+
+// SessionCreateResult and SessionResumeResult name the two identities a new or
+// resumed session answers with. Both responses also carry a message projection
+// and a session-info block; replay reads history through session.history, so
+// neither is decoded here.
 type SessionCreateResult struct {
-	SessionID       string          `json:"session_id"`
-	StoredSessionID string          `json:"stored_session_id"`
-	MessageCount    int             `json:"message_count"`
-	Messages        []Message       `json:"messages"`
-	Info            json.RawMessage `json:"info"`
+	SessionID       string `json:"session_id"`
+	StoredSessionID string `json:"stored_session_id"`
 }
 
 type SessionResumeResult struct {
-	SessionID    string          `json:"session_id"`
-	SessionKey   string          `json:"session_key"`
-	MessageCount int             `json:"message_count"`
-	Messages     []Message       `json:"messages"`
-	Info         json.RawMessage `json:"info"`
+	SessionID  string `json:"session_id"`
+	SessionKey string `json:"session_key"`
+}
+
+type PromptSubmitResult struct {
+	Status string `json:"status"`
 }
 
 type SessionTitleResult struct {
@@ -326,14 +544,16 @@ type SessionTitleResult struct {
 }
 
 type SessionHistoryResult struct {
-	Count    int       `json:"count"`
 	Messages []Message `json:"messages"`
 }
 
+// Message is one row of the gateway's session.history projection. The gateway
+// renders every visible row as {"role", "text"}; a tool row carries no text at
+// all, so an empty Text is a row with nothing to replay, never a missed key.
 type Message struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-	Raw     json.RawMessage `json:"-"`
+	Role string          `json:"role"`
+	Text string          `json:"text"`
+	Raw  json.RawMessage `json:"-"`
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {
@@ -363,10 +583,8 @@ type ActiveSession struct {
 
 // PersistedSession is one durable state.db row returned by session.list.
 type PersistedSession struct {
-	SessionID    string `json:"id"`
-	Title        string `json:"title"`
-	MessageCount int    `json:"message_count"`
-	Source       string `json:"source"`
+	SessionID string `json:"id"`
+	Title     string `json:"title"`
 }
 
 type SessionListResult struct {
@@ -394,38 +612,23 @@ func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Provider is one row of the gateway's model catalogue. The row also carries
+// authentication state, pricing, featured hints, and a per-model capability map
+// ({model: {fast, reasoning}}); the config surface this adapter builds publishes
+// the model ids and their names, so nothing else is decoded. Raw keeps the whole
+// row for callers that need to read the catalogue as the gateway wrote it.
 type Provider struct {
-	Slug          string                             `json:"slug"`
-	Name          string                             `json:"name"`
-	AuthType      string                             `json:"auth_type"`
-	Authenticated bool                               `json:"authenticated"`
-	Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-	IsCurrent     bool                               `json:"is_current"`
-	IsUserDefined bool                               `json:"is_user_defined"`
-	KeyEnv        string                             `json:"key_env"`
-	Models        []string                           `json:"models"`
-	Pricing       map[string]ProviderModelPricing    `json:"pricing"`
-	Source        string                             `json:"source"`
-	TotalModels   int                                `json:"total_models"`
-	Warning       string                             `json:"warning"`
-	Raw           json.RawMessage                    `json:"-"`
+	Slug   string          `json:"slug"`
+	Name   string          `json:"name"`
+	Models []string        `json:"models"`
+	Raw    json.RawMessage `json:"-"`
 }
 
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	var object struct {
-		Slug          string                             `json:"slug"`
-		Name          string                             `json:"name"`
-		AuthType      string                             `json:"auth_type"`
-		Authenticated bool                               `json:"authenticated"`
-		Capabilities  map[string]ProviderModelCapability `json:"capabilities"`
-		IsCurrent     bool                               `json:"is_current"`
-		IsUserDefined bool                               `json:"is_user_defined"`
-		KeyEnv        string                             `json:"key_env"`
-		Models        json.RawMessage                    `json:"models"`
-		Pricing       map[string]ProviderModelPricing    `json:"pricing"`
-		Source        string                             `json:"source"`
-		TotalModels   int                                `json:"total_models"`
-		Warning       string                             `json:"warning"`
+		Slug   string          `json:"slug"`
+		Name   string          `json:"name"`
+		Models json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
@@ -446,32 +649,10 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 
 	p.Slug = object.Slug
 	p.Name = object.Name
-	p.AuthType = object.AuthType
-	p.Authenticated = object.Authenticated
-	p.Capabilities = object.Capabilities
-	p.IsCurrent = object.IsCurrent
-	p.IsUserDefined = object.IsUserDefined
-	p.KeyEnv = object.KeyEnv
 	p.Models = models
-	p.Pricing = object.Pricing
-	p.Source = object.Source
-	p.TotalModels = object.TotalModels
-	p.Warning = object.Warning
 	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
-}
-
-type ProviderModelCapability struct {
-	Fast      bool `json:"fast"`
-	Reasoning bool `json:"reasoning"`
-}
-
-type ProviderModelPricing struct {
-	Cache  *string `json:"cache"`
-	Free   bool    `json:"free"`
-	Input  string  `json:"input"`
-	Output string  `json:"output"`
 }
 
 type BranchResult struct {
@@ -482,14 +663,33 @@ type BranchResult struct {
 }
 
 func (c *Client) CreateSession(ctx context.Context, params map[string]any) (SessionCreateResult, error) {
-	var out SessionCreateResult
-
-	err := c.Call(ctx, "session.create", params, &out)
+	out, _, err := c.CreateSessionWatermark(ctx, params)
 
 	return out, err
 }
 
+func (c *Client) CreateSessionWatermark(
+	ctx context.Context,
+	params map[string]any,
+) (SessionCreateResult, uint64, error) {
+	var out SessionCreateResult
+
+	watermark, err := c.call(ctx, "session.create", params, &out)
+
+	return out, watermark, err
+}
+
 func (c *Client) ResumeSession(ctx context.Context, storedSessionID string, params map[string]any) (SessionResumeResult, error) {
+	out, _, err := c.ResumeSessionWatermark(ctx, storedSessionID, params)
+
+	return out, err
+}
+
+func (c *Client) ResumeSessionWatermark(
+	ctx context.Context,
+	storedSessionID string,
+	params map[string]any,
+) (SessionResumeResult, uint64, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -498,9 +698,9 @@ func (c *Client) ResumeSession(ctx context.Context, storedSessionID string, para
 
 	var out SessionResumeResult
 
-	err := c.Call(ctx, "session.resume", params, &out)
+	watermark, err := c.call(ctx, "session.resume", params, &out)
 
-	return out, err
+	return out, watermark, err
 }
 
 func (c *Client) SetSessionTitle(ctx context.Context, liveSessionID string, title string) (SessionTitleResult, error) {
@@ -565,6 +765,18 @@ func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text st
 	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, nil)
 }
 
+func (c *Client) SubmitPromptWatermark(
+	ctx context.Context,
+	liveSessionID string,
+	text string,
+) (PromptSubmitResult, uint64, bool, error) {
+	var result PromptSubmitResult
+
+	watermark, written, proven, err := c.callWithWriteState(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, &result)
+
+	return result, watermark, written && !proven, err
+}
+
 // AttachImageBytes uploads one validated image to the live session. Hermes
 // queues it for the immediately following prompt.submit call.
 //
@@ -597,8 +809,12 @@ func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {
 	return c.Call(ctx, "session.interrupt", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
-func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string, all bool) error {
-	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": all}, nil)
+// ApprovalRespond answers exactly one native approval: the session's oldest
+// waiting one. Hermes's `all` flag answers every approval queued on the session
+// with the same choice, including ones no host was ever shown, so this adapter
+// never sends it.
+func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string) error {
+	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": false}, nil)
 }
 
 func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID, requestID string, answer any) error {
@@ -654,6 +870,22 @@ func (c *Client) SetModel(ctx context.Context, liveSessionID string, value strin
 	}
 
 	return nil
+}
+
+// ModelSelectionShapeError reports why value cannot name a model selection, or
+// nil when it can. A selection is provider-qualified: two tokens split on the
+// first "/", neither empty, neither a flag, neither carrying whitespace or
+// control characters.
+//
+// The question is the string's shape and never which models exist. Hermes owns
+// that: a provider-qualified selection reaches config.set whatever it names,
+// and Hermes answers for it. Every door that must turn one host value into a
+// provider and a model asks this one predicate, so no door admits a shape
+// another door refuses.
+func ModelSelectionShapeError(value string) error {
+	_, _, err := modelSwitchCommand(value)
+
+	return err
 }
 
 func modelSwitchCommand(value string) (string, string, error) {

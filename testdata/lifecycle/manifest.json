@@ -1,0 +1,420 @@
+{
+  "version": 1,
+  "extension": "acp-go.dev/lifecycle",
+  "description": "Canonical reducer vectors for the acp-go.dev/lifecycle extension. Every fixture is a wire-level expectation: any implementation that reduces the extension envelope must reach the stated verdict from these bytes, whether it is an agent validating its own emitted stream or a host consuming one.",
+  "vectorShape": {
+    "name": "The fixture's name, matching its file name without the extension.",
+    "purpose": "Prose stating the invariant this fixture pins and the reasoning that makes the verdict the only one available.",
+    "negotiated": "The extension answer this fixture reduces under: `versions`, `updatesOutsidePrompt`, `authoritativeQuiescence`, `quiescenceSource`, and `activityKinds`.",
+    "input": "The delivered elements, in order, in the shape `inputShape` fixes.",
+    "postRefusal": "Present on `fail_closed` only, and optional: further inputs in the same shape as `input`, delivered after the refusal. Fail closed latches, so a harness MUST feed every one of them and MUST assert that each is refused with the same token at the same `(streamId, sequence)` identity and that `state` still holds afterwards. A harness that stops feeding at the first refusal cannot tell a consumer that stopped reducing from one that kept going past a verdict it had already returned.",
+    "expect": "The required verdict, in the shape `expectShape` fixes."
+  },
+  "inputShape": {
+    "notification": "An element carrying `method` and `params` is one delivered notification. JSON-RPC framing is omitted; `params` is the notification payload verbatim, with the extension envelope at `params._meta[\"acp-go.dev/lifecycle\"]`.",
+    "control": "An element carrying only `control` is an out-of-band wire event with no notification of its own. The vocabulary is closed at `session_closed`, meaning `session/close` completed for the addressed session.",
+    "comparison": "Notifications are compared as decoded values, never as encoded bytes: key order and insignificant whitespace are never differences. That is the same rule the deep-equality retransmission test uses.",
+    "waiver": "The `updatesOutsidePrompt` in-flight leg of `unnegotiated_fact` — an envelope delivered while no prompt is in flight on a configuration answering `false` — is not expressible here: this shape carries no prompt-boundary marker. It is discharged at the session layer that owns prompt boundaries, and no vector claims it."
+  },
+  "expectShape": {
+    "verdict": "`accepted` when every input reduces, `fail_closed` when one is refused.",
+    "violation": "Present on `fail_closed` only: one token from the closed violation vocabulary.",
+    "atInput": "Present on `fail_closed` only: the zero-based index into the `input` array — counting `control` elements — of the element that must be refused.",
+    "state": "The projection at the moment of refusal, taken before any fail-closed handling the consumer performs; on an `accepted` fixture, the projection after the last input. Terminalizing held entities and refusing to certify further boundaries happen after this projection is taken and are not pinned here.",
+    "stateShape": {
+      "members": ["streamId", "reducedThrough", "suppressedRetransmissions", "foreground", "turns", "activities", "actions", "quiescence", "closed"],
+      "comparison": "Exact equality. Every member listed above is present in every fixture; an extra or missing member fails the fixture.",
+      "streamId": "The current incarnation's stream. A projection is per incarnation and never adopts a prior incarnation's turns, activities, actions, or watermark.",
+      "reducedThrough": "The highest reduced sequence on that stream, or 0 when nothing reduced.",
+      "suppressedRetransmissions": "The count of wholesale-suppressed exact retransmissions. Always present, 0 when none occurred.",
+      "foreground": "`null` before the snapshot reduces. Otherwise `state` and `cycleId` always, plus `turnId` exactly while a turn is open.",
+      "turns": "Each entry carries `turnId`, `origin` (`submission` or `activity` — the two events that open a turn), and `terminal`, plus `outcome` exactly on a terminal turn, which an ending `idle` is required to carry.",
+      "activities": "Each entry carries `activityId`, `kind`, `state`, and `originTurnId`, plus `parentId`, `toolCallId`, and `runId` exactly when the activity's first sight supplied them. `cause` and `progress` are reduced but not projected. Terminal activities stay in the projection.",
+      "actions": "Each entry carries `actionId`, `kind`, `state`, `owner`, and `blocksForeground`, plus `runId` exactly when the first sight supplied it. Terminal actions stay in the projection.",
+      "quiescence": "`certified` always, plus `source`, `watermark`, and `barrier` exactly when the certifying event carried them, plus `invalidatedAt` — the sequence of the first event that began or recorded live work since the last certification — exactly when a previously certified fact was invalidated and not yet recertified. The invalidating set is the contract's: an acceptance, a transition to `running` or `requires_action`, or an activity or action record that is nonterminal.",
+      "closed": "`true` exactly after a `session_closed` control reduced."
+    }
+  },
+  "fixtures": [
+    {
+      "file": "snapshot-first-violation.json",
+      "invariant": "A stream's first event is lifecycle_snapshot; any delta before it is refused."
+    },
+    {
+      "file": "prompt-accepted-before-running.json",
+      "invariant": "Acceptance is distinct from running, and it invalidates the prior quiescence fact."
+    },
+    {
+      "file": "running-task-idle-settles-turn.json",
+      "invariant": "running to activity-running to idle settles the turn and certifies no boundary while the activity is live."
+    },
+    {
+      "file": "agent-origin-second-turn.json",
+      "invariant": "An idle-to-running transition with no submission opens an agent-origin turn, and only the final quiescence_update certifies the boundary."
+    },
+    {
+      "file": "stale-quiescence-cannot-settle.json",
+      "invariant": "A quiescence fact invalidated by later acceptance cannot certify a later activity-free boundary."
+    },
+    {
+      "file": "conflicting-duplicate.json",
+      "invariant": "A repeated sequence identity carrying different content is refused."
+    },
+    {
+      "file": "exact-retransmission-idempotent.json",
+      "invariant": "A deeply equal retransmission of the whole notification is suppressed wholesale and changes nothing."
+    },
+    {
+      "file": "sequence-gap.json",
+      "invariant": "A skipped sequence is refused; contiguity is the loss detector."
+    },
+    {
+      "file": "sequence-regression.json",
+      "invariant": "A sequence below a resumed stream's snapshot boundary is refused rather than reduced as history."
+    },
+    {
+      "file": "post-terminal-mutation.json",
+      "invariant": "A terminal activity never changes state again."
+    },
+    {
+      "file": "parent-before-child-terminal.json",
+      "invariant": "A parent activity cannot terminalize while an owned descendant is nonterminal."
+    },
+    {
+      "file": "child-after-parent-terminal.json",
+      "invariant": "A terminal activity never gains a child; a new activity naming a terminal parent is refused."
+    },
+    {
+      "file": "immutable-identity-change.json",
+      "invariant": "A later activity_update restating an immutable identity field with a different value is refused as an identity change, not as an unknown member."
+    },
+    {
+      "file": "late-causal-work.json",
+      "invariant": "A first-sight activity whose origin turn was first seen at or before a certified watermark is refused; the settled boundary never reopens."
+    },
+    {
+      "file": "unknown-entity.json",
+      "invariant": "An event naming an entity the stream never introduced — a parentId with no prior first sight, an origin turn or owner the stream never opened — is refused rather than reduced as unattached state."
+    },
+    {
+      "file": "background-action-keeps-foreground.json",
+      "invariant": "An action that does not block the foreground cycle leaves foreground state unchanged."
+    },
+    {
+      "file": "background-action-outlives-turn.json",
+      "invariant": "A background action stays pending across its turn's terminal idle, keeping its owning activity nonterminal."
+    },
+    {
+      "file": "blocking-action-requires-action.json",
+      "invariant": "A blocking action projects requires_action only through its own accompanying state_update, and the cycle returns to running when the last blocker resolves."
+    },
+    {
+      "file": "inconsistent-foreground.json",
+      "invariant": "A requires_action transition with no outstanding blocking action is refused."
+    },
+    {
+      "file": "illegal-carrier.json",
+      "invariant": "The identity-only session_info_update is the only legal carrier; an envelope on any other sessionUpdate variant is refused."
+    },
+    {
+      "file": "unsupported-version.json",
+      "invariant": "An envelope whose version is outside the negotiated set is refused."
+    },
+    {
+      "file": "unknown-field.json",
+      "invariant": "An event carrying a member this contract does not fix is refused rather than reduced with the member ignored."
+    },
+    {
+      "file": "malformed-envelope.json",
+      "invariant": "A wrong-typed envelope member is refused as malformed; structural validity is checked before ordering."
+    },
+    {
+      "file": "unknown-event-type.json",
+      "invariant": "An event.type outside the closed six is refused."
+    },
+    {
+      "file": "unnegotiated-fact.json",
+      "invariant": "An event asserting a fact the negotiated answer did not claim is refused."
+    },
+    {
+      "file": "stream-cycle.json",
+      "invariant": "A second lifecycle_snapshot on a live stream is refused; the same shape on a fenced streamId is stale_stream instead."
+    },
+    {
+      "file": "prompt-contained-incarnation-per-prompt.json",
+      "invariant": "A configuration answering updatesOutsidePrompt false opens one incarnation per prompt, each a distinct streamId with its own snapshot, sequence space, and entities."
+    },
+    {
+      "file": "close-containment-fences-stream.json",
+      "invariant": "A completed close fences the stream; a later event on that streamId is refused."
+    },
+    {
+      "file": "snapshot-introduces-entities.json",
+      "invariant": "A resumed stream's snapshot introduces the turn its foreground reports, the turns its activities name as origin, and its own nonterminal sets; later patches resolve against them."
+    },
+    {
+      "file": "snapshot-resumes-mid-turn.json",
+      "invariant": "A snapshot reporting running names the open turn and that turn's origin, and the consumer projects it as an open turn."
+    },
+    {
+      "file": "snapshot-resumes-blocked-cycle.json",
+      "invariant": "A snapshot may resume a cycle a blocking action stopped, and that cycle returns to running only once the blocker terminalizes."
+    },
+    {
+      "file": "snapshot-dangling-parent.json",
+      "invariant": "A snapshot's references resolve inside the snapshot; a parent absent from its own sets is refused, and a refused snapshot opens nothing."
+    },
+    {
+      "file": "snapshot-lists-terminal-entity.json",
+      "invariant": "A snapshot states the complete nonterminal sets, so an entry that is already terminal is refused as malformed."
+    },
+    {
+      "file": "snapshot-idle-names-turn.json",
+      "invariant": "A foreground turn is present only while a turn is open, so an idle snapshot carrying one is refused."
+    },
+    {
+      "file": "snapshot-false-quiescence.json",
+      "invariant": "A snapshot whose own sets contradict the positive quiescence fact it carries is refused rather than certifying nothing."
+    },
+    {
+      "file": "unknown-origin-turn.json",
+      "invariant": "A first-sight activity naming an origin turn the stream never opened is refused."
+    },
+    {
+      "file": "unknown-action-owner.json",
+      "invariant": "An action naming an owner the stream never introduced is refused rather than reduced as an ownerless request."
+    },
+    {
+      "file": "unknown-transition-turn.json",
+      "invariant": "A session-caused transition never opens a turn, so one naming a turn the stream never introduced is refused."
+    },
+    {
+      "file": "reaccepted-turn.json",
+      "invariant": "A second acceptance of a turn the stream already introduced is an identity change, not a second turn."
+    },
+    {
+      "file": "ending-idle-omits-outcome.json",
+      "invariant": "An idle transition that ends an open turn without an outcome is refused as malformed."
+    },
+    {
+      "file": "failed-outcome-omits-stop-reason.json",
+      "invariant": "An ending idle whose outcome is failed carries no stop reason: no ACP v1 stop reason names a failure, so the omission is the required shape."
+    },
+    {
+      "file": "failed-outcome-carries-stop-reason.json",
+      "invariant": "An ending idle whose outcome is failed and which carries a stop reason is refused as malformed."
+    },
+    {
+      "file": "late-causal-parent.json",
+      "invariant": "A first-sight activity whose parent was first seen at or before a certified watermark is fenced, and the fence is judged before parentage."
+    },
+    {
+      "file": "unfenced-work-after-boundary.json",
+      "invariant": "A boundary fences causal work rooted at or before its watermark and nothing else: an agent-origin turn opened after it reduces and settles normally."
+    },
+    {
+      "file": "blocked-cycle-reports-running.json",
+      "invariant": "A cycle a blocking action stopped reports requires_action before anything else; a return to running instead is refused."
+    },
+    {
+      "file": "blocker-pending-at-release.json",
+      "invariant": "A cycle is released when the last action blocking it resolves, not the first; a release with a blocker still pending is refused."
+    },
+    {
+      "file": "turn-ends-while-blocked.json",
+      "invariant": "Every blocking action terminalizes before the transition that ends its cycle; a terminal idle with a blocker pending is refused."
+    },
+    {
+      "file": "action-omits-blocks-foreground.json",
+      "invariant": "An action's first sight carries blocksForeground; absence is refused rather than read as a background action."
+    },
+    {
+      "file": "watermark-claims-own-delivery.json",
+      "invariant": "A watermark never reaches the sequence of the event carrying it; one at or above it is refused as malformed."
+    },
+    {
+      "file": "false-quiescence-while-live.json",
+      "invariant": "A positive quiescence fact delivered while the foreground is live and an activity is nonterminal is refused; each of its two live conditions is pinned alone by its own vector."
+    },
+    {
+      "file": "false-quiescence-foreground-live.json",
+      "invariant": "A positive quiescence fact is refused on a live foreground alone, with no activity and no action held."
+    },
+    {
+      "file": "false-quiescence-holds-activity.json",
+      "invariant": "A positive quiescence fact is refused on one nonterminal activity alone, with the foreground idle and its turn settled."
+    },
+    {
+      "file": "false-quiescence-holds-action.json",
+      "invariant": "A positive quiescence fact is refused on one unresolved action alone, with the foreground idle and no activity held."
+    },
+    {
+      "file": "false-quiescence-uncovered-transition.json",
+      "invariant": "A positive fact whose watermark leaves a reduced transition uncovered is refused, even with nothing live when it arrives."
+    },
+    {
+      "file": "negative-quiescence-carries-proof.json",
+      "invariant": "A watermark is present exactly when the fact is positive; a negative fact carrying one is refused."
+    },
+    {
+      "file": "negative-quiescence-carries-source.json",
+      "invariant": "A proof source is present exactly when the fact is positive; a negative fact naming one is refused."
+    },
+    {
+      "file": "unnegotiated-negative-quiescence.json",
+      "invariant": "A configuration that proved no quiescence class emits no quiescence_update at all, whichever way the fact points."
+    },
+    {
+      "file": "quiescence-recertifies-after-invalidation.json",
+      "invariant": "A revoked certification is not permanent: a later positive fact covering every reduced event certifies the boundary again."
+    },
+    {
+      "file": "quiescence-survives-idle-and-retransmission.json",
+      "invariant": "An idle transition that ends no turn and a suppressed retransmission begin no live work and leave a certification standing."
+    },
+    {
+      "file": "unnegotiated-activity-kind.json",
+      "invariant": "An activity kind outside the answer's activityKinds is refused."
+    },
+    {
+      "file": "omitted-key-envelope.json",
+      "invariant": "Where the answer omitted the key, any envelope at all — the opening snapshot included — is refused."
+    },
+    {
+      "file": "empty-identifier.json",
+      "invariant": "An identifier present carrying the empty string is refused rather than read as an absent member."
+    },
+    {
+      "file": "non-positive-sequence.json",
+      "invariant": "A sequence of zero names no event and is refused as malformed rather than as an ordering failure."
+    },
+    {
+      "file": "retransmission-compares-decoded-values.json",
+      "invariant": "A key-reordered retransmission of the snapshot and of a delta are both suppressed: equality is over decoded values, never bytes."
+    },
+    {
+      "file": "notification-content-conflict.json",
+      "invariant": "The dedup identity covers the whole notification, so the same envelope beside a member the first delivery did not carry is a conflicting duplicate."
+    },
+    {
+      "file": "snapshot-on-fenced-stream.json",
+      "invariant": "A second snapshot on a live stream is a stream cycle; the same shape on a fenced stream is stale instead."
+    },
+    {
+      "file": "incarnation-after-close.json",
+      "invariant": "Close fences the session, so a snapshot announcing a fresh incarnation of a closed session is stale."
+    },
+    {
+      "file": "snapshot-on-superseded-stream.json",
+      "invariant": "A superseded incarnation never resurrects: once a later incarnation's snapshot reduces, a snapshot bearing the prior streamId is stale and the standing projection is untouched."
+    },
+    {
+      "file": "carrier-precedes-ordering.json",
+      "invariant": "Carrier legality is structural, so an illegal carrier is reported ahead of the ordering failure the same frame carries."
+    },
+    {
+      "file": "gap-precedes-stream-cycle.json",
+      "invariant": "Ordering identity is validated before the event is reduced, so a snapshot arriving out of contiguity reports the gap."
+    },
+    {
+      "file": "malformed-precedes-unknown-type.json",
+      "invariant": "Structural validity is checked before the discriminant, so a non-integer sequence outranks the unknown event type beside it."
+    },
+    {
+      "file": "over-bound-identifier.json",
+      "invariant": "An opaque identifier longer than 4096 bytes fails closed; the bound is checked on the decoded value."
+    },
+    {
+      "file": "action-immutable-change.json",
+      "invariant": "A later action_update restating an immutable member with a different value is refused as an identity change."
+    },
+    {
+      "file": "snapshot-blocked-without-blocker.json",
+      "invariant": "A snapshot resuming requires_action with no blocking action in its own action set is refused."
+    },
+    {
+      "file": "activity-first-sight-missing-identity.json",
+      "invariant": "A first-sight activity_update missing an immutable identity field is refused as an identity change, not as an unknown origin."
+    },
+    {
+      "file": "terminal-restatement-suppressed.json",
+      "invariant": "An update restating a terminal activity with no carried difference is a suppressed no-op: it consumes its sequence, leaves the projection untouched, and does not raise the floor a positive quiescence fact must clear."
+    },
+    {
+      "file": "terminal-progress-change-refused.json",
+      "invariant": "A restatement holding the terminal state while carrying a different progress is a carried difference from the reduced terminal record and is refused."
+    },
+    {
+      "file": "terminal-restatement-identical-progress.json",
+      "invariant": "A restatement carrying the terminal state and an identical progress carries no difference and is suppressed."
+    },
+    {
+      "file": "terminal-minimal-patch-redelivery.json",
+      "invariant": "The terminal comparison basis is the patch, so a minimal terminal patch redelivered at the next sequence is a no-op and the members it omits are not differences."
+    },
+    {
+      "file": "terminal-immutable-change-refused.json",
+      "invariant": "A delivery that both names a terminal entity and changes an immutable field reports post_terminal_mutation; the terminal token wins."
+    },
+    {
+      "file": "duplicate-number-value-equal.json",
+      "invariant": "Numbers compare as exact mathematical values, so a duplicate differing only in writing 1 as 1.0 is an exact retransmission and is suppressed."
+    },
+    {
+      "file": "duplicate-number-beyond-double.json",
+      "invariant": "A duplicate whose numbers differ only beyond float64 precision is a conflicting duplicate; a certifying consumer compares losslessly."
+    },
+    {
+      "file": "duplicate-number-huge-exponent.json",
+      "invariant": "A huge-exponent literal is decodable and equal to itself: the duplicate is suppressed without the value ever being materialized."
+    },
+    {
+      "file": "fractional-sequence-malformed.json",
+      "invariant": "Integer-typed members are lexically integral, so a sequence written 2.0 is malformed however its value reads."
+    },
+    {
+      "file": "snapshot-duplicate-activity.json",
+      "invariant": "A snapshot listing one activityId twice is malformed, identical entries included; a whole-state set is judged whole rather than deduplicated."
+    },
+    {
+      "file": "snapshot-duplicate-action.json",
+      "invariant": "A snapshot listing one actionId twice is malformed; uniqueness binds within each set."
+    },
+    {
+      "file": "snapshot-cross-set-id-legal.json",
+      "invariant": "Activities and actions are distinct id spaces, so the same string naming one of each reduces and the two never conflate."
+    },
+    {
+      "file": "replacement-snapshot-refusal-preserves-projection.json",
+      "invariant": "A replacement snapshot is judged whole before the standing projection is touched, so a refused one swaps nothing and the latch holds over the projection exactly as it stood."
+    },
+    {
+      "file": "replacement-supersedes-live-run.json",
+      "invariant": "A new incarnation's opening snapshot is never refused for the uncertified run the superseded projection holds, and the fresh projection adopts nothing of it."
+    },
+    {
+      "file": "snapshot-duplicate-with-defective-entry.json",
+      "invariant": "Set membership precedes entry judgment: an entry that both repeats an id and omits an immutable first-sight member reports the set's malformed_envelope, not its own identity failure."
+    },
+    {
+      "file": "snapshot-duplicate-with-unnegotiated-kind.json",
+      "invariant": "The same ordering holds when the repeated entry's own defect is an unnegotiated kind: the set's verdict is reported, not the entry's."
+    },
+    {
+      "file": "false-quiescence-uncovered-turnless-idle.json",
+      "invariant": "Every reduced delivery raises the floor a positive quiescence fact must clear, a session-caused transition naming no turn included, so a proof stopping one sequence short of one is disproved."
+    },
+    {
+      "file": "session-running-omits-turn.json",
+      "invariant": "A session-caused running transition naming no turn is malformed_envelope: no update may assert a running foreground with no turn, and an event carrying no name never reports unknown_entity."
+    },
+    {
+      "file": "snapshot-running-omits-turn.json",
+      "invariant": "The same rule binds the snapshot: a running foreground carrying neither turnId nor origin asserts a live cycle no turn owns, and the whole assertion is malformed_envelope."
+    },
+    {
+      "file": "session-requires-action-omits-turn.json",
+      "invariant": "A live foreground names its turn in both states: a session-caused requires_action naming no turn is malformed_envelope on a properly blocked cycle, judged before entity resolution and before the blocked-cycle rule, so neither unknown_entity nor inconsistent_foreground is reachable."
+    }
+  ]
+}

@@ -110,9 +110,9 @@ func TestHandoffFormAcceptsEveryAllowlistedFormat(t *testing.T) {
 }
 
 // TestHandoffAndEmbeddedFormsBuildIdenticalNativeParts pins that the transport
-// a host chooses is invisible below the adapter. Both fixtures carry a uri, so
-// the claim is proved on the shape that used to break it rather than by a
-// fixture that omits the field.
+// a host chooses is invisible below the adapter. Both fixtures carry a uri: the
+// claim is proved on the shape that carries the most provenance, not on one
+// that omits the field.
 func TestHandoffAndEmbeddedFormsBuildIdenticalNativeParts(t *testing.T) {
 	root, handoff, data := stagedHandoff(t, "valid.png", mimePNG)
 	embeddedURI := "https://example.test/provenance.png"

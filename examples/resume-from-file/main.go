@@ -22,6 +22,12 @@ import (
 const (
 	defaultSessionFile = "session.jsonl"
 	defaultPrompt      = "Reply with exactly RESUME_OK and do not use tools."
+
+	// A hermes-state-db-v1 session lives under three store keys: the main
+	// snapshot under the empty subpath, the id mapping, and the chunked native
+	// archive. A transcript row names its own key by its shape.
+	idmapSubpath   = "idmap"
+	stateDBSubpath = "state-db"
 )
 
 type client struct {
@@ -149,10 +155,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	store := hermesacp.NewInMemorySessionStore()
-	if err := store.Replace(ctx, hermesacp.SessionKey{SessionID: *sessionID}, []hermesacp.SessionStoreReplacement{{
-		Key:     hermesacp.SessionKey{SessionID: *sessionID},
-		Entries: entries,
-	}}); err != nil {
+	if err := store.Replace(ctx, hermesacp.SessionKey{SessionID: *sessionID}, storeReplacements(*sessionID, entries)); err != nil {
 		return err
 	}
 
@@ -260,14 +263,23 @@ func readTranscriptJSONL(path string) ([]hermesacp.SessionStoreEntry, string, st
 		entries = append(entries, entry)
 
 		var obj map[string]any
-		if json.Unmarshal(entry, &obj) == nil {
-			if sessionID == "" {
-				sessionID, _ = obj["sessionId"].(string)
-			}
+		if json.Unmarshal(entry, &obj) != nil {
+			continue
+		}
 
-			if cwd == "" {
-				cwd, _ = obj["cwd"].(string)
-			}
+		// The main snapshot names the session under a "session" section; the id
+		// mapping names it at the top level. Read whichever this row carries.
+		row := obj
+		if section, ok := obj["session"].(map[string]any); ok {
+			row = section
+		}
+
+		if sessionID == "" {
+			sessionID, _ = row["sessionId"].(string)
+		}
+
+		if cwd == "" {
+			cwd, _ = row["cwd"].(string)
 		}
 	}
 
@@ -276,4 +288,53 @@ func readTranscriptJSONL(path string) ([]hermesacp.SessionStoreEntry, string, st
 	}
 
 	return entries, sessionID, cwd, nil
+}
+
+// storeReplacements routes each transcript row to the store key its shape
+// names. A session that is loadable through ACP needs its main snapshot and its
+// id mapping under separate keys: writing every row under one key leaves the
+// session unreadable, because the loader reads the two independently.
+func storeReplacements(sessionID string, entries []hermesacp.SessionStoreEntry) []hermesacp.SessionStoreReplacement {
+	bySubpath := map[string][]hermesacp.SessionStoreEntry{}
+	order := []string{}
+
+	for _, entry := range entries {
+		subpath := transcriptSubpath(entry)
+		if _, seen := bySubpath[subpath]; !seen {
+			order = append(order, subpath)
+		}
+
+		bySubpath[subpath] = append(bySubpath[subpath], entry)
+	}
+
+	replacements := make([]hermesacp.SessionStoreReplacement, 0, len(order))
+	for _, subpath := range order {
+		replacements = append(replacements, hermesacp.SessionStoreReplacement{
+			Key:     hermesacp.SessionKey{SessionID: sessionID, Subpath: subpath},
+			Entries: bySubpath[subpath],
+		})
+	}
+
+	return replacements
+}
+
+func transcriptSubpath(entry hermesacp.SessionStoreEntry) string {
+	var row map[string]json.RawMessage
+	if json.Unmarshal(entry, &row) != nil {
+		return hermesacp.SessionStoreMainSubpath
+	}
+
+	if _, ok := row["session"]; ok {
+		return hermesacp.SessionStoreMainSubpath
+	}
+
+	if _, ok := row["data"]; ok {
+		return stateDBSubpath
+	}
+
+	if _, ok := row["nativeSessionId"]; ok {
+		return idmapSubpath
+	}
+
+	return hermesacp.SessionStoreMainSubpath
 }

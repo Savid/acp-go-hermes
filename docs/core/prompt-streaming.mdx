@@ -3,14 +3,93 @@ title: Prompt Streaming
 description: How native gateway events map to ACP updates, and how turn failures and timeouts surface.
 ---
 
-Prompt turns call native `prompt.submit` over the Hermes WebSocket gateway and
-consume gateway events until the turn completes. `message.delta` events become
-ACP text chunks, `thinking.delta` events become reasoning chunks, and token data
-from completion payloads becomes `usage_update`. When Hermes supplies
+One permanent session dispatcher consumes the Hermes WebSocket gateway for the
+native incarnation. A prompt registers its local cycle, calls
+`prompt.submit`, and waits for that cycle's terminal result; it never takes over
+the gateway reader. `message.delta` events become ACP text chunks,
+`thinking.delta` events become reasoning chunks, and token data from completion
+payloads becomes `usage_update`. When Hermes supplies
 `message.complete.usage.context_max`, that exact native value becomes
 `usage_update.size`. When it is absent or invalid, the adapter falls back to an
 advertised provider-model context limit; if neither source has one, the size is
 `0`.
+
+Hermes events expose a native session ID but no prompt, message, or run
+correlation. The adapter therefore sequences every inbound frame and uses both
+parts of Hermes's prompt-admission result: the response is an exact inbound
+watermark, and the status is Hermes's own statement of what it did with the
+prompt. The adapter never treats the first frame after an acknowledgement as
+proof of prompt ownership.
+
+Hermes states one of three dispositions, and the adapter adopts each rather than
+refusing an accepted prompt:
+
+| `prompt.submit` status | What Hermes did | What the prompt does |
+|---|---|---|
+| `streaming` | claimed an idle session for this prompt | streams the turn that follows |
+| `queued` | a turn is running; this prompt is the next one | waits for the turn Hermes announces next, then streams it |
+| `redirected`, `steered` | folded this text into the turn already running | reports the running turn as the owner of the answer |
+
+A status outside that vocabulary states nothing frames can be attributed by, and
+only that fails the native incarnation closed.
+
+Frames at or below the response watermark are older work. A complete older
+cycle is projected as an agent-origin cycle and must finish projection before
+the prompt is released. Only Hermes's own answer, never the adapter's view of
+the stream, decides who owns the frames above the watermark:
+
+- Under `queued`, every frame up to the start of the next native turn is
+  agent-origin work; the registered cycle claims nothing until Hermes announces
+  that turn, and Hermes drains its queue into the turn that fills the cycle. The
+  prompt runs exactly once, when Hermes runs it. Hermes announces every turn it
+  starts with a payload-less `message.start`, and it drains a queued prompt
+  ahead of every follow-up turn it could run instead, so the first turn
+  announced after the prompt was queued is that prompt's own. The announcement,
+  not the running turn's terminal, is the boundary: Hermes emits a turn's
+  terminal frame and only then — after a goal judge, a speech flush and
+  persistence — releases the session and drains its queue, so a prompt is
+  commonly queued behind a turn whose terminal this adapter has already
+  projected, and there is no further terminal to wait for. A turn that opens
+  with no announcement at all, once the turn the prompt was queued behind has
+  ended, is neither provably that prompt's turn nor provably agent-origin work:
+  the prompt states a `queued as the session's next native turn` outcome, the
+  frames project as agent-origin, and nothing waits on an announcement that may
+  never come. Hermes runs the text either way, so that outcome is never
+  retryable backpressure.
+- Under `redirected` or `steered`, the running turn carries the text and the
+  answer to it. Where that turn is a cycle this adapter already projects, the
+  prompt states an `absorbed by running turn` outcome and every frame it held
+  goes to that cycle; resending the text would fold it in a second time, so this
+  outcome is never retryable backpressure. Where no cycle is open yet — every
+  autonomous driver marks a session running before it emits a frame — the turn's
+  frames are this prompt's turn.
+- Under `streaming` Hermes had an idle session, so an agent-origin cycle still
+  open at the admission boundary has every frame it will ever get. It is retired
+  as a cycle with no native terminal, projected before the prompt is released,
+  and the prompt keeps the turn Hermes accepted for it.
+
+An autonomous cycle open before the prompt is registered still refuses the
+prompt with `session_foreground` backpressure: nothing was submitted, so
+retrying it cannot run the same text twice.
+
+Permissions and clarification requests inherit ownership only from that same
+actor-selected cycle. The mapped callback carries the exact cycle ID and
+transport generation; missing, stale, metadata-only, or cross-generation
+identity is refused instead of being assigned to the current prompt. Hermes
+clarifications are correlated only by the native `request_id`. A Hermes approval
+carries no tool identity of its own, and Hermes emits `tool.start` only for a
+progress-enabled surface and runs tool calls concurrently, so an approval binds
+to the one active native tool call where exactly one owns the cycle and is
+otherwise its own addressable `toolCallId`. Native `approval.respond` carries
+the session and the choice alone, so an approval that minted its own identity is
+answered exactly as a tool-bound one is. These rules are identical for
+prompt-origin and agent-origin cycles.
+
+The actor also bounds processed state independently of its 256-frame mailbox.
+One cycle may project at most 10 MiB of cumulative text, 256 tool events with
+10 MiB of cumulative tool payload data, and 256 permission/clarification
+controls with 10 MiB of cumulative control payload data. The limit-plus-one
+event is not retained: it fails and contains the native generation.
 
 ## Prompt content
 
@@ -131,29 +210,47 @@ native request a handoff block builds is identical to the one the same bytes
 build embedded — and the host may delete the file as soon as the prompt call
 returns.
 
-Hermes' authoritative `message.complete` text is reconciled with the prefix
-already emitted by `message.delta`. The adapter emits only a missing completion
-suffix, accepts a completion-only response, and suppresses duplicate or
-conflicting terminal text instead of replaying it to the ACP client.
+Hermes' authoritative `message.complete` text is reconciled with the text
+already emitted by `message.delta`. Hermes narrates a tool turn through the same
+delta stream its answer arrives on while `message.complete` carries the final
+response alone, so the completion is not required to extend the concatenated
+deltas. A completion that extends them delivers only its suffix, a completion the
+delta stream already ended with delivers nothing, a completion-only response is
+delivered whole, and a final response the stream never carried is delivered
+rather than dropped. That exact delivered fragment is also the text appended to
+the durable foreground prefix; the completion is never mirrored a second time in
+storage.
+
+The stored foreground text is capped at 64 KiB. Truncation keeps the largest
+complete UTF-8 prefix that fits the byte bound; once the bound cuts a delivered
+fragment, later chunks are not appended behind the omitted bytes. The durable
+value is therefore both valid JSON text and an exact prefix of what ACP
+received.
 
 ## Turn failure contract
 
-A failed turn is never an ACP stop reason. After native message submission has
-started, every non-success settlement destructively fences the isolated runtime
-back to the last committed snapshot before returning one terminal
-`hermes_turn_failed` JSON-RPC error
-(`-32603`, Internal error — the adapter never uses `-32000`). The error `data`
+A failed turn is never an ACP stop reason. A normal provider-declared failure
+commits the failed foreground boundary, emits one failed `idle`, returns one
+terminal `hermes_turn_failed` JSON-RPC error, and leaves the permanent
+dispatcher available for later autonomous work and prompts. Transport,
+protocol, correlation, and publication corruption instead fail the native
+incarnation closed before returning the same error shape
+(`-32603`, Internal error — a turn failure is never reported as `-32000`, which
+belongs to the provider-auth legs). The error `data`
 carries a machine-readable `cause`:
 
 | `cause` | Meaning |
 |---|---|
 | `transport` | Gateway/connection failure, including a mid-turn WebSocket disconnect and any unclassified error. |
-| `provider` | The model provider rejected or failed the turn. |
+| `provider` | The model provider rejected or failed the turn, or reported a native finish outside the closed vocabulary the adapter maps. |
 | `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/reference/go-api). |
 
-`data.message` carries the real native cause, never a fixed placeholder;
-`data.statusCode` and `data.providerCode` appear only when the gateway supplies
-them.
+The wire data is deliberately bounded and secret-safe: it carries only
+`error`, `cause`, and a numeric `statusCode` when Hermes supplied one. Native
+messages, provider codes, malformed frames, request payloads, and arbitrary Go
+errors never cross the ACP error boundary. An embedded Go caller can instead
+use `errors.Is(err, hermesacp.ErrGatewayDisconnected)` and continue inspecting
+the returned error chain for the exact native cause.
 
 <Note>
 A timeout is a failure, not a user cancel, so it surfaces as
@@ -171,19 +268,46 @@ not complete, the prompt fails and the session is poisoned instead of reporting
 a normal timeout or cancellation.
 </Note>
 
-After cancellation, timeout, provider/transport failure, or outbound update
-failure whose selected containment boundary completed, the next authorized
-prompt lazily materializes a fresh isolated home from the last committed
-`hermes-state-db-v1` snapshot and resumes the exact stored native session key.
-Shared-home mode instead resumes that key from the durable official database
-and never restores a per-session native archive.
-The interrupted turn is never snapshotted. Turn nonces and adapter event
-sequences remain monotonic across the native-runtime replacement, and MCP is
-reloaded under the new turn's authorization before the model runs.
+A turn Hermes itself ends with `status: "interrupted"` — a native stop, steer,
+or barge-in — also returns the `cancelled` stop reason rather than the clean end
+of turn a successful completion reports. That is a native terminal, not a client
+cancel: it commits the cancelled boundary and leaves the incarnation running.
+
+After cancellation, timeout, transport failure, or outbound update failure
+whose selected containment boundary completed, the next authorized prompt
+waits for that containment latch, then lazily materializes exactly one fresh
+isolated home from the last committed `hermes-state-db-v1` snapshot and resumes
+the exact stored native session key. Shared-home mode instead resumes that key
+from the durable official database and never restores a per-session native
+archive. A provider-declared failure does not take this replacement path.
+The fenced native turn never advances the durable assistant-history identity.
+Turn nonces and adapter event sequences remain monotonic across a replacement,
+and MCP is reloaded under the new turn's authorization before the model runs.
 
 ## Stream death and reconnect
 
-If the WebSocket stream dies during a turn, the adapter fences that turn with the
-terminal `hermes_turn_failed` error (cause `transport`) and marks the stream
-failed. Subsequent session operations reconnect through normal session
-hydration, so a dropped gateway does not orphan the session.
+If the WebSocket stream dies during a turn, the adapter publishes the
+resume-needed latch before the old pump becomes observable as done, contains the
+old native source, and fences that turn with terminal `hermes_turn_failed`
+(cause `transport`). The next prompt waits for containment and performs the one
+lazy replacement described above.
+
+Gateway reconnect publishes one immutable tuple containing the client,
+transport generation, dispatcher, and live-session mappings. Prompt admission
+leases that tuple through registration and `prompt.submit`, so no request can
+submit on one client while stamping another generation. Create and resume also
+open a generation-scoped pending handshake before their RPC: unknown-live
+frames are buffered to a fixed bound until the response supplies the exact
+watermark and IDs. Create delivers all matched frames once. Resume suppresses
+only replay residue at or below its response watermark and delivers later work
+once. An invalid binding fails the generation closed.
+
+One Hermes connection carries more than this session's turns. Hermes fans
+session-less change broadcasts to every connected peer and mirrors a watched
+child run onto a live ID this adapter never bound; neither names a turn the
+adapter owns, so both are dropped, as is a retained frame no handshake can
+still claim. Retention is bounded twice — 256 frames per transport and 64 per
+native session — so no mirrored run can spend the budget the session being
+bound is waiting to claim. A frame either bound refuses is dropped without
+failing the generation, and is stated on the debug log with the bound that
+refused it; frame bodies are never logged.

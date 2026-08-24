@@ -1,0 +1,65 @@
+{
+  "name": "snapshot-duplicate-with-unnegotiated-kind",
+  "purpose": "The ordering holds whatever the repeated entry's own defect is. Here the second entry for a twice-listed activityId names a kind absent from the answer's activityKinds, which alone would be an unnegotiated fact. Set membership is judged first, so the repeated id decides the verdict — malformed_envelope, the set's failure, rather than the unnegotiated kind the entry would have reported standing alone — and the refused snapshot opens nothing.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [
+                {
+                  "activityId": "act-1",
+                  "kind": "task",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                },
+                {
+                  "activityId": "act-1",
+                  "kind": "subagent",
+                  "state": "running",
+                  "cause": "submission",
+                  "originTurnId": "turn-1"
+                }
+              ],
+              "actions": [],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

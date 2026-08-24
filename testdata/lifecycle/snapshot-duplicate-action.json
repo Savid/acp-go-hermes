@@ -1,0 +1,65 @@
+{
+  "name": "snapshot-duplicate-action",
+  "purpose": "The action set obeys the same rule as the activity set, and the rule is stated per set because that is where an id has to be unique. A snapshot listing the same actionId twice asserts two current states for one outstanding request, so it is malformed whether or not the two entries agree, and the refused snapshot opens nothing.",
+  "negotiated": {
+    "versions": [1],
+    "updatesOutsidePrompt": true,
+    "authoritativeQuiescence": true,
+    "quiescenceSource": "process-containment",
+    "activityKinds": ["task", "subagent"]
+  },
+  "input": [
+    {
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-1",
+        "update": {"sessionUpdate": "session_info_update"},
+        "_meta": {
+          "acp-go.dev/lifecycle": {
+            "version": 1,
+            "streamId": "strm-1",
+            "sequence": 12,
+            "event": {
+              "type": "lifecycle_snapshot",
+              "foreground": {"state": "running", "cycleId": "cyc-1", "turnId": "turn-1", "origin": "submission"},
+              "activities": [],
+              "actions": [
+                {
+                  "actionId": "act-perm-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "turn", "id": "turn-1"},
+                  "blocksForeground": false
+                },
+                {
+                  "actionId": "act-perm-1",
+                  "kind": "permission",
+                  "state": "pending",
+                  "owner": {"type": "turn", "id": "turn-1"},
+                  "blocksForeground": false
+                }
+              ],
+              "quiescence": {"quiescent": false}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "expect": {
+    "verdict": "fail_closed",
+    "violation": "malformed_envelope",
+    "atInput": 0,
+    "state": {
+      "streamId": "strm-1",
+      "reducedThrough": 0,
+      "suppressedRetransmissions": 0,
+      "foreground": null,
+      "turns": [],
+      "activities": [],
+      "actions": [],
+      "quiescence": {"certified": false},
+      "closed": false
+    }
+  }
+}

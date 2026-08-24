@@ -30,7 +30,7 @@ func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T)
 	defer cancel()
 
 	home := t.TempDir()
-	xdg, err := nativehermes.CreateXDGDirs(filepath.Join(home, "acp-go-hermes"), "orphan")
+	xdg, err := nativehermes.CreateGenerationXDGDirs(filepath.Join(home, "acp-go-hermes"))
 	if err != nil {
 		t.Fatalf("create orphan XDG dirs: %v", err)
 	}
@@ -82,7 +82,6 @@ func TestHermesFakeExecutableLeaseReaperKillsMatchingHermesProcess(t *testing.T)
 
 	server, err := nativehermes.StartServer(ctx, nativehermes.StartOptions{
 		ACPSessionID:   "orphan",
-		Root:           filepath.Join(home, "acp-go-hermes"),
 		ScratchParent:  home,
 		Cwd:            t.TempDir(),
 		ExecutablePath: fakeHermesExecutable(t, fakeModeOK),

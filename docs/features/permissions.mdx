@@ -13,12 +13,42 @@ A native `approval.request` gateway event maps to an ACP
 `session/request_permission` request. The adapter presents three options:
 
 Hermes 0.20.0's session-keyed `approval.request` payload has no request or tool
-identifier. The adapter therefore takes the exact native `tool_id` from the
-active `tool.start` event and uses it as the ACP `toolCallId`; it never treats a
-command string or adapter-generated approval ID as a tool identity. Exactly one
-tool must be active when the approval arrives. Missing or ambiguous active-tool
-correlation, terminal IDs, and callbacks outside their exact active turn are
-rejected without invoking the ACP permission callback.
+identifier. The owning actor derives an adapter-owned permission-request
+identity inside the exact cycle, and never treats a command string as a tool
+identity. Where exactly one native tool is active, the adapter takes that exact
+native `tool_id` and uses it only as the ACP `toolCallId`. Hermes emits
+`tool.start` only for a progress-enabled surface and runs tool calls
+concurrently, so an approval also reaches the adapter with no active native tool
+or with several; those bind to the permission-request identity instead, and the
+approval is presented either way. Terminal IDs and callbacks outside their exact
+active turn are still rejected without invoking the ACP permission callback.
+
+An approval that minted its own identity settles exactly as a tool-bound one
+does. Native `approval.respond` carries the session and the chosen option and
+nothing else, so the adapter checks that the answer belongs to the exact cycle
+that emitted the request and never gates the answer on a native tool identity
+Hermes did not give it.
+
+<Note>
+Recorded deviation. Hermes answers the approval that was appended to the
+session's queue first. What that guarantees is that one answer settles exactly
+one queued approval. What it does not guarantee is that the approval settled is
+the one the host was shown: Hermes appends the queue entry under its lock but
+notifies outside it, so two approvals raised concurrently can reach the adapter
+in the opposite order to the queue. The adapter presents one approval at a time
+and blocks its event pump on the host's answer, which bounds the window to
+approvals a single native turn raises concurrently but does not close it.
+
+`approval.respond` also has an `all` flag that answers every approval queued on
+the session with the same choice, including ones no host was ever shown. The
+adapter never sends it — not even for `always`, whose persistence Hermes already
+carries from the choice itself.
+</Note>
+
+The cycle actor keys held controls by both control kind and request ID and
+rejects a duplicate before emitting it. A native clarification whose ID equals
+an adapter-generated permission ID therefore cannot replace the permission's
+owner.
 
 Before invoking `session/request_permission`, the adapter publishes the
 correlated ID as a pending tool call with the active turn's route envelope.

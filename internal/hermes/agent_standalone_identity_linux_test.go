@@ -703,7 +703,10 @@ func TestAgentStandaloneAuthorityPathRejectsDeletedDescriptor(t *testing.T) {
 	require.ErrorContains(t, err, "deleted directory")
 }
 
-func TestAgentStandaloneOwnerlessMarkerRequiresLegacyAffinityLock(t *testing.T) {
+// TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock pins the
+// audit's reading of a quarantine marker whose owner digest holds no permanent
+// affinity lock: the root is refused until that lock exists.
+func TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
 	owners := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)
@@ -1261,10 +1264,9 @@ func TestAgentStandaloneVacancyAllowsProcessExitDuringTaskEnumeration(t *testing
 
 // TestAgentStandaloneVacancyReenumeratesTaskExitingWithESRCH pins the kernel's
 // other way of saying "that task is gone". Reading a task's status after the
-// thread exits yields ENOENT on some kernels and ESRCH on others; only ENOENT
-// used to re-enumerate, so a thread exiting mid-scan refused the claim outright
-// with "no such process" — a vacancy proof failed by the one observation that
-// says nothing about vacancy.
+// thread exits yields ENOENT on some kernels and ESRCH on others, and both
+// re-enumerate: a thread exiting mid-scan says nothing about vacancy, so it may
+// not refuse the claim.
 func TestAgentStandaloneVacancyReenumeratesTaskExitingWithESRCH(t *testing.T) {
 	processes := agentStandaloneTestDirEntries(t, "401")
 	churning := agentStandaloneTestDirEntries(t, "401", "402")

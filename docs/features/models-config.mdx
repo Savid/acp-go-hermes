@@ -14,10 +14,44 @@ Values are built from native gateway `model.options` results as `provider/model`
 Each advertised option carries per-model `_meta.hermes` metadata — see
 [Metadata](/docs/reference/meta).
 
-Model metadata carries no generic `capabilities` list and no input/output
-modality or generator fields. The current driven gateway does not expose an
-exhaustive selected-model image modality source, so image prompt validation
-uses `unknown` model support and forwards valid images to Hermes.
+Those advertised values are a menu for the host, not an accepted set. A
+`provider/model` value absent from the latest menu still travels to Hermes from
+lifecycle metadata, `session/set_session_config_option`, and the next prompt.
+Hermes decides whether it resolves: an accepted selection becomes the config
+option's exact `currentValue`, while a native refusal returns invalid params
+with `error: hermes_model_selection_refused` and `field: value`. Native error
+text is not copied across the ACP boundary.
+Session creation may accept a selection whose provider cannot be resolved until
+the first prompt; that prompt then returns Hermes' native turn failure. A failed
+`model.options` read can hide the menu, but it does not reject a model mutation
+that Hermes already accepted.
+
+Hermes draws its line at the provider. A selection naming a provider it does not
+have is refused; a model no provider advertises is taken, which is why the
+catalogue cannot be read as an acceptance set. Its acknowledgement of an accepted
+selection echoes the key, value, and scope it applied, so the adapter needs no
+read-back to confirm one — a mismatched echo is itself an error.
+
+### Selection values are provider-qualified
+
+A model value is refused locally, before any native call, only when it cannot
+name a provider and a model at all: it must split on `/` into two tokens, neither
+empty, neither beginning with `--`, and neither carrying whitespace. That is a
+question about the value's shape and never about which models exist. Every door
+that must carry a value into a session's provider and model — the config option
+and an active `session/load` or `session/resume` — refuses the same shapes, so
+none of them silently degrades a value another would reject.
+
+Session creation is the exception, and only because nothing is degraded there:
+`session/new` hands the value to Hermes, which carries model and provider as
+separate fields and resolves an unqualified model against its own catalogue.
+
+An advertised option's `_meta.hermes` metadata carries the selection value and
+nothing else: the gateway catalogue's per-model `fast`/`reasoning` capability map
+is not republished, and it names no input/output modality or generator fields at
+all. The current driven gateway does not expose an exhaustive selected-model
+image modality source, so image prompt validation uses `unknown` model support
+and forwards valid images to Hermes.
 
 No mode selector is advertised: Hermes exposes no approved programmatic
 per-session agent/mode enumeration surface for this adapter. Structured output is

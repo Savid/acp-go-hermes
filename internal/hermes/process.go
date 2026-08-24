@@ -27,7 +27,7 @@ import (
 const (
 	MinimumVersion = "0.20.0"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
-	// catalog before the compatibility sweep reaches model.options.
+	// catalog before the required-method sweep reaches model.options.
 	defaultProcessTimeout = 60 * time.Second
 	fieldCwd              = "cwd"
 	fieldTitle            = "title"
@@ -72,9 +72,8 @@ var (
 	// probe spawns its own process and proves the binary, while the sweep proves
 	// one live gateway, so a start that never reached readiness must not cost a
 	// second --version process next time.
-	executableProbed   = map[string]bool{}
-	executableVersions = map[string]string{}
-	gatewayProbed      = map[string]bool{}
+	executableProbed = map[string]bool{}
+	gatewayProbed    = map[string]bool{}
 	// executableProbes holds the version probe currently in flight per
 	// executable, so concurrent starts share one native probe process instead of
 	// each spawning their own. The channel is closed when that probe settles.
@@ -96,7 +95,7 @@ type ProcessOptions struct {
 	// executable can never mutate the durable residence.
 	PrepareSharedHome func(context.Context, string) error
 	// SharedSessionOwners are bound to the native PID/start-time immediately
-	// after spawn, before readiness or compatibility probes can run.
+	// after spawn, before readiness or required-method probes can run.
 	SharedSessionOwners []*SharedSessionOwner
 	// SharedHomeOwner is the exclusive claim on Home held across this and every
 	// other native writer this adapter runs against that root. Its descriptor is
@@ -192,6 +191,19 @@ func (p *Process) ProviderDescendantCount() (int, bool) {
 	return p.tree.descendantCount()
 }
 
+// ProviderTreeVacant reports whether the native containment boundary is proven
+// to hold nothing: its supervised root has gone and its authoritative
+// enumeration finds no surviving descendant. A false second result means no
+// observation may be inferred, and a boundary that cannot enumerate its whole
+// tree never reports a positive claim.
+func (p *Process) ProviderTreeVacant() (bool, bool) {
+	if p == nil || p.tree == nil {
+		return false, false
+	}
+
+	return p.tree.treeVacant()
+}
+
 // BrowserLaunchContained reports whether this process runs with the launcher
 // shim installed. A login leg must not start a native flow without it: hermes
 // opens a browser for the login, and only the shim keeps that launch off the
@@ -258,19 +270,16 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opts.SharedHome {
-		if err := bindSharedHermesVersion(ctx, home, executableVersion(executable)); err != nil {
+	if opts.SharedHome && opts.PrepareSharedHome != nil {
+		if err := opts.PrepareSharedHome(ctx, home); err != nil {
 			return nil, err
 		}
-		if opts.PrepareSharedHome != nil {
-			if err := opts.PrepareSharedHome(ctx, home); err != nil {
-				return nil, err
-			}
-		}
 	}
-	// Official shared-home startup must not create the compatibility probe's
+	// Official shared-home startup must not create the required-method probe's
 	// durable draft outside the adapter's cross-process session-set journal.
-	// Exact v0.20 version binding is the compatibility boundary in this mode;
+	// The per-start minimum-version probe is the executable support boundary in this
+	// mode — a shared home is never bound to the native version that first used
+	// it, because official Hermes owns its state across self-updates;
 	// ordinary session methods are exercised only after the Agent holds its
 	// shared/exclusive operation fence.
 	probeNeeded := gatewayMethodProbeNeeded(opts, executable)
@@ -875,22 +884,8 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	if compareVersions(version, MinimumVersion) < 0 {
 		return fmt.Errorf("hermes version %s is below minimum %s", version, MinimumVersion)
 	}
-	recordExecutableVersion(executable, version)
 
 	return nil
-}
-
-func recordExecutableVersion(executable string, version string) {
-	executableProbeMu.Lock()
-	executableVersions[executable] = version
-	executableProbeMu.Unlock()
-}
-
-func executableVersion(executable string) string {
-	executableProbeMu.Lock()
-	defer executableProbeMu.Unlock()
-
-	return executableVersions[executable]
 }
 
 func parseVersion(output string) (string, bool) {
@@ -992,7 +987,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) (returnErr error) {
 	// resolves a real session through _sess, which can trigger its deferred full
 	// agent build and runtime dependency discovery. Startup must not activate a
 	// session merely to prove that these methods exist.
-	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, missingProbeSessionID, "deny", false)); err != nil {
+	if err := methodPresent("approval.respond", p.Client.ApprovalRespond(ctx, missingProbeSessionID, "deny")); err != nil {
 		return err
 	}
 
@@ -1157,17 +1152,17 @@ func (p *Process) waitReady(ctx context.Context) error {
 func (p *Process) waitGatewayReady(ctx context.Context) error {
 	for {
 		select {
-		case event, ok := <-p.Client.Events():
+		case delivery, ok := <-p.Client.Deliveries():
 			if !ok {
 				return fmt.Errorf("hermes websocket closed before gateway.ready")
 			}
 
-			if event.Type == eventGatewayReady {
-				return nil
+			if delivery.Err != nil {
+				return delivery.Err
 			}
-		case err, ok := <-p.Client.Errors():
-			if ok && err != nil {
-				return err
+
+			if delivery.Event != nil && delivery.Event.Type == eventGatewayReady {
+				return nil
 			}
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1205,10 +1200,4 @@ func defaultWebDistExists() bool {
 	info, err := statPath(filepath.Join(home, ".hermes", "hermes-agent", "hermes_cli", "web_dist"))
 
 	return err == nil && info.IsDir()
-}
-
-func IsStateDB(path string) bool {
-	name := filepath.Base(path)
-
-	return name == "state.db" || name == "state.db-wal" || name == "state.db-shm"
 }

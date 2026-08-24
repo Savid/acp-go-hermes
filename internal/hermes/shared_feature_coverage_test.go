@@ -108,7 +108,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake = newFakeGatewayServer(t)
 		fake.setFail("session.close")
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if err := server.DeleteSession(t.Context(), "stored-1"); err == nil || !strings.Contains(err.Error(), "close Hermes") {
 			t.Fatalf("close-before-delete error = %v", err)
 		}
@@ -117,7 +117,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.setNotFound("session.close", 1)
 		fake.setNotFound("session.delete", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if err := server.DeleteSession(t.Context(), "stored-1"); err != nil {
 			t.Fatalf("not-found delete was not idempotent: %v", err)
 		}
@@ -134,7 +134,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake = newFakeGatewayServer(t)
 		fake.branchNoSession = true
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "missing session_id") {
 			t.Fatalf("missing branch live id error = %v", err)
 		}
@@ -143,7 +143,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchNoKey = true
 		fake.setNotFound("session.close", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "missing stored_session_id") {
 			t.Fatalf("missing branch key error = %v", err)
 		}
@@ -152,7 +152,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.setFail("session.close")
 		fake.setNotFound("session.delete", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "close Hermes branch") {
 			t.Fatalf("branch detach error = %v", err)
 		}
@@ -160,7 +160,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake = newFakeGatewayServer(t)
 		fake.setNotFound("session.close", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if branch, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err != nil || branch.ID != "stored-branch" {
 			t.Fatalf("not-found branch detach = %#v, %v", branch, err)
 		}
@@ -171,7 +171,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchFailAfterSave = true
 		fake.setFail("session.list")
 		server := newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "list durable") {
 			t.Fatalf("failed branch inventory error = %v", err)
 		}
@@ -180,7 +180,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchFailAfterSave = true
 		fake.branchWrongTitle = true
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); !errors.Is(err, ErrBranchRecoveryAmbiguous) {
 			t.Fatalf("ambiguous branch error = %v", err)
 		}
@@ -189,7 +189,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchFailAfterSave = true
 		fake.setFail("session.delete")
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "delete failed") {
 			t.Fatalf("branch cleanup delete error = %v", err)
 		}
@@ -198,7 +198,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchFailAfterSave = true
 		fake.setFailAfter("session.list", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "verify failed") {
 			t.Fatalf("branch cleanup verify error = %v", err)
 		}
@@ -207,34 +207,9 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake.branchFailAfterSave = true
 		fake.deleteKeepsBranch = true
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if _, err := server.ForkWithBaseline(t.Context(), "stored-1", "marker", nil); err == nil || !strings.Contains(err.Error(), "durable row remains") {
 			t.Fatalf("branch cleanup retained-row error = %v", err)
-		}
-	})
-
-	t.Run("checked live lookup", func(t *testing.T) {
-		fake := newFakeGatewayServer(t)
-		server := newGatewayBackedHermesServer(t, fake, "")
-		fake.setFail("session.active_list")
-		if _, err := server.storedSessionIDForLive(t.Context(), "live-1"); err == nil || !strings.Contains(err.Error(), "lookup failed") {
-			t.Fatalf("lookup RPC error = %v", err)
-		}
-
-		fake = newFakeGatewayServer(t)
-		fake.activeNoKey = true
-		server = newGatewayBackedHermesServer(t, fake, "")
-		if _, err := server.storedSessionIDForLive(t.Context(), "live-1"); err == nil || !strings.Contains(err.Error(), "missing session_key") {
-			t.Fatalf("lookup missing key error = %v", err)
-		}
-
-		fake = newFakeGatewayServer(t)
-		server = newGatewayBackedHermesServer(t, fake, "")
-		if _, err := server.storedSessionIDForLive(t.Context(), "other-live"); err == nil || !strings.Contains(err.Error(), "missing live session") {
-			t.Fatalf("lookup missing live error = %v", err)
-		}
-		if stored, err := server.storedSessionIDForLive(t.Context(), "live-1"); err != nil || stored != "stored-1" {
-			t.Fatalf("lookup success = %q, %v", stored, err)
 		}
 	})
 
@@ -242,7 +217,7 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake := newFakeGatewayServer(t)
 		fake.setFail("config.set")
 		server := newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		_, err := server.SendMessage(t.Context(), "stored-1", MessageRequest{
 			Model: &ModelSelector{ProviderID: "provider", ModelID: "model"},
 		})
@@ -260,14 +235,14 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		fake = newFakeGatewayServer(t)
 		fake.setNotFound("config.set", 1)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "stale-live")
+		bindTestGatewaySession(t, server, "stored-1", "stale-live")
 		if err := server.SetModel(t.Context(), "stored-1", "provider/model"); err != nil {
 			t.Fatalf("model stale-live retry: %v", err)
 		}
 
 		fake = newFakeGatewayServer(t)
 		server = newGatewayBackedHermesServer(t, fake, "")
-		server.rememberGatewaySession("stored-1", "live-1")
+		bindTestGatewaySession(t, server, "stored-1", "live-1")
 		if err := server.SetModel(t.Context(), "stored-1", "provider/model"); err != nil {
 			t.Fatalf("model success: %v", err)
 		}
@@ -310,8 +285,8 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		originalMkdir := xdgMkdirAll
 		t.Cleanup(func() { xdgMkdirAll = originalMkdir })
 		xdgMkdirAll = func(string, os.FileMode) error { return errors.New("mkdir fault") }
-		if _, err := CreateXDGDirs(t.TempDir(), "fault"); err == nil {
-			t.Fatal("CreateXDGDirs ignored mkdir fault")
+		if _, err := CreateGenerationXDGDirs(t.TempDir()); err == nil {
+			t.Fatal("CreateGenerationXDGDirs ignored mkdir fault")
 		}
 		xdgMkdirAll = originalMkdir
 		if _, err := SharedHomeXDGDirs(""); err == nil {
@@ -1195,27 +1170,6 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		if err := materializeSharedHermesConfig(t.Context(), home, nil, map[string]string{hermesConfigFileName: "safe: true\n"}); err == nil || !strings.Contains(err.Error(), "exactly false") {
 			t.Fatalf("post-materialization validation error = %v", err)
 		}
-	})
-
-	t.Run("version binding faults", func(t *testing.T) {
-		if err := bindSharedHermesVersion(t.Context(), t.TempDir(), ""); err == nil {
-			t.Fatal("empty version binding was accepted")
-		}
-		home := t.TempDir()
-		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, home), sharedHermesVersionName), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := bindSharedHermesVersion(t.Context(), home, "0.20.0"); err == nil || !strings.Contains(err.Error(), "read") {
-			t.Fatalf("version read error = %v", err)
-		}
-
-		originalWriter := sharedAtomicWriteFile
-		t.Cleanup(func() { sharedAtomicWriteFile = originalWriter })
-		sharedAtomicWriteFile = func(string, []byte, os.FileMode) error { return errors.New("version write fault") }
-		if err := bindSharedHermesVersion(t.Context(), t.TempDir(), "0.20.0"); err == nil || !strings.Contains(err.Error(), "commit") {
-			t.Fatalf("version write error = %v", err)
-		}
-		sharedAtomicWriteFile = originalWriter
 	})
 
 	t.Run("config lock control, open and run errors", func(t *testing.T) {

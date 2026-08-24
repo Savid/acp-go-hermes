@@ -12,7 +12,6 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
@@ -162,9 +161,19 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	requireRemovedHermesRoot(t, restoredRoot)
 }
 
+// requireRestoredHermesStateDB finds the one runtime generation the restore
+// minted. A generation root is named per incarnation, not per session, so it is
+// located under the scratch parent rather than derived from the session id.
 func requireRestoredHermesStateDB(t *testing.T, scratch string, sessionID acp.SessionId) string {
 	t.Helper()
-	root := filepath.Join(scratch, "acp-go-hermes", nativehermes.SafePathName(string(sessionID)))
+	roots, globErr := filepath.Glob(filepath.Join(scratch, "acp-go-hermes-runtime-*"))
+	if globErr != nil {
+		t.Fatalf("locate restored Hermes runtime root for %q: %v", sessionID, globErr)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("restored Hermes runtime roots for %q = %v, want exactly one", sessionID, roots)
+	}
+	root := roots[0]
 	path := filepath.Join(root, "state.db")
 	contents, err := os.ReadFile(path)
 	if err != nil {
