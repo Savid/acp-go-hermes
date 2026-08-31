@@ -11,7 +11,7 @@ route capability, the media envelope, local handoff support, and the lifecycle
 extension. None of them is part of the Hermes namespace.
 
 Initialize advertises the reserved route capability as
-`_meta["acp-go.dev/route"] = {"versions":[1]}`.
+`_meta["acp-go.dev/route"] = {"version":1}`.
 
 `session/prompt` and `session/cancel` require exactly
 `{"version":1,"turnNonce":"..."}` under the reserved route key. The nonce is
@@ -70,7 +70,7 @@ selected model accepts an image at all stays a prompt-time result.
 ## Local handoff
 
 When `WithInputHandoffRoot` is set, initialize additionally advertises
-`_meta["acp-go.dev/handoff"] = {"versions":[1]}`, and image blocks may use the
+`_meta["acp-go.dev/handoff"] = {"version":1}`, and image blocks may use the
 [local handoff form](/docs/core/prompt-streaming#local-handoff-image-input) with the
 per-block envelope:
 
@@ -94,10 +94,10 @@ fields on a `session/prompt` image block and is read nowhere else.
 ## Lifecycle extension
 
 Hermes implements version 1 of the `acp-go.dev/lifecycle` extension. A client
-offers `{"versions":[1]}` under that key in the `initialize` request `_meta`;
-the negotiated `acp-go.dev/lifecycle` answer is placed on
+sends `{"version":1}` under that key in the `initialize` request `_meta`;
+the `acp-go.dev/lifecycle` answer is placed on
 `InitializeResponse._meta` and advertises the facts proven by the active
-containment configuration. With no offer, or with no common version, the key
+containment configuration. With no capability, the key
 is omitted from the response and no lifecycle envelope, correlation read, or
 lifecycle fact exists on the connection at all.
 

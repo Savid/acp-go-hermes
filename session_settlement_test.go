@@ -48,7 +48,7 @@ func TestTurnSettlementNotifiesAfterCompletionLatch(t *testing.T) {
 func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
@@ -90,7 +90,7 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
@@ -122,7 +122,7 @@ func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *tes
 func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
@@ -171,7 +171,7 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
@@ -198,7 +198,7 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
@@ -238,7 +238,7 @@ func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
 
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions:                []int{lifecycle.Version},
+			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
@@ -335,7 +335,7 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 	t.Run("quiescence", func(t *testing.T) {
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions:                []int{lifecycle.Version},
+			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
@@ -362,7 +362,7 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -449,7 +449,7 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 		})
 		agent.setAgentClient(newRecordingAgentClient())
 		session := testSession(agent, client)
@@ -497,7 +497,7 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 			}
 			agent := newTestAgent(WithSessionStore(store))
 			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 			})
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newFakeHermesClient()
@@ -605,7 +605,7 @@ func lifecycleUpdateCount(conn *recordingAgentClient) int {
 func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -703,7 +703,7 @@ func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
 	require.Equal(t, lifecycle.ActionAccepted, permissionActionState(acp.RequestPermissionResponse{}, valOnce))
 
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	require.NoError(t, session.openLifecycleStream())
 	_, _, owned = session.reserveBlockingAction(lifecycle.ActionPermission, "unowned", permissionTurnRoute{})
@@ -778,7 +778,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 	t.Run("quiescence", func(t *testing.T) {
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions:                []int{lifecycle.Version},
+			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
@@ -960,7 +960,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 	t.Run("proved vacancy", func(t *testing.T) {
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions:                []int{lifecycle.Version},
+			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
@@ -987,7 +987,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New("opening failed")
@@ -1056,7 +1056,7 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -1108,7 +1108,7 @@ func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -1151,7 +1151,7 @@ func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T
 func TestAgentCloseMakesTheDurableCommitAWireCloseWould(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)

@@ -2,7 +2,7 @@
   "name": "terminal-restatement-suppressed",
   "purpose": "An update naming an already-terminal activity is judged member-wise under patch semantics against the reduced terminal record: every member it carries must equal that record, immutables at their first-sight values. One that restates the terminal state and its immutables unchanged differs in nothing, so it is a no-op patch and is suppressed rather than refused. Suppression is not silence about ordering: the sequence is consumed and the projection is untouched. It is silence about work — a suppressed no-op begins nothing, so it does not raise the floor a positive quiescence fact must clear, and a proof whose watermark covers the terminal idle but stops below the restatement still certifies the boundary.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

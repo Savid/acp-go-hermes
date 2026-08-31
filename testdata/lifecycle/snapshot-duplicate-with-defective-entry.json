@@ -2,7 +2,7 @@
   "name": "snapshot-duplicate-with-defective-entry",
   "purpose": "Within a snapshot's whole-set judgment, set membership precedes entry judgment. This snapshot lists one activityId twice, and the repeated entry is defective on its own terms as well: it omits originTurnId, an immutable member every first sight carries. Both readings refuse, so the question the vector settles is which failure the snapshot commits, and the set's is first: the moment an id is listed twice the set asserts two current states for one entity, and there is no coherent entry left to judge. The verdict is the set's, malformed_envelope, not the entry's identity failure, and the refused snapshot opens nothing.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

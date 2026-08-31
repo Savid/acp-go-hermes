@@ -2,7 +2,7 @@
   "name": "ending-idle-omits-outcome",
   "purpose": "An idle transition that ends an open turn always records the outcome that settled it. This one carries its stop reason and omits the outcome: a settled turn with no recorded outcome is a boundary a consumer cannot report, so the omission is malformed rather than a turn that ended for no stated reason.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

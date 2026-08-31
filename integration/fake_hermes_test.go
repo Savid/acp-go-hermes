@@ -123,7 +123,7 @@ func TestHermesACPAgentProjectsPreSubmitActivityBeforePromptDispatch(t *testing.
 	initialized, err := conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		Meta: map[string]any{lifecycle.MetaKey: map[string]any{
-			"versions": []any{lifecycle.Version},
+			"version": lifecycle.Version,
 		}},
 	})
 	if err != nil {

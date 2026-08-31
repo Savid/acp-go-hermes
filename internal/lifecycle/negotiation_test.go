@@ -8,25 +8,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func offerMeta(versions any) map[string]any {
-	return map[string]any{MetaKey: map[string]any{fieldVersions: versions}}
+func capabilityMeta(version any) map[string]any {
+	return map[string]any{MetaKey: map[string]any{fieldVersion: version}}
 }
 
-// TestDecodeOfferReportsAnAbsentOffer pins that the host asking for nothing is
+// TestDecodeCapabilityReportsAbsence pins that the host asking for nothing is
 // not a refusal.
-func TestDecodeOfferReportsAnAbsentOffer(t *testing.T) {
+func TestDecodeCapabilityReportsAbsence(t *testing.T) {
 	t.Parallel()
 
-	offer, offered, refusal := DecodeOffer(nil)
+	offered, refusal := DecodeCapability(nil)
 	require.Nil(t, refusal)
 	require.False(t, offered)
-	require.Empty(t, offer.Versions)
 }
 
-// TestDecodeOfferStrictness pins that every refusal names the exact member path,
-// and that versions is validated on every offer whatever the version.
-func TestDecodeOfferStrictness(t *testing.T) {
+// TestDecodeCapabilityExactVersion pins that every refusal names the exact
+// member path and only the current scalar version is accepted.
+func TestDecodeCapabilityExactVersion(t *testing.T) {
 	t.Parallel()
+	for _, version := range []any{1, 1.0, json.Number("1")} {
+		offered, refusal := DecodeCapability(capabilityMeta(version))
+		require.True(t, offered)
+		require.Nil(t, refusal)
+	}
 
 	for _, tc := range []struct {
 		name  string
@@ -34,62 +38,23 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		field string
 	}{
 		{"non-object", map[string]any{MetaKey: []any{1.0}}, MetaPath},
-		{"unknown member", map[string]any{MetaKey: map[string]any{
-			fieldVersions: []any{1.0}, "activityKinds": []any{},
-		}}, MetaPath + ".activityKinds"},
-		{"missing versions", map[string]any{MetaKey: map[string]any{}}, MetaPath + ".versions"},
-		{"empty versions", offerMeta([]any{}), MetaPath + ".versions"},
-		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
-		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
-		// Integral in the float's own terms and still no integer this adapter can
-		// hold: an offered version is one int or it is not a version at all.
-		{"unholdable version", offerMeta([]any{1e300}), MetaPath + ".versions"},
-		{"unholdable negative version", offerMeta([]any{-1e300}), MetaPath + ".versions"},
-		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
-		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
+		{"unknown member", map[string]any{MetaKey: map[string]any{fieldVersion: 1, "activityKinds": []any{}}}, MetaPath + ".activityKinds"},
+		{"missing version", map[string]any{MetaKey: map[string]any{}}, MetaPath + ".version"},
+		{"other integer", capabilityMeta(2), MetaPath + ".version"},
+		{"fractional version", capabilityMeta(1.5), MetaPath + ".version"},
+		{"string version", capabilityMeta("1"), MetaPath + ".version"},
+		{"boolean version", capabilityMeta(true), MetaPath + ".version"},
+		{"array version", capabilityMeta([]any{1}), MetaPath + ".version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, offered, refusal := DecodeOffer(tc.meta)
+			offered, refusal := DecodeCapability(tc.meta)
 			require.False(t, offered)
 			require.NotNil(t, refusal)
 			require.Equal(t, tc.field, refusal.Field)
 			require.Equal(t, "unsupported "+tc.field, refusal.Error())
 		})
-	}
-}
-
-// TestOfferAnswerIntersects pins that the answer is the common set, that only the
-// answer is ordered, and that an empty intersection answers nothing at all.
-func TestOfferAnswerIntersects(t *testing.T) {
-	t.Parallel()
-
-	proven := Negotiated{ActivityKinds: []ActivityKind{}}
-
-	answer, common := Offer{Versions: []int{1, 1, 2}}.Answer(proven)
-	require.True(t, common)
-	require.Equal(t, []int{1}, answer.Versions, "the intersection is duplicate-free")
-
-	answer, common = Offer{Versions: []int{2, 1}}.Answer(proven)
-	require.True(t, common)
-	require.Equal(t, []int{1}, answer.Versions, "an unordered offer is intersected, not refused")
-
-	_, common = Offer{Versions: []int{2, 3}}.Answer(proven)
-	require.False(t, common)
-}
-
-// TestDecodeOfferReadsEveryIntegerSpelling pins that a decoded wire float64, an
-// embedding host's int, and a number-preserving decoder's json.Number are the
-// same offered version.
-func TestDecodeOfferReadsEveryIntegerSpelling(t *testing.T) {
-	t.Parallel()
-
-	for _, versions := range []any{[]any{1.0}, []any{1}, []any{json.Number("1")}} {
-		offer, offered, refusal := DecodeOffer(offerMeta(versions))
-		require.Nil(t, refusal)
-		require.True(t, offered)
-		require.Equal(t, []int{1}, offer.Versions)
 	}
 }
 
@@ -131,18 +96,6 @@ func TestIntegerValueNamesExactlyOneInt(t *testing.T) {
 	}
 }
 
-// TestDecodeOfferReadsEveryIntegerAFloatHolds pins the accepting side of the
-// representability guard: a large integral float64 the target int holds exactly
-// is still one offered version, so the guard refuses only what no int can name.
-func TestDecodeOfferReadsEveryIntegerAFloatHolds(t *testing.T) {
-	t.Parallel()
-
-	offer, offered, refusal := DecodeOffer(offerMeta([]any{float64(1 << 53)}))
-	require.Nil(t, refusal)
-	require.True(t, offered)
-	require.Equal(t, []int{1 << 53}, offer.Versions)
-}
-
 func correlationMeta(value any) map[string]any {
 	return map[string]any{MetaKey: value}
 }
@@ -152,7 +105,7 @@ func correlationMeta(value any) map[string]any {
 func TestDecodePromptCorrelationRequiresTheKeyWhileNegotiated(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 
 	submission, refusal := DecodePromptCorrelation(nil, Negotiated{})
 	require.Nil(t, refusal)
@@ -172,7 +125,7 @@ func TestDecodePromptCorrelationRequiresTheKeyWhileNegotiated(t *testing.T) {
 func TestDecodePromptCorrelationStrictness(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 	submission := map[string]any{"submissionId": "sub-1", "clientNonce": "non-1"}
 
 	for _, tc := range []struct {
@@ -185,9 +138,9 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		{"missing version", map[string]any{"submission": submission}, MetaPath + ".version"},
 		{"fractional version", map[string]any{"version": 1.5, "submission": submission}, MetaPath + ".version"},
 		// No fractional part and still no integer this adapter can hold. The
-		// refusal is the guard's, not the intersection's — what an out-of-range
+		// refusal is the integer guard's — what an out-of-range
 		// conversion would have produced is implementation-defined, so which
-		// negotiated version it might have collided with is not a thing to reason
+		// exact version it might have collided with is not a thing to reason
 		// about. TestIntegerValueNamesExactlyOneInt pins the guard itself.
 		{"unholdable version", map[string]any{"version": 1e300, "submission": submission}, MetaPath + ".version"},
 		{"unsupported version", map[string]any{"version": 2.0, "submission": submission}, MetaPath + ".version"},
@@ -226,7 +179,7 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 func TestDecodePromptCorrelationReadsTheWholeSubmission(t *testing.T) {
 	t.Parallel()
 
-	negotiated := Negotiated{Versions: []int{Version}}
+	negotiated := Negotiated{Version: Version}
 
 	submission, refusal := DecodePromptCorrelation(correlationMeta(map[string]any{
 		"version":    1.0,

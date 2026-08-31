@@ -2,7 +2,7 @@
   "name": "session-requires-action-omits-turn",
   "purpose": "A blocked foreground is owned work blocked, so requires_action names its turn exactly as running does, whatever the cause. The cycle here is properly blocked — a pending blocking action and its accompanying submission-caused transition — so the blocked-cycle consistency rule has nothing to object to, and the only defect left is the missing turnId. That defect is structural: it is judged before entity resolution, so an event carrying no name never reports unknown_entity, and before the cycle is consulted at all, so a properly blocked cycle never converts it into a consistency verdict. The structural refusal wins from both directions.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

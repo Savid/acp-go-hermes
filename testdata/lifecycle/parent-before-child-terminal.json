@@ -2,7 +2,7 @@
   "name": "parent-before-child-terminal",
   "purpose": "Children terminalize before their parent. A parent reporting terminal while an owned descendant is still nonterminal would claim a subtree is done while part of it runs, so it is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

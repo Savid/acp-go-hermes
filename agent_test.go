@@ -332,7 +332,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 		MaxActiveSessions: 1, MaxConcurrentClientCalls: 1,
 	}))
 	bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	first := testSession(bounded, newFakeHermesClient())
 	require.NoError(t, first.openLifecycleStream())
@@ -347,7 +347,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 
 	deferredBounded := newTestAgent()
 	deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	deferred := testSession(deferredBounded, newFakeHermesClient())
 	require.NoError(t, deferred.openLifecycleStream())

@@ -2,7 +2,7 @@
   "name": "false-quiescence-foreground-live",
   "purpose": "A positive quiescence fact asserts that nothing rooted at or before its watermark is live, and the foreground alone can disprove it. One delivered while the foreground is running is refused even though the stream holds no activity and no action: a reducer that reads only entity liveness would certify a boundary over work the foreground itself reports.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

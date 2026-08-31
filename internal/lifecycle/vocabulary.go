@@ -253,10 +253,7 @@ const (
 // set and `UpdatesOutsidePrompt` false are truthful answers for a configuration
 // where nothing can outlive a contained prompt.
 type Negotiated struct {
-	// Versions is the non-empty intersection of the host's offer and the
-	// versions this configuration implements. The connection speaks the highest
-	// member.
-	Versions                []int          `json:"versions"`
+	Version                 int            `json:"version"`
 	UpdatesOutsidePrompt    bool           `json:"updatesOutsidePrompt"`
 	AuthoritativeQuiescence bool           `json:"authoritativeQuiescence"`
 	QuiescenceSource        ProofClass     `json:"quiescenceSource,omitempty"`
@@ -266,23 +263,7 @@ type Negotiated struct {
 // Present reports whether the configuration answered the lifecycle key at all.
 // An absent answer makes every envelope, correlation value, and lifecycle fact
 // illegal on the connection.
-func (n Negotiated) Present() bool { return len(n.Versions) > 0 }
-
-// SupportsVersion reports whether an envelope version is inside the negotiated
-// set.
-func (n Negotiated) SupportsVersion(version int) bool {
-	return slices.Contains(n.Versions, version)
-}
-
-// NegotiatedVersion is the single integer every envelope and correlation value
-// on the connection carries: the highest member of the intersection.
-func (n Negotiated) NegotiatedVersion() int {
-	if !n.Present() {
-		return 0
-	}
-
-	return slices.Max(n.Versions)
-}
+func (n Negotiated) Present() bool { return n.Version == Version }
 
 // DeclaresActivityKind reports whether the answer advertised an activity kind. A
 // kind it never advertised is a kind it cannot prove.
@@ -300,7 +281,7 @@ func (n Negotiated) Advertisement() map[string]any {
 	}
 
 	advertisement := map[string]any{
-		fieldVersions:                slices.Clone(n.Versions),
+		fieldVersion:                 n.Version,
 		fieldUpdatesOutsidePrompt:    n.UpdatesOutsidePrompt,
 		fieldAuthoritativeQuiescence: n.AuthoritativeQuiescence,
 		fieldActivityKinds:           kinds,

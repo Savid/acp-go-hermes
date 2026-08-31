@@ -2,7 +2,7 @@
   "name": "replacement-supersedes-live-run",
   "purpose": "Supersession is the natural end of the prior incarnation, and the conditions that refuse a snapshot are the enumerated ones: holding live work is not among them. strm-1 has accepted a turn carrying a runId — a run live and never certified as finished — when strm-2's otherwise legal opening snapshot arrives, and it reduces. The projection becomes strm-2's own and adopts nothing of strm-1: not its turn, not its watermark, not its sequence space. Failing abandoned work is the durable-authority host's business, never the stream consumer's, so no reducer gates an incarnation replacement on the run the superseded projection still holds.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": false,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

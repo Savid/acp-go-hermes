@@ -2,7 +2,7 @@
   "name": "prompt-accepted-before-running",
   "purpose": "prompt_accepted records that the native dispatcher took durable ownership of the frame. It creates the submission and its prompt-origin turn without entering the foreground, and it invalidates the snapshot's quiescence fact.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

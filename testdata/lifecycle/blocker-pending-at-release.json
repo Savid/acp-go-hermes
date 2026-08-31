@@ -2,7 +2,7 @@
   "name": "blocker-pending-at-release",
   "purpose": "A cycle returns to running when the last action blocking it resolves, not when the first one does. With two blockers outstanding, resolving one leaves the cycle blocked, and a release that assumes otherwise is refused: a reducer never infers a resolution from the transition that presumes it.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

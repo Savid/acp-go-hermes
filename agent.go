@@ -439,7 +439,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	capabilityMeta := capabilityMediaMeta(a.options)
 	capabilityMeta[hermesMetaKey] = hermesMeta
-	capabilityMeta[routeMetaKey] = map[string]any{keyVersions: []int{routeVersion}}
+	capabilityMeta[routeMetaKey] = map[string]any{keyVersion: routeVersion}
 
 	return acp.InitializeResponse{
 		Meta:            lifecycleMeta,

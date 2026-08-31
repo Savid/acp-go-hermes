@@ -792,7 +792,7 @@ func TestLifecycleOpeningFollowsTheEstablishingResponseOverPipes(t *testing.T) {
 	}
 
 	writeJSONRPC(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,` +
-		`"_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}}`)
+		`"_meta":{"acp-go.dev/lifecycle":{"version":1}}}}`)
 
 	var negotiation struct {
 		Result acp.InitializeResponse `json:"result"`
@@ -942,7 +942,7 @@ func TestPermissionOperationUsesOneClientCallLeaseOverPipes(t *testing.T) {
 	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(conn)

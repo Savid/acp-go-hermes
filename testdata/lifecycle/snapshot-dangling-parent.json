@@ -2,7 +2,7 @@
   "name": "snapshot-dangling-parent",
   "purpose": "A snapshot's references resolve inside the snapshot. An activity naming a parent absent from the snapshot's own sets is refused rather than reduced as unattached state: there is no carve-out for a parent terminalized before the stream opened, because a nonterminal child of a terminal parent is a state no stream may assert. A refused snapshot opens nothing, so the projection is untouched.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

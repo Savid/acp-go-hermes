@@ -1016,7 +1016,7 @@ func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordin
 
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()

@@ -2,7 +2,7 @@
   "name": "quiescence-recertifies-after-invalidation",
   "purpose": "A revoked certification is not a permanent one. After acceptance invalidates the opening fact and the turn runs to its terminal idle, a later positive fact whose watermark covers every reduced event certifies the boundary again. Only an explicit fact recertifies: the reducer never re-reads the revoked one as fresh.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

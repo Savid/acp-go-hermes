@@ -3757,7 +3757,7 @@ func TestSharedHomePromptSessionSetLock(t *testing.T) {
 func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
@@ -4115,7 +4115,7 @@ func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	negotiatedSession := testSession(agent, newFakeHermesClient())
 	_, err := negotiatedSession.Prompt(t.Context(), acp.PromptRequest{
@@ -4502,7 +4502,7 @@ func newOrderedControlSession(t *testing.T) (*session, *fakeHermesClient, *order
 	_ = acp.NewClientSideConnection(host, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	connection := newLocalAgentConnection(agent, orderedControlWireWriter{target: a2cW, events: host.wireEvents}, c2aR)

@@ -2,7 +2,7 @@
   "name": "snapshot-blocked-without-blocker",
   "purpose": "A snapshot's foreground answers to the same rule as a transition's: requires_action is a state a blocking action puts the cycle in, and the snapshot states the complete nonterminal sets, so a blocker it does not list does not exist. A resumed requires_action whose only action does not block the foreground asserts a state nothing in the snapshot can explain, and a refused snapshot opens nothing, so the projection is untouched.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

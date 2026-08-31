@@ -202,7 +202,7 @@ func TestSnapshotRefusesAnIncompleteEntity(t *testing.T) {
 func TestReducerRefusesAnUnnegotiatedActivityKind(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
+	degenerate := Negotiated{Version: Version, ActivityKinds: []ActivityKind{}}
 
 	requireReduceRefusal(t, degenerate, ViolationUnnegotiatedFact,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
@@ -530,7 +530,7 @@ func TestQuiescenceInvalidationIsExplicit(t *testing.T) {
 func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
+	degenerate := Negotiated{Version: Version, ActivityKinds: []ActivityKind{}}
 
 	requireReduceRefusal(t, degenerate, ViolationUnnegotiatedFact, openSnapshot(),
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment}))
@@ -835,21 +835,12 @@ func TestViolationErrorNamesTheFrameItRefused(t *testing.T) {
 	require.NotErrorIs(t, refusal, errors.New("sequence_gap"))
 }
 
-// TestNegotiatedVersionIsTheHighestCommonMember pins the single integer every
-// envelope on a connection carries.
-func TestNegotiatedVersionIsTheHighestCommonMember(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, 0, Negotiated{}.NegotiatedVersion())
-	require.Equal(t, 3, Negotiated{Versions: []int{1, 3}}.NegotiatedVersion())
-}
-
 // TestAdvertisementRendersTheAnswer pins the wire shape of the answer, including
 // the presence rule that binds quiescenceSource to its claim.
 func TestAdvertisementRendersTheAnswer(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}.Advertisement()
+	degenerate := Negotiated{Version: Version, ActivityKinds: []ActivityKind{}}.Advertisement()
 	require.Equal(t, []string{}, degenerate["activityKinds"])
 	require.NotContains(t, degenerate, "quiescenceSource")
 

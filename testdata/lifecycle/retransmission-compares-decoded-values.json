@@ -2,7 +2,7 @@
   "name": "retransmission-compares-decoded-values",
   "purpose": "Exact retransmission is judged on decoded values, never on encoded bytes: key order and insignificant whitespace are not differences. A reducer comparing bytes would refuse a legal retransmission of the snapshot that opened the stream, so both a reordered snapshot and a reordered delta are suppressed wholesale and change nothing.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

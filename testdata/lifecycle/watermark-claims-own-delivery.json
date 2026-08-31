@@ -2,7 +2,7 @@
   "name": "watermark-claims-own-delivery",
   "purpose": "A watermark fences the sequences at or before it, so it can never reach the event that carries it: a proof covers work that preceded it and never its own delivery. A watermark at or above its own sequence is malformed rather than a proof that happens to cover one event too many.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

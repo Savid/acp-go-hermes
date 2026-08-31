@@ -5,7 +5,7 @@
   "vectorShape": {
     "name": "The fixture's name, matching its file name without the extension.",
     "purpose": "Prose stating the invariant this fixture pins and the reasoning that makes the verdict the only one available.",
-    "negotiated": "The extension answer this fixture reduces under: `versions`, `updatesOutsidePrompt`, `authoritativeQuiescence`, `quiescenceSource`, and `activityKinds`.",
+    "negotiated": "The extension answer this fixture reduces under: exact scalar `version: 1`, `updatesOutsidePrompt`, `authoritativeQuiescence`, `quiescenceSource`, and `activityKinds`. An empty object means the capability key was omitted.",
     "input": "The delivered elements, in order, in the shape `inputShape` fixes.",
     "postRefusal": "Present on `fail_closed` only, and optional: further inputs in the same shape as `input`, delivered after the refusal. Fail closed latches, so a harness MUST feed every one of them and MUST assert that each is refused with the same token at the same `(streamId, sequence)` identity and that `state` still holds afterwards. A harness that stops feeding at the first refusal cannot tell a consumer that stopped reducing from one that kept going past a verdict it had already returned.",
     "expect": "The required verdict, in the shape `expectShape` fixes."
@@ -118,7 +118,7 @@
     },
     {
       "file": "unsupported-version.json",
-      "invariant": "An envelope whose version is outside the negotiated set is refused."
+      "invariant": "An envelope whose version is not the exact scalar version 1 is refused."
     },
     {
       "file": "unknown-field.json",

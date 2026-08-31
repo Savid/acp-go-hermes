@@ -2,7 +2,7 @@
   "name": "quiescence-survives-idle-and-retransmission",
   "purpose": "A certified fact is revoked by the first later event that begins or records live work, and by nothing else. A session-caused idle that ends no turn and a suppressed exact retransmission both leave the certification standing, so the sequence the projection reports as invalidating is the acceptance rather than either of them.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

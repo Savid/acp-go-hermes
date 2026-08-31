@@ -2,7 +2,7 @@
   "name": "running-task-idle-settles-turn",
   "purpose": "A foreground cycle that runs, spawns an activity, and returns to idle terminalizes its turn. It certifies nothing about background work: the task is still running and no later quiescence_update has arrived.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

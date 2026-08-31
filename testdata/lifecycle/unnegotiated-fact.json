@@ -2,7 +2,7 @@
   "name": "unnegotiated-fact",
   "purpose": "The negotiated answer is the contract for the connection, not a hint about it. A quiescence_update from a configuration that answered authoritativeQuiescence false asserts a fact the sibling never claimed it could prove, so it is refused rather than believed.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": false,
     "activityKinds": ["task"]

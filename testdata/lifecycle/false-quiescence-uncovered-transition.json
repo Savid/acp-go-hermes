@@ -2,7 +2,7 @@
   "name": "false-quiescence-uncovered-transition",
   "purpose": "A watermark must cover every event the stream reduced that named a turn, an activity, or an action. A proof that stops short of the transition which ended the turn describes a boundary the stream has already moved past, so it is disproved even though nothing is live at the moment it arrives — that is exactly the shape a wrong activity-free settlement takes.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -18,7 +18,7 @@ import (
 
 func autonomousLifecycleNegotiation() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,

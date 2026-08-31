@@ -2,7 +2,7 @@
   "name": "blocking-action-requires-action",
   "purpose": "A blocking action never moves the foreground by itself. The sibling emits the accompanying requires_action transition for the blocked cycle and returns it to running when the last blocker resolves, so a reducer never derives foreground state from an action or an action from foreground state.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

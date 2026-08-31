@@ -2,7 +2,7 @@
   "name": "false-quiescence-holds-action",
   "purpose": "A positive quiescence fact is disproved by a single unresolved action, with nothing else live. The foreground is idle and the stream holds no activity, so a reducer that reads foreground state and activity liveness alone would certify a boundary while a pending action still keeps its owner incomplete.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

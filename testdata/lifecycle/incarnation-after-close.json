@@ -2,7 +2,7 @@
   "name": "incarnation-after-close",
   "purpose": "Close fences the session and not merely the stream identity it fenced. A snapshot announcing a fresh incarnation of a session whose close containment completed is stale, because reuse of the stored conversation happens through a new load or resume — a different logical session with its own stream — and never by continuing a closed one. Close lands here directly on the opening quiescent snapshot, so nothing but the fence is under test.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

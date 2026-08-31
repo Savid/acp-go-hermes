@@ -2,7 +2,7 @@
   "name": "agent-origin-second-turn",
   "purpose": "After the prompt-origin turn ends and its task terminalizes, an idle-to-running transition with no submission opens an agent-origin turn caused by that activity. The boundary is certified only by the final quiescence_update, whose watermark covers every transition it fences and sits below the quiescence event's own sequence.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

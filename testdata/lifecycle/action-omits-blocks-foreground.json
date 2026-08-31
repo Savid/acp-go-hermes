@@ -2,7 +2,7 @@
   "name": "action-omits-blocks-foreground",
   "purpose": "An action's first sight carries every member that fixes what it is, blocksForeground included. Read as false by default it would silently demote a blocking request to a background one, which is the difference between a foreground a host renders as waiting and one it renders as working.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "duplicate-number-beyond-double",
   "purpose": "Value equality is exact, and exactness is what a binary float cannot give. Two deliveries at the same identity carry nineteen-digit integers differing only in the last digit; both are far above the range where a float64 keeps every integer, so a reducer that decodes numbers through a double sees one value twice and suppresses a frame that changed its content. The contract's predicate compares the mathematical values, finds them different, and refuses the reused identity as a conflicting duplicate. Lossless comparison is the certifying consumer's obligation, not an optimization.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

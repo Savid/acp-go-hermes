@@ -71,7 +71,7 @@ func TestRouteEnvelopeCurrentShape(t *testing.T) {
 func TestInitializeAdvertisesRouteV1(t *testing.T) {
 	resp, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]any{"versions": []int{1}}, resp.AgentCapabilities.Meta[routeMetaKey])
+	require.Equal(t, map[string]any{"version": 1}, resp.AgentCapabilities.Meta[routeMetaKey])
 }
 
 func TestPromptAndActiveCancelRequireCurrentRoute(t *testing.T) {

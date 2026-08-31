@@ -2,7 +2,7 @@
   "name": "late-causal-parent",
   "purpose": "The causal fence covers a parent as well as an origin turn. A first-sight activity whose parent was first seen at or before a certified watermark is old causal work discovered after the boundary that settled it, and a settled boundary never reopens. The fence is judged before parentage, so this reports the fence rather than the terminal parent.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

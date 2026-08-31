@@ -2,7 +2,7 @@
   "name": "snapshot-on-superseded-stream",
   "purpose": "Supersession fences an incarnation the same way close does. A prompt-contained configuration opens one incarnation per prompt, so reducing the second incarnation's snapshot means the first incarnation's contained process already exited and its stream ended. A later snapshot bearing the first streamId is therefore an event from a superseded incarnation — stale_stream — and never the opening of a fresh stream: the resurrection is refused, a delta on the same superseded streamId stays refused, and the standing projection, the second incarnation's, is untouched.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": false,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

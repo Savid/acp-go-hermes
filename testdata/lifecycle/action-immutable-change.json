@@ -2,7 +2,7 @@
   "name": "action-immutable-change",
   "purpose": "An action's identity is established on first sight and never changes. A later update carries the action's identifier and state, and may restate an immutable member only with its first-sight value; restating one with a different value is an identity change, not a second action and not an unknown member, and is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

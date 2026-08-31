@@ -2,7 +2,7 @@
   "name": "carrier-precedes-ordering",
   "purpose": "Carrier legality is structural: the envelope rides its carrier, so the carrier is classified before ordering is checked. A carrier a conformant client may coalesce is no evidence that the sequence it claims was ever delivered, so this reports the illegal carrier even though the same frame also skips a sequence.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

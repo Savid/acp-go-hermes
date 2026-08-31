@@ -2,7 +2,7 @@
   "name": "stale-quiescence-cannot-settle",
   "purpose": "The snapshot's quiescence fact is invalidated by the acceptance that follows it. The turn then runs and ends with no activity ever created, so nothing is live at the boundary — and the boundary is still uncertified, because no quiescence_update arrived after the work. This is exactly the shape an activity-free settlement takes when it is wrong.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

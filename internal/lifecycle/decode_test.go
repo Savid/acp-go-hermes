@@ -12,7 +12,7 @@ import (
 // refusal in these vectors is structural rather than a fact the answer withheld.
 func richConfiguration() Negotiated {
 	return Negotiated{
-		Versions:                []int{Version},
+		Version:                 Version,
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,

@@ -2,7 +2,7 @@
   "name": "conflicting-duplicate",
   "purpose": "Sequence identity is (streamId, sequence). Reusing an identity with different envelope content is not a retransmission and cannot be reconciled, so it is refused rather than resequenced.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

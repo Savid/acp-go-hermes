@@ -13,7 +13,7 @@ import (
 
 func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 	negotiated := lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
@@ -113,7 +113,7 @@ func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {
 	require.Nil(t, session.lifecycleStream())
 
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	oldReader := sessionIDRandReader
 	t.Cleanup(func() { sessionIDRandReader = oldReader })
@@ -139,7 +139,7 @@ func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {
 func TestLifecycleEmitterViolationFencesStream(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.setAgentClient(newRecordingAgentClient())
 	session := testSession(agent, newFakeHermesClient())
@@ -152,7 +152,7 @@ func TestLifecycleEmitterViolationFencesStream(t *testing.T) {
 
 func TestLifecycleStreamDeliveryFailuresStopAtFailedEvent(t *testing.T) {
 	negotiated := lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}
 
 	newStream := func(t *testing.T) (*sessionStream, *recordingAgentClient) {

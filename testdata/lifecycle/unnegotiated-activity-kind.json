@@ -2,7 +2,7 @@
   "name": "unnegotiated-activity-kind",
   "purpose": "An activity kind outside the answer's activityKinds asserts a kind the configuration never proved it emits. The answer names what this configuration can observe, so a kind absent from it is refused rather than reduced as an activity of unknown provenance.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

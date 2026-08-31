@@ -1,8 +1,8 @@
 {
   "name": "unsupported-version",
-  "purpose": "The envelope's version is the single negotiated integer. A version outside the negotiated set is refused before anything in its event is read, because the reducer has no rule for the shape it would be reducing.",
+  "purpose": "The envelope's version is the exact scalar integer 1. Any other version is refused before anything in its event is read, because the reducer has no rule for the shape it would be reducing.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

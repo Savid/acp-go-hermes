@@ -2,7 +2,7 @@
   "name": "snapshot-false-quiescence",
   "purpose": "A positive quiescence fact must be true of the stream that carries it. A snapshot asserting quiescence while its own sets list live work disproves its own proof, and a false proof fails closed rather than certifying nothing: a swallowed lie is indistinguishable from a loss.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

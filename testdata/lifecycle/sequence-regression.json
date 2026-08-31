@@ -2,7 +2,7 @@
   "name": "sequence-regression",
   "purpose": "A resumed stream opens its snapshot at the boundary it can state truthfully. A pre-snapshot sequence arriving afterwards was never reduced and is not a retransmission of anything; it is refused rather than folded in as history.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

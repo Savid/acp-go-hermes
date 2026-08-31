@@ -14,21 +14,20 @@ import (
 // version, the key is omitted from the response and no envelope, correlation
 // read, or lifecycle fact exists on the connection at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) {
-	offer, offered, refusal := lifecycle.DecodeOffer(meta)
+	offered, refusal := lifecycle.DecodeCapability(meta)
 	if refusal != nil {
 		return nil, lifecycleParamError(refusal)
 	}
 
-	answer, common := offer.Answer(a.provenLifecycleFacts())
-
-	// An omitted key and an empty intersection are the same wire fact: the
-	// response carries no lifecycle member at all.
-	if !offered || !common {
+	if !offered {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
-		//nolint:nilnil // No advertisement and no refusal is the documented empty-intersection answer.
+		//nolint:nilnil // An omitted capability produces no advertisement and no refusal.
 		return nil, nil
 	}
+
+	answer := a.provenLifecycleFacts()
+	answer.Version = lifecycle.Version
 
 	a.retainNegotiatedLifecycle(answer)
 

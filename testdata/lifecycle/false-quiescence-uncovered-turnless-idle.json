@@ -2,7 +2,7 @@
   "name": "false-quiescence-uncovered-turnless-idle",
   "purpose": "The floor a positive quiescence fact must clear is raised by every reduced delivery, not only by the ones that name a turn, an activity, or an action. A session-caused idle restatement names none of them and begins no live work, so it leaves the certification question untouched — and it still moves the stream forward, so a proof whose watermark stops one sequence short of it claims a boundary earlier than something the reducer has already reduced. Nothing in that delivery tells a reducer its emitter meant it to fall outside the boundary, so the floor rises and the proof is disproved.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

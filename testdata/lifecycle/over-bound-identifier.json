@@ -2,7 +2,7 @@
   "name": "over-bound-identifier",
   "purpose": "An identifier is a correlation handle rather than a payload, so it is bounded at 4096 bytes and a longer one fails closed. The bound is this extension's own and is checked on the value as decoded, so an identifier that fits no correlation table is refused before anything is reduced against it.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

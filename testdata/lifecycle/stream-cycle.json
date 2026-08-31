@@ -2,7 +2,7 @@
   "name": "stream-cycle",
   "purpose": "A second lifecycle_snapshot on a live stream would silently restate whole-session state mid-stream and orphan everything reduced before it. A snapshot on a fenced streamId is stale_stream instead; this token is the live-stream case only.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "unknown-entity",
   "purpose": "An event naming an entity the stream never introduced is refused. A first-sight activity whose parentId has no prior first sight would attach work to a parent the reducer cannot enforce parentage, ownership, or terminal ordering against, so it fails closed rather than reducing as unattached state.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

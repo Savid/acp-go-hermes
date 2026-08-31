@@ -1747,7 +1747,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 		}
 	})
 	replayErrAgent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	replayConn := newRecordingAgentClient()
 	replayErrAgent.setAgentClient(replayConn)
@@ -3763,7 +3763,7 @@ func installFailingLifecycleIDReader(t *testing.T, failAt int) {
 
 func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 	negotiated := lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}
 
 	t.Run("new", func(t *testing.T) {

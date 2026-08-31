@@ -2,7 +2,7 @@
   "name": "terminal-immutable-change-refused",
   "purpose": "A delivery that both mutates a terminal entity and changes an immutable identity field is a single refusal with a single token, and the terminal token wins. The restatement here holds the terminal state — no state change at all — while restating kind with a value first sight never established, so the carried difference is the immutable one; it is still reported as post_terminal_mutation rather than immutable_identity_change, because a token naming a terminal entity always outranks one naming a live identity. Two reducers that split this frame differently would disagree about a stream neither of them may reduce.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

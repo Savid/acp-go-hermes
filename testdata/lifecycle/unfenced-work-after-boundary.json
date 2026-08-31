@@ -2,7 +2,7 @@
   "name": "unfenced-work-after-boundary",
   "purpose": "A certified boundary fences causal work rooted at or before its watermark and nothing else. New session-owned work may begin later: an agent-origin turn opened after the boundary, and an activity rooted in it, reduce normally and settle at a second certified boundary. Accepted shapes that resemble violations are exactly where independent reducers diverge.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

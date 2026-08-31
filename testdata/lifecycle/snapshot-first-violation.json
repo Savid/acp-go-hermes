@@ -2,7 +2,7 @@
   "name": "snapshot-first-violation",
   "purpose": "A stream whose first delivered event is a delta rather than lifecycle_snapshot has no truthful starting state, so it is refused before anything is reduced.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

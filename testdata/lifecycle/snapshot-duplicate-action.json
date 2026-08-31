@@ -2,7 +2,7 @@
   "name": "snapshot-duplicate-action",
   "purpose": "The action set obeys the same rule as the activity set, and the rule is stated per set because that is where an id has to be unique. A snapshot listing the same actionId twice asserts two current states for one outstanding request, so it is malformed whether or not the two entries agree, and the refused snapshot opens nothing.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",
