@@ -3081,7 +3081,7 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
-	client.closeErr = nativehermes.ErrProcessContainmentIncomplete
+	client.closeErr = ErrContainmentIncomplete
 	session := testSession(newTestAgent(), client)
 	promptDone := make(chan error, 1)
 	go func() {
@@ -3091,10 +3091,10 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 	<-started
 
 	cancelErr := session.cancelRouted(turnRouteMeta("unproven-fence"))
-	if !errors.Is(cancelErr, nativehermes.ErrProcessContainmentIncomplete) {
+	if !errors.Is(cancelErr, ErrContainmentIncomplete) {
 		t.Fatalf("Cancel error = %v, want process-tree proof failure", cancelErr)
 	}
-	if promptErr := <-promptDone; !errors.Is(promptErr, nativehermes.ErrProcessContainmentIncomplete) {
+	if promptErr := <-promptDone; !errors.Is(promptErr, ErrContainmentIncomplete) {
 		t.Fatalf("Prompt error = %v, want process-tree proof failure", promptErr)
 	}
 	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
@@ -3157,20 +3157,6 @@ func TestCancelWithoutValidatedNonceHasNoNativeSideEffect(t *testing.T) {
 }
 
 func TestPromptFenceRemainingFailureBranches(t *testing.T) {
-	t.Run("prompt resume admission failure", func(t *testing.T) {
-		wantErr := errors.New("resume denied")
-		agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, wantErr
-			},
-		}))
-		session := testSession(agent, newFakeHermesClient())
-		session.runtimeNeedsResume = true
-		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "resume-denied", "reply")); !errors.Is(err, wantErr) {
-			t.Fatalf("Prompt resume error = %v", err)
-		}
-	})
-
 	t.Run("default timer fallback", func(t *testing.T) {
 		agent := newTestAgent(WithTurnTimeout(time.Hour))
 		agent.options.newPromptTimer = nil

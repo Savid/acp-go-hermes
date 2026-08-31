@@ -193,6 +193,26 @@ func TestAuthLegsAnswerOnlyWhileAdvertised(t *testing.T) {
 	}
 }
 
+func TestHostAuthorityWithholdsProviderAuthWithoutDisablingAgent(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newTestHostAuthority()), WithScratchDir(t.TempDir()))
+	response, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+	if err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	hermesMeta, _ := response.AgentCapabilities.Meta[hermesMetaKey].(map[string]any)
+	if _, present := hermesMeta[providerAuthCapabilityKey]; present {
+		t.Fatal("managed agent advertised provider auth")
+	}
+
+	for _, method := range authMethodNames() {
+		_, callErr := callLeg(t, agent, method, map[string]any{"sessionId": "x"})
+		var requestErr *acp.RequestError
+		if !errors.As(callErr, &requestErr) || requestErr.Code != -32601 {
+			t.Fatalf("%s returned %v, want method-not-found", method, callErr)
+		}
+	}
+}
+
 func TestAuthParamFieldsRejectsMalformedClosedObjects(t *testing.T) {
 	t.Parallel()
 

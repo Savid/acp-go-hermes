@@ -25,16 +25,14 @@ import (
 )
 
 const (
-	envFakeHermesHelper        = "ACP_GO_HERMES_FAKE_HELPER"
-	envFakeHermesMode          = "ACP_GO_HERMES_FAKE_MODE"
-	envFakeHermesDescendantPID = "ACP_GO_HERMES_FAKE_DESCENDANT_PID_FILE"
-	envFakeHermesCLICapture    = "ACP_GO_HERMES_TEST_ROOT"
-	fakeModeOK                 = "ok"
-	fakeModeStatusOnly         = "status-only"
-	fakeModeDetachedDescendant = "detached-descendant"
-	fakeModeSessionCLI         = "session-cli"
-	fakeModePreSubmitActivity  = "pre-submit-activity"
-	fakeStoredSessionKey       = "stored-fake"
+	envFakeHermesHelper       = "ACP_GO_HERMES_FAKE_HELPER"
+	envFakeHermesMode         = "ACP_GO_HERMES_FAKE_MODE"
+	envFakeHermesCLICapture   = "ACP_GO_HERMES_TEST_ROOT"
+	fakeModeOK                = "ok"
+	fakeModeStatusOnly        = "status-only"
+	fakeModeSessionCLI        = "session-cli"
+	fakeModePreSubmitActivity = "pre-submit-activity"
+	fakeStoredSessionKey      = "stored-fake"
 	// The one provider this gateway publishes, and therefore the only one its
 	// config.set will resolve.
 	fakeGatewayProviderSlug = "openrouter"
@@ -308,67 +306,6 @@ func assertFakeGatewayToolLifecycle(t *testing.T, client *recordingClient) {
 	}
 	if output, _ := completions[0].RawOutput.(map[string]any); output["probe"] != "authorized" || output["status"] != "ok" {
 		t.Fatalf("gateway ACP tool output = %#v", completions[0].RawOutput)
-	}
-}
-
-func TestHermesACPAgentFakeExecutableLeaseRecoveryIsSessionScoped(t *testing.T) {
-	requireRunIntegration(t)
-	if runtime.GOOS == "windows" {
-		t.Skip("lease reaper signal semantics are platform-specific")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	home := t.TempDir()
-	orphan := exec.CommandContext(ctx, "sleep", "30")
-	if err := orphan.Start(); err != nil {
-		t.Fatalf("start orphan process: %v", err)
-	}
-	waitOrphan := make(chan error, 1)
-	go func() { waitOrphan <- orphan.Wait() }()
-	t.Cleanup(func() {
-		select {
-		case <-waitOrphan:
-			return
-		default:
-		}
-		_ = orphan.Process.Kill()
-		<-waitOrphan
-	})
-
-	leaseDir := filepath.Join(home, "acp-go-hermes", "orphan", "state")
-	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
-		t.Fatalf("mkdir lease dir: %v", err)
-	}
-	lease := map[string]any{"pid": orphan.Process.Pid, "port": 0, "startedAtUnixMilli": time.Now().UnixMilli(), "tokenHash": "test"}
-	data, err := json.Marshal(lease)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(leaseDir, "server.lease"), data, 0o600); err != nil {
-		t.Fatalf("write lease: %v", err)
-	}
-
-	agent := startAgentWithHermesPath(t, ctx, fakeHermesExecutable(t, fakeModeOK), home)
-	defer agent.close()
-
-	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
-	}
-	if _, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir())); err != nil {
-		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
-	}
-
-	leasePath := filepath.Join(leaseDir, "server.lease")
-	if _, err := os.Stat(leasePath); err != nil {
-		t.Fatalf("unrelated session lease was changed: %v", err)
-	}
-	select {
-	case err := <-waitOrphan:
-		t.Fatalf("unrelated session process exited: %v", err)
-	default:
 	}
 }
 
@@ -769,15 +706,6 @@ func handleFakeGatewayRPC(
 			writeFakeGatewayError(ctx, conn, id, 4001, "session not found")
 			return
 		}
-		if mode == fakeModeDetachedDescendant {
-			pidFile := os.Getenv(envFakeHermesDescendantPID)
-			if _, err := os.Stat(pidFile); errors.Is(err, os.ErrNotExist) {
-				writeFakeGatewayResult(ctx, conn, id, map[string]any{"status": "streaming"})
-				spawnFakeDetachedDescendant(pidFile)
-
-				return
-			}
-		}
 		if mode == fakeModePreSubmitActivity {
 			state.recordAssistant("older activity")
 			writeFakeGatewayEvent(ctx, conn, "message.delta", live, map[string]any{"text": "older activity"})
@@ -866,13 +794,4 @@ func writeFakeGatewayEvent(ctx context.Context, conn *websocket.Conn, eventType 
 	}
 	data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "event", "params": params})
 	_ = conn.Write(ctx, websocket.MessageText, data)
-}
-
-func spawnFakeDetachedDescendant(pidFile string) {
-	if pidFile == "" {
-		return
-	}
-
-	cmd := exec.Command("setsid", "sh", "-c", `trap "" TERM; echo $$ > "$1"; while :; do sleep 30; done`, "fake-detached", pidFile)
-	_ = cmd.Start()
 }

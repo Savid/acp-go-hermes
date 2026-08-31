@@ -74,6 +74,12 @@ func TestInitializeAdvertisesRouteV1(t *testing.T) {
 	require.Equal(t, map[string]any{"version": 1}, resp.AgentCapabilities.Meta[routeMetaKey])
 }
 
+func TestRouteCapabilityScalar(t *testing.T) {
+	response, err := newTestAgent().Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"version": 1}, response.AgentCapabilities.Meta["acp-go.dev/route"])
+}
+
 func TestPromptAndActiveCancelRequireCurrentRoute(t *testing.T) {
 	session := &session{id: "session-1", turnInFlight: true, turnNonce: "active-turn"}
 	agent := newTestAgent()

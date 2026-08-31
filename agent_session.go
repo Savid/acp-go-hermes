@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -21,7 +20,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-var reapHermesLeaseFile = nativehermes.ReapLeaseFile
 var createHermesGeneration = nativehermes.CreateGenerationXDGDirs
 var redactSharedHermesMCPServers = nativehermes.RedactedMCPServers
 
@@ -37,7 +35,6 @@ var acquireSharedSessionSetLock = func(
 	return nativehermes.AcquireSharedSessionSetLock(ctx, home, mode)
 }
 
-//nolint:gocyclo // NewSession is one ordered launch, journal, and publication transaction.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_ acp.NewSessionResponse, returnErr error) {
 	if err := rejectLifecycleMeta(params.Meta); err != nil {
 		return acp.NewSessionResponse{}, err
@@ -123,14 +120,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 		if idErr != nil {
 			return acp.NewSessionResponse{}, errors.Join(idErr, closeHermesClientAfterStartupFailure(client))
 		}
-		origin, identityErr := sessionOperationCurrentProcessIdentity()
-		if identityErr != nil {
-			return acp.NewSessionResponse{}, errors.Join(identityErr, closeHermesClientAfterStartupFailure(client))
-		}
 		journal, err = beginSessionOperationJournal(operationHome, sessionOperationJournalFields{
 			OperationID: operationID, Kind: sessionOperationKindNew, Mode: sessionOperationModeShared,
 			LogicalSessionID: string(id), TargetRoot: client.XDGDirs().Root,
-			Marker: operationID, FinalTitle: finalTitle, BaselineNativeSessionIDs: baseline, Origin: origin,
+			Marker: operationID, FinalTitle: finalTitle, BaselineNativeSessionIDs: baseline,
 		})
 		if err != nil {
 			return acp.NewSessionResponse{}, errors.Join(err, closeHermesClientAfterStartupFailure(client))
@@ -154,7 +147,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 	} else {
 		native, err = client.CreateSession(ctx, finalTitle)
 	}
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupSession, sessionStarted, err)
+	a.observe.ObserveNativeStartup(ctx, "session", "session", time.Since(sessionStarted), err)
 
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
@@ -232,7 +225,7 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 	cancel()
 	a.recordIncompleteContainment(err, session.id, record.XDGRoot)
 
-	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+	if errors.Is(err, ErrContainmentIncomplete) {
 		return err
 	}
 
@@ -374,10 +367,7 @@ func (a *Agent) loadOrResumeSession(
 		return nil, incompleteErr
 	}
 
-	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
+	scratchRelease := func() {}
 
 	keepScratch := false
 
@@ -389,7 +379,7 @@ func (a *Agent) loadOrResumeSession(
 		}
 	}()
 
-	parent, err := ensureScratchParent(a.options.ScratchDir)
+	parent, err := a.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
@@ -427,13 +417,9 @@ func (a *Agent) loadOrResumeSession(
 	client, err := a.newHermesClientWithScratchOwner(ctx, id, cwd, meta, xdg, scratchRelease, nativeOwner, mcpServers)
 	if err != nil {
 		if nativeOwner != nil {
-			if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
-				nativeOwner.Retain()
-			} else {
-				err = errors.Join(err, nativeOwner.Release())
-			}
+			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) {
 			keepScratch = true
 
 			a.retainIncompleteHermesRoot(id, xdg.Root)
@@ -597,10 +583,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
 	}
 
-	scratchRelease, err := reserveScratchRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return err
-	}
+	scratchRelease := func() {}
 
 	keepScratch := false
 
@@ -612,7 +595,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		}
 	}()
 
-	parent, err := ensureScratchParent(s.agent.options.ScratchDir)
+	parent, err := s.agent.ensureScratchParent()
 	if err != nil {
 		return err
 	}
@@ -664,13 +647,9 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	client, err := s.agent.newHermesClientWithScratchOwner(ctx, id, cwd, meta, xdg, scratchRelease, nativeOwner, mcpServers)
 	if err != nil {
 		if nativeOwner != nil {
-			if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
-				nativeOwner.Retain()
-			} else {
-				err = errors.Join(err, nativeOwner.Release())
-			}
+			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) {
 			keepScratch = true
 
 			s.agent.retainIncompleteHermesRoot(id, xdg.Root)
@@ -1051,7 +1030,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		err = errors.Join(err, lateErr)
 	}
 
-	if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+	if errors.Is(err, ErrContainmentIncomplete) {
 		a.mu.Lock()
 		delete(a.deleteCleanup, record.SessionID)
 		a.mu.Unlock()
@@ -1186,10 +1165,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		return acp.UnstableForkSessionResponse{}, admissionErr
 	}
 
-	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
+	scratchRelease := func() {}
 
 	keepScratch := false
 
@@ -1201,7 +1177,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		}
 	}()
 
-	parentRoot, err := ensureScratchParent(a.options.ScratchDir)
+	parentRoot, err := a.ensureScratchParent()
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
@@ -1263,17 +1239,13 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		if idErr != nil {
 			return acp.UnstableForkSessionResponse{}, idErr
 		}
-		origin, identityErr := sessionOperationCurrentProcessIdentity()
-		if identityErr != nil {
-			return acp.UnstableForkSessionResponse{}, identityErr
-		}
 		marker = "acp-go-hermes fork " + operationID
 		journal, err = beginSessionOperationJournal(operationHome, sessionOperationJournalFields{
 			OperationID: operationID, Kind: sessionOperationKindFork, Mode: sessionOperationModeShared,
 			LogicalSessionID: string(id), ParentLogicalSessionID: string(params.SessionId),
 			ParentNativeSessionID: parentSnapshot.idmap.NativeSessionID,
 			SourceRoot:            parentSnapshot.client.XDGDirs().Root, TargetRoot: xdg.Root,
-			Marker: marker, FinalTitle: marker, BaselineNativeSessionIDs: baseline, Origin: origin,
+			Marker: marker, FinalTitle: marker, BaselineNativeSessionIDs: baseline,
 		})
 		if err != nil {
 			return acp.UnstableForkSessionResponse{}, err
@@ -1327,7 +1299,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		// The official branch commits its child row and copied history into the
 		// parent's state.db. Isolated mode must snapshot that authoritative DB
 		// only after Branch returns and its parent-side live child is detached.
-		if cloneErr := cloneHermesStateDB(a.options.ScratchDir, parentSnapshot.client.XDGDirs(), xdg); cloneErr != nil {
+		if cloneErr := cloneHermesStateDB(a.scratchDirectory(), parentSnapshot.client.XDGDirs(), xdg); cloneErr != nil {
 			return acp.UnstableForkSessionResponse{}, cloneErr
 		}
 	}
@@ -1340,13 +1312,9 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	client, err := a.newHermesClientWithScratchOwner(ctx, id, params.Cwd, meta, xdg, scratchRelease, nativeOwner, servers)
 	if err != nil {
 		if nativeOwner != nil {
-			if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
-				nativeOwner.Retain()
-			} else {
-				err = errors.Join(err, nativeOwner.Release())
-			}
+			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) {
 			cleanupNativeChild = false
 			keepScratch = true
 
@@ -1360,7 +1328,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	native, err := client.GetSession(ctx, nativeChild.ID)
 	if err != nil {
 		closeErr := closeHermesClientAfterStartupFailure(client)
-		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(closeErr, ErrContainmentIncomplete) {
 			cleanupNativeChild = false
 		}
 		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
@@ -1369,7 +1337,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	}
 	if native.ID != nativeChild.ID {
 		closeErr := closeHermesClientAfterStartupFailure(client)
-		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(closeErr, ErrContainmentIncomplete) {
 			cleanupNativeChild = false
 		}
 		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
@@ -1383,7 +1351,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if meta.Model != "" {
 		if err := client.SetModel(ctx, nativeChild.ID, meta.Model); err != nil {
 			closeErr := closeHermesClientAfterStartupFailure(client)
-			if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+			if errors.Is(closeErr, ErrContainmentIncomplete) {
 				cleanupNativeChild = false
 			}
 			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
@@ -1404,7 +1372,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	session.operationJournal = journal
 	if err := session.openLifecycleStream(); err != nil {
 		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
-		if errors.Is(cleanupErr, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(cleanupErr, ErrContainmentIncomplete) {
 			cleanupNativeChild = false
 		}
 
@@ -1420,7 +1388,7 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 			return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
 		}
 		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
-		if errors.Is(cleanupErr, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(cleanupErr, ErrContainmentIncomplete) {
 			cleanupNativeChild = false
 		}
 
@@ -1449,18 +1417,16 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 	if err := a.rejectIncompleteHermesSession(id); err != nil {
 		return nil, err
 	}
-	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
+	scratchRelease := func() {}
 	if existing.Root == "" {
-		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		parent, parentErr := a.ensureScratchParent()
 		if parentErr != nil {
 			scratchRelease()
 
 			return nil, parentErr
 		}
 
+		var err error
 		existing, err = createHermesGeneration(parent)
 		if err != nil {
 			scratchRelease()
@@ -1472,7 +1438,7 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 
 	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, existing, scratchRelease, mcpServers...)
 	if err != nil {
-		if errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) {
 			a.retainIncompleteHermesRoot(id, root)
 
 			return nil, err
@@ -1496,13 +1462,6 @@ func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId
 }
 
 func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, scratchRelease func(), nativeOwner *nativehermes.SharedSessionOwner, mcpServers ...[]acp.McpServer) (*managedHermesServer, error) {
-	residence := providerAuthResidence(a.options)
-	if residence != "" {
-		if err := validateNativeOwnedDirectory(residence, a.options.ProcessIsolation); err != nil {
-			return nil, err
-		}
-	}
-
 	factory := a.options.clientFactory
 	if factory == nil {
 		factory = nativehermes.StartServer
@@ -1521,95 +1480,43 @@ func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.Sess
 		return nil, err
 	}
 
-	parent, err := ensureScratchParent(a.options.ScratchDir)
+	parent, err := a.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
 
 	start := nativehermes.StartOptions{
-		ACPSessionID:             nativehermes.ACPSessionIDString(id),
-		ScratchParent:            parent,
-		Cwd:                      cwd,
-		ExecutablePath:           a.options.ExecutablePath,
-		DefaultModel:             firstNonEmpty(meta.Model, a.options.DefaultModel),
-		SharedHermesHome:         a.options.SharedHermesHome,
-		SharedNativeSessionOwner: nativeOwner,
-		Env:                      baseEnv,
-		SessionEnv:               sessionEnv,
-		ExtraPathDirs:            slices.Clone(meta.ExtraPathDirs),
-		Isolation:                nativeProcessIsolation(a.options.ProcessIsolation, a.options.testOnlyNoCredential, a.options.testOnlyIdentityLockRoot),
-		// The ambient snapshot travels alongside the policy rather than inside
-		// it, so an omitted policy stays nil the whole way to the launch
-		// boundary and no ProcessIsolation value is manufactured for it.
+		ACPSessionID:       nativehermes.ACPSessionIDString(id),
+		ScratchParent:      parent,
+		Cwd:                cwd,
+		ExecutablePath:     a.options.ExecutablePath,
+		DefaultModel:       firstNonEmpty(meta.Model, a.options.DefaultModel),
+		SharedHermesHome:   a.options.SharedHermesHome,
+		Env:                baseEnv,
+		SessionEnv:         sessionEnv,
+		ExtraPathDirs:      slices.Clone(meta.ExtraPathDirs),
 		AmbientEnvironment: cloneStringMap(a.ambientEnv),
 		Logger:             a.log,
 		ExistingXDG:        existing,
 		MCPServers:         servers,
 		SeedFiles:          cloneStringMap(a.options.SeedFiles),
-		ObserveStartupStage: func(stageCtx context.Context, lifecycle, stage string, elapsed time.Duration, stageErr error) {
-			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
-			if observe != nil {
-				observe(stageCtx, RuntimeResourceKind(lifecycle), RuntimeStartupStage(stage), elapsed, stageErr)
-			}
-		},
-		AcquireDiscoveryResources: func(discoveryCtx context.Context) (func(), func(), error) {
-			discoveryScratchRelease, discoveryErr := reserveScratchRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-			if discoveryErr != nil {
-				return nil, nil, discoveryErr
-			}
-
-			discoveryNativeRelease, discoveryErr := acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-			if discoveryErr != nil {
-				discoveryScratchRelease()
-
-				return nil, nil, discoveryErr
-			}
-
-			return discoveryNativeRelease, discoveryScratchRelease, nil
-		},
-		RetainDiscoveryRoot: func(root string, discoveryErr error) {
-			a.recordIncompleteContainment(discoveryErr, id, root)
-		},
-		DarwinBestEffortContainment: a.options.DarwinBestEffortContainment,
 	}
-
-	nativeRelease, err := acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
+	a.configureHostAuthority(&start)
 
 	a.observe.RecordHermesProcessStart(ctx)
-	processRoot := a.processes.register()
 
 	client, err := factory(ctx, start)
 	if err != nil {
-		processRoot.retire(ctx, providerProcessTreeProven(err))
 		a.recordIncompleteContainment(err, id, existing.Root)
-
-		if !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
-			nativeRelease()
-		}
 
 		return nil, err
 	}
-
-	processRoot.observe(ctx, client)
 
 	root := existing.Root
 
 	managed := &managedHermesServer{
-		Server:                client,
-		root:                  root,
-		sessionID:             id,
-		nativeRelease:         nativeRelease,
-		scratchRelease:        scratchRelease,
-		retainIncomplete:      a.recordIncompleteContainment,
-		processRoot:           processRoot,
-		providerAuthSupported: a.options.SharedHermesHome != "",
-		nativeSessionOwner:    nativeOwner,
-	}
-	if err := nativehermes.BindSharedSessionOwnerToServer(nativeOwner, client); err != nil {
-		return nil, errors.Join(err, managed.Close(context.Background()))
+		Server: client, root: root, sessionID: id, scratchRelease: scratchRelease,
+		retainIncomplete: a.recordIncompleteContainment, nativeSessionOwner: nativeOwner,
 	}
 
 	return managed, nil
@@ -1638,25 +1545,6 @@ func (a *Agent) admitSharedHermesConfig(servers []acp.McpServer) error {
 	}
 
 	return nil
-}
-
-func nativeProcessIsolation(isolation *ProcessIsolation, testOnlyNoCredential bool, testOnlyIdentityLockRoot string) *nativehermes.ProcessIsolation {
-	if isolation == nil {
-		return nil
-	}
-	base := cloneStringMap(isolation.BaseEnvironment)
-
-	return &nativehermes.ProcessIsolation{
-		UID:                      isolation.UID,
-		GID:                      isolation.GID,
-		BaseEnvironment:          base,
-		TestOnlyNoCredential:     testOnlyNoCredential,
-		TestOnlyIdentityLockRoot: testOnlyIdentityLockRoot,
-		IdentityLock:             isolation.IdentityLock,
-		AuthorityDomain:          isolation.AuthorityDomain,
-		StandaloneOwnerID:        isolation.StandaloneOwnerID,
-		StandaloneStateRoot:      isolation.StandaloneStateRoot,
-	}
 }
 
 type deleteCleanupRecord struct {
@@ -1753,10 +1641,6 @@ func (a *Agent) retryDeletedSessionCleanup(ctx context.Context) error {
 func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	if record.SessionID == "" || record.XDGRoot == "" {
 		return nil
-	}
-
-	if reapHermesLeaseFile(filepath.Join(nativehermes.ControlDirForXDG(record.XDGRoot), nativehermes.LeaseFileName), a.log) {
-		return fmt.Errorf("hermes delete cleanup kept live lease for session %q", record.SessionID)
 	}
 
 	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))

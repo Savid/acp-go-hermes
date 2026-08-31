@@ -31,18 +31,3 @@ acp-go-hermes -version
 
 Smoke integration tests that do not spend provider tokens run under
 `make test-integration-smoke`.
-
-## Provision Linux identity authority
-
-Linux installations must persist the shared identity-lock root:
-
-```sh
-sudo install -d -o root -g root -m 0700 \
-  /var/lib/acp-go /var/lib/acp-go/agent-identities
-```
-
-Mount that exact local-lock volume into every service or container that can use
-the same numeric UID pool, with identical user-namespace UID/GID mappings and
-authoritative PID visibility. Otherwise use disjoint pools. Network, FUSE,
-pseudo, read-only, and unknown authority filesystems are rejected. Files named
-`<uid>.lock` are permanent and must never be unlinked, renamed, or replaced.

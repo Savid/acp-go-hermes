@@ -230,9 +230,6 @@ func sessionEnvironmentOwnsManagedPath(key string) bool {
 
 func validatePathCarrierOptions(options Options) error {
 	environments := []map[string]string{options.Env}
-	if options.ProcessIsolation != nil {
-		environments = append(environments, options.ProcessIsolation.BaseEnvironment)
-	}
 
 	for _, environment := range environments {
 		for key := range environment {

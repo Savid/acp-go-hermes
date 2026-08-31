@@ -727,7 +727,7 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 	closeErr = errors.Join(closeErr, pumpErr)
 	if closeErr != nil {
 		name := "hermes_runtime_fence_failed"
-		if errors.Is(closeErr, nativehermes.ErrProcessContainmentIncomplete) {
+		if errors.Is(closeErr, ErrContainmentIncomplete) {
 			name = "hermes_process_containment_incomplete"
 		}
 

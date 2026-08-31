@@ -295,7 +295,7 @@ func TestForkModelBindFailureRetainsChildWithUnprovenContainment(t *testing.T) {
 	childClient := newFakeHermesClient()
 	childClient.getSession = testNativeSession("native-child")
 	childClient.setModelErr = errors.New("model bind failed")
-	childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+	childClient.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
 		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
 			childClient.xdg = start.ExistingXDG
@@ -309,7 +309,7 @@ func TestForkModelBindFailureRetainsChildWithUnprovenContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+	if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("fork unproven containment error = %v", err)
 	}
 	if !childClient.closed || len(parentClient.deleted) != 0 {
@@ -711,16 +711,6 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		}
 	})
 
-	t.Run("scratch admission", func(t *testing.T) {
-		wantErr := errors.New("scratch full")
-		session, _, _ := newResumeRuntimeTestSession(t, WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) { return nil, wantErr },
-		}))
-		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, wantErr) {
-			t.Fatalf("scratch admission error = %v", err)
-		}
-	})
-
 	t.Run("xdg creation", func(t *testing.T) {
 		blockedRoot := filepath.Join(t.TempDir(), "file")
 		if err := os.WriteFile(blockedRoot, []byte("blocked"), 0o600); err != nil {
@@ -788,12 +778,12 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 	t.Run("unproven startup failure", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
 		agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
-			return nil, nativehermes.ErrProcessContainmentIncomplete
+			return nil, ErrContainmentIncomplete
 		}
 		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_containment_incomplete") {
 			t.Fatalf("unproven startup error = %v", err)
 		}
-		if err := agent.rejectIncompleteHermesSession(session.id); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if err := agent.rejectIncompleteHermesSession(session.id); !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("unproven root was not retained: %v", err)
 		}
 	})
@@ -2797,7 +2787,7 @@ func TestSharedHermesHomePreservesPerSessionWrapperGenerations(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	authHome := testNativeOwnedDir(t, "native-auth")
+	authHome := t.TempDir()
 	agent := newTestAgent(
 		WithScratchDir(t.TempDir()),
 		WithProviderAuthRoot(t.TempDir()),
@@ -3266,9 +3256,9 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 
 	t.Run("load startup containment", func(t *testing.T) {
 		agent := newLoadAgent(t, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
-			return nil, nativehermes.ErrProcessContainmentIncomplete
+			return nil, ErrContainmentIncomplete
 		})
-		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("containment error=%v", err)
 		}
 	})
@@ -3343,7 +3333,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 
 	for name, startErr := range map[string]error{
 		"runtime ordinary start": errors.New("start"),
-		"runtime containment":    nativehermes.ErrProcessContainmentIncomplete,
+		"runtime containment":    ErrContainmentIncomplete,
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := newLoadAgent(t, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -3554,9 +3544,9 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient := newFakeHermesClient()
 		parentClient.forkSession = testNativeSession("native-child")
 		agent, parent := newForkAgent(t, parentClient, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
-			return nil, nativehermes.ErrProcessContainmentIncomplete
+			return nil, ErrContainmentIncomplete
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, nativehermes.ErrProcessContainmentIncomplete) {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("child containment error=%v", err)
 		}
 	})
@@ -3581,7 +3571,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		childClient := newFakeHermesClient()
 		childClient.getSession = testNativeSession("different")
-		childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+		childClient.closeErr = ErrContainmentIncomplete
 		agent, parent := newForkAgent(t, parentClient, func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
 			childClient.xdg = start.ExistingXDG
 
@@ -3597,7 +3587,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		childClient := newFakeHermesClient()
 		childClient.getSession = testNativeSession("native-child")
-		childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+		childClient.closeErr = ErrContainmentIncomplete
 		agent, parent := newForkAgent(t, parentClient, func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
 			childClient.xdg = start.ExistingXDG
 
@@ -3715,8 +3705,22 @@ func TestSharedClientAdmissionAndOwnerBindingEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agent.newHermesClientWithScratchOwner(t.Context(), "session", t.TempDir(), sessionMeta{}, xdg, func() {}, owner); err == nil {
-		t.Fatal("server without owner process identity accepted")
+	client, err := agent.newHermesClientWithScratchOwner(t.Context(), "session", t.TempDir(), sessionMeta{}, xdg, func() {}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.nativeSessionOwner != owner {
+		t.Fatal("shared native-session owner was not bound to the managed server")
+	}
+	if closeErr := client.Close(t.Context()); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	replacement, err := nativehermes.AcquireSharedNativeSessionOwner(agent.options.SharedHermesHome, "native")
+	if err != nil {
+		t.Fatalf("managed server close did not release the native-session owner: %v", err)
+	}
+	if err := replacement.Release(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -3814,7 +3818,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		childClient := newFakeHermesClient()
 		childClient.getSession = testNativeSession("native-child")
-		childClient.closeErr = nativehermes.ErrProcessContainmentIncomplete
+		childClient.closeErr = ErrContainmentIncomplete
 		agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 				childClient.xdg = opts.ExistingXDG
@@ -3831,6 +3835,6 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 			SessionId: parent.id, Cwd: t.TempDir(),
 		})
 		require.ErrorContains(t, err, "lifecycle stream id failed")
-		require.ErrorIs(t, err, nativehermes.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
 	})
 }

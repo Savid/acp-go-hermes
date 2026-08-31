@@ -1,0 +1,178 @@
+package hermesacp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+
+	"github.com/coder/acp-go-sdk"
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+)
+
+var managedRemoveAll = os.RemoveAll
+
+type managedHermesServer struct {
+	nativehermes.Server
+	root               string
+	sessionID          acp.SessionId
+	scratchRelease     func()
+	retainIncomplete   func(error, acp.SessionId, string)
+	nativeSessionOwner *nativehermes.SharedSessionOwner
+	once               sync.Once
+	closeErr           error
+}
+
+func (s *managedHermesServer) CreateSessionWithDraft(
+	ctx context.Context,
+	title string,
+	bind func(nativehermes.SessionDraft) error,
+) (nativehermes.Session, error) {
+	creator, ok := s.Server.(nativehermes.DraftSessionCreator)
+	if !ok {
+		return nativehermes.Session{}, errors.New("hermes server does not expose draft session creation")
+	}
+
+	return creator.CreateSessionWithDraft(ctx, title, bind)
+}
+
+func (s *managedHermesServer) PersistedSessions(ctx context.Context) ([]nativehermes.Session, error) {
+	lister, ok := s.Server.(nativehermes.PersistedSessionLister)
+	if !ok {
+		return nil, errors.New("hermes server does not expose persisted session inventory")
+	}
+
+	return lister.PersistedSessions(ctx)
+}
+
+func (s *managedHermesServer) ForkWithBaseline(ctx context.Context, id, marker string, baseline []string) (nativehermes.Session, error) {
+	forker, ok := s.Server.(nativehermes.RecoverableSessionForker)
+	if !ok {
+		return nativehermes.Session{}, errors.New("hermes server does not expose recoverable session fork")
+	}
+
+	return forker.ForkWithBaseline(ctx, id, marker, baseline)
+}
+
+func (s *managedHermesServer) SetModel(ctx context.Context, id, value string) error {
+	setter, ok := s.Server.(interface {
+		SetModel(context.Context, string, string) error
+	})
+	if !ok {
+		return errors.New("hermes server does not expose session model selection")
+	}
+
+	return setter.SetModel(ctx, id, value)
+}
+
+func (s *managedHermesServer) Close(ctx context.Context) error {
+	s.once.Do(func() {
+		s.closeErr = s.Server.Close(ctx)
+		if s.nativeSessionOwner != nil {
+			s.closeErr = errors.Join(s.closeErr, s.nativeSessionOwner.Release())
+		}
+
+		if errors.Is(s.closeErr, ErrContainmentIncomplete) || errors.Is(s.closeErr, ErrHostAuthorityUnavailable) {
+			if s.retainIncomplete != nil {
+				s.retainIncomplete(s.closeErr, s.sessionID, s.root)
+			}
+
+			return
+		}
+
+		s.closeErr = errors.Join(s.closeErr, deleteHermesScratchRoot(s.root, s.scratchRelease))
+	})
+
+	return s.closeErr
+}
+
+func (s *managedHermesServer) ProviderAuthSupported() bool {
+	supported, ok := s.Server.(interface{ ProviderAuthSupported() bool })
+
+	return ok && supported.ProviderAuthSupported()
+}
+
+func (a *Agent) retainIncompleteHermesRoot(id acp.SessionId, root string) {
+	a.recordIncompleteContainment(ErrContainmentIncomplete, id, root)
+}
+
+func (a *Agent) claimSharedNativeSession(client nativehermes.Server, nativeSessionID string) error {
+	owner, err := a.acquireSharedNativeSessionOwner(nativeSessionID)
+	if err != nil || owner == nil {
+		return err
+	}
+
+	managed, ok := client.(*managedHermesServer)
+	if !ok {
+		return errors.Join(errors.New("shared Hermes native session claim requires a managed server"), owner.Release())
+	}
+
+	managed.nativeSessionOwner = owner
+
+	return nil
+}
+
+func (a *Agent) acquireSharedNativeSessionOwner(nativeSessionID string) (*nativehermes.SharedSessionOwner, error) {
+	if a.options.SharedHermesHome == "" {
+		return nil, nil //nolint:nilnil // No shared home has no native-session owner.
+	}
+
+	return nativehermes.AcquireSharedNativeSessionOwner(a.options.SharedHermesHome, nativeSessionID)
+}
+
+func (a *Agent) recordIncompleteContainment(err error, id acp.SessionId, root string) {
+	if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
+		return
+	}
+
+	a.mu.Lock()
+	if a.incompleteRoots[id] == nil {
+		a.incompleteRoots[id] = make(map[string]struct{})
+	}
+
+	if root != "" {
+		a.incompleteRoots[id][root] = struct{}{}
+	}
+
+	if a.containmentErr == nil {
+		a.containmentErr = err
+	}
+	a.mu.Unlock()
+}
+
+func hermesServerRoot(server nativehermes.Server) string {
+	if server == nil {
+		return ""
+	}
+
+	return server.XDGDirs().Root
+}
+
+func (a *Agent) rejectIncompleteHermesSession(id acp.SessionId) error {
+	a.mu.Lock()
+	roots, retained := a.incompleteRoots[id]
+	a.mu.Unlock()
+
+	if retained {
+		return fmt.Errorf("%w: Hermes session %q retains %d native trees", ErrContainmentIncomplete, id, len(roots))
+	}
+
+	return nil
+}
+
+func deleteHermesScratchRoot(root string, release func()) error {
+	if root == "" {
+		return nil
+	}
+
+	if err := errors.Join(managedRemoveAll(root), managedRemoveAll(nativehermes.ControlDirForXDG(root))); err != nil {
+		return err
+	}
+
+	if release != nil {
+		release()
+	}
+
+	return nil
+}

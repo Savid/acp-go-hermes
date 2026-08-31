@@ -10,9 +10,9 @@ import (
 
 // negotiateLifecycle reads the host's `acp-go.dev/lifecycle` offer and answers
 // with the facts this connection's active configuration proved. The answer is
-// the contract for the whole connection: with no offer, or with no common
-// version, the key is omitted from the response and no envelope, correlation
-// read, or lifecycle fact exists on the connection at all.
+// the contract for the whole connection. With no offer, the key is omitted
+// from the response and no envelope, correlation read, or lifecycle fact
+// exists on the connection at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) {
 	offered, refusal := lifecycle.DecodeCapability(meta)
 	if refusal != nil {
@@ -34,26 +34,22 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	return map[string]any{lifecycle.MetaKey: answer.Advertisement()}, nil
 }
 
-// provenLifecycleFacts states what this configuration can actually prove, read
-// from the same containment selector that enforces the boundary rather than from
-// a compiled-in constant.
+// provenLifecycleFacts states what this configuration can actually prove.
 //
 // One `hermes serve` process owns a session for its whole lifetime, so the
 // session's ordered stream is session-owned and delivers between prompts:
 // `updatesOutsidePrompt` is true, and the opening snapshot rides that channel
 // after the establishing response. The gateway's structured event vocabulary
 // carries no background activity entity — a todo list and a plan are
-// presentation state, never evidence — so `activityKinds` is empty. Only the
-// authoritative Linux boundary enumerates the whole descendant tree, so only it
-// proves vacancy and names the `process-containment` class; shared-identity
-// execution and opted-in Darwin containment prove a weaker boundary, and a
-// weaker boundary is never promoted.
+// presentation state, never evidence — so `activityKinds` is empty. A host
+// authority supplies the terminal whole-tree proof required to advertise
+// authoritative quiescence; ordinary execution does not make that claim.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	proven := lifecycle.Negotiated{
 		UpdatesOutsidePrompt: true,
 		ActivityKinds:        []lifecycle.ActivityKind{},
 	}
-	if a.containmentMode.provesWholeTreeLifecycle() {
+	if a.options.HostAuthority != nil {
 		proven.AuthoritativeQuiescence = true
 		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
 	}

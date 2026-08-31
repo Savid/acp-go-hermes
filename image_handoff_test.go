@@ -20,7 +20,14 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/stretchr/testify/require"
 )
+
+func TestHandoffCapabilityScalar(t *testing.T) {
+	response, err := newTestAgent(WithInputHandoffRoot(t.TempDir())).Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"version": 1}, response.AgentCapabilities.Meta["acp-go.dev/handoff"])
+}
 
 // keyFilename is the native attachment field neither input form derives, kept
 // here so the tests that pin its absence name it.

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -77,11 +76,6 @@ func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 			// authenticates, submits a turn, or reads the operator's Hermes home.
 			"OPENAI_API_KEY": "acp-go-hermes-smoke-placeholder-not-a-credential",
 		},
-		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
-		RetainDiscoveryRoot:       func(string, error) {},
-	}
-	if runtime.GOOS == "darwin" {
-		opts.DarwinBestEffortContainment = true
 	}
 	proc, err := Start(ctx, opts)
 	if err != nil {

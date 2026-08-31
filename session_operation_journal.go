@@ -68,7 +68,6 @@ type sessionOperationJournalFields struct {
 	Marker                   string
 	FinalTitle               string
 	BaselineNativeSessionIDs []string
-	Origin                   nativehermes.DurableProcessIdentity
 }
 
 type sessionOperationJournalPatch struct {
@@ -77,30 +76,28 @@ type sessionOperationJournalPatch struct {
 	LiveSessionID            *string
 	Marker                   *string
 	BaselineNativeSessionIDs *[]string
-	Origin                   *nativehermes.DurableProcessIdentity
 }
 
 type sessionOperationJournalRecord struct {
-	Format                   string                              `json:"format"`
-	OperationID              string                              `json:"operationId"`
-	Kind                     sessionOperationKind                `json:"kind"`
-	Mode                     sessionOperationMode                `json:"mode"`
-	Phase                    sessionOperationPhase               `json:"phase"`
-	LogicalSessionID         string                              `json:"logicalSessionId"`
-	ParentLogicalSessionID   string                              `json:"parentLogicalSessionId,omitempty"`
-	ParentNativeSessionID    string                              `json:"parentNativeSessionId,omitempty"`
-	SourceRoot               string                              `json:"sourceRoot,omitempty"`
-	TargetRoot               string                              `json:"targetRoot,omitempty"`
-	Marker                   string                              `json:"marker"`
-	FinalTitle               string                              `json:"finalTitle,omitempty"`
-	BaselineNativeSessionIDs []string                            `json:"baselineNativeSessionIds"`
-	NativeSessionID          string                              `json:"nativeSessionId,omitempty"`
-	LiveSessionID            string                              `json:"liveSessionId,omitempty"`
-	Origin                   nativehermes.DurableProcessIdentity `json:"origin"`
-	Prepared                 *sessionOperationPreparedManifest   `json:"prepared,omitempty"`
-	PreparedManifestSHA256   string                              `json:"preparedManifestSHA256,omitempty"`
-	CreatedAtUnixMilli       int64                               `json:"createdAtUnixMilli"`
-	UpdatedAtUnixMilli       int64                               `json:"updatedAtUnixMilli"`
+	Format                   string                            `json:"format"`
+	OperationID              string                            `json:"operationId"`
+	Kind                     sessionOperationKind              `json:"kind"`
+	Mode                     sessionOperationMode              `json:"mode"`
+	Phase                    sessionOperationPhase             `json:"phase"`
+	LogicalSessionID         string                            `json:"logicalSessionId"`
+	ParentLogicalSessionID   string                            `json:"parentLogicalSessionId,omitempty"`
+	ParentNativeSessionID    string                            `json:"parentNativeSessionId,omitempty"`
+	SourceRoot               string                            `json:"sourceRoot,omitempty"`
+	TargetRoot               string                            `json:"targetRoot,omitempty"`
+	Marker                   string                            `json:"marker"`
+	FinalTitle               string                            `json:"finalTitle,omitempty"`
+	BaselineNativeSessionIDs []string                          `json:"baselineNativeSessionIds"`
+	NativeSessionID          string                            `json:"nativeSessionId,omitempty"`
+	LiveSessionID            string                            `json:"liveSessionId,omitempty"`
+	Prepared                 *sessionOperationPreparedManifest `json:"prepared,omitempty"`
+	PreparedManifestSHA256   string                            `json:"preparedManifestSHA256,omitempty"`
+	CreatedAtUnixMilli       int64                             `json:"createdAtUnixMilli"`
+	UpdatedAtUnixMilli       int64                             `json:"updatedAtUnixMilli"`
 }
 
 type sessionOperationPreparedManifest struct {
@@ -150,19 +147,17 @@ var (
 	sessionOperationCreateTemp = func(directory, pattern string) (sessionOperationFile, error) {
 		return os.CreateTemp(directory, pattern)
 	}
-	sessionOperationMarshal                = json.Marshal
-	sessionOperationCurrentProcessIdentity = nativehermes.CurrentDurableProcessIdentity
-	sessionOperationProcessIdentityGone    = nativehermes.DurableProcessIdentityGone
-	sessionOperationRename                 = os.Rename
-	sessionOperationMkdir                  = os.Mkdir
-	sessionOperationMkdirAll               = os.MkdirAll
-	sessionOperationChmod                  = os.Chmod
-	sessionOperationLstat                  = os.Lstat
-	sessionOperationOpen                   = os.Open
-	sessionOperationReadDir                = os.ReadDir
-	sessionOperationRemove                 = os.Remove
-	sessionOperationRemoveAll              = os.RemoveAll
-	sessionOperationNow                    = time.Now
+	sessionOperationMarshal   = json.Marshal
+	sessionOperationRename    = os.Rename
+	sessionOperationMkdir     = os.Mkdir
+	sessionOperationMkdirAll  = os.MkdirAll
+	sessionOperationChmod     = os.Chmod
+	sessionOperationLstat     = os.Lstat
+	sessionOperationOpen      = os.Open
+	sessionOperationReadDir   = os.ReadDir
+	sessionOperationRemove    = os.Remove
+	sessionOperationRemoveAll = os.RemoveAll
+	sessionOperationNow       = time.Now
 )
 
 func newSessionOperationID() (string, error) {
@@ -201,7 +196,6 @@ func beginSessionOperationJournal(sharedHome string, fields sessionOperationJour
 		Marker:                   fields.Marker,
 		FinalTitle:               fields.FinalTitle,
 		BaselineNativeSessionIDs: cloneAndSortSessionOperationIDs(fields.BaselineNativeSessionIDs),
-		Origin:                   fields.Origin,
 		CreatedAtUnixMilli:       now,
 		UpdatedAtUnixMilli:       now,
 	}
@@ -360,10 +354,6 @@ func (j *sessionOperationJournal) update(patch sessionOperationJournalPatch) err
 
 	if patch.BaselineNativeSessionIDs != nil {
 		next.BaselineNativeSessionIDs = cloneAndSortSessionOperationIDs(*patch.BaselineNativeSessionIDs)
-	}
-
-	if patch.Origin != nil {
-		next.Origin = *patch.Origin
 	}
 
 	next.UpdatedAtUnixMilli = sessionOperationNow().UnixMilli()
@@ -819,10 +809,6 @@ func validateSessionOperationJournalRecord(record sessionOperationJournalRecord)
 		}
 	case sessionOperationPhaseTargetReady:
 		return errors.New("unsupported Hermes session-operation phase")
-	}
-
-	if record.Origin.PID <= 0 || record.Origin.KernelStartTime == "" {
-		return errors.New("hermes session-operation process identity is incomplete")
 	}
 
 	if record.CreatedAtUnixMilli <= 0 || record.UpdatedAtUnixMilli < record.CreatedAtUnixMilli {

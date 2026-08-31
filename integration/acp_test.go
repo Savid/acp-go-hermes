@@ -284,7 +284,6 @@ func TestHermesDirectSessionDeletionDrainsGatewayBeforeContainment(t *testing.T)
 	agent := hermesacp.NewAgent(
 		hermesacp.WithExecutablePath(integrationHermesPath(t)),
 		hermesacp.WithScratchDir(t.TempDir()),
-		integrationContainmentOption(),
 	)
 	defer func() {
 		if err := agent.Close(); err != nil {

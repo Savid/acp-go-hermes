@@ -3,7 +3,6 @@ package hermesacp
 import (
 	"context"
 	"log/slog"
-	"os"
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -25,26 +24,11 @@ const defaultImageLimitBytes int64 = 6 * 1024 * 1024
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
-type ProcessIdentityLockCapability interface {
-	Duplicate() (*os.File, error)
-}
-
-// ProcessIsolation is the optional explicit operating-system identity and
-// complete base environment for every native Hermes process. Leaving
-// Options.ProcessIsolation nil selects ordinary same-identity execution; a
-// non-nil value selects the strict Linux boundary described on
-// WithProcessIsolation.
-type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
-	// IdentityLock is an optional trusted-supervisor descriptor for the
-	// host-global UID lock. Linux supervisors validate it and never expose it to
-	// the native Hermes process. Standalone embeddings should leave it nil.
-	IdentityLock        ProcessIdentityLockCapability
-	AuthorityDomain     ProcessIdentityLockCapability
-	StandaloneOwnerID   string
-	StandaloneStateRoot string
+func WithHostAuthority(authority HostAuthority) Option {
+	return func(options *Options) {
+		options.hostAuthoritySupplied = true
+		options.HostAuthority = authority
+	}
 }
 
 // ConcurrencyLimits bounds work accepted by one Agent.
@@ -68,62 +52,6 @@ type ImageLimits struct {
 	MaxOutputBytesPerToolCall int64
 }
 
-// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
-type RuntimeResourceKind string
-
-const (
-	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
-	RuntimeResourceSession   RuntimeResourceKind = "session"
-	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
-	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
-)
-
-type RuntimeProcessKind string
-
-const (
-	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
-	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
-)
-
-type RuntimeContainmentMode string
-
-const (
-	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
-	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the ordinary default, reported
-	// whenever WithProcessIsolation is omitted. Native work runs as the
-	// adapter's current operating-system identity, root or non-root alike, on
-	// every supported platform.
-	//
-	// It is a non-authoritative posture rather than a containment achievement.
-	// The wrapper completes the direct child and process group it started and
-	// nothing beyond them, so it reports no provider-descendant inventory — not
-	// even a terminal zero — and makes no whole-tree quiescence or
-	// credential-separation claim.
-	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
-	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
-)
-
-type RuntimeStartupStage string
-
-const (
-	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
-	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
-	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	RuntimeStartupSession       RuntimeStartupStage = "session"
-)
-
-// RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
-// A nil callback leaves that resource unbounded for standalone use.
-type RuntimeResourceHooks struct {
-	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (func(), error)
-	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (func(), error)
-	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
-	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
-	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-	ObserveContainment     func(context.Context, RuntimeContainmentMode)
-}
-
 type promptTimer struct {
 	C    <-chan time.Time
 	Stop func() bool
@@ -135,8 +63,8 @@ type Options struct {
 	AgentTitle   string
 	AgentVersion string
 
-	ExecutablePath   string
-	ProcessIsolation *ProcessIsolation
+	ExecutablePath string
+	HostAuthority  HostAuthority
 	// Home is unsupported because native residence selection is explicit. Use
 	// ScratchDir for isolated ephemeral state or SharedHermesHome for the
 	// official-Hermes shared durable mode.
@@ -173,21 +101,18 @@ type Options struct {
 	MeterProvider     metric.MeterProvider
 	TextMapPropagator propagation.TextMapPropagator
 
-	SessionStore                SessionStore
-	SessionStoreLoadTimeout     time.Duration
-	ConcurrencyLimits           ConcurrencyLimits
-	ImageLimits                 ImageLimits
-	SeedFiles                   map[string]string
-	TurnTimeout                 time.Duration
-	RuntimeResourceHooks        RuntimeResourceHooks
-	DarwinBestEffortContainment bool
+	SessionStore            SessionStore
+	SessionStoreLoadTimeout time.Duration
+	ConcurrencyLimits       ConcurrencyLimits
+	ImageLimits             ImageLimits
+	SeedFiles               map[string]string
+	TurnTimeout             time.Duration
+	hostAuthoritySupplied   bool
 
-	clientFactory            func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
-	newPromptTimer           func(time.Duration) promptTimer
-	storeWriteTTL            time.Duration
-	beforeTerminalCommit     func()
-	testOnlyNoCredential     bool
-	testOnlyIdentityLockRoot string
+	clientFactory        func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)
+	newPromptTimer       func(time.Duration) promptTimer
+	storeWriteTTL        time.Duration
+	beforeTerminalCommit func()
 }
 
 func applyOptions(opts []Option) Options {
@@ -212,12 +137,6 @@ func applyOptions(opts []Option) Options {
 	}
 	for _, opt := range opts {
 		opt(&options)
-	}
-
-	if options.ProcessIsolation != nil {
-		cloned := *options.ProcessIsolation
-		cloned.BaseEnvironment = cloneStringMap(options.ProcessIsolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
 	}
 
 	return options
@@ -250,31 +169,6 @@ func WithAgentVersion(version string) Option {
 func WithExecutablePath(path string) Option {
 	return func(options *Options) {
 		options.ExecutablePath = path
-	}
-}
-
-// WithProcessIsolation explicitly selects the hardened Linux identity
-// boundary: every Hermes process and version probe runs as the supplied
-// nonzero non-root identity with no supplementary groups, under a trusted root
-// supervisor that remains a distinct identity. BaseEnvironment is the complete
-// native environment rather than an overlay on the adapter's own; WithEnv and
-// session values overlay it. BASH_ENV and ACP_GO_HERMES_PATH_DIR_* are reserved
-// for the adapter's native terminal PATH carrier.
-//
-// The option fails closed. Construction or launch refuses when the platform is
-// not Linux, the supervisor is not root, the native identity is root, or the
-// two identities are not distinct, and it never falls back to ordinary
-// same-identity or Darwin best-effort execution. It cannot be combined with
-// WithDarwinBestEffortContainment.
-//
-// Omitting this option is the ordinary default and is not a configuration
-// error: Hermes then runs as the adapter's current UID/GID, root or non-root
-// alike, on every supported platform, and the Agent reports shared_identity.
-func WithProcessIsolation(isolation ProcessIsolation) Option {
-	return func(options *Options) {
-		cloned := isolation
-		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
 	}
 }
 
@@ -338,7 +232,7 @@ func WithProviderAuthRoot(path string) Option {
 // native sessions survive adapter restarts with the official runtime.
 //
 // The path must be absolute and already clean, and requires ordinary
-// same-identity execution; combining it with WithProcessIsolation is rejected.
+// same-identity execution.
 // Provider-auth extension methods additionally require WithProviderAuthRoot,
 // and configuring both canonicalizes this path: the agent creates the directory
 // 0700 when absent, resolves its symlinks, and adopts the resolved path for the
@@ -355,12 +249,6 @@ func WithProviderAuthRoot(path string) Option {
 func WithSharedHermesHome(path string) Option {
 	return func(options *Options) {
 		options.SharedHermesHome = path
-	}
-}
-
-func WithDarwinBestEffortContainment() Option {
-	return func(options *Options) {
-		options.DarwinBestEffortContainment = true
 	}
 }
 
@@ -433,13 +321,6 @@ func WithImageLimits(limits ImageLimits) Option {
 func WithTurnTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.TurnTimeout = timeout
-	}
-}
-
-// WithRuntimeResourceHooks installs host-facing native-root and scratch-root admission hooks.
-func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
-	return func(options *Options) {
-		options.RuntimeResourceHooks = hooks
 	}
 }
 

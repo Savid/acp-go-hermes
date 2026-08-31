@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNegotiatedJSONExactVersion(t *testing.T) {
+func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 	t.Parallel()
 
 	var decoded Negotiated

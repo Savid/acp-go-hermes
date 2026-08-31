@@ -21,25 +21,13 @@ binary configures adapter exporters from the standard `OTEL_*` environment
 variables.
 
 Telemetry records ACP request outcomes, prompt-turn timing, token usage, active
-sessions, and `hermes serve` process starts. A contained `hermes --version`
-probe is admitted separately as `discovery` for both native-root and scratch-
-root resource hooks; it is not hidden beneath the session admission. Inbound
-ACP `_meta` W3C trace
+sessions, and `hermes serve` process starts. Inbound ACP `_meta` W3C trace
 context is extracted for adapter spans and injected into each launched
 `hermes serve` process as `TRACEPARENT`, `TRACESTATE`, and `BAGGAGE`.
 
-`acp_go_hermes.runtime.containment` records the selected `containment` mode as
-`authoritative`, `shared_identity`, `best_effort`, or `unavailable`.
-`shared_identity` is the ordinary default, reported on every supported platform
-whenever `WithProcessIsolation` is omitted: native work runs as the adapter's
-own identity, root or non-root alike. It is a non-authoritative posture rather
-than a containment achievement, so it makes no whole-tree quiescence or
-credential-separation claim and publishes no provider-process snapshots at all —
-not even a terminal zero. Darwin best-effort startup also emits a structured
-warning with `containment=best_effort`, and suppresses provider-process
-snapshots for the same reason: it cannot authoritatively enumerate escaped
-descendants, so a count would mislead even when it would read zero. Only
-`authoritative` publishes provider-descendant inventory.
+Managed authority failures preserve the three stable error identities in the
+Go error chain. Logs may record operation names and bounded failure classes,
+but never the authority's environment values or native protocol bodies.
 
 <Note>
 Telemetry avoids recording prompt text, tool inputs, tool outputs, and raw

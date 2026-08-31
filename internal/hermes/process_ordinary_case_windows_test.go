@@ -3,6 +3,7 @@
 package hermes
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 // is what says the search order the wrapper reasoned about is the one the
 // harness process actually gets.
 func TestWindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt(t *testing.T) {
-	shell, err := resolveHarnessExecutable(nil, "cmd", os.Environ())
+	shell, err := resolveHarnessExecutable("cmd", os.Environ())
 	require.NoError(t, err, "ordinary resolution must find cmd on the ambient Path")
 
 	decoyDir := t.TempDir()
@@ -44,7 +45,7 @@ func TestWindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt(t *te
 	environment, err := ordinaryEnvironment(ambient, map[string]string{"PATH": harnessDir, "PathExt": ".BAT"})
 	require.NoError(t, err)
 
-	resolved, err := resolveHarnessExecutable(nil, "hermes", environment)
+	resolved, err := resolveHarnessExecutable("hermes", environment)
 	require.NoError(t, err)
 	require.Equal(t, harness, resolved)
 
@@ -92,7 +93,7 @@ func TestWindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt(t *te
 // the harness out of the phase it becomes, and a real cmd.exe handed the same
 // block has to reach exactly that file.
 func TestWindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins(t *testing.T) {
-	shell, err := resolveHarnessExecutable(nil, "cmd", os.Environ())
+	shell, err := resolveHarnessExecutable("cmd", os.Environ())
 	require.NoError(t, err, "ordinary resolution must find cmd on the ambient Path")
 
 	decoyDir := t.TempDir()
@@ -117,7 +118,7 @@ func TestWindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins(t *testing.T)
 	require.Equal(t, 1, windowsSearchPathOwners(environment),
 		"the child must receive exactly one search path")
 
-	resolved, err := resolveHarnessExecutable(nil, "hermes", environment)
+	resolved, err := resolveHarnessExecutable("hermes", environment)
 	require.NoError(t, err)
 	require.Equal(t, harness, resolved,
 		"the decoy the superseded spelling pointed at must be unreachable")
@@ -141,24 +142,14 @@ func windowsFixtureResolvedByChild(t *testing.T, shell string, env []string, cal
 
 	// /d skips autorun scripts and an empty working directory keeps the
 	// implicit current-directory search from answering for PATH.
-	command := exec.Command(shell, "/d", "/c", call)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, shell, "/d", "/c", call)
 	command.Env = env
 	command.Dir = t.TempDir()
 	command.Stdout = file
-	configureHermesProcess(command)
-
-	tree, err := startContainedProcess(command)
-	require.NoError(t, err)
-
-	wait := tree.directChild(command)
-	select {
-	case <-wait.done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("conflicting-case child did not exit")
-	}
-	require.NoError(t, wait.err)
-	require.NoError(t, tree.complete(30*time.Second))
-	require.NoError(t, tree.close())
+	require.NoError(t, command.Run())
+	require.NoError(t, context.Cause(ctx))
 	require.NoError(t, file.Close())
 
 	contents, err := os.ReadFile(output)

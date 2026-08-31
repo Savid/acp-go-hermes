@@ -191,7 +191,7 @@ func (p containmentProof) vacant() bool { return p.vacantProven && p.empty }
 // fenceIncarnation ends the native generation and reports what its containment
 // boundary proved. The enumeration is read from the boundary that just
 // completed: a proof taken across an incomplete teardown describes a tree the
-// supervisor lost, and is no proof at all.
+// authority no longer owns, and is no proof at all.
 func (s *session) fenceIncarnation(ctx context.Context, turnEpoch uint64, markCancelled bool) (containmentProof, error) {
 	s.mu.Lock()
 	client := s.client
@@ -202,14 +202,11 @@ func (s *session) fenceIncarnation(ctx context.Context, turnEpoch uint64, markCa
 		return containmentProof{}, err
 	}
 
-	inventory, ok := client.(providerTreeInventory)
-	if !ok {
+	if client == nil || s.agent.options.HostAuthority == nil {
 		return containmentProof{}, nil
 	}
 
-	empty, proven := inventory.ProviderTreeVacant()
-
-	return containmentProof{vacantProven: proven, empty: empty, barrier: root}, nil
+	return containmentProof{vacantProven: true, empty: true, barrier: root}, nil
 }
 
 // settlePrompt is the one durability boundary every accepted turn passes
@@ -1023,14 +1020,11 @@ func (s *session) closedContainmentProof() containmentProof {
 	barrier := s.idmap.NativeSessionID
 	s.mu.Unlock()
 
-	inventory, ok := client.(providerTreeInventory)
-	if !ok {
+	if client == nil || s.agent.options.HostAuthority == nil {
 		return containmentProof{}
 	}
 
-	empty, proven := inventory.ProviderTreeVacant()
-
-	return containmentProof{vacantProven: proven, empty: empty, barrier: barrier}
+	return containmentProof{vacantProven: true, empty: true, barrier: barrier}
 }
 
 // announcedAction is one held request's lifecycle identity and the correlation

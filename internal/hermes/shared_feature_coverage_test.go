@@ -3,30 +3,15 @@
 package hermes
 
 import (
-	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"golang.org/x/sys/unix"
 )
-
-type sharedOwnerIdentityTestServer struct {
-	Server
-	pid   int
-	start string
-	err   error
-}
-
-func (s sharedOwnerIdentityTestServer) SharedSessionOwnerProcessIdentity() (int, string, error) {
-	return s.pid, s.start, s.err
-}
 
 func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // One stateful fake covers the wire failure matrix.
 	t.Run("model rpc admission and failure", func(t *testing.T) {
@@ -258,25 +243,6 @@ func TestSharedGatewayProtocolFaultCoverage(t *testing.T) { //nolint:gocyclo // 
 		if nilServer.ProviderAuthSupported() {
 			t.Fatal("nil server advertised provider auth")
 		}
-		if _, _, err := nilServer.SharedSessionOwnerProcessIdentity(); err == nil {
-			t.Fatal("nil server exposed a process identity")
-		}
-		server := &hermesServer{process: &Process{Cmd: &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}}}
-		if pid, start, err := server.SharedSessionOwnerProcessIdentity(); err != nil || pid != os.Getpid() || start == "" {
-			t.Fatalf("server process identity = %d/%q, %v", pid, start, err)
-		}
-		server = &hermesServer{process: &Process{Cmd: &exec.Cmd{Process: &os.Process{Pid: 99999999}}}}
-		if _, _, err := server.SharedSessionOwnerProcessIdentity(); err == nil {
-			t.Fatal("missing server process exposed a durable identity")
-		}
-
-		originalCurrentStart := currentDurableProcessStartTime
-		t.Cleanup(func() { currentDurableProcessStartTime = originalCurrentStart })
-		currentDurableProcessStartTime = func(int) (string, error) { return "", errors.New("identity fault") }
-		if _, err := CurrentDurableProcessIdentity(); err == nil || !strings.Contains(err.Error(), "identity fault") {
-			t.Fatalf("current durable identity fault = %v", err)
-		}
-		currentDurableProcessStartTime = originalCurrentStart
 	})
 }
 
@@ -443,78 +409,6 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 	})
 }
 
-func TestSharedProcessPreparationFaultCoverage(t *testing.T) {
-	restoreProcessSeams(t)
-	process, startErr := Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:           t.TempDir(),
-		SharedHome:     true,
-		Timeout:        10 * time.Second,
-		PrepareSharedHome: func(context.Context, string) error {
-			return errors.New("prepare shared home fault")
-		},
-	}))
-	if startErr == nil || process != nil || !strings.Contains(startErr.Error(), "prepare shared home fault") {
-		t.Fatalf("shared preparation fault = %#v, %v", process, startErr)
-	}
-
-	process, startErr = Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath:      fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:                t.TempDir(),
-		Timeout:             10 * time.Second,
-		SharedSessionOwners: []*SharedSessionOwner{{}},
-	}))
-	if startErr == nil || process != nil || !strings.Contains(startErr.Error(), "lock is unavailable") {
-		t.Fatalf("invalid shared owner = %#v, %v", process, startErr)
-	}
-
-	home := t.TempDir()
-	owner, ownerErr := AcquireSharedACPSessionOwner(home, "bind-fault")
-	if ownerErr != nil {
-		t.Fatal(ownerErr)
-	}
-	t.Cleanup(func() { _ = owner.Release() })
-	if err := os.Mkdir(owner.claimPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var spawned DurableProcessIdentity
-	afterHermesSpawnBeforeOwnerBind = func(cmd *exec.Cmd) {
-		start, inspectErr := inspectHermesProcessStartTime(cmd.Process.Pid)
-		if inspectErr != nil {
-			t.Errorf("inspect spawned fake Hermes process: %v", inspectErr)
-
-			return
-		}
-		spawned = DurableProcessIdentity{PID: cmd.Process.Pid, KernelStartTime: start}
-	}
-	process, startErr = Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath:      fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:                t.TempDir(),
-		Timeout:             10 * time.Second,
-		SharedSessionOwners: []*SharedSessionOwner{owner},
-	}))
-	if startErr == nil || process != nil {
-		t.Fatalf("post-spawn owner bind fault = %#v, %v", process, startErr)
-	}
-	if spawned.PID == 0 {
-		t.Fatal("post-spawn owner bind fault did not observe the fake process")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		probeErr := syscall.Kill(spawned.PID, 0)
-		if errors.Is(probeErr, syscall.ESRCH) {
-			break
-		}
-		if probeErr != nil {
-			t.Fatalf("inspect failed-start fake process cleanup: %v", probeErr)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("failed-start fake Hermes process %d survived cleanup", spawned.PID)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
 	badParent := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(badParent, []byte("x"), 0o600); err != nil {
@@ -579,18 +473,14 @@ func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
 	}
 }
 
-func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner sidecar faults share one hashed-path fixture.
+func TestSharedOwnerFaultCoverage(t *testing.T) {
 	originalChmod := sharedOwnerChmod
 	originalFileChmod := sharedOwnerFileChmod
 	originalTryLock := sharedOwnerTryLock
-	originalMarshal := sharedOwnerJSONMarshal
-	originalStartTime := sharedOwnerInspectStartTime
 	t.Cleanup(func() {
 		sharedOwnerChmod = originalChmod
 		sharedOwnerFileChmod = originalFileChmod
 		sharedOwnerTryLock = originalTryLock
-		sharedOwnerJSONMarshal = originalMarshal
-		sharedOwnerInspectStartTime = originalStartTime
 	})
 
 	t.Run("input and owner directory", func(t *testing.T) {
@@ -677,155 +567,6 @@ func TestSharedOwnerFaultCoverage(t *testing.T) { //nolint:gocyclo // Owner side
 			t.Fatalf("owner lock fault = %v", err)
 		}
 		sharedOwnerTryLock = originalTryLock
-
-		owner, err := AcquireSharedNativeSessionOwner(t.TempDir(), "native")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = owner.Release() })
-		sharedOwnerJSONMarshal = func(any) ([]byte, error) { return nil, errors.New("claim marshal fault") }
-		if err := owner.BindProcessIdentity(os.Getpid(), "start"); err == nil || !strings.Contains(err.Error(), "marshal fault") {
-			t.Fatalf("owner claim marshal fault = %v", err)
-		}
-		sharedOwnerJSONMarshal = originalMarshal
-	})
-
-	t.Run("claim decoding", func(t *testing.T) {
-		home := t.TempDir()
-		owner, err := AcquireSharedNativeSessionOwner(home, "claim")
-		if err != nil {
-			t.Fatal(err)
-		}
-		claimPath := owner.claimPath
-		if err := owner.Release(); err != nil {
-			t.Fatal(err)
-		}
-		for name, data := range map[string][]byte{
-			"empty":      {},
-			"oversized":  []byte(strings.Repeat("x", 4097)),
-			"malformed":  []byte("{"),
-			"incomplete": []byte(`{"pid":1}`),
-		} {
-			t.Run(name, func(t *testing.T) {
-				if err := os.WriteFile(claimPath, data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := AcquireSharedNativeSessionOwner(home, "claim"); err == nil {
-					t.Fatalf("%s owner claim was accepted", name)
-				}
-			})
-		}
-		if err := os.Remove(claimPath); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(claimPath, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := AcquireSharedNativeSessionOwner(home, "claim"); err == nil {
-			t.Fatal("directory owner claim was accepted")
-		}
-	})
-
-	t.Run("claim open and claimant inspection faults", func(t *testing.T) {
-		home := t.TempDir()
-		owner, acquireErr := AcquireSharedNativeSessionOwner(home, "claim-open")
-		if acquireErr != nil {
-			t.Fatal(acquireErr)
-		}
-		claimPath := owner.claimPath
-		if err := owner.Release(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(claimPath, claimPath); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := AcquireSharedNativeSessionOwner(home, "claim-open"); err == nil || !strings.Contains(err.Error(), "open") {
-			t.Fatalf("claim symlink loop error = %v", err)
-		}
-
-		owner, acquireErr = AcquireSharedNativeSessionOwner(home, "claim-inspect")
-		if acquireErr != nil {
-			t.Fatal(acquireErr)
-		}
-		claimPath = owner.claimPath
-		if err := owner.Release(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(claimPath, []byte("{\"pid\":1,\"kernelStartTime\":\"unknown\"}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		sharedOwnerInspectStartTime = func(int) (string, error) { return "", errors.New("inspection uncertain") }
-		if _, err := AcquireSharedNativeSessionOwner(home, "claim-inspect"); err == nil || !strings.Contains(err.Error(), "verify") {
-			t.Fatalf("uncertain claimant inspection error = %v", err)
-		}
-		sharedOwnerInspectStartTime = originalStartTime
-	})
-
-	t.Run("bind and retained wrappers", func(t *testing.T) {
-		if err := (*SharedSessionOwner)(nil).BindProcess(1); err != nil {
-			t.Fatal(err)
-		}
-		if err := (*SharedSessionOwner)(nil).BindProcessIdentity(1, "start"); err != nil {
-			t.Fatal(err)
-		}
-		if err := BindSharedSessionOwnerToServer(nil, nil); err != nil {
-			t.Fatal(err)
-		}
-		if err := BindSharedSessionOwnerToServer(&SharedSessionOwner{}, struct{ Server }{}); err == nil {
-			t.Fatal("server without owner identity was accepted")
-		}
-		if err := BindSharedSessionOwnerToServer(&SharedSessionOwner{}, sharedOwnerIdentityTestServer{err: errors.New("identity fault")}); err == nil {
-			t.Fatal("server identity fault was ignored")
-		}
-
-		home := t.TempDir()
-		owner, acquireErr := AcquireSharedACPSessionOwner(home, "logical")
-		if acquireErr != nil {
-			t.Fatal(acquireErr)
-		}
-		if err := owner.BindProcess(99999999); err == nil {
-			t.Fatal("missing process bound to owner")
-		}
-		if err := owner.BindProcessIdentity(0, ""); err == nil {
-			t.Fatal("incomplete explicit identity was accepted")
-		}
-		identity, identityErr := CurrentDurableProcessIdentity()
-		if identityErr != nil {
-			t.Fatal(identityErr)
-		}
-		if err := BindSharedSessionOwnerToServer(owner, sharedOwnerIdentityTestServer{pid: identity.PID, start: identity.KernelStartTime}); err != nil {
-			t.Fatal(err)
-		}
-		files, filesErr := sharedSessionOwnerFiles([]*SharedSessionOwner{nil, owner})
-		if filesErr != nil || len(files) != 1 {
-			t.Fatalf("owner files = %#v, %v", files, filesErr)
-		}
-		if err := owner.Release(); err != nil {
-			t.Fatal(err)
-		}
-		owner.file = nil
-		if _, err := sharedSessionOwnerFiles([]*SharedSessionOwner{owner}); err == nil {
-			t.Fatal("owner without lock file was accepted")
-		}
-		retainSharedSessionOwner(nil)
-		(*SharedSessionOwner)(nil).Retain()
-	})
-
-	t.Run("claim inspection classification", func(t *testing.T) {
-		if sharedOwnerInspectionProvesGone(errors.New("uncertain")) {
-			t.Fatal("uncertain owner inspection proved death")
-		}
-		if gone, err := DurableProcessIdentityGone(DurableProcessIdentity{}); err == nil || gone {
-			t.Fatalf("incomplete durable identity = %t, %v", gone, err)
-		}
-		if gone, err := sharedSessionOwnerClaimGone(sharedSessionOwnerClaim{PID: -1}); err != nil || !gone {
-			t.Fatalf("missing claimant = %t, %v", gone, err)
-		}
-		sharedOwnerInspectStartTime = func(int) (string, error) { return "", errors.New("uncertain") }
-		if gone, err := sharedSessionOwnerClaimGone(sharedSessionOwnerClaim{PID: 1, KernelStartTime: "start"}); err == nil || gone {
-			t.Fatalf("uncertain claimant = %t, %v", gone, err)
-		}
-		sharedOwnerInspectStartTime = originalStartTime
 	})
 }
 

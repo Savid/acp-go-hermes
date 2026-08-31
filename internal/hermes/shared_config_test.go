@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -404,122 +403,6 @@ func TestSharedNativeOwnershipConflictsAcrossDifferentACPRecords(t *testing.T) {
 	}
 	if err := other.Release(); err != nil {
 		t.Fatalf("release different native owner: %v", err)
-	}
-}
-
-func TestSharedSessionOwnerClaimRefusesExactLiveProcessAndAdmitsStartMismatch(t *testing.T) {
-	home := t.TempDir()
-	owner, err := AcquireSharedNativeSessionOwner(home, "orphan-native")
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, err := InspectProcess(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := owner.BindProcessIdentity(os.Getpid(), identity.StartTime); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate an adapter crash: its lock description closes without clearing
-	// the atomically-published native claimant sidecar.
-	if err := errors.Join(owner.unlock(), owner.file.Close()); err != nil {
-		t.Fatalf("abandon adapter lock: %v", err)
-	}
-
-	if _, err := AcquireSharedNativeSessionOwner(home, "orphan-native"); err == nil || !strings.Contains(err.Error(), "claimant process is still live") {
-		t.Fatalf("exact live claimant error = %v", err)
-	}
-	if err := atomicSharedHermesWriteFile(owner.claimPath, []byte(`{"pid":`+fmt.Sprint(os.Getpid())+`,"kernelStartTime":"reused-pid-start"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := AcquireSharedNativeSessionOwner(home, "orphan-native")
-	if err != nil {
-		t.Fatalf("start-time mismatch was not recoverable: %v", err)
-	}
-	if err := recovered.Release(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSharedSessionOwnerClaimReplacementIsAtomic(t *testing.T) {
-	home := t.TempDir()
-	owner, err := AcquireSharedNativeSessionOwner(home, "atomic-native")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = owner.Release() }()
-	if err := owner.BindProcessIdentity(101, "old-complete"); err != nil {
-		t.Fatal(err)
-	}
-	want, err := os.ReadFile(owner.claimPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	previousRename := sharedAtomicRename
-	sharedAtomicRename = func(string, string) error { return errors.New("rename failed") }
-	t.Cleanup(func() { sharedAtomicRename = previousRename })
-	if err := owner.BindProcessIdentity(202, "new-incomplete"); err == nil {
-		t.Fatal("claim replacement accepted failed atomic rename")
-	}
-	got, err := os.ReadFile(owner.claimPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("claim changed after failed atomic replacement: got %q want %q", got, want)
-	}
-	sharedAtomicRename = previousRename
-}
-
-func TestSharedSessionOwnerIsRetainedWhenStartContainmentIsUnproven(t *testing.T) {
-	restoreProcessSeams(t)
-	home := t.TempDir()
-	t.Cleanup(func() { releaseRetainedSharedOwnersUnder(t, home) })
-
-	startHermesContainedProcess = func(*exec.Cmd, ...ContainmentSpec) (*processContainment, error) {
-		return nil, ErrProcessContainmentIncomplete
-	}
-	options := darwinTestStartOptions(t, StartOptions{
-		ACPSessionID:     "failed-start",
-		Cwd:              t.TempDir(),
-		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
-		SharedHermesHome: home,
-		ExistingXDG:      testXDGDirs(t),
-	})
-	if _, err := StartServer(t.Context(), options); !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("failed start error = %v", err)
-	}
-
-	options.ExistingXDG = testXDGDirs(t)
-	if _, err := StartServer(t.Context(), options); err == nil || !strings.Contains(err.Error(), "home root is already claimed") {
-		t.Fatalf("second home-root claim after unproven start error = %v", err)
-	}
-	if _, err := acquireSharedACPSessionOwner(home, "failed-start"); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("second session owner after unproven start error = %v", err)
-	}
-}
-
-// releaseRetainedSharedOwnersUnder drops the deliberately process-lifetime
-// claims one unproven-containment fixture leaves behind, so a later fixture can
-// still take the same residence inside this one test binary.
-func releaseRetainedSharedOwnersUnder(t *testing.T, home string) {
-	t.Helper()
-
-	control, err := SharedHermesAdapterControlDir(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	retainedSharedSessionOwners.Lock()
-	defer retainedSharedSessionOwners.Unlock()
-
-	for owner := range retainedSharedSessionOwners.owners {
-		if strings.HasPrefix(owner.lockPath, control+string(os.PathSeparator)) {
-			_ = owner.Release()
-
-			delete(retainedSharedSessionOwners.owners, owner)
-		}
 	}
 }
 

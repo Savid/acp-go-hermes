@@ -7,13 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
-	hermesacp "github.com/savid/acp-go-hermes"
 )
 
 const liveTokenHermesConfig = `model:
@@ -45,28 +43,6 @@ func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) [
 	}
 
 	return append(args, extraArgs...)
-}
-
-// integrationContainmentOption accepts the same Darwin containment boundary for
-// an in-process Agent. On every other platform the option is rejected, so the
-// tier configures nothing there.
-func integrationContainmentOption() hermesacp.Option {
-	if runtime.GOOS == "darwin" {
-		return hermesacp.WithDarwinBestEffortContainment()
-	}
-
-	return func(*hermesacp.Options) {}
-}
-
-func integrationProcessIsolationOption() hermesacp.Option {
-	return hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
-		UID: uint32(os.Geteuid()),
-		GID: uint32(os.Getegid()),
-		BaseEnvironment: map[string]string{
-			"PATH": os.Getenv("PATH"),
-			"HOME": os.Getenv("HOME"),
-		},
-	})
 }
 
 func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {

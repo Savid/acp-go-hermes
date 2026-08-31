@@ -45,7 +45,6 @@ func TestLiveShippedResumeFixtureLoads(t *testing.T) {
 		hermesacp.WithExecutablePath(integrationHermesPath(t)),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
-		integrationContainmentOption(),
 	)
 	defer func() {
 		if err := agent.Close(); err != nil {

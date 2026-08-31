@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,8 +23,6 @@ import (
 )
 
 const (
-	LeaseFileName = "server.lease"
-
 	// closeTimeout bounds gateway redial and shutdown handshakes.
 	closeTimeout = 5 * time.Second
 )
@@ -187,22 +184,21 @@ type StartOptions struct {
 	// control generation; multiple Servers of this one adapter process share the
 	// native home under a single exclusive home-root claim, and a second adapter
 	// process is refused that root outright.
-	SharedHermesHome            string
-	SharedNativeSessionOwner    *SharedSessionOwner
-	Env                         map[string]string
-	SessionEnv                  map[string]string
-	ExtraPathDirs               []string
-	Isolation                   *ProcessIsolation
-	AmbientEnvironment          map[string]string
-	HealthTimeout               time.Duration
-	Logger                      *slog.Logger
-	ExistingXDG                 XDGDirs
-	MCPServers                  []acp.McpServer
-	SeedFiles                   map[string]string
-	ObserveStartupStage         func(context.Context, string, string, time.Duration, error)
-	AcquireDiscoveryResources   func(context.Context) (func(), func(), error)
-	RetainDiscoveryRoot         func(string, error)
-	DarwinBestEffortContainment bool
+	SharedHermesHome    string
+	Env                 map[string]string
+	SessionEnv          map[string]string
+	ExtraPathDirs       []string
+	NativeEnvironment   map[string]string
+	StartNative         NativeStarter
+	PrepareNativeTree   func(context.Context, string) error
+	ReclaimNativeTree   func(context.Context, string) error
+	AmbientEnvironment  map[string]string
+	HealthTimeout       time.Duration
+	Logger              *slog.Logger
+	ExistingXDG         XDGDirs
+	MCPServers          []acp.McpServer
+	SeedFiles           map[string]string
+	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
 }
 
 type ACPSessionIDString string
@@ -216,11 +212,9 @@ type XDGDirs struct {
 }
 
 type hermesServer struct {
-	cmd       *exec.Cmd
-	xdg       XDGDirs
-	log       *slog.Logger
-	lease     ServerLease
-	leasePath string
+	xdg         XDGDirs
+	log         *slog.Logger
+	controlLock *SharedSessionSetLock
 
 	deliveries       chan TurnDelivery
 	closed           chan struct{}
@@ -253,7 +247,7 @@ type hermesServer struct {
 	transport           *gatewayTransport
 	registrations       uint64
 
-	supervisorWG           sync.WaitGroup
+	reconnectWG            sync.WaitGroup
 	dispatcherWG           sync.WaitGroup
 	actorWG                sync.WaitGroup
 	transportCloseWG       sync.WaitGroup
@@ -270,22 +264,6 @@ type hermesServerCloseAttempt struct {
 }
 
 type serverCloseJoinHookKey struct{}
-
-func (s *hermesServer) ProviderDescendantCount() (int, bool) {
-	if s == nil || s.process == nil {
-		return 0, false
-	}
-
-	return s.process.ProviderDescendantCount()
-}
-
-func (s *hermesServer) ProviderTreeVacant() (bool, bool) {
-	if s == nil || s.process == nil {
-		return false, false
-	}
-
-	return s.process.ProviderTreeVacant()
-}
 
 // ProviderAuthSupported reports that this server's exact credential residence
 // is durable. Official shared-HERMES_HOME mode is the only supported residence.
@@ -513,28 +491,14 @@ type ProviderModel struct {
 	Name string `json:"name"`
 }
 
-type ProcessIdentity struct {
-	StartTime string
-	Cmdline   []string
-	Env       map[string]string
-}
-
 var (
 	hermesMarshalIndent = json.MarshalIndent
 	hermesUnmarshalYAML = yaml.Unmarshal
-	hermesWriteLease    = WriteLease
-	hermesReapLeaseFile = ReapLeaseFile
 	hermesControlMkdir  = os.MkdirAll
 	hermesControlChmod  = os.Chmod
-	hermesNativeHandoff = handoffGeneratedNativeTree
-	InspectProcess      = inspectHermesProcess
 )
 
 func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr error) {
-	if options.AcquireDiscoveryResources == nil || options.RetainDiscoveryRoot == nil {
-		return nil, errors.New("hermes version discovery resource callbacks are required")
-	}
-
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
@@ -608,11 +572,7 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 
 		defer func() {
 			if !keepOwners {
-				if errors.Is(resultErr, ErrProcessContainmentIncomplete) {
-					homeOwner.Retain()
-				} else {
-					resultErr = errors.Join(resultErr, homeOwner.Release())
-				}
+				resultErr = errors.Join(resultErr, homeOwner.Release())
 			}
 		}()
 
@@ -623,11 +583,7 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 
 		defer func() {
 			if !keepOwners {
-				if errors.Is(resultErr, ErrProcessContainmentIncomplete) {
-					retainSharedSessionOwner(sessionOwner)
-				} else {
-					resultErr = errors.Join(resultErr, sessionOwner.Release())
-				}
+				resultErr = errors.Join(resultErr, sessionOwner.Release())
 			}
 		}()
 	}
@@ -645,14 +601,17 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		return nil, fmt.Errorf("protect Hermes control directory: %w", err)
 	}
 
-	leasePath := filepath.Join(controlDir, LeaseFileName)
-
-	// A server owns exactly one session XDG root. Recover only a predecessor
-	// that owned this same root: sweeping root/* here would treat every other
-	// live session in the shared agent home as stale and terminate its process.
-	if retained := hermesReapLeaseFile(leasePath, options.Logger); retained {
-		return nil, fmt.Errorf("previous Hermes process for %q remains live", xdg.Root)
+	controlLock, err := acquireServerControlLock(ctx, controlDir)
+	if err != nil {
+		return nil, err
 	}
+
+	keepControlLock := false
+	defer func() {
+		if !keepControlLock {
+			resultErr = errors.Join(resultErr, controlLock.Release())
+		}
+	}()
 
 	configurationStarted := time.Now()
 
@@ -677,12 +636,6 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, configErr)
 
 		return nil, configErr
-	}
-
-	if ownershipErr := hermesNativeHandoff(nativeXDG.Root, options.Isolation); ownershipErr != nil {
-		observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, ownershipErr)
-
-		return nil, ownershipErr
 	}
 
 	observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, nil)
@@ -710,49 +663,27 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		PrepareSharedHome: func(prepareCtx context.Context, home string) error {
 			return materializeSharedHermesConfig(prepareCtx, home, servers, options.SeedFiles)
 		},
-		SharedSessionOwners:         []*SharedSessionOwner{sessionOwner, options.SharedNativeSessionOwner},
-		SharedHomeOwner:             homeOwner,
-		ScratchParent:               options.ScratchParent,
-		Cwd:                         options.Cwd,
-		Env:                         cloneEnvironmentMap(options.Env),
-		SessionEnv:                  processEnv,
-		ExtraPathDirs:               extraPathDirs,
-		Isolation:                   options.Isolation,
-		AmbientEnvironment:          options.AmbientEnvironment,
-		Timeout:                     options.HealthTimeout,
-		Configure:                   configureHermesProcess,
-		ObserveStartupStage:         options.ObserveStartupStage,
-		AcquireDiscoveryResources:   options.AcquireDiscoveryResources,
-		RetainDiscoveryRoot:         options.RetainDiscoveryRoot,
-		DarwinBestEffortContainment: options.DarwinBestEffortContainment,
+		ScratchParent:       options.ScratchParent,
+		Cwd:                 options.Cwd,
+		Env:                 cloneEnvironmentMap(options.Env),
+		SessionEnv:          processEnv,
+		ExtraPathDirs:       extraPathDirs,
+		NativeEnvironment:   options.NativeEnvironment,
+		StartNative:         options.StartNative,
+		PrepareNativeTree:   options.PrepareNativeTree,
+		ReclaimNativeTree:   options.ReclaimNativeTree,
+		AmbientEnvironment:  options.AmbientEnvironment,
+		Timeout:             options.HealthTimeout,
+		ObserveStartupStage: options.ObserveStartupStage,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	lease := ServerLease{
-		PID:       proc.Cmd.Process.Pid,
-		Port:      proc.Port,
-		StartedAt: time.Now().UnixMilli(),
-		TokenHash: PasswordHash(proc.Token),
-		XDGRoot:   nativeXDG.Root,
-	}
-	if identity, err := InspectProcess(proc.Cmd.Process.Pid); err == nil {
-		lease.ProcessStartTime = identity.StartTime
-	}
-
-	if err := hermesWriteLease(controlDir, lease); err != nil {
-		closeErr := proc.Close(context.Background())
-
-		return nil, errors.Join(err, closeErr)
-	}
-
 	server := &hermesServer{
-		cmd:                   proc.Cmd,
 		xdg:                   xdg,
 		log:                   options.Logger,
-		lease:                 lease,
-		leasePath:             leasePath,
+		controlLock:           controlLock,
 		deliveries:            make(chan TurnDelivery, gatewayMappedDeliveryCapacity+1),
 		closed:                make(chan struct{}),
 		process:               proc,
@@ -769,26 +700,9 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 	server.enableReconnect(proc.Redial)
 
 	keepOwners = true
+	keepControlLock = true
 
 	return server, nil
-}
-
-// SharedSessionOwnerProcessIdentity returns the exact process identity already
-// owned by this Server so an adapter-created native-session claim can be bound
-// immediately after official Hermes allocates its native ID.
-func (s *hermesServer) SharedSessionOwnerProcessIdentity() (int, string, error) {
-	if s == nil || s.process == nil || s.process.Cmd == nil || s.process.Cmd.Process == nil {
-		return 0, "", errors.New("hermes server has no native process identity")
-	}
-
-	pid := s.process.Cmd.Process.Pid
-
-	startTime, err := inspectHermesProcessStartTime(pid)
-	if err != nil {
-		return 0, "", err
-	}
-
-	return pid, startTime, nil
 }
 
 func observeHermesStartupStage(ctx context.Context, observe func(context.Context, string, string, time.Duration, error), lifecycle, stage string, started time.Time, err error) {
@@ -860,7 +774,7 @@ func (s *hermesServer) closeAttemptOnce(ctx context.Context) error {
 		s.dispatcherWG.Wait()
 		s.stopGatewayActors()
 		s.actorWG.Wait()
-		s.supervisorWG.Wait()
+		s.reconnectWG.Wait()
 		s.turnLease.Lock()
 		s.transportCloseWG.Wait()
 		close(s.deliveries)
@@ -878,39 +792,9 @@ func (s *hermesServer) closeAttemptOnce(ctx context.Context) error {
 		return err
 	}
 
-	if s.leasePath != "" {
-		err = errors.Join(err, removeLeaseFileIfOwned(s.leasePath, s.lease))
-	}
-
-	err = errors.Join(err, s.sharedSessionOwner.Release(), s.sharedHomeOwner.Release())
+	err = errors.Join(err, s.sharedSessionOwner.Release(), s.sharedHomeOwner.Release(), s.controlLock.Release())
 
 	return err
-}
-
-// removeLeaseFileIfOwned removes path only when its immutable contents still
-// identify the closing server. A same-session replacement writes a new lease
-// before the predecessor object can be closed, and the predecessor must never
-// unlink that replacement's live ownership record.
-func removeLeaseFileIfOwned(path string, owner ServerLease) error {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
-	if err != nil {
-		return err
-	}
-
-	var current ServerLease
-	if err := json.Unmarshal(data, &current); err != nil {
-		return err
-	}
-
-	if current != owner {
-		return nil
-	}
-
-	return os.Remove(path)
 }
 
 type TurnDelivery struct {
@@ -1139,7 +1023,7 @@ func (s *hermesServer) gatewayTransport() *gatewayTransport {
 	return s.transport
 }
 
-// enableReconnect wires the idle-reconnect supervisor. turnBusy is a transport
+// enableReconnect wires the idle-reconnect loop. turnBusy is a transport
 // lease around gateway RPCs (including non-prompt RPCs), not lifecycle turn
 // admission; session admission remains owned by the adapter session actor.
 func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, error)) {
@@ -1150,13 +1034,13 @@ func (s *hermesServer) enableReconnect(redial func(context.Context) (*Client, er
 		s.turnIdle = sync.NewCond(&s.connMu)
 	}
 
-	s.supervisorWG.Add(1)
+	s.reconnectWG.Add(1)
 	s.connMu.Unlock()
 
 	go func() {
-		defer s.supervisorWG.Done()
+		defer s.reconnectWG.Done()
 
-		s.superviseGateway()
+		s.runGatewayReconnectLoop()
 	}()
 }
 
@@ -1195,11 +1079,11 @@ func (s *hermesServer) endGatewayTurn() {
 	}
 }
 
-// superviseGateway watches the live connection and, on an idle disconnect,
+// runGatewayReconnectLoop watches the live connection and, on an idle disconnect,
 // redials the still-running `hermes serve` process so the next turn reconnects
 // instead of failing. A mid-turn disconnect is fenced by the prompt loop; the
-// supervisor waits for the turn to finish before reconnecting.
-func (s *hermesServer) superviseGateway() {
+// reconnect loop waits for the turn to finish before reconnecting.
+func (s *hermesServer) runGatewayReconnectLoop() {
 	for {
 		transport := s.gatewayTransport()
 		if transport == nil || transport.client == nil || transport.dispatcher == nil {
@@ -1271,7 +1155,7 @@ func (s *hermesServer) reconnectGateway() {
 			s.log.Debug("reconnect hermes gateway failed", slog.String("classification", "dial_failed"))
 		}
 
-		leaseReapSleep(LeaseReapPollInterval)
+		time.Sleep(20 * time.Millisecond)
 
 		return
 	}
@@ -2242,7 +2126,7 @@ func gatewayToolPart(
 		toolName = active.name
 	}
 
-	status := containmentStateRunning
+	status := "running"
 	if event.Type == evtToolComplete {
 		status = valCompleted
 		if gatewayToolFailed(payload, toolName) {
@@ -3460,7 +3344,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	// Reject any ".." segment so the cleaned join can never escape home; a
 	// relative path without ".." segments always stays confined under home.
 	for _, segment := range strings.Split(filepath.ToSlash(relative), "/") {
-		if segment == containmentParentPath {
+		if segment == ".." {
 			return "", "", invalid()
 		}
 	}
@@ -3505,175 +3389,6 @@ func deepMergeYAML(base, override map[string]any) map[string]any {
 	return merged
 }
 
-func PasswordHash(password string) string {
-	sum := sha256.Sum256([]byte(password))
-
-	return hex.EncodeToString(sum[:])
-}
-
 func ControlDirForXDG(root string) string {
 	return root + ".control"
-}
-
-type ServerLease struct {
-	PID              int    `json:"pid"`
-	Port             int    `json:"port"`
-	StartedAt        int64  `json:"startedAtUnixMilli"`
-	TokenHash        string `json:"tokenHash"`
-	XDGRoot          string `json:"xdgRoot"`
-	ProcessStartTime string `json:"processStartTime,omitempty"`
-}
-
-func WriteLease(stateDir string, lease ServerLease) error {
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return err
-	}
-
-	data, err := hermesMarshalIndent(lease, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(filepath.Join(stateDir, LeaseFileName), data, 0o600)
-}
-
-var (
-	LeaseReapTimeout      = 3 * time.Second
-	LeaseReapPollInterval = 20 * time.Millisecond
-	leaseReapSleep        = time.Sleep
-	leaseReapNow          = time.Now
-)
-
-func ReapLeaseFile(path string, log *slog.Logger) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-
-	var lease ServerLease
-	if err := json.Unmarshal(data, &lease); err != nil {
-		_ = os.Remove(path)
-
-		return false
-	}
-
-	if lease.PID <= 0 || !leaseMatchesProcess(lease) {
-		// Not our identified live process (gone, replaced, or
-		// unidentifiable): the lease is safe to remove.
-		_ = os.Remove(path)
-
-		return false
-	}
-
-	if reapLeaseProcess(lease, log) {
-		_ = os.Remove(path)
-
-		return false
-	}
-	// The process survived termination or could not be verified dead: KEEP
-	// the lease so the next startup retries the reap ladder.
-	if log != nil {
-		log.Debug("stale hermes lease process survived termination; keeping lease", slog.Int("pid", lease.PID))
-	}
-
-	return true
-}
-
-// reapLeaseProcess runs the shutdown ladder against an identified stale server
-// process: signal the group, wait, escalate to SIGKILL, then VERIFY the process
-// is gone. It returns true only when the process is confirmed dead.
-func reapLeaseProcess(lease ServerLease, log *slog.Logger) bool {
-	if err := terminateProcessGroupID(lease.PID); err != nil {
-		if log != nil {
-			log.Debug("terminate stale hermes lease group failed", slog.Int("pid", lease.PID), slog.String(jsonFieldError, err.Error()))
-		}
-
-		return leaseProcessGone(lease)
-	}
-
-	if waitLeaseProcessGone(lease) {
-		return true
-	}
-
-	if err := killProcessGroupID(lease.PID); err != nil {
-		if log != nil {
-			log.Debug("kill stale hermes lease group failed", slog.Int("pid", lease.PID), slog.String(jsonFieldError, err.Error()))
-		}
-
-		return leaseProcessGone(lease)
-	}
-
-	return waitLeaseProcessGone(lease)
-}
-
-func waitLeaseProcessGone(lease ServerLease) bool {
-	deadline := leaseReapNow().Add(LeaseReapTimeout)
-
-	for {
-		if leaseProcessGone(lease) {
-			return true
-		}
-
-		if !leaseReapNow().Before(deadline) {
-			return false
-		}
-
-		leaseReapSleep(LeaseReapPollInterval)
-	}
-}
-
-// leaseProcessGone reports whether the leased process no longer exists or was
-// replaced by an unrelated process reusing the PID.
-func leaseProcessGone(lease ServerLease) bool {
-	identity, err := InspectProcess(lease.PID)
-	if err != nil {
-		return true
-	}
-
-	if lease.ProcessStartTime != "" && identity.StartTime != lease.ProcessStartTime {
-		return true
-	}
-
-	return false
-}
-
-func leaseMatchesProcess(lease ServerLease) bool {
-	if lease.PID <= 0 || lease.ProcessStartTime == "" {
-		return false
-	}
-
-	identity, err := InspectProcess(lease.PID)
-	if err != nil {
-		return false
-	}
-
-	if identity.StartTime != lease.ProcessStartTime {
-		return false
-	}
-
-	if PasswordHash(identity.Env[envHermesSessionToken]) != lease.TokenHash {
-		return false
-	}
-
-	if filepath.Clean(identity.Env[envHermesHome]) != filepath.Clean(lease.XDGRoot) {
-		return false
-	}
-
-	return cmdlineLooksLikeHermesServe(identity.Cmdline)
-}
-
-func cmdlineLooksLikeHermesServe(args []string) bool {
-	for _, arg := range args {
-		if arg == valServe {
-			return true
-		}
-	}
-
-	for _, arg := range args {
-		if strings.Contains(filepath.Base(arg), valHermes) {
-			return true
-		}
-	}
-
-	return false
 }

@@ -33,11 +33,9 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
 	agent := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
 	)
 	cwd := t.TempDir()
 	newResp, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
@@ -59,11 +57,9 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 
 	restoreHome := t.TempDir()
 	restored := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
 	)
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession after native delete: %v", err)
@@ -87,11 +83,9 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
 	agent := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
 	)
 	cwd := t.TempDir()
 	parent, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
@@ -142,11 +136,9 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 
 	restoreHome := t.TempDir()
 	restored := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
 	)
 	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession fork after native delete: %v", err)

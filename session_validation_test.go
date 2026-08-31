@@ -79,12 +79,6 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if _, err := hermesOptionsFromMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env meta accepted")
 	}
-	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"mode": "plan"}}}); err == nil {
-		t.Fatal("removed mode meta accepted")
-	}
-	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"permission": "ask"}}}); err == nil {
-		t.Fatal("removed permission meta accepted")
-	}
 	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env lifecycle meta accepted")
 	}

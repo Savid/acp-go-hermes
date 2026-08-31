@@ -28,11 +28,6 @@ func (a *Agent) recoverPendingSharedSessionOperations(
 		return errors.New("pending Hermes session recovery requires persisted session inventory")
 	}
 
-	currentOrigin, err := sessionOperationCurrentProcessIdentity()
-	if err != nil {
-		return err
-	}
-
 	for _, journal := range journals {
 		storeState := sessionOperationStoreAbsent
 
@@ -64,17 +59,6 @@ func (a *Agent) recoverPendingSharedSessionOperations(
 			continue
 		case sessionOperationStoreAmbiguous:
 			return fmt.Errorf("%w: session operation %q has partial or different Store state", ErrSessionOperationAmbiguous, journal.record.OperationID)
-		}
-
-		if journal.record.Origin != currentOrigin {
-			gone, inspectErr := sessionOperationProcessIdentityGone(journal.record.Origin)
-			if inspectErr != nil {
-				return inspectErr
-			}
-
-			if !gone {
-				return fmt.Errorf("%w: session operation %q still has a live adapter claimant", ErrSessionOperationAmbiguous, journal.record.OperationID)
-			}
 		}
 
 		if err := a.recoverAbsentSharedSessionOperation(ctx, home, client, lister, journal, true); err != nil {

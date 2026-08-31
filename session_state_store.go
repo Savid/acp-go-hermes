@@ -356,7 +356,7 @@ func (s *session) captureSnapshotLocked(
 		replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey, Entries: entries})
 	default:
 		xdg := snapshot.client.XDGDirs()
-		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
+		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.scratchDirectory(), xdg.Root); archiveErr != nil {
 			return nil, archiveErr
 		} else if ok {
 			main.Archives["state-db"] = archiveInfo{

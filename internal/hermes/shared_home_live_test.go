@@ -103,9 +103,9 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 		if l.server.XDGDirs().Root != l.xdg.Root {
 			t.Fatalf("%s wrapper home = %q, want %q", l.id, l.server.XDGDirs().Root, l.xdg.Root)
 		}
-		lease := filepath.Join(ControlDirForXDG(l.xdg.Root), LeaseFileName)
-		if _, err := os.Stat(lease); err != nil {
-			t.Fatalf("%s unique wrapper lease: %v", l.id, err)
+		controlLock := filepath.Join(ControlDirForXDG(l.xdg.Root), "server.lock")
+		if _, err := os.Stat(controlLock); err != nil {
+			t.Fatalf("%s control lock: %v", l.id, err)
 		}
 	}
 	firstRuntime := lanes[0].server.(*hermesServer)
@@ -114,8 +114,7 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 		t.Fatalf("native processes do not share exact HERMES_HOME: %q / %q", firstRuntime.process.Home, secondRuntime.process.Home)
 	}
 	if firstRuntime.process.Port == secondRuntime.process.Port || firstRuntime.process.Token == secondRuntime.process.Token ||
-		firstRuntime.process.shim.dir == secondRuntime.process.shim.dir || firstRuntime.leasePath == secondRuntime.leasePath ||
-		firstRuntime.cmd.Process.Pid == secondRuntime.cmd.Process.Pid {
+		firstRuntime.process.shim.dir == secondRuntime.process.shim.dir || firstRuntime.process.native == secondRuntime.process.native {
 		t.Fatalf("same-home process runtime carriers collided")
 	}
 

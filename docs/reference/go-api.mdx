@@ -17,12 +17,10 @@ err := hermesacp.Serve(ctx, input, output, opts...)
 `NewAgent` builds an `Agent` you own; `Serve` runs the ACP loop over a
 reader/writer pair.
 
-`ErrProcessContainmentIncomplete` is the stable `errors.Is` discriminator returned
-when the selected native containment boundary cannot be completed. `Serve`
-returns an `Agent.Close` error carrying this sentinel even when the stream
-loop would otherwise return normally or with context cancellation. A host that
-receives it must retain or quarantine any resources the native process tree may
-still reach.
+`ErrHostAuthorityUnavailable`, `ErrContainmentIncomplete`, and
+`ErrNativeTreeBusy` are stable `errors.Is` discriminators for managed native
+execution. They distinguish authority loss, uncertain process or filesystem
+terminality, and a reclaim refused while a native process is live.
 
 `ErrGatewayDisconnected` is the stable `errors.Is` discriminator for loss of
 the Hermes gateway. Direct `Agent` calls preserve both that sentinel and the
@@ -35,12 +33,12 @@ arbitrary error text are intentionally omitted.
 | Option | Purpose |
 |---|---|
 | `WithExecutablePath` | Path to the `hermes` binary (falls back to `hermes` on `PATH`). |
-| `WithProcessIsolation` | Optional. Opts into the hardened Linux identity boundary: nonzero non-root UID/GID and a complete replacement environment for native Hermes processes. The embedded supervisor stays a distinct trusted root; only `hermes serve` receives the configured identity, with supplementary groups cleared. Linux-only and fail-closed. Omitting it runs Hermes as the adapter's own identity. |
+| `WithHostAuthority` | Routes every managed native launch and native-tree ownership transition through the supplied borrowed host authority. Omitting it selects ordinary same-account execution. |
 | `WithScratchDir` | Sole parent directory for all ephemeral on-disk scratch (isolated per-session homes, sqlite temp dirs, process temp roots); empty means the system temp directory, created `0700` when missing. |
 | `WithHome` | Unsupported. Use `WithScratchDir` for isolated ephemeral state or `WithSharedHermesHome` for the explicit official-Hermes durable mode. |
 | `WithSharedHermesHome` | Absolute, already-clean, supported local-filesystem path used as the exact durable `HERMES_HOME` by each per-session official Hermes process of this adapter. The adapter claims the home root exclusively for the lifetime of those processes and refuses to start when another adapter already holds it. Native database/auth state is shared; processes, environments, events, and wrapper controls remain separate. With `WithProviderAuthRoot` also set, the adapter resolves this path's symlinks and uses the resolved path everywhere instead. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Static Agent-scoped environment overlaid on `ProcessIsolation.BaseEnvironment`, or on the captured sanitized ambient environment in ordinary mode, for Hermes executable lookup, version probing, and each `hermes serve` process. This is the only API that may set the native base `PATH`. `BASH_ENV` and `ACP_GO_HERMES_PATH_DIR_*` are reserved for the adapter's terminal PATH carrier. |
+| `WithEnv` | Static Agent-scoped environment overlaid on the authority's complete native environment, or on the captured sanitized ambient environment in ordinary mode, for version probing and each `hermes serve` process. This is the only API that may set the native base `PATH`. `BASH_ENV` and `ACP_GO_HERMES_PATH_DIR_*` are reserved for the adapter's terminal PATH carrier. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
@@ -49,22 +47,15 @@ arbitrary error text are intentionally omitted.
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Requires `WithSharedHermesHome`; supplying it alone fails `initialize` with `-32603`. |
 | `WithInputHandoffRoot` | Absolute read-only root under which the host materializes local handoff image files; unset leaves the handoff prompt form rejected. |
 | `WithTurnTimeout` | Per-turn deadline; `0` disables (see below). |
-| `WithRuntimeResourceHooks` | Host admission hooks for native-process roots and adapter scratch roots. |
-| `WithDarwinBestEffortContainment` | Explicitly accept Darwin process-group containment and its escaped-descendant, marker-scrubbing, and PGID-reuse risks. Rejected off Darwin, and rejected when combined with `WithProcessIsolation`. |
 | `WithAgentName` / `WithAgentTitle` / `WithAgentVersion` | Advertised agent identity. |
 | `WithLogger` | `*slog.Logger` for adapter diagnostics. |
 | `WithTracerProvider` / `WithMeterProvider` / `WithTextMapPropagator` | OpenTelemetry providers. |
 
-`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
-optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
-for the already-held canonical UID lock and shared `domain.lock` lease. Each
-capability keeps ownership of its original descriptor; caller-owned duplicates
-reach only the trusted supervisor, which validates the named inodes, held locks,
-and strict matching domain record and protects them with checked `FD_CLOEXEC`.
-Set both fields together for
-host-borrowed authority or leave both nil for standalone domain, disposition,
-and UID-lock acquisition. A mixed nil/non-nil pair fails closed. Native
-processes receive neither capability nor descriptor.
+`HostAuthority` supplies a fresh complete native environment, prepares and
+reclaims fully materialized trees, and starts a logical executable request with
+host-created stdio. `Wait` proves process-tree terminality. `Revoke` initiates
+whole-tree teardown and is followed by `Wait`. The adapter borrows the
+authority; it never closes it.
 
 ## Provider auth
 
@@ -89,9 +80,9 @@ the home through a symlink will not see its own spelling in any of those
 places.
 
 A misconfiguration is not always a silent degradation. Omitting
-`WithProviderAuthRoot` leaves the seven methods unadvertised and answering
-`-32601`; an absolute pair the agent cannot prepare logs a warning and does the
-same. A relative ledger root, a relative or unclean shared home, or
+`WithProviderAuthRoot`, or supplying `WithHostAuthority`, leaves the seven
+methods unadvertised and answering `-32601`; an absolute pair the agent cannot
+prepare logs a warning and does the same. A relative ledger root, a relative or unclean shared home, or
 `WithProviderAuthRoot` without a shared home is instead a construction failure
 that every `initialize` reports as `-32603`.
 
@@ -110,13 +101,9 @@ the deadline. A timeout is a failure, not a user cancel, so it is never reported
 as the `cancelled` stop reason — see
 [Prompt streaming](/docs/core/prompt-streaming).
 
-Linux completion under an explicit policy authoritatively empties the native
-tree. Ordinary same-identity completion covers exactly the direct child and the
-process group the adapter started, and makes no claim about work that left that
-boundary. Darwin best-effort completion means only direct-child reaping plus
-absence of the captured original process group; it does not establish that
-escaped descendants are gone. The explicit hardened policy is Linux-only and is
-refused elsewhere rather than downgraded.
+Managed completion is authoritative only after `Wait` returns and every
+prepared tree has been reclaimed. Ordinary completion covers the direct child
+started by the adapter under the adapter's operating-system account.
 
 `WithImageLimits(ImageLimits)` replaces all four image limits:
 `MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
@@ -137,17 +124,6 @@ or removes anything, so it does not compete with `WithScratchDir` for ephemeral
 materialization. A relative path is rejected at agent construction. Omitting the
 option leaves every handoff-form block rejected as `invalid_handoff` and the
 capability unadvertised.
-
-`RuntimeContainmentMode` reports `authoritative`, `shared_identity`,
-`best_effort`, or `unavailable`. Embedded hosts read the resolved mode from
-`Agent.ContainmentMode()`, and the `ObserveContainment` runtime-resource hook
-reports it once at agent construction. `shared_identity` is the ordinary default reported on
-every supported platform when `WithProcessIsolation` is omitted; it is
-non-authoritative, so it publishes no provider-descendant snapshots and makes no
-whole-tree quiescence or credential-separation claim. Best-effort snapshots are
-suppressed for the same reason, including zero-valued ones. `unavailable` means
-native launch fails closed, which is what an explicit policy reports on a
-platform that cannot host it. Only `authoritative` publishes inventory.
 
 `WithSeedFiles` confines paths to the config root: absolute paths, `..`
 segments, and empty keys are rejected at session start. `config.yaml` is the one
@@ -184,19 +160,6 @@ turnNonce)` reuses it only for that active turn. Builders fail closed by
 omitting the route envelope when given an empty or oversized nonce, so the
 adapter rejects the resulting request.
 
-`RuntimeResourceHooks` supplies `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
-`ObserveContainment`.
-Admission callbacks receive `runtime`, `session`, `prompt`, or `discovery`; nil
-callbacks leave standalone operation unbounded. Hermes reserves the isolated
-session home before creating it, holds the native permit for the one
-`hermes serve` tree, and releases the reservation only after clean shutdown and
-root deletion. Linux process snapshots include the dedicated per-session
-subreaper plus every currently owned native descendant. Descendant snapshots
-require authoritative containment, so ordinary `shared_identity` execution
-produces none on any platform; startup observations distinguish spawn,
-readiness, configuration, and native session creation.
-
 ## Session store
 
 The `SessionStore` interface is `Append`, `Load`, `Replace`, `Delete`,
@@ -222,10 +185,10 @@ ahead of the base `PATH` for both that session's `hermes serve` process and its
 actual local terminal commands. Order and duplicates are semantic. Empty,
 relative, or path-list-separator-bearing entries are rejected with the exact
 indexed metadata field. Session `Env` cannot contain `PATH`, `BASH_ENV`, or an
-`ACP_GO_HERMES_PATH_DIR_*` key. `WithEnv` and
-`ProcessIsolation.BaseEnvironment` also reserve the latter two namespaces, and
-an ambient `BASH_ENV` is scrubbed at launch. The dedicated ordered field is the
-sole session-scoped PATH authority.
+`ACP_GO_HERMES_PATH_DIR_*` key. `WithEnv` and the host authority environment
+also reserve the latter two namespaces, and an ambient `BASH_ENV` is scrubbed
+at launch. The dedicated ordered field is the sole session-scoped PATH
+authority.
 
 Hermes executable resolution and version probing see only the static base
 environment. The launched process sees operation directories first, the

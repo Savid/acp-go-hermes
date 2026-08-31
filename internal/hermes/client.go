@@ -205,7 +205,7 @@ func (c *Client) Deliveries() <-chan GatewayDelivery {
 
 // Done is closed when the read loop exits, i.e. when the underlying WebSocket
 // connection has terminated (normal close or disconnect). It carries no value
-// and never blocks a producer, so a supervisor can watch it without competing
+// and never blocks a producer, so a reconnect loop can watch it without competing
 // with ordered delivery consumers.
 func (c *Client) Done() <-chan struct{} {
 	return c.done

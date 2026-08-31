@@ -38,23 +38,23 @@ var (
 
 // Agent exposes Hermes through ACP.
 type Agent struct {
-	options         Options
-	log             *slog.Logger
-	observe         *observer.Observer
-	optionsErr      error
-	processes       *providerProcessTracker
-	containmentMode RuntimeContainmentMode
-	providerAuth    *providerAuth
+	options      Options
+	log          *slog.Logger
+	observe      *observer.Observer
+	optionsErr   error
+	providerAuth *providerAuth
 	// ambientEnv is the adapter's environment as it stood at construction. It is
-	// the base ordinary same-identity execution sanitizes; an explicit policy
-	// never reads it.
+	// the base ordinary same-identity execution sanitizes; managed execution
+	// uses the authority's environment instead.
 	ambientEnv map[string]string
+	nativeEnv  map[string]string
 
 	mu                 sync.Mutex
 	closed             bool
 	closeOnce          sync.Once
 	closeErr           error
 	containmentErr     error
+	authorityErr       error
 	constructions      sync.WaitGroup
 	constructing       int
 	constructionSeq    uint64
@@ -87,7 +87,7 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
+	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
 		validateSharedHermesHomeOptions(options), validatePathCarrierOptions(options))
 	options.ConcurrencyLimits = limits
@@ -107,15 +107,9 @@ func NewAgent(opts ...Option) *Agent {
 		TracerProvider: options.TracerProvider,
 		Version:        options.AgentVersion,
 	})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	mode := containmentMode(options)
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
+	var nativeEnv map[string]string
+	if options.hostAuthoritySupplied && optionsErr == nil {
+		nativeEnv, optionsErr = readHostEnvironment(options.HostAuthority)
 	}
 
 	agent := &Agent{
@@ -129,26 +123,17 @@ func NewAgent(opts ...Option) *Agent {
 		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
 		constructionCancel: make(map[uint64]context.CancelCauseFunc),
 		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
-		containmentMode:    mode,
 		ambientEnv:         ambientEnvironment(),
+		nativeEnv:          nativeEnv,
 	}
-	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	// Invalid option combinations must be side-effect free. In particular,
 	// provider-auth initialization prepares the durable Hermes residence, which
 	// must never happen after shared-home/process-isolation validation failed.
-	if optionsErr == nil {
+	if optionsErr == nil && options.HostAuthority == nil {
 		agent.providerAuth = newProviderAuth(agent)
 	}
 
 	return agent
-}
-
-func (a *Agent) ContainmentMode() RuntimeContainmentMode {
-	if a == nil {
-		return RuntimeContainmentUnavailable
-	}
-
-	return a.containmentMode
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {

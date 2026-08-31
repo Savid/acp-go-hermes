@@ -2,17 +2,15 @@
 // agent.
 //
 // Most hosts run the agent over a pair of JSON-RPC streams using [Serve].
-// Serve launches one isolated, authenticated loopback `hermes serve` process
-// tree per ACP session, maps ACP requests into native gateway WebSocket JSON-RPC
-// calls, streams gateway events back to the client as ACP session updates,
-// and closes its platform containment boundary on cancellation, timeout, and
-// close. Linux provides authoritative containment. Windows runs ordinary
-// same-identity native launch; it refuses an explicit Unix UID/GID isolation
-// policy, the shared native home, and a provider-auth login.
-// Darwin is available only through explicit best-effort opt-in and
-// cannot contain descendants that escape the original process group. A cancelled or timed-out session lazily resumes its exact native key
-// from the last committed snapshot on the next prompt. Hosts must complete ACP
-// initialization before issuing session or other agent methods.
+// Serve launches one authenticated loopback `hermes serve` process per ACP
+// session, maps ACP requests into native gateway WebSocket JSON-RPC calls, and
+// streams gateway events back to the client as ACP session updates. Without a
+// [HostAuthority], native processes run under the adapter's ordinary
+// same-identity launcher. [WithHostAuthority] routes every native launch and
+// prepared tree through the supplied authority. A cancelled or timed-out
+// session lazily resumes its exact native key from the last committed snapshot
+// on the next prompt. Hosts must complete ACP initialization before issuing
+// session or other agent methods.
 //
 // Hosts should use [Serve] for the JSON-RPC transport; hosts that embed the
 // agent directly construct one with [NewAgent] and the same [Option] values.

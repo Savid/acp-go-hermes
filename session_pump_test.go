@@ -1766,7 +1766,6 @@ func TestSessionPumpCloseResolvesDeferredAutonomousProjectionOnce(t *testing.T) 
 	agent.setAgentClient(connection)
 	base := newFakeHermesClient()
 	s := testSession(agent, base)
-	s.client = treeInventoryServer{fakeHermesClient: base, vacant: true}
 	require.NoError(t, s.openLifecycleStream())
 	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
@@ -1989,7 +1988,7 @@ func TestSessionPumpDeferredGenerationLossFailsClosed(t *testing.T) {
 }
 
 func TestPumpContainmentCertifiesVacancyBeforeFencingStream(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
@@ -1999,8 +1998,7 @@ func TestPumpContainmentCertifiesVacancyBeforeFencingStream(t *testing.T) {
 	require.NoError(t, s.openLifecycleStream())
 	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
-	inventory := treeInventoryServer{fakeHermesClient: base, vacant: true}
-	var current nativehermes.Server = inventory
+	var current nativehermes.Server = base
 	s.mu.Lock()
 	s.client = current
 	s.mu.Unlock()

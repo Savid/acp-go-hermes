@@ -3,6 +3,8 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -46,7 +48,7 @@ func TestTurnSettlementNotifiesAfterCompletionLatch(t *testing.T) {
 // configuration: the settlement already certified and fenced the stream, so the
 // close boundary must not try to certify again on the fenced stream.
 func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
@@ -57,7 +59,6 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
-	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 }
 
 func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
@@ -99,7 +100,6 @@ func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *tes
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
-	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 	agent.sessions[session.id] = session
@@ -120,7 +120,7 @@ func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *tes
 // a cancel settled the turn and ended the incarnation, and the close response
 // must not carry a spurious stale_stream violation.
 func TestCloseSessionAfterCancelledTurn(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
@@ -131,7 +131,6 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
-	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +168,7 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 // least of all the quiescence fact its completed proof would otherwise state,
 // which on an unopened stream would be a delta before the snapshot.
 func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
@@ -180,7 +179,6 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
-	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 	require.NoError(t, session.openLifecycleStream())
 	agent.sessions[session.id] = session
 
@@ -196,7 +194,7 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 // snapshot reach the host afterwards — a frame on a session the host was told is
 // gone. The fence makes the late open a local stale_stream refusal instead.
 func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
@@ -207,7 +205,6 @@ func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
-	session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 	require.NoError(t, session.openLifecycleStream())
 	agent.sessions[session.id] = session
 	// The establishing response queues the owed snapshot; the release goroutine
@@ -228,29 +225,25 @@ func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 
 // The live incarnation is the other half of the same branch: a stream whose
 // opening assertion was delivered and which nothing has fenced does get the
-// emission rungs. What it states there is whatever its boundary actually
-// proved — a completed whole-tree proof yields the quiescence fact, and a
-// runtime that enumerates nothing yields none — and either way the stream is
+// emission rungs. Managed execution states the quiescence fact supplied by its
+// authority boundary; ordinary execution states none. Either way the stream is
 // fenced afterwards.
 func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
-	closeLive := func(t *testing.T, enumerates bool) (*session, *recordingAgentClient) {
+	closeLive := func(t *testing.T, managed bool) (*session, *recordingAgentClient) {
 		t.Helper()
 
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Version:                 lifecycle.Version,
-			AuthoritativeQuiescence: true,
-			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
-			ActivityKinds:           []lifecycle.ActivityKind{},
-		})
+		negotiated := lifecycle.Negotiated{Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{}}
+		if managed {
+			agent = newTestAgent(WithHostAuthority(newTestHostAuthority()))
+			negotiated.AuthoritativeQuiescence = true
+			negotiated.QuiescenceSource = lifecycle.ProofClassProcessContainment
+		}
+		agent.retainNegotiatedLifecycle(negotiated)
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
 		session := testSession(agent, client)
-
-		if enumerates {
-			session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
-		}
 
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
@@ -264,15 +257,15 @@ func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
 		return session, conn
 	}
 
-	t.Run("proved vacancy", func(t *testing.T) {
+	t.Run("managed authority", func(t *testing.T) {
 		_, conn := closeLive(t, true)
 		require.Equal(t, 2, lifecycleUpdateCount(conn), "the boundary owes the fact its completed proof produced")
 	})
 
-	t.Run("nothing to enumerate", func(t *testing.T) {
+	t.Run("ordinary execution", func(t *testing.T) {
 		_, conn := closeLive(t, false)
 		require.Equal(t, 1, lifecycleUpdateCount(conn),
-			"a boundary that enumerated no tree states no quiescence fact")
+			"ordinary execution states no quiescence fact")
 	})
 }
 
@@ -333,7 +326,7 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 	})
 
 	t.Run("quiescence", func(t *testing.T) {
-		agent := newTestAgent()
+		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
@@ -346,7 +339,6 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 
 		client := newFakeHermesClient()
 		session := testSession(agent, client)
-		session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
@@ -447,7 +439,7 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 			return nil
 		}
 
-		agent := newTestAgent()
+		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 		})
@@ -554,7 +546,7 @@ func TestQuarantinedContainmentStillLeavesTheIDCloseable(t *testing.T) {
 
 	client.closeFunc = func(context.Context) error {
 		if closes.Add(1) == 1 {
-			return ErrProcessContainmentIncomplete
+			return ErrContainmentIncomplete
 		}
 
 		return nil
@@ -565,8 +557,8 @@ func TestQuarantinedContainmentStillLeavesTheIDCloseable(t *testing.T) {
 	agent.sessions[session.id] = session
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrProcessContainmentIncomplete,
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrContainmentIncomplete,
 		"the incomplete generation root was not quarantined")
 	require.NotNil(t, agent.activeSession(session.id), "the quarantine detached the id the retry needs")
 
@@ -577,7 +569,7 @@ func TestQuarantinedContainmentStillLeavesTheIDCloseable(t *testing.T) {
 
 	// The quarantine outlives the completed close: the root it named is still one
 	// no resume may build on.
-	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.rejectIncompleteHermesSession(session.id), ErrContainmentIncomplete)
 }
 
 // lifecycleUpdateCount counts the notifications that actually carried a
@@ -614,6 +606,19 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	messagesBlocked := make(chan struct{})
 	messagesRelease := make(chan struct{})
 	var once sync.Once
+
+	session := testSession(agent, client)
+	if err := session.openLifecycleStream(); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(client.XDGDirs().Root, "state.db")
+	require.NoError(t, os.WriteFile(statePath, []byte("prior-complete-native-state"), 0o600))
+	require.NoError(t, session.snapshotToStore(t.Context()))
+	stateKey := SessionKey{SessionID: string(session.id), Subpath: stateDBSubpath}
+	priorComplete, loadErr := agent.sessionStore().Load(t.Context(), stateKey)
+	require.NoError(t, loadErr)
+	require.NotEmpty(t, priorComplete)
+	require.NoError(t, os.WriteFile(statePath, []byte("partial-forced-state"), 0o600))
 	client.messagesFunc = func(ctx context.Context, _ string) ([]nativehermes.NativeMessage, error) {
 		once.Do(func() { close(messagesBlocked) })
 		select {
@@ -624,10 +629,6 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 		}
 	}
 
-	session := testSession(agent, client)
-	if err := session.openLifecycleStream(); err != nil {
-		t.Fatal(err)
-	}
 	turnCtx := session.beginTurn(t.Context(), "turn")
 	session.mu.Lock()
 	session.turnInFlight = true
@@ -679,6 +680,10 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	if terminal := session.committedTerminalState(); terminal.Outcome != string(lifecycle.OutcomeCancelled) {
 		t.Errorf("expected committed cancelled outcome, got %q", terminal.Outcome)
 	}
+	afterForcedRevoke, loadErr := agent.sessionStore().Load(t.Context(), stateKey)
+	require.NoError(t, loadErr)
+	require.Equal(t, priorComplete, afterForcedRevoke,
+		"forced revoke published the partially captured native state")
 }
 
 func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
@@ -776,7 +781,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 	})
 
 	t.Run("quiescence", func(t *testing.T) {
-		agent := newTestAgent()
+		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
@@ -788,7 +793,6 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
 		session := testSession(agent, client)
-		session.client = treeInventoryServer{fakeHermesClient: client, vacant: true}
 		require.NoError(t, session.openLifecycleStream())
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 		session.mu.Lock()

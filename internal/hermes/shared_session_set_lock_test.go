@@ -208,21 +208,3 @@ func TestSharedSessionSetLockRefusesInvalidInputsAndSymlinkControl(t *testing.T)
 		t.Fatal("symlink control directory accepted")
 	}
 }
-
-func TestDurableProcessIdentityDetectsLiveReuseAndGone(t *testing.T) {
-	identity, err := CurrentDurableProcessIdentity()
-	if err != nil {
-		t.Fatalf("CurrentDurableProcessIdentity: %v", err)
-	}
-	if gone, err := DurableProcessIdentityGone(identity); err != nil || gone {
-		t.Fatalf("current identity gone=%v err=%v", gone, err)
-	}
-	reused := identity
-	reused.KernelStartTime += "-different"
-	if gone, err := DurableProcessIdentityGone(reused); err != nil || !gone {
-		t.Fatalf("reused identity gone=%v err=%v", gone, err)
-	}
-	if _, err := DurableProcessIdentityGone(DurableProcessIdentity{}); err == nil {
-		t.Fatal("incomplete process identity accepted")
-	}
-}

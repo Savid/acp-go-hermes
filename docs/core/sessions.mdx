@@ -3,7 +3,7 @@ title: Sessions
 description: The per-session process model, adapter-owned IDs, and the load/resume/delete semantics.
 ---
 
-Each ACP session owns one supervised `hermes serve` runtime and one isolated
+Each ACP session owns one `hermes serve` runtime and one isolated
 `HERMES_HOME` generation materialized under the scratch parent (`WithScratchDir`, or the
 system temp directory by default). The adapter talks to the native dashboard
 gateway over loopback WebSocket JSON-RPC. Sessions are independent: one crashing
@@ -76,8 +76,8 @@ life of the process whichever way the retry goes, so it can never back a resumed
 runtime again.
 
 Cancellation and timeout are destructive runtime boundaries. The adapter first
-interrupts Hermes, then completes the selected platform containment boundary
-before the prompt settles. Every new, loaded, resumed, forked, or lazily rebuilt
+interrupts Hermes, then closes and waits for the session's native process
+boundary before the prompt settles. Every new, loaded, resumed, forked, or lazily rebuilt
 runtime uses a fresh physical generation root; durable continuity comes only
 from the committed snapshot. The logical ACP session remains active; its next prompt recreates the home from the last committed snapshot and resumes
 the same native durable session key. A stale cancel nonce cannot target that
@@ -117,7 +117,7 @@ reserved namespace. The hook is stored in both isolated and shared Hermes homes
 without editing operator `config.yaml`.
 
 Raw session `PATH`, `BASH_ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are refused.
-`WithEnv` and `ProcessIsolation.BaseEnvironment` also reserve `BASH_ENV` and the
+`WithEnv` and the host authority environment also reserve `BASH_ENV` and the
 private namespace; an inherited ambient `BASH_ENV` is deliberately scrubbed at
 the final process boundary. On Windows, validated native drive and UNC paths
 are converted directly to Git Bash path syntax without looking up or executing

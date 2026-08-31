@@ -86,8 +86,7 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.Equal(t, false, advertisement["authoritativeQuiescence"])
 	require.Equal(t, []string{}, advertisement["activityKinds"])
 
-	authoritative := newTestAgent()
-	authoritative.containmentMode = RuntimeContainmentAuthoritative
+	authoritative := NewAgent(WithHostAuthority(newTestHostAuthority()))
 	response, err = authoritative.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
 	require.NoError(t, err)
 	advertisement, ok = response.Meta[lifecycle.MetaKey].(map[string]any)

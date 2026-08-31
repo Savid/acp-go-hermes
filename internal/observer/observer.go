@@ -158,12 +158,6 @@ func mustInt64Counter(meter metric.Meter, name string, description string) metri
 	return instrument
 }
 
-func mustInt64Gauge(meter metric.Meter, name string, description string) metric.Int64Gauge {
-	instrument, _ := meter.Int64Gauge(name, metric.WithDescription(description))
-
-	return instrument
-}
-
 func mustInt64Histogram(meter metric.Meter, name string, unit string, description string) metric.Int64Histogram {
 	instrument, _ := meter.Int64Histogram(name, metric.WithUnit(unit), metric.WithDescription(description))
 

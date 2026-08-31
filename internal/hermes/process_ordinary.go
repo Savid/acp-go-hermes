@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
 
-// Ordinary same-identity execution is what an omitted policy selects. It is a
-// genuinely separate strategy rather than a relaxed policy: nothing here reads
-// a ProcessIsolation, requests a credential change, or consults an authority
-// root. What it does own is the sanitized ambient environment the native
+// Ordinary same-identity execution is what an omitted authority selects. It is
+// a genuinely separate strategy: nothing here
+// requests a credential change or consults an authority. What it does own is
+// the sanitized ambient environment the native
 // harness inherits, and the executable resolution rules that go with an
-// ordinary shell environment rather than a closed policy one.
+// ordinary shell environment.
 
 // The adapter-managed Hermes state keys. Each is written by the adapter from a
 // value it generated, so these are the names an inherited environment must
@@ -34,27 +35,37 @@ const (
 // credential residence most of all.
 var ordinaryManagedEnvironmentKeys = []string{envHermesHome, envHermesSessionToken}
 
-// ordinaryPrivateEnvironmentKeys names the adapter-private markers that live
-// outside the private prefix. They travel between the wrapper and its own
-// containment bootstrap, so an ambient copy is a forged one.
-var ordinaryPrivateEnvironmentKeys = []string{envRuntimeID, envScratchRoot}
+var processRuntimePlatform = runtime.GOOS
 
-// scrubOrdinaryEnvironmentKey reports whether an ambient key is adapter-private
-// or adapter-managed state. Matching is case-insensitive because the comparison
-// exists to stop a spoofed variable, and a case variant is exactly how one
-// would be spelled.
+const (
+	processPlatformLinux   = "linux"
+	processPlatformWindows = "windows"
+)
+
+// scrubOrdinaryEnvironmentKey reports whether an ambient key is adapter-managed
+// state. Matching is case-insensitive because a case variant must not bypass
+// the boundary.
 func scrubOrdinaryEnvironmentKey(key string) bool {
 	upper := strings.ToUpper(key)
 
-	if strings.HasPrefix(upper, privateSupervisorEnvPrefix) || strings.HasPrefix(upper, processSupervisorEnvPrefix) {
-		return true
-	}
-
-	return slices.Contains(ordinaryPrivateEnvironmentKeys, upper) || slices.Contains(ordinaryManagedEnvironmentKeys, upper)
+	return slices.Contains(ordinaryManagedEnvironmentKeys, upper)
 }
 
-// ordinaryEnvironment builds the native environment for an omitted policy: the
-// adapter's own ambient environment minus its private and managed state, with
+func envValueFold(env []string, name string, fold bool) string {
+	matched := ""
+
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && (key == name || fold && strings.EqualFold(key, name)) {
+			matched = value
+		}
+	}
+
+	return matched
+}
+
+// ordinaryEnvironment builds the native environment for an omitted authority:
+// the adapter's own ambient environment minus its managed state, with
 // the caller overlay applied on top. The overlay is scrubbed on the same terms
 // as the base, so a caller cannot reintroduce through WithEnv what the ambient
 // scrub just removed. Each overlay is a later phase, so where names fold it
@@ -169,11 +180,10 @@ func executableExtensionList(pathext string) []string {
 }
 
 // lookOrdinaryPathInEnvironment resolves the harness executable for ordinary
-// execution. A closed policy may require every PATH entry to be absolute
-// because the policy author wrote the whole environment; an ordinary launch
-// inherits whatever shell environment the operator already has, where
+// execution. An ordinary launch inherits whatever shell environment the
+// operator already has, where
 // "PATH=bin:/usr/bin" and a relative configured executable are both ordinary.
-// Refusing those would turn policy omission into an app-start blocker, so the
+// Refusing those would turn authority omission into an app-start blocker, so the
 // rule here is only that the result must exist and be runnable on this platform.
 func lookOrdinaryPathInEnvironment(file string, environment []string) (string, error) {
 	return lookOrdinaryPathWithRules(file, environment, ordinaryExecutableRules(environment))

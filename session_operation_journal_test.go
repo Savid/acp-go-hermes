@@ -348,10 +348,6 @@ func newTestSessionOperationJournalWithLogical(t *testing.T, home string, kind s
 	if err != nil {
 		t.Fatal(err)
 	}
-	origin, err := nativehermes.CurrentDurableProcessIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	fields := sessionOperationJournalFields{
 		OperationID:              operationID,
 		Kind:                     kind,
@@ -362,7 +358,6 @@ func newTestSessionOperationJournalWithLogical(t *testing.T, home string, kind s
 		Marker:                   "__acpgo_pending_" + operationID,
 		FinalTitle:               "Hermes session",
 		BaselineNativeSessionIDs: []string{"native-b", "native-a"},
-		Origin:                   origin,
 	}
 	if kind == sessionOperationKindFork {
 		fields.ParentLogicalSessionID = "parent-acp"
@@ -480,15 +475,11 @@ func TestSessionOperationIDEntropyFailure(t *testing.T) {
 func TestSessionOperationJournalBeginFailures(t *testing.T) {
 	validFields := func(t *testing.T) sessionOperationJournalFields {
 		t.Helper()
-		origin, err := nativehermes.CurrentDurableProcessIdentity()
-		if err != nil {
-			t.Fatal(err)
-		}
 
 		return sessionOperationJournalFields{
 			OperationID: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			Kind:        sessionOperationKindNew, Mode: sessionOperationModeShared,
-			LogicalSessionID: "logical", Marker: "marker", Origin: origin,
+			LogicalSessionID: "logical", Marker: "marker",
 		}
 	}
 
@@ -674,8 +665,7 @@ func TestSessionOperationJournalUpdateAndPreparationFailures(t *testing.T) {
 	journal := newTestSessionOperationJournal(t, home, sessionOperationKindNew)
 	marker := "changed-marker"
 	baseline := []string{"z", "a"}
-	origin := journal.record.Origin
-	if err := journal.update(sessionOperationJournalPatch{Marker: &marker, BaselineNativeSessionIDs: &baseline, Origin: &origin}); err != nil {
+	if err := journal.update(sessionOperationJournalPatch{Marker: &marker, BaselineNativeSessionIDs: &baseline}); err != nil {
 		t.Fatal(err)
 	}
 	badMarker := ""
@@ -923,7 +913,6 @@ func TestSessionOperationJournalValidationMatrix(t *testing.T) {
 		"fork fenced":          func(record *sessionOperationJournalRecord) { record.Phase = sessionOperationPhaseLiveFenced },
 		"published identities": func(record *sessionOperationJournalRecord) { record.Phase = sessionOperationPhaseStorePrepared },
 		"target ready":         func(record *sessionOperationJournalRecord) { record.Phase = sessionOperationPhaseTargetReady },
-		"origin":               func(record *sessionOperationJournalRecord) { record.Origin.PID = 0 },
 		"timestamps":           func(record *sessionOperationJournalRecord) { record.UpdatedAtUnixMilli = 0 },
 		"baseline":             func(record *sessionOperationJournalRecord) { record.BaselineNativeSessionIDs = []string{" bad"} },
 		"orphan manifest hash": func(record *sessionOperationJournalRecord) { record.PreparedManifestSHA256 = strings.Repeat("0", 64) },
@@ -1177,95 +1166,6 @@ func TestSessionOperationBaselineRejectsInvalidBaseline(t *testing.T) {
 	if _, _, err := sessionOperationBaselineDelta([]string{" bad"}, nil); err == nil {
 		t.Fatal("invalid baseline accepted")
 	}
-}
-
-func TestSessionOperationIdentityFaults(t *testing.T) {
-	wantErr := errors.New("process identity unavailable")
-
-	t.Run("new current identity", func(t *testing.T) {
-		previous := sessionOperationCurrentProcessIdentity
-		calls := 0
-		sessionOperationCurrentProcessIdentity = func() (nativehermes.DurableProcessIdentity, error) {
-			calls++
-			if calls == 1 {
-				return previous()
-			}
-
-			return nativehermes.DurableProcessIdentity{}, wantErr
-		}
-		t.Cleanup(func() { sessionOperationCurrentProcessIdentity = previous })
-
-		client := newFakeHermesClient()
-		client.createSession = testNativeSession("native")
-		agent := newSharedHomeLifecycleAgent(t, client)
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); !errors.Is(err, wantErr) {
-			t.Fatalf("new identity error = %v", err)
-		}
-	})
-
-	t.Run("fork current identity", func(t *testing.T) {
-		previous := sessionOperationCurrentProcessIdentity
-		calls := 0
-		sessionOperationCurrentProcessIdentity = func() (nativehermes.DurableProcessIdentity, error) {
-			calls++
-			if calls == 1 {
-				return previous()
-			}
-
-			return nativehermes.DurableProcessIdentity{}, wantErr
-		}
-		t.Cleanup(func() { sessionOperationCurrentProcessIdentity = previous })
-
-		parentClient := newFakeHermesClient()
-		agent := newTestAgent(
-			WithScratchDir(t.TempDir()),
-			WithSharedHermesHome(t.TempDir()),
-			WithSessionStore(NewInMemorySessionStore()),
-		)
-		parent := testSession(agent, parentClient)
-		parent.id = "parent"
-		parent.idmap.SessionID = "parent"
-		parent.idmap.NativeSessionID = "native-parent"
-		agent.sessions[parent.id] = parent
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, wantErr) {
-			t.Fatalf("fork identity error = %v", err)
-		}
-	})
-
-	t.Run("recovery current identity", func(t *testing.T) {
-		previous := sessionOperationCurrentProcessIdentity
-		sessionOperationCurrentProcessIdentity = func() (nativehermes.DurableProcessIdentity, error) {
-			return nativehermes.DurableProcessIdentity{}, wantErr
-		}
-		t.Cleanup(func() { sessionOperationCurrentProcessIdentity = previous })
-
-		home := t.TempDir()
-		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
-		if err := agent.recoverPendingSharedSessionOperations(t.Context(), home, newFakeHermesClient()); !errors.Is(err, wantErr) {
-			t.Fatalf("recovery identity error = %v", err)
-		}
-	})
-
-	t.Run("recovery prior identity inspection", func(t *testing.T) {
-		home := t.TempDir()
-		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
-		origin := journal.record.Origin
-		origin.KernelStartTime += "-different"
-		if err := journal.update(sessionOperationJournalPatch{Origin: &origin}); err != nil {
-			t.Fatal(err)
-		}
-
-		previous := sessionOperationProcessIdentityGone
-		sessionOperationProcessIdentityGone = func(nativehermes.DurableProcessIdentity) (bool, error) {
-			return false, wantErr
-		}
-		t.Cleanup(func() { sessionOperationProcessIdentityGone = previous })
-
-		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
-		if err := agent.recoverPendingSharedSessionOperations(t.Context(), home, newFakeHermesClient()); !errors.Is(err, wantErr) {
-			t.Fatalf("prior identity inspection error = %v", err)
-		}
-	})
 }
 
 func TestSessionOperationMarshalFaults(t *testing.T) {
