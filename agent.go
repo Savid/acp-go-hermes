@@ -15,6 +15,8 @@ import (
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
+const capabilityScopeSession = "session"
+
 const (
 	listSessionsPageSize            = 50
 	defaultMaxActiveSessions        = 32
@@ -128,7 +130,7 @@ func NewAgent(opts ...Option) *Agent {
 	}
 	// Invalid option combinations must be side-effect free. In particular,
 	// provider-auth initialization prepares the durable Hermes residence, which
-	// must never happen after shared-home/process-isolation validation failed.
+	// must never happen after shared-home or host-authority validation failed.
 	if optionsErr == nil && options.HostAuthority == nil {
 		agent.providerAuth = newProviderAuth(agent)
 	}
@@ -403,7 +405,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		valElicitation: map[string]any{
 			"unstable": true,
-			"scope":    "session",
+			"scope":    capabilityScopeSession,
 			"tracks":   "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{

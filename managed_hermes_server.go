@@ -20,7 +20,11 @@ type managedHermesServer struct {
 	scratchRelease     func()
 	retainIncomplete   func(error, acp.SessionId, string)
 	nativeSessionOwner *nativehermes.SharedSessionOwner
-	once               sync.Once
+	mu                 sync.Mutex
+	settled            bool
+	closed             bool
+	ownerReleased      bool
+	settlementErr      error
 	closeErr           error
 }
 
@@ -67,22 +71,40 @@ func (s *managedHermesServer) SetModel(ctx context.Context, id, value string) er
 }
 
 func (s *managedHermesServer) Close(ctx context.Context) error {
-	s.once.Do(func() {
-		s.closeErr = s.Server.Close(ctx)
-		if s.nativeSessionOwner != nil {
-			s.closeErr = errors.Join(s.closeErr, s.nativeSessionOwner.Release())
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-		if errors.Is(s.closeErr, ErrContainmentIncomplete) || errors.Is(s.closeErr, ErrHostAuthorityUnavailable) {
+	if s.closed {
+		return s.closeErr
+	}
+
+	var closeErr error
+	if !s.settled {
+		closeErr = s.Server.Close(ctx)
+		if errors.Is(closeErr, ErrContainmentIncomplete) || errors.Is(closeErr, ErrHostAuthorityUnavailable) {
 			if s.retainIncomplete != nil {
-				s.retainIncomplete(s.closeErr, s.sessionID, s.root)
+				s.retainIncomplete(closeErr, s.sessionID, s.root)
 			}
 
-			return
+			return closeErr
 		}
 
-		s.closeErr = errors.Join(s.closeErr, deleteHermesScratchRoot(s.root, s.scratchRelease))
-	})
+		if s.nativeSessionOwner != nil && !s.ownerReleased {
+			closeErr = errors.Join(closeErr, s.nativeSessionOwner.Release())
+			s.ownerReleased = true
+		}
+
+		s.settlementErr = closeErr
+		s.settled = true
+	}
+
+	cleanupErr := deleteHermesScratchRoot(s.root, s.scratchRelease)
+	if cleanupErr != nil {
+		return errors.Join(s.settlementErr, cleanupErr)
+	}
+
+	s.closeErr = s.settlementErr
+	s.closed = true
 
 	return s.closeErr
 }

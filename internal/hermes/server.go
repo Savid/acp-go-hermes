@@ -656,10 +656,9 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 	processEnv["HERMES_TUI_TOOL_PROGRESS"] = "all"
 
 	proc, err := Start(ctx, ProcessOptions{
-		ExecutablePath:  options.ExecutablePath,
-		Home:            nativeXDG.Root,
-		ContainmentRoot: xdg.Root,
-		SharedHome:      options.SharedHermesHome != "",
+		ExecutablePath: options.ExecutablePath,
+		Home:           nativeXDG.Root,
+		SharedHome:     options.SharedHermesHome != "",
 		PrepareSharedHome: func(prepareCtx context.Context, home string) error {
 			return materializeSharedHermesConfig(prepareCtx, home, servers, options.SeedFiles)
 		},

@@ -67,14 +67,21 @@ func (a *Agent) hostAuthorityAdmissionError() error {
 }
 
 func (a *Agent) recordHostAuthorityError(err error) error {
-	if !errors.Is(err, ErrHostAuthorityUnavailable) {
+	if err == nil {
+		return nil
+	}
+
+	authorityUnavailable := errors.Is(err, ErrHostAuthorityUnavailable)
+	if authorityUnavailable {
+		err = errors.Join(err, ErrContainmentIncomplete)
+	}
+
+	if !authorityUnavailable && !errors.Is(err, ErrContainmentIncomplete) {
 		return err
 	}
 
-	err = errors.Join(err, ErrContainmentIncomplete)
-
 	a.mu.Lock()
-	if a.authorityErr == nil {
+	if authorityUnavailable && a.authorityErr == nil {
 		a.authorityErr = err
 	}
 
@@ -103,14 +110,12 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 			}
 		}()
 
-		err = a.options.HostAuthority.PrepareNativeTree(ctx, root)
-		err = a.recordHostAuthorityError(err)
-
-		if err != nil && !errors.Is(err, ErrNativeTreeBusy) {
-			err = errors.Join(err, ErrContainmentIncomplete)
+		err = a.recordHostAuthorityError(a.options.HostAuthority.PrepareNativeTree(ctx, root))
+		if err == nil {
+			return nil
 		}
 
-		return err
+		return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
 	}
 	start.ReclaimNativeTree = func(ctx context.Context, root string) (err error) {
 		defer func() {
@@ -123,7 +128,7 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 
 		err = a.recordHostAuthorityError(err)
 		if err != nil {
-			err = errors.Join(err, ErrContainmentIncomplete)
+			err = a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
 		}
 
 		return err
@@ -145,14 +150,14 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 			Environment: append([]string(nil), request.Environment...), WorkingDirectory: request.WorkingDirectory,
 		})
 		if err != nil {
-			return nil, errors.Join(a.recordHostAuthorityError(err), ErrContainmentIncomplete)
+			return nil, a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
 		}
 
 		if nativeProcessNil(hostProcess) {
 			return nil, a.recordHostAuthorityError(ErrHostAuthorityUnavailable)
 		}
 
-		return nativeProcessBridge{process: hostProcess}, nil
+		return nativeProcessBridge{process: hostProcess, record: a.recordHostAuthorityError}, nil
 	}
 }
 
@@ -163,19 +168,82 @@ func nativeProcessNil(process NativeProcess) bool {
 
 	value := reflect.ValueOf(process)
 
-	return value.Kind() == reflect.Pointer && value.IsNil()
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
-type nativeProcessBridge struct{ process NativeProcess }
-
-func (p nativeProcessBridge) Stdin() io.WriteCloser { return p.process.Stdin() }
-func (p nativeProcessBridge) Stdout() io.ReadCloser { return p.process.Stdout() }
-func (p nativeProcessBridge) Stderr() io.ReadCloser { return p.process.Stderr() }
-
-func (p nativeProcessBridge) Wait(ctx context.Context) (nativehermes.NativeResult, error) {
-	result, err := p.process.Wait(ctx)
-
-	return nativehermes.NativeResult{ExitCode: result.ExitCode, Signal: result.Signal, Revoked: result.Revoked}, err
+type nativeProcessBridge struct {
+	process NativeProcess
+	record  func(error) error
 }
 
-func (p nativeProcessBridge) Revoke(ctx context.Context) error { return p.process.Revoke(ctx) }
+func (p nativeProcessBridge) recordError(err error) error {
+	if p.record == nil {
+		return err
+	}
+
+	return p.record(err)
+}
+
+func (p nativeProcessBridge) Stdin() (stream io.WriteCloser) {
+	defer func() {
+		if recover() != nil {
+			stream = nil
+			_ = p.recordError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	return p.process.Stdin()
+}
+
+func (p nativeProcessBridge) Stdout() (stream io.ReadCloser) {
+	defer func() {
+		if recover() != nil {
+			stream = nil
+			_ = p.recordError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	return p.process.Stdout()
+}
+
+func (p nativeProcessBridge) Stderr() (stream io.ReadCloser) {
+	defer func() {
+		if recover() != nil {
+			stream = nil
+			_ = p.recordError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	return p.process.Stderr()
+}
+
+func (p nativeProcessBridge) Wait(ctx context.Context) (result nativehermes.NativeResult, err error) {
+	defer func() {
+		if recover() != nil {
+			result = nativehermes.NativeResult{}
+			err = p.recordError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	hostResult, err := p.process.Wait(ctx)
+	if err != nil {
+		err = p.recordError(errors.Join(err, ErrContainmentIncomplete))
+	}
+
+	return nativehermes.NativeResult{ExitCode: hostResult.ExitCode, Signal: hostResult.Signal, Revoked: hostResult.Revoked}, err
+}
+
+func (p nativeProcessBridge) Revoke(ctx context.Context) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = p.recordError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	return p.process.Revoke(ctx)
+}

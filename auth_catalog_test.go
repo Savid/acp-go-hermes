@@ -277,15 +277,9 @@ func TestMethodsRejectsAnUnknownParamField(t *testing.T) {
 	requireInvalidField(t, err, "extra")
 }
 
-// TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn pins where a leg's
-// gateway comes from. An explicit process-isolation policy admits exactly one
-// live native process per standalone agent identity — the claim proves the
-// identity vacant across every task in the PID namespace — so a leg that starts
-// a second harness beside the session it is fenced by cannot claim that
-// identity at all while the session holds it. It waits out the whole claim
-// budget and then answers with the closed transport cause, which is a login
-// surface that never works under the very policy it exists to protect. Every
-// leg therefore answers on the runtime its addressed session already owns.
+// TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn pins each login leg to
+// the native runtime already owned by its addressed session. A leg must not
+// create a second gateway with a separate session incarnation.
 func TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn(t *testing.T) {
 	t.Parallel()
 

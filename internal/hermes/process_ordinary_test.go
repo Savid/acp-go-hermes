@@ -265,6 +265,36 @@ func TestManagedEnvironmentStartsFromAuthorityBase(t *testing.T) {
 	require.Equal(t, "yes", envValueFold(environment, "SESSION", false))
 }
 
+func TestManagedEnvironmentFoldsWindowsNamesAndScrubsAdapterState(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	processRuntimePlatform = processPlatformWindows
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+
+	environment, err := managedEnvironment(
+		map[string]string{
+			"Path":                                 `C:\\native`,
+			"BASE":                                 "base",
+			strings.ToLower(envHermesHome):         `C:\\foreign-home`,
+			strings.ToLower(envHermesSessionToken): "foreign-token",
+		},
+		map[string]string{"PATH": `C:\\agent`, "base": "agent"},
+		map[string]string{"SESSION": "yes", envHermesHome: `C:\\session-home`},
+	)
+	require.NoError(t, err)
+	require.Equal(t, `C:\\agent`, envValueFold(environment, "PATH", true))
+	require.Equal(t, "agent", envValueFold(environment, "BASE", true))
+	require.Equal(t, "yes", envValueFold(environment, "SESSION", true))
+	require.Empty(t, envValueFold(environment, envHermesHome, true))
+	require.Empty(t, envValueFold(environment, envHermesSessionToken, true))
+
+	upserted := upsertProcessEnv([]string{
+		"Path=old-path",
+		"PATH=other-old-path",
+		"KEPT=yes",
+	}, "PATH", `C:\\final`)
+	require.Equal(t, []string{"KEPT=yes", `PATH=C:\\final`}, upserted)
+}
+
 func TestProcessScalarHelpers(t *testing.T) {
 	port, err := freePort()
 	require.NoError(t, err)

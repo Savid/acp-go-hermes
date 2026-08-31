@@ -35,10 +35,6 @@ const (
 	missingProbeSessionID = "__acp_go_hermes_missing_probe__"
 )
 
-// ErrContainmentIncomplete means the selected native containment
-// boundary did not complete. Callers retaining native resources must keep them.
-var ErrContainmentIncomplete = errors.New("hermes process containment incomplete")
-
 var (
 	listenTCP             = net.Listen
 	randReader            = rand.Reader
@@ -76,10 +72,6 @@ var (
 type ProcessOptions struct {
 	ExecutablePath string
 	Home           string
-	// ContainmentRoot is the unique wrapper-owned generation used for process
-	// ownership records when Home is an intentionally shared durable residence.
-	// Empty uses Home.
-	ContainmentRoot string
 	// SharedHome binds the exact probed Hermes version to Home before launch.
 	SharedHome bool
 	// PrepareSharedHome runs after a fresh executable version probe and exact
@@ -246,12 +238,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		}
 		if shim != nil {
 			if prepareErr := opts.PrepareNativeTree(ctx, shim.dir); prepareErr != nil {
-				return nil, errors.Join(prepareErr, process.removeUnpreparedTrees())
+				return nil, prepareErr
 			}
 			process.preparedShim = true
 		}
 		if prepareErr := opts.PrepareNativeTree(ctx, home); prepareErr != nil {
-			return nil, errors.Join(prepareErr, process.reclaimAndRemove(context.Background()))
+			return nil, prepareErr
 		}
 		process.preparedHome = true
 	}
@@ -267,6 +259,9 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	})
 	if err != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, err)
+		if process.managed {
+			return nil, err
+		}
 
 		return nil, errors.Join(err, process.reclaimAndRemove(context.Background()))
 	}
@@ -303,7 +298,9 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 
 			return nil, errors.Join(err, process.Close(context.Background()))
 		}
-		markGatewayMethodsProbed(executable)
+		if opts.StartNative == nil {
+			markGatewayMethodsProbed(executable)
+		}
 	}
 	observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, nil)
 
@@ -311,7 +308,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 }
 
 func gatewayMethodProbeNeeded(opts ProcessOptions, executable string) bool {
-	return !opts.SharedHome && !gatewayMethodsProbed(executable)
+	return !opts.SharedHome && (opts.StartNative != nil || !gatewayMethodsProbed(executable))
 }
 
 // processLaunchEnvironment builds the environment the native harness receives.
@@ -546,41 +543,45 @@ func managedEnvironment(base map[string]string, overlays ...map[string]string) (
 		return nil, errors.New("host authority native environment is unavailable")
 	}
 
-	env := make(map[string]string, len(base))
-	for key, value := range base {
-		env[key] = value
-	}
-	for _, overlay := range overlays {
-		for key, value := range overlay {
+	phases := make([]map[string]string, 0, len(overlays)+1)
+	for _, phase := range append([]map[string]string{base}, overlays...) {
+		sanitized := make(map[string]string, len(phase))
+		for key, value := range phase {
 			if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 || strings.IndexByte(value, 0) >= 0 {
 				return nil, fmt.Errorf("process environment contains invalid key %q", key)
 			}
-			env[key] = value
+			if !scrubOrdinaryEnvironmentKey(key) {
+				sanitized[key] = value
+			}
 		}
+		phases = append(phases, sanitized)
+	}
+	env, err := mergeProcessEnvironmentPhases(phases...)
+	if err != nil {
+		return nil, err
 	}
 
 	return sortedProcessEnvironment(env), nil
 }
 
 func upsertProcessEnv(env []string, key string, value string) []string {
-	prefix := key + "="
 	filtered := env[:0]
 	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
+		entryKey, _, ok := strings.Cut(entry, "=")
+		if ok && processEnvironmentKeyMatches(entryKey, key) {
 			continue
 		}
 
 		filtered = append(filtered, entry)
 	}
 
-	return append(filtered, prefix+value)
+	return append(filtered, key+"="+value)
 }
 
-// ensureExecutableVersion proves the harness executable satisfies the minimum
-// version exactly once per executable. The probe is a whole second native
-// process holding a discovery native root and a scratch generation, so
-// concurrent starts share one: the first caller runs it and every other caller
-// waits on that outcome rather than spawning its own.
+// ensureExecutableVersion proves the harness executable satisfies the minimum.
+// Ordinary absolute executables are cached and concurrent starts share their
+// probe. Managed logical selectors are authority-scoped, so every managed start
+// runs a fresh authority-routed probe.
 //
 // A waiter answers to its own context throughout. It leaves the moment that
 // context ends, without disturbing the probe; and if the probe it joined
@@ -593,6 +594,10 @@ func upsertProcessEnv(env []string, key string, value string) []string {
 // its startup method sweep is a separate fact with its own marker, so a start
 // that failed at readiness no longer costs a second --version process.
 func ensureExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) error {
+	if opts.StartNative != nil {
+		return probeExecutableVersion(ctx, executable, opts)
+	}
+
 	if opts.SharedHome {
 		sharedExecutableVersionProbeMu.Lock()
 		defer sharedExecutableVersionProbeMu.Unlock()
@@ -687,7 +692,7 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 			return errors.Join(errors.New("host authority tree operations are unavailable"), removeAll(probeRoot))
 		}
 		if prepareErr := opts.PrepareNativeTree(ctx, probeRoot); prepareErr != nil {
-			return errors.Join(prepareErr, removeAll(probeRoot))
+			return prepareErr
 		}
 	}
 	starter := opts.StartNative
@@ -698,11 +703,22 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 		Executable: executable, Arguments: []string{argVersion}, Environment: probeEnvironment,
 	})
 	if err != nil {
+		if managed {
+			return fmt.Errorf("hermes --version probe failed: %w", err)
+		}
+
 		return fmt.Errorf("hermes --version probe failed: %w", errors.Join(err, reclaimProbeTree(opts, probeRoot, managed)))
 	}
 	if process == nil || process.Stdin() == nil || process.Stdout() == nil || process.Stderr() == nil {
+		settled, settleErr := settleProbeProcess(process)
+		if !settled {
+			return fmt.Errorf("hermes --version probe failed: %w", errors.Join(
+				errors.New("native process returned unusable host stdio"), settleErr,
+			))
+		}
+
 		return fmt.Errorf("hermes --version probe failed: %w", errors.Join(
-			errors.New("native process returned unusable host stdio"), settleProbeProcess(process), reclaimProbeTree(opts, probeRoot, managed),
+			errors.New("native process returned unusable host stdio"), settleErr, reclaimProbeTree(opts, probeRoot, managed),
 		))
 	}
 	_ = process.Stdin().Close()
@@ -711,16 +727,24 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	go func() { _, _ = io.Copy(&output, process.Stdout()); drained <- struct{}{} }()
 	go func() { _, _ = io.Copy(&output, process.Stderr()); drained <- struct{}{} }()
 	result, waitErr := process.Wait(ctx)
-	if ctx.Err() != nil {
+	settled := waitErr == nil || (!managed && ctx.Err() == nil)
+	if waitErr != nil {
 		revokeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		revokeErr := process.Revoke(revokeCtx)
-		result, waitErr = process.Wait(revokeCtx)
+		var finalWaitErr error
+		result, finalWaitErr = process.Wait(revokeCtx)
 		cancel()
-		waitErr = errors.Join(ctx.Err(), revokeErr, waitErr)
+		settled = finalWaitErr == nil || (!managed && !errors.Is(finalWaitErr, context.Canceled) && !errors.Is(finalWaitErr, context.DeadlineExceeded))
+		waitErr = errors.Join(waitErr, revokeErr, finalWaitErr)
 	}
+	if !settled {
+		return fmt.Errorf("hermes --version probe failed: %w", waitErr)
+	}
+
 	<-drained
 	<-drained
-	err = errors.Join(waitErr, reclaimProbeTree(opts, probeRoot, managed))
+	err = waitErr
+	err = errors.Join(err, reclaimProbeTree(opts, probeRoot, managed))
 	if result.ExitCode != 0 || result.Signal != 0 || result.Revoked {
 		err = errors.Join(err, fmt.Errorf("exit code %d signal %d", result.ExitCode, result.Signal))
 	}
@@ -740,9 +764,9 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	return nil
 }
 
-func settleProbeProcess(process NativeProcess) error {
+func settleProbeProcess(process NativeProcess) (bool, error) {
 	if process == nil {
-		return nil
+		return false, errors.New("native process is unavailable for settlement")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -750,7 +774,7 @@ func settleProbeProcess(process NativeProcess) error {
 	revokeErr := process.Revoke(ctx)
 	_, waitErr := process.Wait(ctx)
 
-	return errors.Join(revokeErr, waitErr)
+	return waitErr == nil, errors.Join(revokeErr, waitErr)
 }
 
 func reclaimProbeTree(opts ProcessOptions, root string, managed bool) error {
@@ -891,19 +915,26 @@ func (p *Process) Close(ctx context.Context) error {
 		_ = p.Client.Close(websocket.StatusNormalClosure, "closing")
 	}
 	if p.native == nil {
+		if p.managed {
+			return errors.New("native process is unavailable for settlement")
+		}
+
 		return p.reclaimAndRemove(ctx)
 	}
 
 	revokeErr := p.native.Revoke(ctx)
 	result, waitErr := p.native.Wait(ctx)
-	if waitErr != nil && (errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded)) {
-		return errors.Join(waitErr, revokeErr)
-	}
 	if result.Revoked {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(waitErr, &exitErr) {
 			waitErr = nil
 		}
+	}
+	if p.managed && waitErr != nil {
+		return errors.Join(waitErr, revokeErr)
+	}
+	if waitErr != nil && (errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded)) {
+		return errors.Join(waitErr, revokeErr)
 	}
 
 	return errors.Join(revokeErr, waitErr, p.reclaimAndRemove(ctx))

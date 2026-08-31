@@ -142,6 +142,10 @@ type recordingWriteCloser struct{}
 func (recordingWriteCloser) Write(data []byte) (int, error) { return len(data), nil }
 func (recordingWriteCloser) Close() error                   { return nil }
 
+type panickingStdioProcess struct{ *recordingNativeProcess }
+
+func (*panickingStdioProcess) Stdin() io.WriteCloser { panic("stdio unavailable") }
+
 func newTestHostAuthority() *recordingHostAuthority {
 	authority := &recordingHostAuthority{
 		environment: map[string]string{"PATH": "/usr/bin"},
@@ -324,11 +328,21 @@ func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 	}
 	err := startWithRecordingAuthority(t, authority, WithHostAuthority(authority), executable)
 	require.ErrorIs(t, err, markerErr)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ordinary fallback executed managed selector: %v", err)
 	}
 	if eventIndex(authority.events, "start:"+executable+" --version") < 0 {
 		t.Fatalf("authority did not receive managed probe: %v", authority.events)
+	}
+	for _, event := range authority.events {
+		if strings.HasPrefix(event, "reclaim:") {
+			t.Fatalf("managed StartNative error was followed by reclaim: %v", authority.events)
+		}
+		if root, ok := strings.CutPrefix(event, "prepare:"); ok {
+			_, statErr := os.Stat(root)
+			require.NoError(t, statErr, "managed StartNative error must retain the prepared tree")
+		}
 	}
 }
 
@@ -353,4 +367,90 @@ func TestHostAuthorityLossStopsNativeAdmission(t *testing.T) {
 	if _, err := options.StartNative(t.Context(), request); !errors.Is(err, ErrHostAuthorityUnavailable) {
 		t.Fatalf("later launch = %v", err)
 	}
+}
+
+func TestHostAuthorityWaitFailureMapsAndLatchesContainment(t *testing.T) {
+	want := errors.New("authority wait uncertain")
+	authority := newTestHostAuthority()
+	authority.process = &recordingNativeProcess{
+		stdin: recordingWriteCloser{}, stdout: io.NopCloser(strings.NewReader("")),
+		stderr: io.NopCloser(strings.NewReader("")), waitErr: want,
+	}
+	authority.start = nil
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	options := nativehermes.StartOptions{}
+	agent.configureHostAuthority(&options)
+	process, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+	require.NoError(t, err)
+	_, err = process.Wait(t.Context())
+	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.containmentErr, ErrContainmentIncomplete)
+}
+
+func TestHostAuthorityStdioPanicFailsClosed(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.process = &panickingStdioProcess{recordingNativeProcess: &recordingNativeProcess{}}
+	authority.start = nil
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	options := nativehermes.StartOptions{}
+	agent.configureHostAuthority(&options)
+	process, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+	require.NoError(t, err)
+	require.Nil(t, process.Stdin())
+	require.ErrorIs(t, agent.hostAuthorityAdmissionError(), ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, agent.containmentErr, ErrContainmentIncomplete)
+}
+
+func TestHostAuthorityPrepareFailureRetainsAttemptedTree(t *testing.T) {
+	want := errors.New("prepare uncertain")
+	authority := newTestHostAuthority()
+	authority.prepareErr = want
+	err := startWithRecordingAuthority(t, authority, WithHostAuthority(authority), "logical-hermes")
+	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+
+	prepared := ""
+	for _, event := range authority.events {
+		if path, ok := strings.CutPrefix(event, "prepare:"); ok {
+			prepared = path
+		}
+		if strings.HasPrefix(event, "reclaim:") {
+			t.Fatalf("failed prepare was followed by reclaim: %v", authority.events)
+		}
+	}
+	require.NotEmpty(t, prepared)
+	_, statErr := os.Stat(prepared)
+	require.NoError(t, statErr)
+}
+
+func TestManagedHermesServerRetriesContainmentBeforeRemoval(t *testing.T) {
+	root := t.TempDir()
+	want := errors.Join(errors.New("wait uncertain"), ErrContainmentIncomplete)
+	attempts := 0
+	client := newFakeHermesClient()
+	client.closeFunc = func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return want
+		}
+
+		return nil
+	}
+	retained := 0
+	server := &managedHermesServer{
+		Server: client, root: root, sessionID: "session",
+		retainIncomplete: func(error, acp.SessionId, string) { retained++ },
+	}
+
+	require.ErrorIs(t, server.Close(t.Context()), ErrContainmentIncomplete)
+	require.Equal(t, 1, retained)
+	_, err := os.Stat(root)
+	require.NoError(t, err, "uncertain settlement must retain the root")
+	require.NoError(t, server.Close(t.Context()))
+	require.Equal(t, 2, attempts)
+	_, err = os.Stat(root)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, server.Close(t.Context()))
+	require.Equal(t, 2, attempts)
 }

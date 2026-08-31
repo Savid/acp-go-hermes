@@ -3,10 +3,13 @@ package hermes
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -17,17 +20,35 @@ type probeTestProcess struct {
 	stderr io.ReadCloser
 	result NativeResult
 	err    error
+	revoke error
 }
 
 func (p *probeTestProcess) Stdin() io.WriteCloser                      { return p.stdin }
 func (p *probeTestProcess) Stdout() io.ReadCloser                      { return p.stdout }
 func (p *probeTestProcess) Stderr() io.ReadCloser                      { return p.stderr }
 func (p *probeTestProcess) Wait(context.Context) (NativeResult, error) { return p.result, p.err }
-func (p *probeTestProcess) Revoke(context.Context) error               { return nil }
+func (p *probeTestProcess) Revoke(context.Context) error               { return p.revoke }
 
 type nopWriteCloser struct{ bytes.Buffer }
 
 func (*nopWriteCloser) Close() error { return nil }
+
+type blockingReadCloser struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	<-r.done
+
+	return 0, io.EOF
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.once.Do(func() { close(r.done) })
+
+	return nil
+}
 
 func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 	var mu sync.Mutex
@@ -71,14 +92,256 @@ func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 }
 
 func TestVersionProbeRejectsUnusableAuthorityProcess(t *testing.T) {
+	var root string
+	reclaims := 0
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return &probeTestProcess{err: errors.New("wait uncertain")}, nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	require.ErrorContains(t, probeExecutableVersion(t.Context(), "hermes", opts), "unusable host stdio")
+	require.Zero(t, reclaims)
+	_, err := os.Stat(root)
+	require.NoError(t, err, "an uncertain native process must retain its prepared probe tree")
+}
+
+func TestVersionProbeWaitFailureRetainsPreparedTree(t *testing.T) {
+	var root string
+	reclaims := 0
+	waitErr := errors.New("authority cannot prove settlement")
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return &probeTestProcess{
+				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+				stderr: io.NopCloser(strings.NewReader("")), err: waitErr,
+			}, nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	err := probeExecutableVersion(t.Context(), "hermes", opts)
+	require.ErrorIs(t, err, waitErr)
+	require.Zero(t, reclaims)
+	_, err = os.Stat(root)
+	require.NoError(t, err)
+}
+
+func TestVersionProbePrepareFailureDoesNotTouchAttemptedTree(t *testing.T) {
+	want := errors.New("prepare uncertain")
+	var root string
+	started := false
+	reclaimed := false
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return want
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			started = true
+
+			return nil, errors.New("unexpected start")
+		},
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaimed = true
+
+			return nil
+		},
+	}
+
+	err := probeExecutableVersion(t.Context(), "hermes", opts)
+	require.ErrorIs(t, err, want)
+	require.False(t, started)
+	require.False(t, reclaimed)
+	_, err = os.Stat(root)
+	require.NoError(t, err)
+}
+
+func TestVersionProbeRevokeErrorReclaimsAfterSuccessfulWait(t *testing.T) {
+	want := errors.New("revoke refused")
+	var root string
+	reclaims := 0
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return &probeTestProcess{revoke: want}, nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	err := probeExecutableVersion(t.Context(), "hermes", opts)
+	require.ErrorIs(t, err, want)
+	require.Equal(t, 1, reclaims)
+	_, statErr := os.Stat(root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestVersionProbeStartErrorRetainsPreparedTree(t *testing.T) {
+	want := errors.New("managed start uncertain")
+	var root string
+	reclaims := 0
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) { return nil, want },
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	err := probeExecutableVersion(t.Context(), "hermes", opts)
+	require.ErrorIs(t, err, want)
+	require.Zero(t, reclaims)
+	_, err = os.Stat(root)
+	require.NoError(t, err)
+}
+
+func TestVersionProbeWaitFailureDoesNotWaitForPipeEOF(t *testing.T) {
+	want := errors.New("managed wait uncertain")
+	stdout := &blockingReadCloser{done: make(chan struct{})}
+	stderr := &blockingReadCloser{done: make(chan struct{})}
+	t.Cleanup(func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+	})
 	opts := ProcessOptions{
 		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(context.Context, string) error { return nil },
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
-			return &probeTestProcess{}, nil
+			return &probeTestProcess{
+				stdin: &nopWriteCloser{}, stdout: stdout, stderr: stderr, err: want,
+			}, nil
 		},
 		ReclaimNativeTree: func(context.Context, string) error { return nil },
 	}
 
-	require.ErrorContains(t, probeExecutableVersion(t.Context(), "hermes", opts), "unusable host stdio")
+	done := make(chan error, 1)
+	go func() { done <- probeExecutableVersion(t.Context(), "hermes", opts) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, want)
+	case <-time.After(time.Second):
+		t.Fatal("failed managed Wait blocked on inherited pipe EOF")
+	}
+}
+
+func TestManagedServeStartErrorRetainsPreparedTrees(t *testing.T) {
+	want := errors.New("managed serve start uncertain")
+	prepared := make(map[string]struct{})
+	reclaimed := make(map[string]struct{})
+	opts := ProcessOptions{
+		ExecutablePath: "logical-hermes", Home: t.TempDir(), ScratchParent: t.TempDir(),
+		NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, root string) error {
+			prepared[root] = struct{}{}
+
+			return nil
+		},
+		StartNative: func(_ context.Context, request NativeRequest) (NativeProcess, error) {
+			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
+				return &probeTestProcess{
+					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stderr: io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+
+			return nil, want
+		},
+		ReclaimNativeTree: func(_ context.Context, root string) error {
+			reclaimed[root] = struct{}{}
+
+			return nil
+		},
+	}
+
+	_, err := Start(t.Context(), opts)
+	require.ErrorIs(t, err, want)
+	retained := 0
+	for root := range prepared {
+		if _, ok := reclaimed[root]; ok {
+			continue
+		}
+		retained++
+		_, statErr := os.Stat(root)
+		require.NoError(t, statErr, "managed serve StartNative error must retain prepared tree %q", root)
+	}
+	require.GreaterOrEqual(t, retained, 2, "serve residence and browser shim must remain host-owned")
+}
+
+type retryWaitProcess struct {
+	probeTestProcess
+	mu       sync.Mutex
+	waitErrs []error
+}
+
+func (p *retryWaitProcess) Wait(context.Context) (NativeResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.waitErrs) == 0 {
+		return p.result, nil
+	}
+	err := p.waitErrs[0]
+	p.waitErrs = p.waitErrs[1:]
+
+	return p.result, err
+}
+
+func TestManagedProcessCloseRetriesBeforeReclaim(t *testing.T) {
+	want := errors.New("wait uncertain")
+	root := t.TempDir()
+	reclaims := 0
+	native := &retryWaitProcess{waitErrs: []error{want, nil}}
+	process := &Process{
+		Home: root, native: native, managed: true, preparedHome: true,
+		reclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	require.ErrorIs(t, process.Close(t.Context()), want)
+	require.Zero(t, reclaims)
+	_, err := os.Stat(root)
+	require.NoError(t, err)
+	require.NoError(t, process.Close(t.Context()))
+	require.Equal(t, 1, reclaims)
 }
