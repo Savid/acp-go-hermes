@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -171,6 +172,328 @@ func newTestHostAuthority() *recordingHostAuthority {
 	}
 
 	return authority
+}
+
+type managedSnapshotTestServer struct {
+	*fakeHermesClient
+}
+
+func (s *managedSnapshotTestServer) GetSession(_ context.Context, id string) (nativehermes.Session, error) {
+	return testNativeSession(id), s.getErr
+}
+
+func newManagedSnapshotTestAgent(
+	t *testing.T,
+	authority *recordingHostAuthority,
+) (*Agent, *InMemorySessionStore, *[]*managedSnapshotTestServer) {
+	t.Helper()
+
+	store := NewInMemorySessionStore()
+	servers := &[]*managedSnapshotTestServer{}
+	agent := NewAgent(
+		WithHostAuthority(authority),
+		WithScratchDir(t.TempDir()),
+		WithSessionStore(store),
+		func(options *Options) {
+			options.clientFactory = func(ctx context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+				stateDB := filepath.Join(start.ExistingXDG.Root, "state.db")
+				if err := os.WriteFile(stateDB, []byte("managed snapshot state"), 0o600); err != nil {
+					return nil, err
+				}
+				if err := start.PrepareNativeTree(ctx, start.ExistingXDG.Root); err != nil {
+					return nil, err
+				}
+
+				client := newFakeHermesClient()
+				client.xdg = start.ExistingXDG
+				client.createSession = testNativeSession("native-managed")
+				client.forkSession = testNativeSession("native-managed-child")
+				client.closeFunc = func(closeCtx context.Context) error {
+					return start.ReclaimNativeTree(closeCtx, start.ExistingXDG.Root)
+				}
+				server := &managedSnapshotTestServer{fakeHermesClient: client}
+				*servers = append(*servers, server)
+
+				return server, nil
+			}
+		},
+	)
+	require.NoError(t, agent.optionsErr)
+
+	return agent, store, servers
+}
+
+func requireManagedSnapshotArchived(t *testing.T, store SessionStore, id acp.SessionId) {
+	t.Helper()
+
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(id), Subpath: stateDBSubpath})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+}
+
+func TestManagedInitialSnapshotReadsOnlyAfterReclaim(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	requireManagedSnapshotArchived(t, store, created.SessionId)
+	require.NoError(t, authority.violation)
+	require.Empty(t, authority.prepared)
+	require.GreaterOrEqual(t, eventIndex(authority.events, "reclaim:"), 0)
+}
+
+func TestManagedSuccessfulTurnSnapshotReadsOnlyAfterReclaim(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, store, servers := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	response, err := agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "managed-turn", "continue"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	require.GreaterOrEqual(t, len(*servers), 2)
+	requireManagedSnapshotArchived(t, store, created.SessionId)
+	require.NoError(t, authority.violation)
+	require.Empty(t, authority.prepared)
+}
+
+func TestManagedCloseSnapshotReadsOnlyAfterReclaim(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	require.NotNil(t, active)
+	active.toolMu.Lock()
+	active.cancelMu.Lock()
+	err = active.resumeRuntimeForTurnLocked(t.Context())
+	active.cancelMu.Unlock()
+	active.toolMu.Unlock()
+	require.NoError(t, err)
+	require.NotEmpty(t, authority.prepared)
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	requireManagedSnapshotArchived(t, store, created.SessionId)
+	require.NoError(t, authority.violation)
+	require.Empty(t, authority.prepared)
+}
+
+func TestManagedCloseRetriesFilesystemCaptureFromReclaimedResidence(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, _, _ := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	active.toolMu.Lock()
+	active.cancelMu.Lock()
+	err = active.resumeRuntimeForTurnLocked(t.Context())
+	active.cancelMu.Unlock()
+	active.toolMu.Unlock()
+	require.NoError(t, err)
+	root := hermesServerRoot(active.client)
+
+	originalLstat := stateLstat
+	want := errors.New("capture unavailable")
+	stateLstat = func(string) (os.FileInfo, error) { return nil, want }
+	t.Cleanup(func() { stateLstat = originalLstat })
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.ErrorIs(t, err, want)
+	require.NotNil(t, agent.activeSession(created.SessionId))
+	require.Empty(t, authority.prepared)
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+
+	stateLstat = originalLstat
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	require.Nil(t, agent.activeSession(created.SessionId))
+	_, statErr = os.Stat(root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestManagedForkSnapshotReadsOnlyAfterReclaim(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	forked, err := agent.forkSession(t.Context(), ForkSessionRequest(created.SessionId, t.TempDir()))
+	require.NoError(t, err)
+	requireManagedSnapshotArchived(t, store, forked.SessionId)
+	require.NoError(t, authority.violation)
+	require.Empty(t, authority.prepared)
+}
+
+func TestManagedForcedRevokeRetainsPriorCompleteSnapshot(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, store, servers := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	before, err := store.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: stateDBSubpath})
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+
+	active := agent.activeSession(created.SessionId)
+	active.toolMu.Lock()
+	active.cancelMu.Lock()
+	err = active.resumeRuntimeForTurnLocked(t.Context())
+	active.cancelMu.Unlock()
+	active.toolMu.Unlock()
+	require.NoError(t, err)
+
+	started := make(chan struct{})
+	latest := (*servers)[len(*servers)-1]
+	latest.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		close(started)
+		<-ctx.Done()
+
+		return nativehermes.NativeMessage{}, ctx.Err()
+	}
+	promptCtx, cancelPrompt := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, promptErr := agent.Prompt(promptCtx, TextPromptRequest(created.SessionId, "managed-cancel", "cancel"))
+		done <- promptErr
+	}()
+	<-started
+	cancelPrompt()
+	<-done
+
+	after, err := store.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: stateDBSubpath})
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	require.NoError(t, authority.violation)
+	require.Empty(t, authority.prepared)
+}
+
+func TestManagedDeleteBusyRetainsCleanupForPublicRetry(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	agent, _, _ := newManagedSnapshotTestAgent(t, authority)
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	active := agent.activeSession(created.SessionId)
+	active.toolMu.Lock()
+	active.cancelMu.Lock()
+	err = active.resumeRuntimeForTurnLocked(t.Context())
+	active.cancelMu.Unlock()
+	active.toolMu.Unlock()
+	require.NoError(t, err)
+
+	busy := true
+	authority.reclaimHook = func(string) error {
+		if busy {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	require.NotEmpty(t, authority.prepared)
+	require.Contains(t, agent.deleteCleanup, created.SessionId)
+	require.NoError(t, agent.containmentErr)
+
+	busy = false
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(created.SessionId))
+	require.NoError(t, err)
+	require.Empty(t, authority.prepared)
+	require.NotContains(t, agent.deleteCleanup, created.SessionId)
+}
+
+func TestManagedTerminalProbeBusyRetriesAfterLiveServerSettles(t *testing.T) {
+	authority := newTestHostAuthority()
+	authority.moveTrees = true
+	root := filepath.Join(t.TempDir(), "terminal-probe")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	require.NoError(t, authority.PrepareNativeTree(t.Context(), root))
+
+	liveServer := true
+	authority.reclaimHook = func(string) error {
+		if liveServer {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	require.True(t, agent.retainNativeTree(root, ErrNativeTreeBusy))
+	require.ErrorIs(t, agent.retryRetiredNativeRoots(t.Context()), ErrNativeTreeBusy)
+	require.Contains(t, agent.retiredNativeRoots, root)
+	require.NoError(t, agent.hostAuthorityAdmissionError())
+
+	liveServer = false
+	require.NoError(t, agent.retryRetiredNativeRoots(t.Context()))
+	require.NotContains(t, agent.retiredNativeRoots, root)
+	_, err := os.Stat(root)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestManagedNativeGenerationRefusesRetainedBusyTree(t *testing.T) {
+	authority := newTestHostAuthority()
+	root := filepath.Join(t.TempDir(), "retained")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	require.True(t, agent.retainNativeTree(root, ErrNativeTreeBusy))
+	authority.reclaimHook = func(string) error { return ErrNativeTreeBusy }
+
+	finish, err := agent.beginManagedNativeGeneration(t.Context())
+	require.Nil(t, finish)
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	require.Contains(t, agent.retiredNativeRoots, root)
+
+	authority.reclaimHook = nil
+	finish, err = agent.beginManagedNativeGeneration(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, finish)
+	finish()
+	require.NotContains(t, agent.retiredNativeRoots, root)
+}
+
+func TestRetiredCleanupOnlyTreeDoesNotReclaimAgain(t *testing.T) {
+	authority := newTestHostAuthority()
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	root := filepath.Join(t.TempDir(), "cleanup-only")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	require.True(t, agent.retainNativeTree(root, nil))
+
+	want := errors.New("remove failed")
+	previousRemoveAll := retiredNativeRemoveAll
+	retiredNativeRemoveAll = func(string) error { return want }
+	t.Cleanup(func() { retiredNativeRemoveAll = previousRemoveAll })
+
+	require.ErrorIs(t, agent.retryRetiredNativeRoots(t.Context()), want)
+	require.NotContains(t, authority.events, "reclaim:"+root)
+	require.Contains(t, agent.retiredNativeRoots, root)
+
+	retiredNativeRemoveAll = previousRemoveAll
+	require.NoError(t, agent.retryRetiredNativeRoots(t.Context()))
+	require.NotContains(t, authority.events, "reclaim:"+root)
+	require.NotContains(t, agent.retiredNativeRoots, root)
+}
+
+func TestFailedGenerationCleanupPreservesOnlyExactIncompleteRoots(t *testing.T) {
+	agent := NewAgent(WithScratchDir(t.TempDir()))
+	id := acp.SessionId("failed-generation")
+	probeRoot := filepath.Join(t.TempDir(), "probe")
+	sessionRoot := filepath.Join(t.TempDir(), "session")
+	agent.retainIncompleteHermesRoot(id, probeRoot)
+
+	require.True(t, agent.retainFailedHermesGeneration(id, probeRoot, ErrContainmentIncomplete))
+	require.False(t, agent.retainFailedHermesGeneration(id, sessionRoot, ErrContainmentIncomplete))
+	require.NotContains(t, agent.incompleteRoots[id], sessionRoot)
 }
 
 func TestSuppliedNilHostAuthorityFailsBeforeSessionMutation(t *testing.T) {
@@ -388,6 +711,40 @@ func TestHostAuthorityWaitFailureMapsAndLatchesContainment(t *testing.T) {
 	require.ErrorIs(t, agent.containmentErr, ErrContainmentIncomplete)
 }
 
+func TestHostAuthorityRevokeLossFencesEveryActiveSession(t *testing.T) {
+	authority := newTestHostAuthority()
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	firstClient := newFakeHermesClient()
+	first := testSession(agent, firstClient)
+	first.id = "authority-first"
+	secondClient := newFakeHermesClient()
+	second := testSession(agent, secondClient)
+	second.id = "authority-second"
+	require.NoError(t, first.openLifecycleStream())
+	require.NoError(t, second.openLifecycleStream())
+	agent.sessions[first.id] = first
+	agent.sessions[second.id] = second
+
+	bridge := nativeProcessBridge{
+		process: &recordingNativeProcess{revokeErr: ErrHostAuthorityUnavailable},
+		record:  agent.recordHostAuthorityError,
+	}
+	err := bridge.Revoke(t.Context())
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.hostAuthorityAdmissionError(), ErrHostAuthorityUnavailable)
+	for _, current := range []*session{first, second} {
+		current.mu.Lock()
+		closing := current.lifecycleClosing
+		current.mu.Unlock()
+		require.True(t, closing)
+		require.False(t, current.lifecycleStream().live())
+	}
+	require.Eventually(t, func() bool {
+		return firstClient.closeCount() == 1 && secondClient.closeCount() == 1
+	}, time.Second, time.Millisecond)
+}
+
 func TestHostAuthorityWaitCancellationDetachesWithoutContainment(t *testing.T) {
 	authority := newTestHostAuthority()
 	process := &recordingNativeProcess{
@@ -412,6 +769,28 @@ func TestHostAuthorityWaitCancellationDetachesWithoutContainment(t *testing.T) {
 	process.waitErr = nil
 	_, err = native.Wait(t.Context())
 	require.NoError(t, err)
+	require.NoError(t, agent.containmentErr)
+}
+
+func TestHostAuthorityRevokeCancellationDoesNotLatchContainment(t *testing.T) {
+	authority := newTestHostAuthority()
+	process := &recordingNativeProcess{revokeErr: context.Canceled}
+	authority.process = process
+	authority.start = nil
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	options := nativehermes.StartOptions{}
+	agent.configureHostAuthority(&options)
+	native, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+	require.NoError(t, err)
+
+	revokeCtx, cancelRevoke := context.WithCancel(t.Context())
+	cancelRevoke()
+	require.ErrorIs(t, native.Revoke(revokeCtx), context.Canceled)
+	require.NoError(t, agent.containmentErr)
+	require.NoError(t, agent.hostAuthorityAdmissionError())
+
+	process.revokeErr = nil
+	require.NoError(t, native.Revoke(t.Context()))
 	require.NoError(t, agent.containmentErr)
 }
 

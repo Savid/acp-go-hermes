@@ -88,12 +88,16 @@ type ProcessOptions struct {
 	// version probing, and as the native base environment.
 	Env map[string]string
 	// SessionEnv is applied only after executable lookup and version probing.
-	SessionEnv        map[string]string
-	ExtraPathDirs     []string
-	NativeEnvironment map[string]string
-	StartNative       NativeStarter
-	PrepareNativeTree func(context.Context, string) error
-	ReclaimNativeTree func(context.Context, string) error
+	SessionEnv            map[string]string
+	ExtraPathDirs         []string
+	NativeEnvironment     map[string]string
+	StartNative           NativeStarter
+	PrepareNativeTree     func(context.Context, string) error
+	ReclaimNativeTree     func(context.Context, string) error
+	RetainNativeTree      func(string, error) bool
+	NativeTreeSettled     func()
+	ContainmentIncomplete error
+	NativeTreeBusy        error
 	// AmbientEnvironment is the adapter's own environment, captured once by the
 	// host-facing Agent. Ordinary same-identity execution sanitizes it into the
 	// native environment; managed execution uses NativeEnvironment instead. The
@@ -127,23 +131,30 @@ func (b *synchronizedBuffer) String() string {
 }
 
 type Process struct {
-	Client            *Client
-	Home              string
-	Port              int
-	Token             string
-	StatusURL         string
-	APIBaseURL        string
-	native            NativeProcess
-	managed           bool
-	shim              *browserShim
-	preparedHome      bool
-	preparedShim      bool
-	reclaimNativeTree func(context.Context, string) error
+	Client                *Client
+	Home                  string
+	Port                  int
+	Token                 string
+	StatusURL             string
+	APIBaseURL            string
+	native                NativeProcess
+	managed               bool
+	shim                  *browserShim
+	preparedHome          bool
+	preparedShim          bool
+	shimCleanupPending    bool
+	reclaimNativeTree     func(context.Context, string) error
+	retainNativeTree      func(string, error) bool
+	nativeTreeSettled     func()
+	containmentIncomplete error
+	nativeTreeBusy        error
 
-	waitOnce   sync.Once
+	waitMu     sync.Mutex
+	waitActive bool
 	waitDone   chan struct{}
 	waitResult NativeResult
 	waitErr    error
+	closeMu    sync.Mutex
 }
 
 // BrowserLaunchContained reports whether this process runs with the launcher
@@ -231,6 +242,8 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		StatusURL:  "http://127.0.0.1:" + strconv.Itoa(port) + "/api/status",
 		APIBaseURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/api",
 		managed:    opts.StartNative != nil, shim: shim, reclaimNativeTree: opts.ReclaimNativeTree,
+		retainNativeTree: opts.RetainNativeTree, nativeTreeSettled: opts.NativeTreeSettled,
+		containmentIncomplete: opts.ContainmentIncomplete, nativeTreeBusy: opts.NativeTreeBusy,
 	}
 	if process.managed {
 		if opts.PrepareNativeTree == nil || opts.ReclaimNativeTree == nil {
@@ -238,12 +251,39 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		}
 		if shim != nil {
 			if prepareErr := opts.PrepareNativeTree(ctx, shim.dir); prepareErr != nil {
+				if !process.treeBusy(prepareErr) && process.retainNativeTree != nil {
+					_ = process.retainNativeTree(shim.dir, prepareErr)
+				} else if process.treeBusy(prepareErr) {
+					removeErr := shim.remove()
+					if removeErr != nil && process.retainNativeTree != nil {
+						_ = process.retainNativeTree(shim.dir, nil)
+					}
+
+					prepareErr = errors.Join(prepareErr, removeErr)
+				}
+
 				return nil, prepareErr
 			}
 			process.preparedShim = true
 		}
 		if prepareErr := opts.PrepareNativeTree(ctx, home); prepareErr != nil {
-			return nil, prepareErr
+			if !process.treeBusy(prepareErr) && process.retainNativeTree != nil {
+				_ = process.retainNativeTree(home, prepareErr)
+			}
+
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), closeTimeout)
+			rollbackErr := process.reclaimAndRemove(rollbackCtx)
+			rollbackCancel()
+			if process.preparedShim && process.retainNativeTree != nil &&
+				process.retainNativeTree(process.shim.dir, rollbackErr) {
+				process.preparedShim = false
+			}
+			if process.shimCleanupPending && process.retainNativeTree != nil &&
+				process.retainNativeTree(process.shim.dir, nil) {
+				process.shimCleanupPending = false
+			}
+
+			return nil, errors.Join(prepareErr, rollbackErr)
 		}
 		process.preparedHome = true
 	}
@@ -260,13 +300,15 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, err)
 		if process.managed {
+			process.retainPreparedTrees(err)
+
 			return nil, err
 		}
 
 		return nil, errors.Join(err, process.reclaimAndRemove(context.Background()))
 	}
 	if process.native == nil || process.native.Stdin() == nil || process.native.Stdout() == nil || process.native.Stderr() == nil {
-		return nil, errors.Join(errors.New("native process returned unusable host stdio"), process.Close(context.Background()))
+		return nil, process.startupFailure(errors.New("native process returned unusable host stdio"))
 	}
 	process.beginWait()
 	process.drainOutput(opts.LogWriter)
@@ -278,25 +320,25 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if readyErr := process.waitReady(readyCtx); readyErr != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, readyErr)
 
-		return nil, errors.Join(readyErr, process.Close(context.Background()))
+		return nil, process.startupFailure(readyErr)
 	}
 	client, err := Dial(readyCtx, "ws://127.0.0.1:"+strconv.Itoa(port)+"/api/ws?token="+token, http.Header{
 		"X-Hermes-Session-Token": []string{token},
 	})
 	if err != nil {
-		return nil, errors.Join(err, process.Close(context.Background()))
+		return nil, process.startupFailure(err)
 	}
 	process.Client = client
 	if err := process.waitGatewayReady(readyCtx); err != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, err)
 
-		return nil, errors.Join(err, process.Close(context.Background()))
+		return nil, process.startupFailure(err)
 	}
 	if probeNeeded {
 		if err := process.probeGatewayMethods(readyCtx); err != nil {
 			observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "readiness", readinessStarted, err)
 
-			return nil, errors.Join(err, process.Close(context.Background()))
+			return nil, process.startupFailure(err)
 		}
 		if opts.StartNative == nil {
 			markGatewayMethodsProbed(executable)
@@ -676,6 +718,7 @@ func markGatewayMethodsProbed(executable string) {
 	executableProbeMu.Unlock()
 }
 
+//nolint:gocyclo // Version probing is one fail-closed process and tree transaction.
 func probeExecutableVersion(ctx context.Context, executable string, opts ProcessOptions) error {
 	probeRoot, err := mkdirTemp(opts.ScratchParent, "acp-go-hermes-probe-")
 	if err != nil {
@@ -692,6 +735,18 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 			return errors.Join(errors.New("host authority tree operations are unavailable"), removeAll(probeRoot))
 		}
 		if prepareErr := opts.PrepareNativeTree(ctx, probeRoot); prepareErr != nil {
+			if opts.NativeTreeBusy != nil && errors.Is(prepareErr, opts.NativeTreeBusy) {
+				removeErr := removeAll(probeRoot)
+				if removeErr != nil && opts.RetainNativeTree != nil {
+					_ = opts.RetainNativeTree(probeRoot, nil)
+				}
+
+				return errors.Join(prepareErr, removeErr)
+			}
+			if opts.RetainNativeTree != nil {
+				_ = opts.RetainNativeTree(probeRoot, prepareErr)
+			}
+
 			return prepareErr
 		}
 	}
@@ -704,6 +759,10 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	})
 	if err != nil {
 		if managed {
+			if opts.RetainNativeTree != nil {
+				_ = opts.RetainNativeTree(probeRoot, err)
+			}
+
 			return fmt.Errorf("hermes --version probe failed: %w", err)
 		}
 
@@ -712,9 +771,15 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	if process == nil || process.Stdin() == nil || process.Stdout() == nil || process.Stderr() == nil {
 		settled, settleErr := settleProbeProcess(process)
 		if !settled {
-			return fmt.Errorf("hermes --version probe failed: %w", errors.Join(
+			uncertainErr := errors.Join(
 				errors.New("native process returned unusable host stdio"), settleErr,
-			))
+				opts.ContainmentIncomplete,
+			)
+			if opts.RetainNativeTree != nil {
+				_ = opts.RetainNativeTree(probeRoot, uncertainErr)
+			}
+
+			return fmt.Errorf("hermes --version probe failed: %w", uncertainErr)
 		}
 
 		return fmt.Errorf("hermes --version probe failed: %w", errors.Join(
@@ -731,14 +796,21 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	if waitErr != nil {
 		revokeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		revokeErr := process.Revoke(revokeCtx)
-		var finalWaitErr error
-		result, finalWaitErr = process.Wait(revokeCtx)
 		cancel()
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var finalWaitErr error
+		result, finalWaitErr = process.Wait(waitCtx)
+		waitCancel()
 		settled = finalWaitErr == nil || (!managed && !errors.Is(finalWaitErr, context.Canceled) && !errors.Is(finalWaitErr, context.DeadlineExceeded))
 		waitErr = errors.Join(waitErr, revokeErr, finalWaitErr)
 	}
 	if !settled {
-		return fmt.Errorf("hermes --version probe failed: %w", waitErr)
+		uncertainErr := errors.Join(waitErr, opts.ContainmentIncomplete)
+		if opts.RetainNativeTree != nil {
+			_ = opts.RetainNativeTree(probeRoot, uncertainErr)
+		}
+
+		return fmt.Errorf("hermes --version probe failed: %w", uncertainErr)
 	}
 
 	<-drained
@@ -768,23 +840,36 @@ func settleProbeProcess(process NativeProcess) (bool, error) {
 	if process == nil {
 		return false, errors.New("native process is unavailable for settlement")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	revokeErr := process.Revoke(ctx)
-	_, waitErr := process.Wait(ctx)
+	revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	revokeErr := process.Revoke(revokeCtx)
+	revokeCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, waitErr := process.Wait(waitCtx)
+	waitCancel()
 
 	return waitErr == nil, errors.Join(revokeErr, waitErr)
 }
 
 func reclaimProbeTree(opts ProcessOptions, root string, managed bool) error {
 	if managed {
-		if err := opts.ReclaimNativeTree(context.Background(), root); err != nil {
+		reclaimCtx, reclaimCancel := context.WithTimeout(context.Background(), closeTimeout)
+		err := opts.ReclaimNativeTree(reclaimCtx, root)
+		reclaimCancel()
+		if err != nil {
+			if opts.RetainNativeTree != nil {
+				_ = opts.RetainNativeTree(root, err)
+			}
+
 			return err
 		}
 	}
 
-	return removeAll(root)
+	removeErr := removeAll(root)
+	if removeErr != nil && opts.RetainNativeTree != nil {
+		_ = opts.RetainNativeTree(root, nil)
+	}
+
+	return removeErr
 }
 
 func parseVersion(output string) (string, bool) {
@@ -911,6 +996,9 @@ func methodPresent(method string, err error) error {
 }
 
 func (p *Process) Close(ctx context.Context) error {
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+
 	if p.Client != nil {
 		_ = p.Client.Close(websocket.StatusNormalClosure, "closing")
 	}
@@ -923,7 +1011,24 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 
 	revokeErr := p.native.Revoke(ctx)
-	result, waitErr := p.native.Wait(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(revokeErr, ctxErr)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer waitCancel()
+
+	var result NativeResult
+	var waitErr error
+	waitDone := p.beginWait()
+	select {
+	case <-waitDone:
+		p.waitMu.Lock()
+		result, waitErr = p.waitResult, p.waitErr
+		p.waitMu.Unlock()
+	case <-waitCtx.Done():
+		waitErr = p.containmentFailure("wait for Hermes process", waitCtx.Err())
+	}
 	if result.Revoked {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(waitErr, &exitErr) {
@@ -937,7 +1042,15 @@ func (p *Process) Close(ctx context.Context) error {
 		return errors.Join(waitErr, revokeErr)
 	}
 
-	return errors.Join(revokeErr, waitErr, p.reclaimAndRemove(ctx))
+	reclaimCtx, reclaimCancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer reclaimCancel()
+
+	reclaimErr := p.reclaimAndRemove(reclaimCtx)
+	if reclaimErr != nil {
+		return errors.Join(revokeErr, waitErr, reclaimErr)
+	}
+
+	return waitErr
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.
@@ -945,15 +1058,23 @@ func (p *Process) Close(ctx context.Context) error {
 // ACP session remains resident; waiting only from Close would leave that root
 // as a zombie until the session was eventually released.
 func (p *Process) beginWait() <-chan struct{} {
-	p.waitOnce.Do(func() {
+	p.waitMu.Lock()
+	if !p.waitActive {
+		p.waitActive = true
 		p.waitDone = make(chan struct{})
+		done := p.waitDone
 		go func() {
-			p.waitResult, p.waitErr = p.native.Wait(context.Background())
-			close(p.waitDone)
+			result, err := p.native.Wait(context.Background())
+			p.waitMu.Lock()
+			p.waitResult, p.waitErr = result, err
+			p.waitMu.Unlock()
+			close(done)
 		}()
-	})
+	}
+	done := p.waitDone
+	p.waitMu.Unlock()
 
-	return p.waitDone
+	return done
 }
 
 func (p *Process) drainOutput(writer io.Writer) {
@@ -962,6 +1083,50 @@ func (p *Process) drainOutput(writer io.Writer) {
 	}
 	go func() { _, _ = io.Copy(writer, p.native.Stdout()) }()
 	go func() { _, _ = io.Copy(writer, p.native.Stderr()) }()
+}
+
+func (p *Process) startupFailure(cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	closeErr := p.Close(ctx)
+	cancel()
+	if p.managed && (p.preparedShim || p.preparedHome) && closeErr != nil &&
+		!p.treeBusy(closeErr) && !errors.Is(closeErr, p.containmentIncomplete) {
+		closeErr = p.containmentFailure("settle failed Hermes startup", closeErr)
+	}
+
+	p.retainPreparedTrees(closeErr)
+
+	return errors.Join(cause, closeErr)
+}
+
+func (p *Process) retainPreparedTrees(err error) {
+	if p.retainNativeTree == nil {
+		return
+	}
+
+	if p.preparedShim && p.shim != nil && p.retainNativeTree(p.shim.dir, err) {
+		p.preparedShim = false
+	}
+
+	if p.preparedHome && p.retainNativeTree(p.Home, err) {
+		p.preparedHome = false
+	}
+
+	if p.shimCleanupPending && p.shim != nil && p.retainNativeTree(p.shim.dir, nil) {
+		p.shimCleanupPending = false
+	}
+}
+
+func (p *Process) containmentFailure(operation string, cause error) error {
+	if p.containmentIncomplete == nil {
+		return fmt.Errorf("native containment incomplete: %s: %w", operation, cause)
+	}
+
+	return fmt.Errorf("%w: %s: %w", p.containmentIncomplete, operation, cause)
+}
+
+func (p *Process) treeBusy(err error) bool {
+	return p.nativeTreeBusy != nil && errors.Is(err, p.nativeTreeBusy)
 }
 
 func (p *Process) removeUnpreparedTrees() error {
@@ -979,14 +1144,20 @@ func (p *Process) removeUnpreparedTrees() error {
 func (p *Process) reclaimAndRemove(ctx context.Context) error {
 	var err error
 	if p.managed && p.reclaimNativeTree != nil {
-		if p.preparedShim {
+		if p.preparedShim && p.shim != nil {
 			if reclaimErr := p.reclaimNativeTree(ctx, p.shim.dir); reclaimErr != nil {
 				err = errors.Join(err, reclaimErr)
 			} else {
 				p.preparedShim = false
-				err = errors.Join(err, p.shim.remove())
 			}
 		}
+
+		if !p.preparedShim && p.shim != nil {
+			removeErr := p.shim.remove()
+			p.shimCleanupPending = removeErr != nil
+			err = errors.Join(err, removeErr)
+		}
+
 		if p.preparedHome {
 			if reclaimErr := p.reclaimNativeTree(ctx, p.Home); reclaimErr != nil {
 				err = errors.Join(err, reclaimErr)
@@ -996,6 +1167,9 @@ func (p *Process) reclaimAndRemove(ctx context.Context) error {
 		}
 	} else {
 		err = errors.Join(err, p.shim.remove())
+	}
+	if err == nil && p.managed && p.nativeTreeSettled != nil {
+		p.nativeTreeSettled()
 	}
 
 	return err

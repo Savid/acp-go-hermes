@@ -50,6 +50,15 @@ the full-archive SHA-256. Restore requires a contiguous sequence, exactly one
 terminal chunk, matching size/checksum metadata, and then reassembles the
 archive into a fresh per-session `HERMES_HOME`.
 
+With a host authority, snapshot capture reads the protocol-derived session and
+history fields while the server is live, closes the WebSocket, revokes the
+native process, waits for its terminal result, and successfully reclaims the
+prepared residence before reading `state.db`. The reclaimed residence is then
+removed. The logical session remains active without a native process until the
+next operation hydrates a fresh residence from the committed snapshot. A
+reclaim refusal or uncertain terminal result leaves the residence registered
+and unread.
+
 In explicit shared-home mode the durable official Hermes database is already
 the native authority. Snapshots contain logical metadata only: they do not
 encode or restore `state-db`. A prior per-session native archive is ignored
@@ -114,13 +123,14 @@ is never adopted. In managed mode, the next runtime is not admitted until the
 host authority has returned the prior process's terminal result and reclaimed
 its prepared trees.
 
-`session/close` captures its final eligible snapshot before stopping the native
-client, because managed client shutdown removes the isolated XDG root. Close
+`session/close` captures protocol state before stopping the native client. In
+managed mode it then waits for terminality, reclaims the residence, and captures
+the native archive; ordinary mode captures the archive before shutdown. Close
 still skips snapshotting while a turn, permission, elicitation, or generation
-is pending. When an eligible mandatory capture fails, close returns before
-native teardown or lifecycle fencing and leaves the close-only session
-addressable; a retry captures again. Once capture succeeds, its publication
-completes before the session id is detached.
+is pending. A failed ordinary capture keeps the live generation. A failed
+managed archive capture keeps the reclaimed residence and partial commit. In
+both cases the close-only session remains addressable for an exact retry. Once
+capture succeeds, publication completes before the session id is detached.
 
 <Note>
 Snapshots exclude credential-bearing files and scrub credential tables from the

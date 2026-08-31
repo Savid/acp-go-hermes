@@ -184,21 +184,25 @@ type StartOptions struct {
 	// control generation; multiple Servers of this one adapter process share the
 	// native home under a single exclusive home-root claim, and a second adapter
 	// process is refused that root outright.
-	SharedHermesHome    string
-	Env                 map[string]string
-	SessionEnv          map[string]string
-	ExtraPathDirs       []string
-	NativeEnvironment   map[string]string
-	StartNative         NativeStarter
-	PrepareNativeTree   func(context.Context, string) error
-	ReclaimNativeTree   func(context.Context, string) error
-	AmbientEnvironment  map[string]string
-	HealthTimeout       time.Duration
-	Logger              *slog.Logger
-	ExistingXDG         XDGDirs
-	MCPServers          []acp.McpServer
-	SeedFiles           map[string]string
-	ObserveStartupStage func(context.Context, string, string, time.Duration, error)
+	SharedHermesHome      string
+	Env                   map[string]string
+	SessionEnv            map[string]string
+	ExtraPathDirs         []string
+	NativeEnvironment     map[string]string
+	StartNative           NativeStarter
+	PrepareNativeTree     func(context.Context, string) error
+	ReclaimNativeTree     func(context.Context, string) error
+	RetainNativeTree      func(string, error) bool
+	NativeTreeSettled     func()
+	ContainmentIncomplete error
+	NativeTreeBusy        error
+	AmbientEnvironment    map[string]string
+	HealthTimeout         time.Duration
+	Logger                *slog.Logger
+	ExistingXDG           XDGDirs
+	MCPServers            []acp.McpServer
+	SeedFiles             map[string]string
+	ObserveStartupStage   func(context.Context, string, string, time.Duration, error)
 }
 
 type ACPSessionIDString string
@@ -662,18 +666,22 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 		PrepareSharedHome: func(prepareCtx context.Context, home string) error {
 			return materializeSharedHermesConfig(prepareCtx, home, servers, options.SeedFiles)
 		},
-		ScratchParent:       options.ScratchParent,
-		Cwd:                 options.Cwd,
-		Env:                 cloneEnvironmentMap(options.Env),
-		SessionEnv:          processEnv,
-		ExtraPathDirs:       extraPathDirs,
-		NativeEnvironment:   options.NativeEnvironment,
-		StartNative:         options.StartNative,
-		PrepareNativeTree:   options.PrepareNativeTree,
-		ReclaimNativeTree:   options.ReclaimNativeTree,
-		AmbientEnvironment:  options.AmbientEnvironment,
-		Timeout:             options.HealthTimeout,
-		ObserveStartupStage: options.ObserveStartupStage,
+		ScratchParent:         options.ScratchParent,
+		Cwd:                   options.Cwd,
+		Env:                   cloneEnvironmentMap(options.Env),
+		SessionEnv:            processEnv,
+		ExtraPathDirs:         extraPathDirs,
+		NativeEnvironment:     options.NativeEnvironment,
+		StartNative:           options.StartNative,
+		PrepareNativeTree:     options.PrepareNativeTree,
+		ReclaimNativeTree:     options.ReclaimNativeTree,
+		RetainNativeTree:      options.RetainNativeTree,
+		NativeTreeSettled:     options.NativeTreeSettled,
+		ContainmentIncomplete: options.ContainmentIncomplete,
+		NativeTreeBusy:        options.NativeTreeBusy,
+		AmbientEnvironment:    options.AmbientEnvironment,
+		Timeout:               options.HealthTimeout,
+		ObserveStartupStage:   options.ObserveStartupStage,
 	})
 	if err != nil {
 		return nil, err

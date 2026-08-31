@@ -17,6 +17,7 @@ type managedHermesServer struct {
 	nativehermes.Server
 	root               string
 	sessionID          acp.SessionId
+	managed            bool
 	scratchRelease     func()
 	retainIncomplete   func(error, acp.SessionId, string)
 	nativeSessionOwner *nativehermes.SharedSessionOwner
@@ -81,13 +82,11 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 	var closeErr error
 	if !s.settled {
 		closeErr = s.Server.Close(ctx)
-		if errors.Is(closeErr, ErrNativeTreeBusy) {
-			return closeErr
-		}
-
-		if errors.Is(closeErr, ErrContainmentIncomplete) || errors.Is(closeErr, ErrHostAuthorityUnavailable) {
+		if closeErr != nil {
 			if s.retainIncomplete != nil {
-				s.retainIncomplete(closeErr, s.sessionID, s.root)
+				if errors.Is(closeErr, ErrContainmentIncomplete) || errors.Is(closeErr, ErrHostAuthorityUnavailable) {
+					s.retainIncomplete(closeErr, s.sessionID, s.root)
+				}
 			}
 
 			return closeErr
@@ -111,6 +110,64 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 	s.closed = true
 
 	return s.closeErr
+}
+
+func (s *managedHermesServer) reclaimForSnapshot(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.managed {
+		return "", errors.New("hermes snapshot reclaim requires host authority")
+	}
+
+	if s.closed {
+		return "", errors.New("hermes snapshot residence is already closed")
+	}
+
+	if s.settled {
+		return s.root, nil
+	}
+
+	if err := s.Server.Close(ctx); err != nil {
+		if s.retainIncomplete != nil && (errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable)) {
+			s.retainIncomplete(err, s.sessionID, s.root)
+		}
+
+		return "", err
+	}
+
+	if s.nativeSessionOwner != nil && !s.ownerReleased {
+		if err := s.nativeSessionOwner.Release(); err != nil {
+			return "", err
+		}
+
+		s.ownerReleased = true
+	}
+
+	s.settled = true
+
+	return s.root, nil
+}
+
+func (s *managedHermesServer) finishReclaimedSnapshot() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return s.closeErr
+	}
+
+	if !s.settled {
+		return errors.New("hermes snapshot residence has not been reclaimed")
+	}
+
+	if err := deleteHermesScratchRoot(s.root, s.scratchRelease); err != nil {
+		return err
+	}
+
+	s.closed = true
+
+	return nil
 }
 
 func (s *managedHermesServer) ProviderAuthSupported() bool {

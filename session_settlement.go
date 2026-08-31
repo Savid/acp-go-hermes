@@ -804,10 +804,10 @@ func (s *session) nativeRun(
 // its own, and this boundary settles the incarnation rather than a foreground
 // cycle.
 //
-// The resumable generation is read before the containment boundary and made
-// durable after it. Containment removes the generation's own files, so the read
-// cannot follow it; the commit is the durability boundary the ordering rule is
-// stated against, and it is what happens afterwards.
+// Managed capture reads protocol state first, then settles and reclaims the
+// native residence before reading its state database. Ordinary capture reads
+// its same-identity residence before shutdown. In both modes publication is the
+// durability boundary and follows the completed capture.
 //
 // A boundary that fails is not spent. The generation it captured but could not
 // publish is retained on the session, and the next close of the same id publishes
@@ -875,13 +875,18 @@ func (s *session) settleClosedSession(ctx context.Context) error {
 	}
 
 	if captureErr != nil {
-		// Capture is the mandatory, non-destructive first rung of an eligible
-		// close. If it fails, the live generation and its stream remain intact and
-		// the close-only logical session stays addressable so the exact capture can
-		// be retried. Containment would destroy the only source for that retry.
+		// A failed ordinary capture leaves the live generation intact. A failed
+		// managed filesystem capture retains its already-reclaimed residence and
+		// partial commit. Both remain addressable for the exact retry.
 		s.retainOwedCloseCommit(commit)
 
 		return errors.Join(pumpSyncErr, captureErr)
+	}
+
+	if commitErr := s.completeManagedSnapshotCommit(commit); commitErr != nil {
+		s.retainOwedCloseCommit(commit)
+
+		return errors.Join(pumpSyncErr, commitErr)
 	}
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)

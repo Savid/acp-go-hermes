@@ -225,7 +225,7 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 	cancel()
 	a.recordIncompleteContainment(err, session.id, record.XDGRoot)
 
-	if errors.Is(err, ErrContainmentIncomplete) {
+	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
 		return err
 	}
 
@@ -419,10 +419,8 @@ func (a *Agent) loadOrResumeSession(
 		if nativeOwner != nil {
 			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, ErrContainmentIncomplete) {
+		if a.retainFailedHermesGeneration(id, xdg.Root, err) {
 			keepScratch = true
-
-			a.retainIncompleteHermesRoot(id, xdg.Root)
 		}
 
 		return nil, err
@@ -549,6 +547,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		ExtraPathDirs: slices.Clone(s.extraPathDirs),
 		RawMessages:   s.rawMessages,
 	}
+	previousClient := s.client
 	s.mu.Unlock()
 
 	if needsResume && resumeWait != nil {
@@ -581,6 +580,11 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 	if err := s.agent.rejectIncompleteHermesSession(id); err != nil {
 		return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
+	}
+	if managed, ok := previousClient.(*managedHermesServer); ok && managed.managed {
+		if err := managed.finishReclaimedSnapshot(); err != nil {
+			return err
+		}
 	}
 
 	scratchRelease := func() {}
@@ -649,11 +653,10 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		if nativeOwner != nil {
 			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, ErrContainmentIncomplete) {
+		if s.agent.retainFailedHermesGeneration(id, xdg.Root, err) {
 			keepScratch = true
-
-			s.agent.retainIncompleteHermesRoot(id, xdg.Root)
-
+		}
+		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 			return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
 		}
 
@@ -1030,16 +1033,14 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 		err = errors.Join(err, lateErr)
 	}
 
-	if errors.Is(err, ErrContainmentIncomplete) {
-		a.mu.Lock()
-		delete(a.deleteCleanup, record.SessionID)
-		a.mu.Unlock()
-
+	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
 	cleanupErr := a.cleanupDeletedSession(record)
-	a.forgetDeleteCleanupIfDone(record.SessionID)
+	if cleanupErr == nil {
+		a.forgetDeleteCleanupIfDone(record.SessionID)
+	}
 
 	return acp.UnstableDeleteSessionResponse{}, errors.Join(settleErr, err, cleanupErr)
 }
@@ -1191,6 +1192,14 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	if parent.lifetimeEnded() {
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
+	parent.toolMu.Lock()
+	parent.cancelMu.Lock()
+	resumeErr := parent.resumeRuntimeForTurnLocked(ctx)
+	parent.cancelMu.Unlock()
+	parent.toolMu.Unlock()
+	if resumeErr != nil {
+		return acp.UnstableForkSessionResponse{}, resumeErr
+	}
 	if reason := parent.snapshotBlockedReason(); reason != "" {
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidRequest(map[string]any{jsonFieldError: "session cannot be forked", "reason": reason})
 	}
@@ -1299,7 +1308,21 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		// The official branch commits its child row and copied history into the
 		// parent's state.db. Isolated mode must snapshot that authoritative DB
 		// only after Branch returns and its parent-side live child is detached.
-		if cloneErr := cloneHermesStateDB(a.scratchDirectory(), parentSnapshot.client.XDGDirs(), xdg); cloneErr != nil {
+		var cloneErr error
+		if a.options.HostAuthority != nil {
+			cloneErr = parent.withReclaimedManagedState(ctx, parentSnapshot.client, func(root string) error {
+				return cloneHermesStateDBRoot(a.scratchDirectory(), root, xdg)
+			})
+			parent.mu.Lock()
+			parentReclaimed := parent.runtimeNeedsResume
+			parent.mu.Unlock()
+			if parentReclaimed {
+				cleanupNativeChild = false
+			}
+		} else {
+			cloneErr = cloneHermesStateDB(a.scratchDirectory(), parentSnapshot.client.XDGDirs(), xdg)
+		}
+		if cloneErr != nil {
 			return acp.UnstableForkSessionResponse{}, cloneErr
 		}
 	}
@@ -1314,11 +1337,9 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 		if nativeOwner != nil {
 			err = errors.Join(err, nativeOwner.Release())
 		}
-		if errors.Is(err, ErrContainmentIncomplete) {
+		if a.retainFailedHermesGeneration(id, xdg.Root, err) {
 			cleanupNativeChild = false
 			keepScratch = true
-
-			a.retainIncompleteHermesRoot(id, xdg.Root)
 		}
 
 		return acp.UnstableForkSessionResponse{}, err
@@ -1438,9 +1459,7 @@ func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd strin
 
 	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, existing, scratchRelease, mcpServers...)
 	if err != nil {
-		if errors.Is(err, ErrContainmentIncomplete) {
-			a.retainIncompleteHermesRoot(id, root)
-
+		if a.retainFailedHermesGeneration(id, root, err) {
 			return nil, err
 		}
 
@@ -1502,13 +1521,29 @@ func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.Sess
 		SeedFiles:          cloneStringMap(a.options.SeedFiles),
 	}
 	a.configureHostAuthority(&start)
+	if start.RetainNativeTree != nil {
+		retainNativeTree := start.RetainNativeTree
+		start.RetainNativeTree = func(root string, err error) bool {
+			if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
+				a.retainIncompleteHermesRoot(id, root)
+
+				return true
+			}
+
+			return retainNativeTree(root, err)
+		}
+	}
+
+	finishNativeGeneration, err := a.beginManagedNativeGeneration(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finishNativeGeneration()
 
 	a.observe.RecordHermesProcessStart(ctx)
 
 	client, err := factory(ctx, start)
 	if err != nil {
-		a.recordIncompleteContainment(err, id, existing.Root)
-
 		return nil, err
 	}
 
@@ -1516,10 +1551,32 @@ func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.Sess
 
 	managed := &managedHermesServer{
 		Server: client, root: root, sessionID: id, scratchRelease: scratchRelease,
-		retainIncomplete: a.recordIncompleteContainment, nativeSessionOwner: nativeOwner,
+		managed: a.options.HostAuthority != nil, retainIncomplete: a.recordIncompleteContainment, nativeSessionOwner: nativeOwner,
 	}
 
 	return managed, nil
+}
+
+func (a *Agent) retainFailedHermesGeneration(id acp.SessionId, root string, err error) bool {
+	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
+		a.mu.Lock()
+		roots := a.incompleteRoots[id]
+		_, retained := roots[root]
+		hasExactRoot := len(roots) != 0
+		a.mu.Unlock()
+		if retained {
+			return true
+		}
+		if hasExactRoot {
+			return false
+		}
+
+		a.retainIncompleteHermesRoot(id, root)
+
+		return true
+	}
+
+	return a.ownsRetiredNativeRoot(root)
 }
 
 func (a *Agent) admitSharedHermesConfig(servers []acp.McpServer) error {
@@ -1551,6 +1608,7 @@ type deleteCleanupRecord struct {
 	SessionID acp.SessionId
 	NativeID  string
 	XDGRoot   string
+	Server    *managedHermesServer
 }
 
 // deleteCleanupRecord names what a delete still owes the filesystem. The root
@@ -1570,6 +1628,7 @@ func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCl
 		if xdg := snapshot.client.XDGDirs(); xdg.Root != "" {
 			record.XDGRoot = xdg.Root
 		}
+		record.Server, _ = snapshot.client.(*managedHermesServer)
 	}
 
 	return record
@@ -1587,18 +1646,6 @@ func (a *Agent) rememberDeleteCleanup(record deleteCleanupRecord) {
 
 func (a *Agent) forgetDeleteCleanupIfDone(id acp.SessionId) {
 	if id == "" {
-		return
-	}
-
-	a.mu.Lock()
-	record, remembered := a.deleteCleanup[id]
-	a.mu.Unlock()
-
-	if !remembered {
-		return
-	}
-
-	if _, err := os.Stat(record.XDGRoot); err == nil {
 		return
 	}
 
@@ -1642,6 +1689,13 @@ func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
 	if record.SessionID == "" || record.XDGRoot == "" {
 		return nil
 	}
+	if record.Server != nil && record.Server.managed {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err := record.Server.Close(ctx)
+		cancel()
+
+		return err
+	}
 
 	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))
 }
@@ -1674,7 +1728,11 @@ func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
 }
 
 func cloneHermesStateDB(scratchDir string, source nativehermes.XDGDirs, target nativehermes.XDGDirs) error {
-	data, _, ok, err := encodeHermesStateDBArchive(scratchDir, source.Root)
+	return cloneHermesStateDBRoot(scratchDir, source.Root, target)
+}
+
+func cloneHermesStateDBRoot(scratchDir string, sourceRoot string, target nativehermes.XDGDirs) error {
+	data, _, ok, err := encodeHermesStateDBArchive(scratchDir, sourceRoot)
 	if err != nil {
 		return err
 	}

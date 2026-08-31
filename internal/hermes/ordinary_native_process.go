@@ -16,6 +16,7 @@ type ordinaryNativeProcess struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
+	kill   func() error
 
 	waitOnce sync.Once
 	waitDone chan struct{}
@@ -67,7 +68,7 @@ func startOrdinaryNative(ctx context.Context, request NativeRequest) (NativeProc
 	}
 
 	return &ordinaryNativeProcess{
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, waitDone: make(chan struct{}),
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, kill: cmd.Process.Kill, waitDone: make(chan struct{}),
 	}, nil
 }
 
@@ -107,10 +108,16 @@ func (p *ordinaryNativeProcess) Revoke(ctx context.Context) error {
 	p.revokeOnce.Do(func() {
 		p.outcomeMu.Lock()
 		if !p.terminal && p.cmd.Process != nil {
-			p.revoked = true
+			kill := p.kill
+			if kill == nil {
+				kill = p.cmd.Process.Kill
+			}
 
-			p.revokeErr = p.cmd.Process.Kill()
-			if errors.Is(p.revokeErr, os.ErrProcessDone) {
+			p.revokeErr = kill()
+			switch {
+			case p.revokeErr == nil:
+				p.revoked = true
+			case errors.Is(p.revokeErr, os.ErrProcessDone):
 				p.revokeErr = nil
 			}
 		}

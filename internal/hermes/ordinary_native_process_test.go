@@ -5,12 +5,52 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestOrdinaryRevokeDoesNotMarkNaturalExitWhenKillLoses(t *testing.T) {
+	for name, killErr := range map[string]error{
+		"already terminal": os.ErrProcessDone,
+		"kill failed":      errors.New("kill failed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			process := &ordinaryNativeProcess{
+				cmd:  &exec.Cmd{Process: &os.Process{Pid: 1}},
+				kill: func() error { return killErr },
+			}
+			err := process.Revoke(t.Context())
+			if errors.Is(killErr, os.ErrProcessDone) {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, killErr)
+			}
+			require.False(t, process.revoked)
+		})
+	}
+}
+
+func TestOrdinaryRevokeStartsKillForCanceledCaller(t *testing.T) {
+	kills := 0
+	process := &ordinaryNativeProcess{
+		cmd: &exec.Cmd{Process: &os.Process{Pid: 1}},
+		kill: func() error {
+			kills++
+
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	require.ErrorIs(t, process.Revoke(ctx), context.Canceled)
+	require.Equal(t, 1, kills)
+	require.True(t, process.revoked)
+}
 
 const ordinaryNativeHelperMode = "ACP_GO_HERMES_ORDINARY_NATIVE_HELPER"
 

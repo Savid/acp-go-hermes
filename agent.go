@@ -66,6 +66,9 @@ type Agent struct {
 	deleted            map[acp.SessionId]struct{}
 	deleteCleanup      map[acp.SessionId]deleteCleanupRecord
 	incompleteRoots    map[acp.SessionId]map[string]struct{}
+	retiredNativeRoots map[string]bool
+	retiredNativeRetry sync.Mutex
+	nativeAdmissionMu  sync.Mutex
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -123,6 +126,7 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:            make(map[acp.SessionId]struct{}),
 		deleteCleanup:      make(map[acp.SessionId]deleteCleanupRecord),
 		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
+		retiredNativeRoots: make(map[string]bool),
 		constructionCancel: make(map[uint64]context.CancelCauseFunc),
 		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
 		ambientEnv:         ambientEnvironment(),
@@ -246,6 +250,9 @@ func (a *Agent) close() error {
 
 		cancel()
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	err = errors.Join(err, a.retryRetiredNativeRoots(ctx))
+	cancel()
 	a.mu.Lock()
 	a.conn = nil
 	a.mu.Unlock()

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"reflect"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
+
+var retiredNativeRemoveAll = os.RemoveAll
 
 func hostAuthorityNil(authority HostAuthority) bool {
 	if authority == nil {
@@ -81,6 +84,8 @@ func (a *Agent) recordHostAuthorityError(err error) error {
 	}
 
 	a.mu.Lock()
+
+	firstUnavailable := authorityUnavailable && a.authorityErr == nil
 	if authorityUnavailable && a.authorityErr == nil {
 		a.authorityErr = err
 	}
@@ -88,15 +93,54 @@ func (a *Agent) recordHostAuthorityError(err error) error {
 	if a.containmentErr == nil {
 		a.containmentErr = err
 	}
+
+	sessions := make([]*session, 0, len(a.sessions))
+	if firstUnavailable {
+		for _, current := range a.sessions {
+			sessions = append(sessions, current)
+		}
+	}
 	a.mu.Unlock()
 
+	for _, current := range sessions {
+		current.closeLifecycleAdmission()
+		current.lifecycleStream().fence()
+	}
+
+	if len(sessions) != 0 {
+		go a.fenceAuthoritySessions(sessions)
+	}
+
 	return err
+}
+
+func (a *Agent) fenceAuthoritySessions(sessions []*session) {
+	for _, current := range sessions {
+		current.prepareClose()
+
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err := current.Close(ctx)
+
+		cancel()
+
+		a.recordIncompleteContainment(err, current.id, hermesServerRoot(current.client))
+	}
 }
 
 func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 	start.NativeEnvironment = cloneStringMap(a.nativeEnv)
 	if a.options.HostAuthority == nil {
 		return
+	}
+
+	start.RetainNativeTree = a.retainNativeTree
+	start.ContainmentIncomplete = ErrContainmentIncomplete
+	start.NativeTreeBusy = ErrNativeTreeBusy
+	start.NativeTreeSettled = func() {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		_ = a.retryRetiredNativeRoots(ctx)
+
+		cancel()
 	}
 
 	start.PrepareNativeTree = func(ctx context.Context, root string) (err error) {
@@ -115,26 +159,13 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 			return nil
 		}
 
-		return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
-	}
-	start.ReclaimNativeTree = func(ctx context.Context, root string) (err error) {
-		defer func() {
-			if recover() != nil {
-				err = a.recordHostAuthorityError(ErrHostAuthorityUnavailable)
-			}
-		}()
-
-		err = a.options.HostAuthority.ReclaimNativeTree(ctx, root)
 		if errors.Is(err, ErrNativeTreeBusy) {
 			return err
 		}
 
-		if err != nil {
-			return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
-		}
-
-		return nil
+		return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
 	}
+	start.ReclaimNativeTree = a.reclaimNativeTree
 	start.StartNative = func(ctx context.Context, request nativehermes.NativeRequest) (process nativehermes.NativeProcess, err error) {
 		if admissionErr := a.hostAuthorityAdmissionError(); admissionErr != nil {
 			return nil, admissionErr
@@ -161,6 +192,139 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 
 		return nativeProcessBridge{process: hostProcess, record: a.recordHostAuthorityError}, nil
 	}
+}
+
+func (a *Agent) reclaimNativeTree(ctx context.Context, root string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = a.recordHostAuthorityError(ErrHostAuthorityUnavailable)
+		}
+	}()
+
+	err = a.options.HostAuthority.ReclaimNativeTree(ctx, root)
+	if errors.Is(err, ErrNativeTreeBusy) {
+		return err
+	}
+
+	if err != nil {
+		return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
+	}
+
+	return nil
+}
+
+func (a *Agent) retainNativeTree(root string, err error) bool {
+	if root == "" || (err != nil && !errors.Is(err, ErrNativeTreeBusy)) {
+		return false
+	}
+
+	a.retiredNativeRetry.Lock()
+	defer a.retiredNativeRetry.Unlock()
+
+	a.mu.Lock()
+	pending, retained := a.retiredNativeRoots[root]
+	a.retiredNativeRoots[root] = err != nil || (retained && pending)
+	a.mu.Unlock()
+
+	return true
+}
+
+func (a *Agent) retryRetiredNativeRoots(ctx context.Context) error {
+	if a.options.HostAuthority == nil {
+		return nil
+	}
+
+	a.retiredNativeRetry.Lock()
+	defer a.retiredNativeRetry.Unlock()
+
+	a.mu.Lock()
+
+	type retainedRoot struct {
+		root           string
+		reclaimPending bool
+	}
+
+	roots := make([]retainedRoot, 0, len(a.retiredNativeRoots))
+	for root, reclaimPending := range a.retiredNativeRoots {
+		roots = append(roots, retainedRoot{root: root, reclaimPending: reclaimPending})
+	}
+	a.mu.Unlock()
+
+	var (
+		joined error
+		busy   bool
+	)
+
+	for _, retained := range roots {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(joined, err)
+		}
+
+		if retained.reclaimPending {
+			err := a.reclaimNativeTree(ctx, retained.root)
+			if errors.Is(err, ErrNativeTreeBusy) {
+				busy = true
+
+				continue
+			}
+
+			if err != nil {
+				joined = errors.Join(joined, err)
+
+				continue
+			}
+
+			a.mu.Lock()
+			a.retiredNativeRoots[retained.root] = false
+			a.mu.Unlock()
+		}
+
+		if err := retiredNativeRemoveAll(retained.root); err != nil {
+			joined = errors.Join(joined, err)
+
+			continue
+		}
+
+		a.mu.Lock()
+		delete(a.retiredNativeRoots, retained.root)
+		a.mu.Unlock()
+	}
+
+	if busy {
+		joined = errors.Join(joined, ErrNativeTreeBusy)
+	}
+
+	return joined
+}
+
+func (a *Agent) beginManagedNativeGeneration(ctx context.Context) (func(), error) {
+	if a.options.HostAuthority == nil {
+		return func() {}, nil
+	}
+
+	a.nativeAdmissionMu.Lock()
+
+	if err := a.hostAuthorityAdmissionError(); err != nil {
+		a.nativeAdmissionMu.Unlock()
+
+		return nil, err
+	}
+
+	if err := a.retryRetiredNativeRoots(ctx); err != nil {
+		a.nativeAdmissionMu.Unlock()
+
+		return nil, err
+	}
+
+	return a.nativeAdmissionMu.Unlock, nil
+}
+
+func (a *Agent) ownsRetiredNativeRoot(root string) bool {
+	a.mu.Lock()
+	_, retained := a.retiredNativeRoots[root]
+	a.mu.Unlock()
+
+	return retained
 }
 
 func nativeProcessNil(process NativeProcess) bool {
@@ -199,7 +363,12 @@ func (p nativeProcessBridge) Stdin() (stream io.WriteCloser) {
 		}
 	}()
 
-	return p.process.Stdin()
+	stream = p.process.Stdin()
+	if stream == nil {
+		_ = p.recordError(ErrHostAuthorityUnavailable)
+	}
+
+	return stream
 }
 
 func (p nativeProcessBridge) Stdout() (stream io.ReadCloser) {
@@ -210,7 +379,12 @@ func (p nativeProcessBridge) Stdout() (stream io.ReadCloser) {
 		}
 	}()
 
-	return p.process.Stdout()
+	stream = p.process.Stdout()
+	if stream == nil {
+		_ = p.recordError(ErrHostAuthorityUnavailable)
+	}
+
+	return stream
 }
 
 func (p nativeProcessBridge) Stderr() (stream io.ReadCloser) {
@@ -221,7 +395,12 @@ func (p nativeProcessBridge) Stderr() (stream io.ReadCloser) {
 		}
 	}()
 
-	return p.process.Stderr()
+	stream = p.process.Stderr()
+	if stream == nil {
+		_ = p.recordError(ErrHostAuthorityUnavailable)
+	}
+
+	return stream
 }
 
 func (p nativeProcessBridge) Wait(ctx context.Context) (result nativehermes.NativeResult, err error) {
@@ -254,5 +433,19 @@ func (p nativeProcessBridge) Revoke(ctx context.Context) (err error) {
 		}
 	}()
 
-	return p.process.Revoke(ctx)
+	err = p.process.Revoke(ctx)
+	if err == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) &&
+		!errors.Is(err, ErrHostAuthorityUnavailable) && !errors.Is(err, ErrContainmentIncomplete) {
+		return err
+	}
+
+	if errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrContainmentIncomplete) {
+		return p.recordError(err)
+	}
+
+	return err
 }

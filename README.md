@@ -127,9 +127,9 @@ in this mode; ordinary ACP sessions remain available.
   Embedded hosts can supply `WithHostAuthority` to route the version probe and
   session server through a host-owned process and filesystem boundary. The
   adapter materializes each native tree before preparing it, then reclaims it
-  before removal. The explicit shared-home mode remains an ordinary standalone
-  residence with separate processes, ports, tokens, browser shims, event
-  streams, environment, and wrapper control roots.
+  before snapshot reads or removal. The explicit shared-home mode remains an
+  ordinary standalone residence with separate processes, ports, tokens,
+  browser shims, event streams, environment, and wrapper control roots.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session

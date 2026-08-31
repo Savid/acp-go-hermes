@@ -2381,7 +2381,7 @@ func TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden(t *testing.T) {
 	require.False(t, live, "failed teardown left the session addressable")
 }
 
-func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
+func TestAgentDeletedCleanupBookkeeping(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
@@ -2392,8 +2392,7 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 			t.Fatalf("empty cleanup record was remembered: %#v", agent.deleteCleanup)
 		}
 		agent.forgetDeleteCleanupIfDone("")
-		// An id nothing is remembered for is nothing to forget, and its runtime
-		// root is not derivable from the id: only the remembered record names it.
+		// An id nothing is remembered for is nothing to forget.
 		agent.forgetDeleteCleanupIfDone("never-remembered")
 
 		xdg, err := testGenerationXDG(agent.options.ScratchDir)
@@ -2402,8 +2401,8 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 		}
 		agent.deleteCleanup["keep"] = deleteCleanupRecord{SessionID: "keep", XDGRoot: xdg.Root}
 		agent.forgetDeleteCleanupIfDone("keep")
-		if _, ok := agent.deleteCleanup["keep"]; !ok {
-			t.Fatal("cleanup metadata was forgotten while XDG root still existed")
+		if _, ok := agent.deleteCleanup["keep"]; ok {
+			t.Fatal("completed cleanup metadata was retained")
 		}
 
 		agent.deleteCleanup["gone"] = deleteCleanupRecord{SessionID: "gone", XDGRoot: filepath.Join(xdg.Root, "removed")}
@@ -2412,6 +2411,7 @@ func TestAgentDeletedCleanupHelperBranches(t *testing.T) {
 			t.Fatal("cleanup metadata survived a runtime root that is already gone")
 		}
 
+		agent.deleteCleanup["pending"] = deleteCleanupRecord{SessionID: "pending", XDGRoot: xdg.Root}
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
 		if err := agent.retryDeletedSessionCleanup(cancelled); err == nil {

@@ -91,6 +91,36 @@ func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 	require.Equal(t, []string{"prepare", "start", "reclaim"}, events)
 }
 
+func TestManagedVersionProbeBusyRetainsTreeAndFailsAdmission(t *testing.T) {
+	busy := errors.New("lease still has a live server")
+	var retained string
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(context.Context, string) error { return nil },
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return &probeTestProcess{
+				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+				stderr: io.NopCloser(strings.NewReader("")),
+			}, nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error { return busy },
+		NativeTreeBusy:    busy,
+		RetainNativeTree: func(root string, err error) bool {
+			if !errors.Is(err, busy) {
+				return false
+			}
+			retained = root
+
+			return true
+		},
+	}
+
+	require.ErrorIs(t, probeExecutableVersion(t.Context(), "hermes", opts), busy)
+	require.NotEmpty(t, retained)
+	_, err := os.Stat(retained)
+	require.NoError(t, err)
+}
+
 func TestVersionProbeRejectsUnusableAuthorityProcess(t *testing.T) {
 	var root string
 	reclaims := 0
@@ -324,7 +354,7 @@ func (p *retryWaitProcess) Wait(context.Context) (NativeResult, error) {
 	return p.result, err
 }
 
-func TestManagedProcessCloseRetriesBeforeReclaim(t *testing.T) {
+func TestManagedProcessCloseDoesNotRetryUncertainWait(t *testing.T) {
 	want := errors.New("wait uncertain")
 	root := t.TempDir()
 	reclaims := 0
@@ -342,6 +372,77 @@ func TestManagedProcessCloseRetriesBeforeReclaim(t *testing.T) {
 	require.Zero(t, reclaims)
 	_, err := os.Stat(root)
 	require.NoError(t, err)
+	require.ErrorIs(t, process.Close(t.Context()), want)
+	require.Zero(t, reclaims)
+}
+
+func TestManagedProcessCloseAcceptsTerminalWaitAfterRevokeError(t *testing.T) {
+	want := errors.New("revoke request failed")
+	root := t.TempDir()
+	reclaims := 0
+	process := &Process{
+		Home: root,
+		native: &probeTestProcess{
+			stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("")),
+			stderr: io.NopCloser(strings.NewReader("")), revoke: want,
+		},
+		managed: true, preparedHome: true,
+		reclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+
+	require.NoError(t, process.Close(t.Context()))
+	require.Equal(t, 1, reclaims)
+}
+
+type cachedTerminalProcess struct {
+	probeTestProcess
+	waitStarted chan struct{}
+	releaseWait chan struct{}
+	waitOnce    sync.Once
+}
+
+func (p *cachedTerminalProcess) Wait(context.Context) (NativeResult, error) {
+	p.waitOnce.Do(func() { close(p.waitStarted) })
+	<-p.releaseWait
+
+	return NativeResult{Revoked: true}, nil
+}
+
+func (p *cachedTerminalProcess) Revoke(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func TestManagedProcessCloseRetriesCanceledRevokeWithCachedTerminalWait(t *testing.T) {
+	root := t.TempDir()
+	native := &cachedTerminalProcess{
+		waitStarted: make(chan struct{}),
+		releaseWait: make(chan struct{}),
+	}
+	reclaims := 0
+	process := &Process{
+		Home: root, native: native, managed: true, preparedHome: true,
+		reclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+	}
+	process.beginWait()
+	<-native.waitStarted
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, process.Close(canceled), context.Canceled)
+	require.Zero(t, reclaims)
+	_, err := os.Stat(root)
+
+	require.NoError(t, err)
+
+	close(native.releaseWait)
 	require.NoError(t, process.Close(t.Context()))
 	require.Equal(t, 1, reclaims)
 }
