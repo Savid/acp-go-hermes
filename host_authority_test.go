@@ -388,6 +388,33 @@ func TestHostAuthorityWaitFailureMapsAndLatchesContainment(t *testing.T) {
 	require.ErrorIs(t, agent.containmentErr, ErrContainmentIncomplete)
 }
 
+func TestHostAuthorityWaitCancellationDetachesWithoutContainment(t *testing.T) {
+	authority := newTestHostAuthority()
+	process := &recordingNativeProcess{
+		stdin: recordingWriteCloser{}, stdout: io.NopCloser(strings.NewReader("")),
+		stderr: io.NopCloser(strings.NewReader("")), waitErr: context.Canceled,
+	}
+	authority.process = process
+	authority.start = nil
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	options := nativehermes.StartOptions{}
+	agent.configureHostAuthority(&options)
+	native, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+	require.NoError(t, err)
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	_, err = native.Wait(waitCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.NoError(t, agent.containmentErr)
+
+	process.waitErr = nil
+	_, err = native.Wait(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, agent.containmentErr)
+}
+
 func TestHostAuthorityStdioPanicFailsClosed(t *testing.T) {
 	authority := newTestHostAuthority()
 	authority.process = &panickingStdioProcess{recordingNativeProcess: &recordingNativeProcess{}}
@@ -453,4 +480,38 @@ func TestManagedHermesServerRetriesContainmentBeforeRemoval(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 	require.NoError(t, server.Close(t.Context()))
 	require.Equal(t, 2, attempts)
+}
+
+func TestManagedHermesServerRetriesBusyReclaimBeforeRemoval(t *testing.T) {
+	root := t.TempDir()
+	authority := newTestHostAuthority()
+	reclaims := 0
+	authority.reclaimHook = func(string) error {
+		reclaims++
+		if reclaims == 1 {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	options := nativehermes.StartOptions{}
+	agent.configureHostAuthority(&options)
+	client := newFakeHermesClient()
+	client.closeFunc = func(ctx context.Context) error {
+		return options.ReclaimNativeTree(ctx, root)
+	}
+	server := &managedHermesServer{Server: client, root: root, sessionID: "session"}
+
+	err := server.Close(t.Context())
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.NoError(t, agent.containmentErr)
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr, "busy reclaim must retain the root")
+
+	require.NoError(t, server.Close(t.Context()))
+	require.Equal(t, 2, reclaims)
+	_, statErr = os.Stat(root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }

@@ -125,13 +125,15 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 		}()
 
 		err = a.options.HostAuthority.ReclaimNativeTree(ctx, root)
-
-		err = a.recordHostAuthorityError(err)
-		if err != nil {
-			err = a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
+		if errors.Is(err, ErrNativeTreeBusy) {
+			return err
 		}
 
-		return err
+		if err != nil {
+			return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
+		}
+
+		return nil
 	}
 	start.StartNative = func(ctx context.Context, request nativehermes.NativeRequest) (process nativehermes.NativeProcess, err error) {
 		if admissionErr := a.hostAuthorityAdmissionError(); admissionErr != nil {
@@ -232,6 +234,13 @@ func (p nativeProcessBridge) Wait(ctx context.Context) (result nativehermes.Nati
 
 	hostResult, err := p.process.Wait(ctx)
 	if err != nil {
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) &&
+			!errors.Is(err, ErrHostAuthorityUnavailable) && !errors.Is(err, ErrContainmentIncomplete) {
+			return nativehermes.NativeResult{
+				ExitCode: hostResult.ExitCode, Signal: hostResult.Signal, Revoked: hostResult.Revoked,
+			}, err
+		}
+
 		err = p.recordError(errors.Join(err, ErrContainmentIncomplete))
 	}
 

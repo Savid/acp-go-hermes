@@ -81,6 +81,10 @@ func (s *managedHermesServer) Close(ctx context.Context) error {
 	var closeErr error
 	if !s.settled {
 		closeErr = s.Server.Close(ctx)
+		if errors.Is(closeErr, ErrNativeTreeBusy) {
+			return closeErr
+		}
+
 		if errors.Is(closeErr, ErrContainmentIncomplete) || errors.Is(closeErr, ErrHostAuthorityUnavailable) {
 			if s.retainIncomplete != nil {
 				s.retainIncomplete(closeErr, s.sessionID, s.root)
