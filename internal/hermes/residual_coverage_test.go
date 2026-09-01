@@ -413,8 +413,8 @@ func TestResidualOrdinaryEnvironmentStartFailures(t *testing.T) {
 		ScratchParent:      t.TempDir(),
 		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")},
 		SessionEnv:         map[string]string{"TOKEN": "one", "token": "two"},
-		Timeout:            time.Second,
-	}); err == nil || process != nil {
+		Timeout:            10 * time.Second,
+	}); err == nil || process != nil || !strings.Contains(err.Error(), "names TOKEN twice") {
 		t.Fatalf("duplicate session environment start = %#v, %v", process, err)
 	}
 }
@@ -954,9 +954,18 @@ func TestResidualOrdinaryProcessStartupFailures(t *testing.T) {
 
 	for _, mode := range []string{fakeProcessModeStatusOnly, fakeProcessModeNoGatewayReady} {
 		t.Run(mode, func(t *testing.T) {
+			executable := fakeHermesExecutable(t, mode)
+			executableProbeMu.Lock()
+			executableProbed[executable] = true
+			executableProbeMu.Unlock()
+			t.Cleanup(func() {
+				executableProbeMu.Lock()
+				delete(executableProbed, executable)
+				executableProbeMu.Unlock()
+			})
 			if _, err := Start(t.Context(), ProcessOptions{
-				ExecutablePath: fakeHermesExecutable(t, mode), ScratchParent: t.TempDir(),
-				AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: 100 * time.Millisecond,
+				ExecutablePath: executable, ScratchParent: t.TempDir(),
+				AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: 2 * time.Second,
 			}); err == nil {
 				t.Fatal("incomplete gateway startup was accepted")
 			}
