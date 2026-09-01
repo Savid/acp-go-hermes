@@ -151,6 +151,9 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 		envRunIntegration + "=1",
 		envAgentBinary + "=" + nativeBrowserAdapterPath,
 		envHermesPath + "=" + nativeBrowserHermesPath,
+		"/usr/bin/timeout",
+		"--kill-after=10s",
+		"180s",
 		"/usr/bin/strace",
 		"-f",
 		"-qq",
@@ -193,6 +196,7 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 func runNativeHermesProviderAuthCanary(t *testing.T) {
 	t.Helper()
 
+	t.Log("native browser phase: version")
 	versionOutput, err := exec.CommandContext(t.Context(), nativeBrowserHermesPath, "--version").CombinedOutput()
 	if err != nil {
 		t.Fatalf("run pinned Hermes version: %v: %s", err, versionOutput)
@@ -214,6 +218,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
+	t.Log("native browser phase: start adapter")
 	agent := startLiveAgent(t, ctx, root,
 		"-provider-auth-root", ledgerRoot,
 		"-shared-hermes-home", sharedHome,
@@ -221,6 +226,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	defer agent.close()
 
 	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
+	t.Log("native browser phase: initialize")
 	initialized, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		t.Fatalf("initialize production adapter: %v\nstderr:\n%s", err, agent.stderrString())
@@ -230,12 +236,14 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("provider auth capability absent: %#v\nstderr:\n%s", hermesMeta, agent.stderrString())
 	}
 
+	t.Log("native browser phase: new session")
 	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("new production Hermes session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 
 	var methods authMethodsWire
+	t.Log("native browser phase: methods")
 	if callErr := callAuthLeg(t, ctx, conn, hermesacp.AuthMethodsMethod, map[string]any{
 		"sessionId": string(session.SessionId),
 	}, &methods); callErr != nil {
@@ -255,6 +263,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	}
 
 	var authorization authAuthorizeWire
+	t.Log("native browser phase: authorize")
 	err = callAuthLeg(t, ctx, conn, hermesacp.AuthAuthorizeMethod, map[string]any{
 		"sessionId":          string(session.SessionId),
 		"providerId":         "anthropic",
@@ -270,6 +279,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("native authorization presentation = %#v", authorization)
 	}
 
+	t.Log("native browser phase: cancel")
 	if callErr := callAuthLeg(t, ctx, conn, hermesacp.AuthCancelMethod, map[string]any{
 		"sessionId":  string(session.SessionId),
 		"providerId": "anthropic",
