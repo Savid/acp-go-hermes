@@ -1,0 +1,519 @@
+package hermesacp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/coder/acp-go-sdk"
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+)
+
+func TestManagedHermesServerOptionalSurfaces(t *testing.T) {
+	const storedSessionID = "stored"
+
+	unsupported := &managedHermesServer{Server: struct{ nativehermes.Server }{}}
+	if _, err := unsupported.CreateSessionWithDraft(t.Context(), "title", func(nativehermes.SessionDraft) error { return nil }); err == nil {
+		t.Fatal("unsupported draft creation succeeded")
+	}
+	if _, err := unsupported.PersistedSessions(t.Context()); err == nil {
+		t.Fatal("unsupported persisted inventory succeeded")
+	}
+	if _, err := unsupported.ForkWithBaseline(t.Context(), "id", "marker", nil); err == nil {
+		t.Fatal("unsupported recoverable fork succeeded")
+	}
+	if err := unsupported.SetModel(t.Context(), "id", "provider/model"); err == nil {
+		t.Fatal("unsupported model selection succeeded")
+	}
+	if unsupported.ProviderAuthSupported() {
+		t.Fatal("unsupported provider auth was advertised")
+	}
+
+	client := newFakeHermesClient()
+	client.createSession = nativehermes.Session{ID: storedSessionID}
+	client.persistedSessions = []nativehermes.Session{{ID: storedSessionID}}
+	client.forkSession = nativehermes.Session{ID: "forked"}
+	supported := &managedHermesServer{Server: client}
+	created, err := supported.CreateSessionWithDraft(t.Context(), "title", func(draft nativehermes.SessionDraft) error {
+		if draft.StoredSessionID != storedSessionID {
+			t.Fatalf("draft = %#v", draft)
+		}
+
+		return nil
+	})
+	if err != nil || created.ID != storedSessionID {
+		t.Fatalf("draft creation = %#v, %v", created, err)
+	}
+	listed, err := supported.PersistedSessions(t.Context())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("persisted sessions = %#v, %v", listed, err)
+	}
+	forked, err := supported.ForkWithBaseline(t.Context(), storedSessionID, "marker", nil)
+	if err != nil || forked.ID != "forked" {
+		t.Fatalf("recoverable fork = %#v, %v", forked, err)
+	}
+	if err := supported.SetModel(t.Context(), storedSessionID, "provider/model"); err != nil {
+		t.Fatal(err)
+	}
+	if !supported.ProviderAuthSupported() {
+		t.Fatal("supported provider auth was hidden")
+	}
+}
+
+func TestManagedHermesServerSnapshotResidualBranches(t *testing.T) {
+	if _, err := (&managedHermesServer{}).reclaimForSnapshot(t.Context()); err == nil {
+		t.Fatal("unmanaged snapshot reclaim succeeded")
+	}
+	if _, err := (&managedHermesServer{managed: true, closed: true}).reclaimForSnapshot(t.Context()); err == nil {
+		t.Fatal("closed snapshot reclaim succeeded")
+	}
+	settled := &managedHermesServer{managed: true, settled: true, root: "/settled"}
+	if root, err := settled.reclaimForSnapshot(t.Context()); err != nil || root != "/settled" {
+		t.Fatalf("settled snapshot reclaim = %q, %v", root, err)
+	}
+
+	retained := 0
+	client := newFakeHermesClient()
+	client.closeErr = ErrContainmentIncomplete
+	server := &managedHermesServer{
+		Server: client, managed: true, root: t.TempDir(), sessionID: "session",
+		retainIncomplete: func(error, acp.SessionId, string) { retained++ },
+	}
+	if _, err := server.reclaimForSnapshot(t.Context()); !errors.Is(err, ErrContainmentIncomplete) || retained != 1 {
+		t.Fatalf("failed snapshot reclaim = %v, retained=%d", err, retained)
+	}
+
+	if err := (&managedHermesServer{}).finishReclaimedSnapshot(); err == nil {
+		t.Fatal("unreclaimed snapshot finished")
+	}
+	wantClosed := errors.New("closed snapshot")
+	if err := (&managedHermesServer{closed: true, closeErr: wantClosed}).finishReclaimedSnapshot(); !errors.Is(err, wantClosed) {
+		t.Fatalf("closed snapshot finish = %v", err)
+	}
+
+	originalRemoveAll := managedRemoveAll
+	t.Cleanup(func() { managedRemoveAll = originalRemoveAll })
+	managedRemoveAll = func(string) error { return errors.New("scratch remove refused") }
+	if err := (&managedHermesServer{settled: true, root: t.TempDir()}).finishReclaimedSnapshot(); err == nil {
+		t.Fatal("snapshot cleanup failure was ignored")
+	}
+	if err := (&managedHermesServer{Server: newFakeHermesClient(), settled: true, root: t.TempDir()}).Close(t.Context()); err == nil {
+		t.Fatal("close cleanup failure was ignored")
+	}
+	managedRemoveAll = originalRemoveAll
+}
+
+func TestManagedHermesServerSnapshotOwnerResidualBranches(t *testing.T) {
+	successOwner, err := nativehermes.AcquireSharedNativeSessionOwner(t.TempDir(), "success")
+	if err != nil {
+		t.Fatal(err)
+	}
+	success := &managedHermesServer{
+		Server: newFakeHermesClient(), managed: true, root: t.TempDir(), nativeSessionOwner: successOwner,
+	}
+	if _, reclaimErr := success.reclaimForSnapshot(t.Context()); reclaimErr != nil || !success.ownerReleased {
+		t.Fatalf("successful owner reclaim = %v, released=%v", reclaimErr, success.ownerReleased)
+	}
+
+	home := t.TempDir()
+	failingOwner, err := nativehermes.AcquireSharedNativeSessionOwner(home, "failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := nativehermes.SharedHermesAdapterControlDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(control); err != nil {
+		t.Fatal(err)
+	}
+	failing := &managedHermesServer{
+		Server: newFakeHermesClient(), managed: true, root: t.TempDir(), nativeSessionOwner: failingOwner,
+	}
+	if _, err := failing.reclaimForSnapshot(t.Context()); err == nil || failing.ownerReleased {
+		t.Fatalf("failed owner reclaim = %v, released=%v", err, failing.ownerReleased)
+	}
+}
+
+func TestManagedHermesOwnershipAndScratchResidualBranches(t *testing.T) {
+	agent := NewAgent()
+	agent.retainIncompleteHermesRoot("session", "/retained")
+	if err := agent.rejectIncompleteHermesSession("session"); !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("retained session rejection = %v", err)
+	}
+	if root := hermesServerRoot(nil); root != "" {
+		t.Fatalf("nil server root = %q", root)
+	}
+
+	home := t.TempDir()
+	shared := NewAgent(WithSharedHermesHome(home))
+	if shared.optionsErr != nil {
+		t.Fatal(shared.optionsErr)
+	}
+	if err := shared.claimSharedNativeSession(newFakeHermesClient(), "native"); err == nil || !strings.Contains(err.Error(), "requires a managed server") {
+		t.Fatalf("non-managed native claim = %v", err)
+	}
+
+	released := false
+	if err := deleteHermesScratchRoot("", func() { released = true }); err != nil || released {
+		t.Fatalf("empty scratch deletion = %v, released=%v", err, released)
+	}
+	originalRemoveAll := managedRemoveAll
+	t.Cleanup(func() { managedRemoveAll = originalRemoveAll })
+	managedRemoveAll = func(string) error { return errors.New("remove refused") }
+	if err := deleteHermesScratchRoot(t.TempDir(), func() { released = true }); err == nil || released {
+		t.Fatalf("failed scratch deletion = %v, released=%v", err, released)
+	}
+}
+
+func TestStrictStoreDecoderResidualBranches(t *testing.T) {
+	var destination struct{}
+	if err := decodeStrictStoreJSON([]byte(`1`), &destination, nil); err == nil {
+		t.Fatal("typed store decode mismatch was accepted")
+	}
+	decoder := json.NewDecoder(strings.NewReader(""))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("empty strict JSON value was accepted")
+	}
+	decoder = json.NewDecoder(strings.NewReader(`[{"x":`))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("truncated strict JSON array was accepted")
+	}
+}
+
+func TestSharedHomeHostAuthorityValidationResidualBranch(t *testing.T) {
+	options := Options{}
+	options.SharedHermesHome = filepath.Clean(t.TempDir())
+	options.HostAuthority = newTestHostAuthority()
+	if err := validateSharedHermesHomeOptions(options); err == nil {
+		t.Fatal("shared home accepted host authority")
+	}
+}
+
+func TestHostAuthorityValidationAndEnvironmentResidualBranches(t *testing.T) {
+	if hostAuthorityNil(residualValueAuthority{}) {
+		t.Fatal("value authority was classified as nil")
+	}
+	if _, err := readHostEnvironment(nil); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		t.Fatalf("nil authority environment = %v", err)
+	}
+	if _, err := readHostEnvironment(&residualAuthority{environment: func() map[string]string {
+		panic("environment unavailable")
+	}}); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		t.Fatalf("panicked authority environment = %v", err)
+	}
+	if _, err := readHostEnvironment(&residualAuthority{environment: func() map[string]string { return nil }}); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		t.Fatalf("nil authority environment result = %v", err)
+	}
+	if err := validateHostAuthority(Options{
+		hostAuthoritySupplied: true, HostAuthority: residualValueAuthority{}, SharedHermesHome: t.TempDir(),
+	}); err == nil {
+		t.Fatal("shared residence accepted a value host authority")
+	}
+}
+
+func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
+	newConfigured := func(t *testing.T) (*Agent, *residualAuthority, nativehermes.StartOptions) {
+		t.Helper()
+		authority := &residualAuthority{}
+		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+		if agent.optionsErr != nil {
+			t.Fatal(agent.optionsErr)
+		}
+		start := nativehermes.StartOptions{}
+		agent.configureHostAuthority(&start)
+
+		return agent, authority, start
+	}
+
+	t.Run("prepare admission", func(t *testing.T) {
+		agent, _, start := newConfigured(t)
+		agent.authorityErr = ErrHostAuthorityUnavailable
+		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("prepare admission = %v", err)
+		}
+	})
+	t.Run("prepare panic", func(t *testing.T) {
+		_, authority, start := newConfigured(t)
+		authority.prepare = func(context.Context, string) error { panic("prepare unavailable") }
+		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("prepare panic = %v", err)
+		}
+	})
+	t.Run("prepare busy", func(t *testing.T) {
+		_, authority, start := newConfigured(t)
+		authority.prepare = func(context.Context, string) error { return ErrNativeTreeBusy }
+		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrNativeTreeBusy) {
+			t.Fatalf("prepare busy = %v", err)
+		}
+	})
+	t.Run("start admission", func(t *testing.T) {
+		agent, _, start := newConfigured(t)
+		agent.authorityErr = ErrHostAuthorityUnavailable
+		if _, err := start.StartNative(t.Context(), nativehermes.NativeRequest{}); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("start admission = %v", err)
+		}
+	})
+	t.Run("start panic", func(t *testing.T) {
+		_, authority, start := newConfigured(t)
+		authority.start = func(context.Context, NativeRequest) (NativeProcess, error) { panic("start unavailable") }
+		if _, err := start.StartNative(t.Context(), nativehermes.NativeRequest{}); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("start panic = %v", err)
+		}
+	})
+	t.Run("start nil process", func(t *testing.T) {
+		_, authority, start := newConfigured(t)
+		authority.start = func(context.Context, NativeRequest) (NativeProcess, error) {
+			return nilResidualNativeProcess(), nil
+		}
+		if _, err := start.StartNative(t.Context(), nativehermes.NativeRequest{}); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("nil start process = %v", err)
+		}
+	})
+	t.Run("reclaim panic", func(t *testing.T) {
+		agent, authority, _ := newConfigured(t)
+		authority.reclaim = func(context.Context, string) error { panic("reclaim unavailable") }
+		if err := agent.reclaimNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+			t.Fatalf("reclaim panic = %v", err)
+		}
+	})
+	t.Run("reclaim failure", func(t *testing.T) {
+		agent, authority, _ := newConfigured(t)
+		want := errors.New("reclaim refused")
+		authority.reclaim = func(context.Context, string) error { return want }
+		if err := agent.reclaimNativeTree(t.Context(), t.TempDir()); !errors.Is(err, want) || !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("reclaim failure = %v", err)
+		}
+	})
+}
+
+func TestRetiredNativeRootRetryResidualBranches(t *testing.T) {
+	authority := &residualAuthority{}
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	root := t.TempDir()
+	agent.retiredNativeRoots[root] = true
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := agent.retryRetiredNativeRoots(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled retry = %v", err)
+	}
+
+	want := errors.New("reclaim refused")
+	authority.reclaim = func(context.Context, string) error { return want }
+	if err := agent.retryRetiredNativeRoots(t.Context()); !errors.Is(err, want) || !errors.Is(err, ErrContainmentIncomplete) {
+		t.Fatalf("failed retry = %v", err)
+	}
+}
+
+func TestNativeProcessBridgeResidualBranches(t *testing.T) {
+	if nativeProcessNil(residualValueNativeProcess{}) {
+		t.Fatal("value process was classified as nil")
+	}
+	want := errors.New("native failure")
+	assertRecorded := func(t *testing.T, invoke func(*residualNativeProcess, nativeProcessBridge) error) {
+		t.Helper()
+		var recorded error
+		process := &residualNativeProcess{}
+		bridge := nativeProcessBridge{
+			process: process,
+			record: func(err error) error {
+				recorded = err
+
+				return err
+			},
+		}
+		if err := invoke(process, bridge); err == nil || recorded == nil {
+			t.Fatalf("bridge result = %v, recorded=%v", err, recorded)
+		}
+	}
+
+	if err := (nativeProcessBridge{}).recordError(want); !errors.Is(err, want) {
+		t.Fatalf("nil recorder = %v", err)
+	}
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.stdout = func() io.ReadCloser { panic("stdout unavailable") }
+		if stream := bridge.Stdout(); stream != nil {
+			t.Fatal("panicked stdout returned a stream")
+		}
+
+		return ErrHostAuthorityUnavailable
+	})
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.stdout = func() io.ReadCloser { return nil }
+		if stream := bridge.Stdout(); stream != nil {
+			t.Fatal("nil stdout returned a stream")
+		}
+
+		return ErrHostAuthorityUnavailable
+	})
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.stderr = func() io.ReadCloser { panic("stderr unavailable") }
+		if stream := bridge.Stderr(); stream != nil {
+			t.Fatal("panicked stderr returned a stream")
+		}
+
+		return ErrHostAuthorityUnavailable
+	})
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.stderr = func() io.ReadCloser { return nil }
+		if stream := bridge.Stderr(); stream != nil {
+			t.Fatal("nil stderr returned a stream")
+		}
+
+		return ErrHostAuthorityUnavailable
+	})
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.wait = func(context.Context) (NativeResult, error) { panic("wait unavailable") }
+		_, err := bridge.Wait(t.Context())
+
+		return err
+	})
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.wait = func(context.Context) (NativeResult, error) { return NativeResult{}, want }
+		_, err := bridge.Wait(t.Context())
+
+		return err
+	})
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	cancelBridge := nativeProcessBridge{process: &residualNativeProcess{
+		wait: func(context.Context) (NativeResult, error) { return NativeResult{ExitCode: 7}, context.Canceled },
+	}}
+	if result, err := cancelBridge.Wait(canceled); !errors.Is(err, context.Canceled) || result.ExitCode != 7 {
+		t.Fatalf("canceled wait = %#v, %v", result, err)
+	}
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.revoke = func(context.Context) error { panic("revoke unavailable") }
+
+		return bridge.Revoke(t.Context())
+	})
+	cancelBridge.process = &residualNativeProcess{revoke: func(context.Context) error { return context.Canceled }}
+	if err := cancelBridge.Revoke(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled revoke = %v", err)
+	}
+	assertRecorded(t, func(process *residualNativeProcess, bridge nativeProcessBridge) error {
+		process.revoke = func(context.Context) error { return ErrContainmentIncomplete }
+
+		return bridge.Revoke(t.Context())
+	})
+	genericBridge := nativeProcessBridge{process: &residualNativeProcess{revoke: func(context.Context) error { return want }}}
+	if err := genericBridge.Revoke(t.Context()); !errors.Is(err, want) {
+		t.Fatalf("generic revoke = %v", err)
+	}
+}
+
+type residualValueAuthority struct{}
+
+func (residualValueAuthority) NativeEnvironment() map[string]string {
+	return map[string]string{"PATH": "/bin"}
+}
+func (residualValueAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (residualValueAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
+func (residualValueAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
+	return residualValueNativeProcess{}, nil
+}
+
+type residualValueNativeProcess struct{}
+
+func (residualValueNativeProcess) Stdin() io.WriteCloser { return nopWriteCloser{Writer: io.Discard} }
+func (residualValueNativeProcess) Stdout() io.ReadCloser { return io.NopCloser(strings.NewReader("")) }
+func (residualValueNativeProcess) Stderr() io.ReadCloser { return io.NopCloser(strings.NewReader("")) }
+func (residualValueNativeProcess) Wait(context.Context) (NativeResult, error) {
+	return NativeResult{}, nil
+}
+func (residualValueNativeProcess) Revoke(context.Context) error { return nil }
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+func nilResidualNativeProcess() NativeProcess {
+	var process *residualNativeProcess
+
+	return process
+}
+
+type residualAuthority struct {
+	environment func() map[string]string
+	prepare     func(context.Context, string) error
+	reclaim     func(context.Context, string) error
+	start       func(context.Context, NativeRequest) (NativeProcess, error)
+}
+
+func (a *residualAuthority) NativeEnvironment() map[string]string {
+	if a.environment != nil {
+		return a.environment()
+	}
+
+	return map[string]string{"PATH": "/bin"}
+}
+func (a *residualAuthority) PrepareNativeTree(ctx context.Context, root string) error {
+	if a.prepare != nil {
+		return a.prepare(ctx, root)
+	}
+
+	return nil
+}
+func (a *residualAuthority) ReclaimNativeTree(ctx context.Context, root string) error {
+	if a.reclaim != nil {
+		return a.reclaim(ctx, root)
+	}
+
+	return nil
+}
+func (a *residualAuthority) StartNative(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+	if a.start != nil {
+		return a.start(ctx, request)
+	}
+
+	return residualValueNativeProcess{}, nil
+}
+
+type residualNativeProcess struct {
+	stdin  func() io.WriteCloser
+	stdout func() io.ReadCloser
+	stderr func() io.ReadCloser
+	wait   func(context.Context) (NativeResult, error)
+	revoke func(context.Context) error
+}
+
+func (p *residualNativeProcess) Stdin() io.WriteCloser {
+	if p.stdin != nil {
+		return p.stdin()
+	}
+
+	return nopWriteCloser{Writer: io.Discard}
+}
+func (p *residualNativeProcess) Stdout() io.ReadCloser {
+	if p.stdout != nil {
+		return p.stdout()
+	}
+
+	return io.NopCloser(strings.NewReader(""))
+}
+func (p *residualNativeProcess) Stderr() io.ReadCloser {
+	if p.stderr != nil {
+		return p.stderr()
+	}
+
+	return io.NopCloser(strings.NewReader(""))
+}
+func (p *residualNativeProcess) Wait(ctx context.Context) (NativeResult, error) {
+	if p.wait != nil {
+		return p.wait(ctx)
+	}
+
+	return NativeResult{}, nil
+}
+func (p *residualNativeProcess) Revoke(ctx context.Context) error {
+	if p.revoke != nil {
+		return p.revoke(ctx)
+	}
+
+	return nil
+}
