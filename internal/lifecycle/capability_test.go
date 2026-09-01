@@ -39,7 +39,7 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 			t.Parallel()
 
 			var value Negotiated
-			require.Error(t, value.UnmarshalJSON([]byte(test.data)))
+			require.Error(t, json.Unmarshal([]byte(test.data), &value))
 		})
 	}
 }

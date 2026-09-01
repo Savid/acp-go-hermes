@@ -3942,3 +3942,236 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		require.ErrorIs(t, err, ErrContainmentIncomplete)
 	})
 }
+
+func TestSessionCleanupRetryEntryResidualBranches(t *testing.T) {
+	newAgentWithBadCleanup := func() *Agent {
+		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
+		agent.deleteCleanup["bad"] = deleteCleanupRecord{SessionID: "bad", XDGRoot: string([]byte{0})}
+
+		return agent
+	}
+	loadAgent := newAgentWithBadCleanup()
+	if _, err := loadAgent.LoadSession(t.Context(), LoadSessionRequest("missing", t.TempDir())); err == nil {
+		t.Fatal("missing load unexpectedly succeeded")
+	}
+	deleteAgent := newAgentWithBadCleanup()
+	if _, err := deleteAgent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("missing")); err != nil {
+		t.Fatalf("delete after cleanup retry = %v", err)
+	}
+}
+
+func TestRuntimeResumeEarlyResidualBranches(t *testing.T) {
+	t.Run("managed finish", func(t *testing.T) {
+		want := errors.New("managed finish refused")
+		managed := &managedHermesServer{managed: true, closed: true, closeErr: want}
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		session.client = managed
+		session.runtimeNeedsResume = true
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
+			t.Fatalf("managed finish = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		session := testSession(newTestAgent(WithScratchDir(t.TempDir())), newFakeHermesClient())
+		session.runtimeNeedsResume = true
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
+			t.Fatalf("resume generation creation = %v", err)
+		}
+	})
+}
+
+func TestActiveRebindAndComparisonResidualBranches(t *testing.T) {
+	want := errors.New("close refused")
+	agent := newTestAgent()
+	failingClient := newFakeHermesClient()
+	failingClient.closeErr = want
+	failing := testSession(agent, failingClient)
+	if err := agent.closeActiveSessionForRebind(t.Context(), failing.id, failing, func() {}); !errors.Is(err, want) {
+		t.Fatalf("failed active rebind close = %v", err)
+	}
+
+	missing := testSession(agent, newFakeHermesClient())
+	if err := agent.closeActiveSessionForRebind(t.Context(), missing.id, missing, func() {}); err == nil {
+		t.Fatal("missing active rebind close succeeded")
+	}
+	if stringMapsEqual(map[string]string{"left": "one"}, map[string]string{}) {
+		t.Fatal("different-length maps compared equal")
+	}
+}
+
+func TestNewHermesClientResidualBranches(t *testing.T) {
+	t.Run("incomplete residence", func(t *testing.T) {
+		agent := newTestAgent()
+		agent.retainIncompleteHermesRoot("session", t.TempDir())
+		if _, err := agent.newHermesClient(t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}); !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("incomplete residence = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
+		if _, err := agent.newHermesClient(t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}); !errors.Is(err, want) {
+			t.Fatalf("client generation creation = %v", err)
+		}
+	})
+
+	t.Run("scratch parent", func(t *testing.T) {
+		blocked := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(blocked, []byte("blocked"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		agent := newTestAgent(WithScratchDir(blocked))
+		if _, err := agent.newHermesClientWithScratch(
+			t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
+		); err == nil {
+			t.Fatal("client accepted unusable scratch parent")
+		}
+	})
+
+	t.Run("retention bridge", func(t *testing.T) {
+		authority := &residualAuthority{}
+		agent := newTestAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+		firstRoot := filepath.Join(t.TempDir(), "incomplete")
+		secondRoot := filepath.Join(t.TempDir(), "busy")
+		agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			if !start.RetainNativeTree(firstRoot, ErrContainmentIncomplete) {
+				t.Fatal("containment-incomplete root was not retained")
+			}
+			if !start.RetainNativeTree(secondRoot, ErrNativeTreeBusy) {
+				t.Fatal("busy root was not retained")
+			}
+
+			return newFakeHermesClient(), nil
+		}
+		client, err := agent.newHermesClientWithScratch(
+			t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{Root: t.TempDir()}, func() {},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestLoadSessionResidualBranches(t *testing.T) {
+	t.Run("incomplete residence", func(t *testing.T) {
+		agent := newTestAgent()
+		agent.retainIncompleteHermesRoot("missing", t.TempDir())
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("missing", t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("incomplete load residence = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("load generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("missing", t.TempDir())); !errors.Is(err, want) {
+			t.Fatalf("load generation creation = %v", err)
+		}
+	})
+
+	t.Run("active rebind close", func(t *testing.T) {
+		want := errors.New("rebind close refused")
+		client := newFakeHermesClient()
+		client.closeErr = want
+		agent := newTestAgent()
+		session := testSession(agent, client)
+		if err := agent.storeStartedSession(session); err != nil {
+			t.Fatal(err)
+		}
+		request := LoadSessionRequest(session.id, session.cwd, WithSessionHermesOptions(HermesOptions{
+			Env: map[string]string{"REBIND": "true"},
+		}))
+		if _, err := agent.LoadSession(t.Context(), request); !errors.Is(err, want) {
+			t.Fatalf("active rebind close = %v", err)
+		}
+	})
+}
+
+func TestForkEarlyResidualBranches(t *testing.T) {
+	newForkAgent := func(t *testing.T) (*Agent, *session) {
+		t.Helper()
+		agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+		parent := testSession(agent, newFakeHermesClient())
+		parent.id = "parent"
+		parent.idmap.SessionID = "parent"
+		agent.sessions[parent.id] = parent
+
+		return agent, parent
+	}
+
+	t.Run("generated incomplete residence", func(t *testing.T) {
+		agent, parent := newForkAgent(t)
+		originalReader := sessionIDRandReader
+		t.Cleanup(func() { sessionIDRandReader = originalReader })
+		sessionIDRandReader = strings.NewReader(strings.Repeat("\x00", 16))
+		generated := acp.SessionId("00000000-0000-4000-8000-000000000000")
+		agent.retainIncompleteHermesRoot(generated, t.TempDir())
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("generated incomplete fork residence = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		agent, parent := newForkAgent(t)
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("fork generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, want) {
+			t.Fatalf("fork generation creation = %v", err)
+		}
+	})
+
+	t.Run("parent resume", func(t *testing.T) {
+		agent, parent := newForkAgent(t)
+		want := errors.New("parent resume refused")
+		parent.runtimeNeedsResume = true
+		parent.runtimeResumeErr = want
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil || !strings.Contains(err.Error(), want.Error()) {
+			t.Fatalf("fork parent resume = %v", err)
+		}
+	})
+
+	t.Run("child lookup containment", func(t *testing.T) {
+		agent, parent := newForkAgent(t)
+		parentClient, ok := parent.client.(*fakeHermesClient)
+		if !ok {
+			t.Fatalf("parent client = %T", parent.client)
+		}
+		parentClient.forkSession = testNativeSession("native-child")
+		child := newFakeHermesClient()
+		child.getErr = errors.New("child lookup refused")
+		child.closeErr = ErrContainmentIncomplete
+		agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			child.xdg = start.ExistingXDG
+
+			return child, nil
+		}
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("fork child lookup containment = %v", err)
+		}
+	})
+}

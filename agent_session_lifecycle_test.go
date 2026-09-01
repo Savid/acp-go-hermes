@@ -364,3 +364,29 @@ func lifecycleMetricSum(metrics metricdata.ResourceMetrics, name string) int64 {
 
 	return sum
 }
+
+func TestAgentAndSessionLifecycleAdmissionResidualBranches(t *testing.T) {
+	closed := newTestAgent()
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := closed.beginActiveReuse(t.Context(), "session"); err == nil {
+		t.Fatal("closed agent admitted active reuse")
+	}
+	if _, _, err := closed.acquireSessionLifecycle(t.Context(), "session"); err == nil {
+		t.Fatal("closed agent admitted session lifecycle")
+	}
+	if _, err := closed.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session"}); err == nil {
+		t.Fatal("closed agent admitted session close")
+	}
+
+	agent := newTestAgent()
+	session := testSession(agent, newFakeHermesClient())
+	agent.sessions[session.id] = session
+	if err := agent.cleanupFailedStartedSession(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if agent.activeSession(session.id) != nil {
+		t.Fatal("failed started session remained active")
+	}
+}

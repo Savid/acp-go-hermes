@@ -1220,3 +1220,15 @@ func TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary(t *testing.T) {
 	require.Equal(t, acp.StopReasonCancelled, out.resp.StopReason,
 		"the shutdown did not cancel the turn in flight")
 }
+
+func TestSettlementManagedCompletionResidualBranch(t *testing.T) {
+	want := errors.New("managed completion refused")
+	managed := &managedHermesServer{closed: true, closeErr: want}
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	session.owedCloseCommit = &sessionStoreCommit{
+		managed: managed, managedReady: []SessionStoreReplacement{{Key: SessionKey{SessionID: "session"}}},
+	}
+	if err := session.settleClosedSession(t.Context()); !errors.Is(err, want) || session.owedCloseCommit == nil {
+		t.Fatalf("managed settlement completion = %v, retained=%v", err, session.owedCloseCommit != nil)
+	}
+}

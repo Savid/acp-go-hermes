@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -135,4 +136,21 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.Error(t, err)
 	_, err = weak.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{Meta: reserved})
 	require.Error(t, err)
+}
+
+func TestApplyAdmittedActiveLifecycleRequest(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	meta := sessionMeta{}
+	if rebind, err := applyAdmittedActiveLifecycleRequest(
+		t.Context(), session, session.cwd, nil, nil, &meta,
+	); err != nil || rebind {
+		t.Fatalf("live reuse application = rebind:%v err:%v", rebind, err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := applyAdmittedActiveLifecycleRequest(
+		canceled, session, session.cwd, nil, nil, &meta,
+	); err == nil {
+		t.Fatalf("cancelled reuse rejection = %v", err)
+	}
 }

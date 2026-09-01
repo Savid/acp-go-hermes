@@ -2299,3 +2299,42 @@ func TestCloseWaitsForPublishedPumpContainmentOutcome(t *testing.T) {
 		s.stopPump()
 	})
 }
+
+func TestQuestionRouteRetiresAfterHostWrite(t *testing.T) {
+	session, client, _, turnCtx, _ := activeQuestionSession(
+		t, acp.UnstableCreateElicitationResponse{}, nil,
+	)
+	session.afterHostControlWrite = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+	}
+	if err := session.handleQuestion(turnCtx, questionRequest("retired-after-write")); !errors.Is(err, errPromptCancelled) {
+		t.Fatalf("retired question route = %v", err)
+	}
+	if client.questionRejectCount() != 1 {
+		t.Fatalf("retired question rejects = %d", client.questionRejectCount())
+	}
+}
+
+func TestPumpBarrierDrainsClosedSourceDuringShutdown(t *testing.T) {
+	client := newFakeHermesClient()
+	session := testSession(newTestAgent(), client)
+	t.Cleanup(session.stopPump)
+	session.afterPumpBarrierAccept = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+		close(client.deliveries)
+	}
+	if err := session.synchronizePump(t.Context()); err != nil {
+		t.Fatalf("closed source barrier = %v", err)
+	}
+
+	deliveries := make(chan nativehermes.TurnDelivery)
+	close(deliveries)
+	closed, err := session.drainPumpBarrier(t.Context(), deliveries)
+	if err != nil || !closed {
+		t.Fatalf("closed source drain = closed:%v err:%v", closed, err)
+	}
+}

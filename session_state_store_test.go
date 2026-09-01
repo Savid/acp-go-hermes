@@ -2115,3 +2115,22 @@ func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SessionStoreTerminalState{}, terminal, "the fixture settles no turn of its own")
 }
+
+func TestStrictStoreDecoderResidualBranches(t *testing.T) {
+	var destination struct{}
+	if err := decodeStrictStoreJSON([]byte(`1`), &destination, nil); err == nil {
+		t.Fatal("typed store decode mismatch was accepted")
+	}
+	decoder := json.NewDecoder(strings.NewReader(""))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("empty strict JSON value was accepted")
+	}
+	decoder = json.NewDecoder(strings.NewReader(`[{"x":`))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("truncated strict JSON array was accepted")
+	}
+	decoder = json.NewDecoder(strings.NewReader(`{"`))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("truncated strict JSON object member was accepted")
+	}
+}
