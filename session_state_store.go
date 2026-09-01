@@ -129,6 +129,8 @@ type stateSnapshotSession struct {
 	Cwd                   string             `json:"cwd"`
 	Title                 string             `json:"title"`
 	Model                 stateSnapshotModel `json:"model"`
+	Env                   map[string]string  `json:"env"`
+	ExtraPathDirs         []string           `json:"extraPathDirs"`
 }
 
 type stateSnapshotModel struct {
@@ -330,6 +332,8 @@ func (s *session) captureSnapshotLocked(
 				ProviderID: snapshot.providerID,
 				ModelID:    snapshot.modelID,
 			},
+			Env:           durableSessionEnvironment(snapshot.env),
+			ExtraPathDirs: append([]string{}, snapshot.extraPathDirs...),
 		},
 		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
@@ -1186,6 +1190,15 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 	}
 
 	return nil
+}
+
+func durableSessionEnvironment(environment map[string]string) map[string]string {
+	cloned := make(map[string]string, len(environment))
+	for key, value := range environment {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 func sqliteArchiveContent(scratchDir string, path string) ([]byte, bool, error) {

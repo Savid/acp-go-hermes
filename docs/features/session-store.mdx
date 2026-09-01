@@ -76,6 +76,11 @@ close (or the runner to restart and settle it) before recovery proceeds.
 The `idmap` subpath records the ACP session ID, durable Hermes session key, and
 fork lineage. Live gateway session IDs and auth tokens are not persisted.
 
+The main snapshot carries the session environment and ordered
+`extraPathDirs`. Cold load and resume rebuild omitted carriers from those saved
+values. Explicitly supplied carriers replace them for the new native
+incarnation, including explicit empty values.
+
 The main snapshot also carries a required terminal summary. Before any
 completed assistant turn it is empty. After a completed turn it identifies the
 latest finished assistant by its replay-stable `history-N` position; unfinished
@@ -84,9 +89,11 @@ atomically with the main snapshot, `idmap`, and archive. A successful
 `session/prompt` response is returned only after that commit and carries the
 same identity as `_meta.hermes.messageId`.
 
-Every current-format main entry contains explicit non-null `terminal`,
-`archives`, and `wrapper` sections. Hydration and terminal inspection reject
-truncated entries, null required sections, and unknown fields.
+Every current-format main entry contains explicit non-null session `env`,
+session `extraPathDirs`, `terminal`, `archives`, and `wrapper` sections.
+Hydration and terminal inspection reject truncated entries, null required
+sections, and invalid session carriers. Terminal inspection also rejects
+unknown fields.
 
 The successful turn must strictly advance the terminal `history-N` position
 beyond the committed baseline captured before native message submission. An
@@ -132,7 +139,9 @@ managed archive capture keeps the reclaimed residence and partial commit. In
 both cases the close-only session remains addressable for an exact retry. Once
 capture succeeds, publication completes before the session id is detached.
 
-<Note>
-Snapshots exclude credential-bearing files and scrub credential tables from the
-SQLite archive, so a store never captures provider secrets.
-</Note>
+<Warning>
+Snapshots exclude Hermes credential files and scrub credential tables from the
+SQLite archive. Session-scoped environment values are durable session
+configuration and are stored in the main snapshot, so the host's
+`SessionStore` must protect them as secrets.
+</Warning>

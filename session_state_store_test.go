@@ -629,6 +629,20 @@ func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 			},
 			want: "terminal summary",
 		},
+		{
+			name: "session environment is missing",
+			mutate: func(_ *idmapRecord, snapshot *stateSnapshot) {
+				snapshot.Session.Env = nil
+			},
+			want: "session environment is required",
+		},
+		{
+			name: "session path directories are missing",
+			mutate: func(_ *idmapRecord, snapshot *stateSnapshot) {
+				snapshot.Session.ExtraPathDirs = nil
+			},
+			want: "session extra path directories are required",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1448,6 +1462,8 @@ func validHydrateSnapshot() stateSnapshot {
 		Session: stateSnapshotSession{
 			SessionID:       "s",
 			NativeSessionID: "n",
+			Env:             map[string]string{},
+			ExtraPathDirs:   []string{},
 		},
 		Terminal: &stateSnapshotTerminal{},
 		Archives: map[string]archiveInfo{},

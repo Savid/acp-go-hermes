@@ -409,6 +409,14 @@ func (a *Agent) loadOrResumeSession(
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "cwd_mismatch", keyField: jsonFieldCwd})
 	}
 
+	if !meta.EnvSet {
+		meta.Env = cloneStringMap(snapshot.Session.Env)
+	}
+
+	if !meta.ExtraPathDirsSet {
+		meta.ExtraPathDirs = slices.Clone(snapshot.Session.ExtraPathDirs)
+	}
+
 	nativeOwner, err := a.acquireSharedNativeSessionOwner(idmap.NativeSessionID)
 	if err != nil {
 		return nil, err

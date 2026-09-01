@@ -23,11 +23,13 @@ const (
 )
 
 type sessionMeta struct {
-	Model         string
-	Env           map[string]string
-	ExtraPathDirs []string
-	OutputSchema  any
-	RawMessages   rawMessageConfig
+	Model            string
+	Env              map[string]string
+	EnvSet           bool
+	ExtraPathDirs    []string
+	ExtraPathDirsSet bool
+	OutputSchema     any
+	RawMessages      rawMessageConfig
 }
 
 func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
@@ -41,17 +43,21 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 	}
 
 	return sessionMeta{
-		Model:         options.Model,
-		Env:           cloneStringMap(options.Env),
-		ExtraPathDirs: slices.Clone(options.ExtraPathDirs),
-		RawMessages:   rawMessageConfigFromMeta(meta),
+		Model:            options.Model,
+		Env:              cloneStringMap(options.Env),
+		EnvSet:           options.EnvSet,
+		ExtraPathDirs:    slices.Clone(options.ExtraPathDirs),
+		ExtraPathDirsSet: options.ExtraPathDirsSet,
+		RawMessages:      rawMessageConfigFromMeta(meta),
 	}, nil
 }
 
 type hermesMetaOptions struct {
-	Model         string
-	Env           map[string]string
-	ExtraPathDirs []string
+	Model            string
+	Env              map[string]string
+	EnvSet           bool
+	ExtraPathDirs    []string
+	ExtraPathDirsSet bool
 }
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
@@ -74,6 +80,7 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 
 		options.Env = env
+		options.EnvSet = true
 	}
 
 	if rawDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
@@ -83,6 +90,7 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 
 		options.ExtraPathDirs = dirs
+		options.ExtraPathDirsSet = true
 	}
 
 	return options, nil

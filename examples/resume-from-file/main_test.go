@@ -22,7 +22,7 @@ import (
 func transcriptSnapshot(sessionID string, cwd string) string {
 	return fmt.Sprintf(
 		`{"format":"hermes-state-db-v1","capturedAtUnixMilli":1,"session":{"sessionId":%q,`+
-			`"nativeSessionId":"native-1","cwd":%q,"title":"t","model":{}},`+
+			`"nativeSessionId":"native-1","cwd":%q,"title":"t","model":{},"env":{},"extraPathDirs":[]},`+
 			`"terminal":{"messageId":"","role":"","finish":""},"archives":{},"wrapper":{"foreground":null}}`,
 		sessionID, cwd,
 	)

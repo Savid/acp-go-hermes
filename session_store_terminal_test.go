@@ -1166,6 +1166,8 @@ func terminalInspectorSnapshot(terminal *stateSnapshotTerminal) stateSnapshot {
 		Session: stateSnapshotSession{
 			SessionID:       "session-1",
 			NativeSessionID: "native-1",
+			Env:             map[string]string{},
+			ExtraPathDirs:   []string{},
 		},
 		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
@@ -1278,6 +1280,10 @@ func (r *alwaysFailReader) Read([]byte) (int, error) {
 func TestStoredLifecycleBoundaryValidation(t *testing.T) {
 	valid := func() stateSnapshot {
 		return stateSnapshot{
+			Session: stateSnapshotSession{
+				Env:           map[string]string{},
+				ExtraPathDirs: []string{},
+			},
 			Archives: map[string]archiveInfo{},
 			Terminal: &stateSnapshotTerminal{},
 			Wrapper: &stateSnapshotWrapper{Foreground: &stateSnapshotForeground{
@@ -1288,6 +1294,18 @@ func TestStoredLifecycleBoundaryValidation(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*stateSnapshot){
+		"missing session environment": func(snapshot *stateSnapshot) {
+			snapshot.Session.Env = nil
+		},
+		"missing session path directories": func(snapshot *stateSnapshot) {
+			snapshot.Session.ExtraPathDirs = nil
+		},
+		"reserved session environment": func(snapshot *stateSnapshot) {
+			snapshot.Session.Env = map[string]string{"PATH": "/untrusted"}
+		},
+		"invalid session path directory": func(snapshot *stateSnapshot) {
+			snapshot.Session.ExtraPathDirs = []string{"relative"}
+		},
 		"identity": func(snapshot *stateSnapshot) {
 			snapshot.Wrapper.Foreground.TurnID = ""
 		},

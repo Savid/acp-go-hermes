@@ -100,6 +100,27 @@ func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
 	}
 }
 
+func TestLifecycleMetaTracksExplicitEmptyCarriers(t *testing.T) {
+	omitted, err := sessionMetaFromLifecycle(HermesOptions{}.Meta())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.EnvSet || omitted.ExtraPathDirsSet {
+		t.Fatalf("omitted carrier presence = env %t dirs %t", omitted.EnvSet, omitted.ExtraPathDirsSet)
+	}
+
+	explicit, err := sessionMetaFromLifecycle(HermesOptions{
+		Env:           map[string]string{},
+		ExtraPathDirs: []string{},
+	}.Meta())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicit.EnvSet || !explicit.ExtraPathDirsSet || explicit.Env == nil || explicit.ExtraPathDirs == nil {
+		t.Fatalf("explicit carrier = %#v", explicit)
+	}
+}
+
 func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
 	_, err := sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{"PATH": "/operation/bin"}}.Meta())
 	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".PATH")

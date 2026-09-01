@@ -603,6 +603,9 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store))
 	session := testSession(agent, sourceClient)
 	session.cwd = root
+	storedPathDir := t.TempDir()
+	session.env = map[string]string{"WAGIE_API_TOKEN": "stored-bearer"}
+	session.extraPathDirs = []string{storedPathDir}
 	mcpServer := HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)
 	session.mcpServers = []acp.McpServer{mcpServer}
 	if err6 := session.snapshotToStore(ctx); err6 != nil {
@@ -620,7 +623,6 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 		Info:  nativehermes.NativeMessageInfo{ID: "history-1", SessionID: "native-1", Role: "user"},
 		Parts: []nativehermes.Part{replayPart},
 	}}
-	loadPathDir := t.TempDir()
 	var loadedStart nativehermes.StartOptions
 	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 		loadedStart = opts
@@ -634,10 +636,6 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 		"session-1",
 		root,
 		WithSessionMCPServers(mcpServer),
-		WithSessionHermesOptions(HermesOptions{
-			Env:           map[string]string{"WAGIE_API_TOKEN": "loaded-bearer"},
-			ExtraPathDirs: []string{loadPathDir},
-		}),
 	))
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
@@ -645,7 +643,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	if resp.Meta[hermesMetaKey] == nil || conn.updateCount() != 1 {
 		t.Fatalf("load resp=%#v updates=%#v", resp, conn.updates)
 	}
-	if loadedStart.SessionEnv["WAGIE_API_TOKEN"] != "loaded-bearer" || !slices.Equal(loadedStart.ExtraPathDirs, []string{loadPathDir}) {
+	if loadedStart.SessionEnv["WAGIE_API_TOKEN"] != "stored-bearer" || !slices.Equal(loadedStart.ExtraPathDirs, []string{storedPathDir}) {
 		t.Fatalf("loaded carrier = env %#v dirs %#v", loadedStart.SessionEnv, loadedStart.ExtraPathDirs)
 	}
 	loaded := agent.activeSession("session-1")
@@ -1041,6 +1039,8 @@ func resumeRuntimeSnapshot(session *session) stateSnapshot {
 				ProviderID: session.providerID,
 				ModelID:    session.modelID,
 			},
+			Env:           durableSessionEnvironment(session.env),
+			ExtraPathDirs: append([]string{}, session.extraPathDirs...),
 		},
 		Terminal: &stateSnapshotTerminal{},
 		Archives: map[string]archiveInfo{},
