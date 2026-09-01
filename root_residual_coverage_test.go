@@ -311,6 +311,9 @@ func TestRetiredNativeRootRetryResidualBranches(t *testing.T) {
 }
 
 func TestNativeProcessBridgeResidualBranches(t *testing.T) {
+	if !nativeProcessNil(nil) {
+		t.Fatal("nil process was not classified as nil")
+	}
 	if nativeProcessNil(residualValueNativeProcess{}) {
 		t.Fatal("value process was classified as nil")
 	}
@@ -405,6 +408,132 @@ func TestNativeProcessBridgeResidualBranches(t *testing.T) {
 	if err := genericBridge.Revoke(t.Context()); !errors.Is(err, want) {
 		t.Fatalf("generic revoke = %v", err)
 	}
+}
+
+func TestManagedSnapshotStateResidualBranches(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	if err := session.withReclaimedManagedState(t.Context(), session.client, func(string) error { return nil }); err == nil {
+		t.Fatal("ordinary client state reclaim succeeded")
+	}
+	if _, _, err := session.beginManagedSnapshotStateHeld(t.Context(), session.client); err == nil {
+		t.Fatal("ordinary client snapshot begin succeeded")
+	}
+
+	wantClose := errors.New("managed close refused")
+	failing := &managedHermesServer{
+		Server: &fakeHermesClient{closeErr: wantClose}, managed: true, root: t.TempDir(),
+	}
+	if _, _, err := session.beginManagedSnapshotStateHeld(t.Context(), failing); !errors.Is(err, wantClose) {
+		t.Fatalf("managed snapshot close failure = %v", err)
+	}
+	fake := newFakeHermesClient()
+	fake.closeErr = wantClose
+	failing.Server = fake
+	session.client = failing
+	if _, err := session.captureSnapshotLocked(t.Context(), nil); !errors.Is(err, wantClose) {
+		t.Fatalf("managed snapshot capture close failure = %v", err)
+	}
+}
+
+func TestCompleteManagedSnapshotCommitResidualBranches(t *testing.T) {
+	newCommit := func(t *testing.T) (*session, *sessionStoreCommit) {
+		t.Helper()
+		root := t.TempDir()
+		managed := &managedHermesServer{
+			Server: newFakeHermesClient(), managed: true, settled: true, root: root,
+		}
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		commit := &sessionStoreCommit{
+			managed: managed, managedRoot: root,
+			managedMain:  &stateSnapshot{Archives: map[string]archiveInfo{}},
+			managedState: SessionKey{SessionID: "session", Subpath: stateDBSubpath},
+			mainKey:      SessionKey{SessionID: "session", Subpath: SessionStoreMainSubpath},
+		}
+
+		return session, commit
+	}
+
+	t.Run("archive entry encoding", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		session, commit := newCommit(t)
+		if err := os.WriteFile(filepath.Join(commit.managedRoot, fileStateDB), []byte("sqlite placeholder"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stateSQLiteArchiveContent = func(string, string) ([]byte, bool, error) {
+			return []byte("scrubbed sqlite"), true, nil
+		}
+		want := errors.New("archive entry marshal refused")
+		stateJSONMarshal = func(any) ([]byte, error) { return nil, want }
+		if err := session.completeManagedSnapshotCommit(commit); !errors.Is(err, want) {
+			t.Fatalf("archive entry encoding = %v", err)
+		}
+	})
+
+	t.Run("main encoding", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		session, commit := newCommit(t)
+		want := errors.New("main marshal refused")
+		stateJSONMarshal = func(any) ([]byte, error) { return nil, want }
+		if err := session.completeManagedSnapshotCommit(commit); !errors.Is(err, want) || commit.managedReady != nil {
+			t.Fatalf("main encoding = %v, ready=%#v", err, commit.managedReady)
+		}
+	})
+
+	t.Run("finish reclaim", func(t *testing.T) {
+		session, commit := newCommit(t)
+		want := errors.New("finish refused")
+		commit.managed.closed = true
+		commit.managed.closeErr = want
+		if err := session.completeManagedSnapshotCommit(commit); !errors.Is(err, want) {
+			t.Fatalf("finish reclaim = %v", err)
+		}
+	})
+}
+
+func TestSnapshotCaptureCancellationResidualBranches(t *testing.T) {
+	t.Run("after id map", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		session := snapshotFaultSession(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		stateJSONMarshal = func(value any) ([]byte, error) {
+			encoded, err := json.Marshal(value)
+			cancel()
+
+			return encoded, err
+		}
+		if _, err := session.captureSnapshotLocked(ctx, nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation after id map = %v", err)
+		}
+	})
+
+	t.Run("after managed completion", func(t *testing.T) {
+		restoreStateStoreSeams(t)
+		fake := newFakeHermesClient()
+		root := t.TempDir()
+		xdg, err := testGenerationXDG(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fake.xdg = xdg
+		managed := &managedHermesServer{Server: fake, managed: true, root: root}
+		session := testSession(newTestAgent(), fake)
+		session.client = managed
+		ctx, cancel := context.WithCancel(t.Context())
+		calls := 0
+		stateJSONMarshal = func(value any) ([]byte, error) {
+			calls++
+			encoded, marshalErr := json.Marshal(value)
+			if calls == 2 {
+				cancel()
+			}
+
+			return encoded, marshalErr
+		}
+		commit, err := session.captureSnapshotLocked(ctx, nil)
+		if !errors.Is(err, context.Canceled) || commit == nil || calls != 2 {
+			t.Fatalf("managed completion cancellation = commit:%v calls:%d err:%v", commit != nil, calls, err)
+		}
+	})
 }
 
 type residualValueAuthority struct{}
