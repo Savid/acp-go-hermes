@@ -788,12 +788,12 @@ func hydrateStateFromStoreMode(ctx context.Context, store SessionStore, sessionI
 	}
 
 	var idmap idmapRecord
-	if err := json.Unmarshal(idEntries[len(idEntries)-1], &idmap); err != nil {
+	if err := decodeStrictStoreJSON(idEntries[len(idEntries)-1], &idmap, idmapJSONShape); err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
 	}
 
 	var snapshot stateSnapshot
-	if err := json.Unmarshal(mainEntries[len(mainEntries)-1], &snapshot); err != nil {
+	if err := decodeStrictStoreJSON(mainEntries[len(mainEntries)-1], &snapshot, stateSnapshotJSONShape); err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
 	}
 

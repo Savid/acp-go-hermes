@@ -1278,6 +1278,17 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	if !active.snapshot().rawMessages.Enabled() {
 		t.Fatal("active ResumeSession did not apply rawEvent=true")
 	}
+	carrierOmitted := []SessionRequestOption{
+		WithSessionAdditionalDirectories(additionalDir),
+		WithSessionMCPServers(httpMCP),
+		WithSessionRawEvents(false),
+	}
+	if _, loadErr := agent.LoadSession(ctx, LoadSessionRequest(id, cwd, carrierOmitted...)); loadErr != nil {
+		t.Fatalf("active LoadSession with omitted carriers: %v", loadErr)
+	}
+	if got := active.snapshot(); !stringMapsEqual(got.env, map[string]string{"A": "B"}) || !slices.Equal(got.extraPathDirs, extraPathDirs) {
+		t.Fatalf("omitted active carriers changed live values: env %#v dirs %#v", got.env, got.extraPathDirs)
+	}
 	if factoryCalls != 1 {
 		t.Fatalf("active load/resume started a second native process: %d", factoryCalls)
 	}
@@ -1310,14 +1321,8 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	requireLifecycleMismatch(t, err, "additionalDirectories")
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(HTTPMCPServer("other", "https://other.example.test", nil)), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}, ExtraPathDirs: extraPathDirs})))
 	requireLifecycleMismatch(t, err, "mcpServers")
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "changed"}, ExtraPathDirs: extraPathDirs})))
-	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", ExtraPathDirs: extraPathDirs})))
-	requireLifecycleMismatch(t, err, "_meta.hermes.options.env")
-	_, err = agent.ResumeSession(ctx, ResumeSessionRequest(id, cwd, WithSessionAdditionalDirectories(additionalDir), WithSessionMCPServers(httpMCP), WithSessionHermesOptions(HermesOptions{Model: "openai/gpt-test", Env: map[string]string{"A": "B"}, ExtraPathDirs: []string{secondPathDir, firstPathDir}})))
-	requireLifecycleMismatch(t, err, hermesExtraPathDirsOptionPath)
 	if factoryCalls != 1 {
-		t.Fatalf("invalid active load/resume started a native process: %d", factoryCalls)
+		t.Fatalf("active reuse or invalid request started a native process: %d", factoryCalls)
 	}
 
 	if err := agent.Close(); err != nil {
@@ -1328,7 +1333,7 @@ func TestActiveLoadResumeReusesSession(t *testing.T) {
 	}
 }
 
-func TestActiveLifecycleRejectsExtraPathDirsMismatch(t *testing.T) {
+func TestActiveLifecycleResolvesCarrierReuseAndRebind(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
 	cwd := t.TempDir()
@@ -1344,11 +1349,21 @@ func TestActiveLifecycleRejectsExtraPathDirsMismatch(t *testing.T) {
 		idmapRecord{},
 	)
 
-	if err := applyActiveLifecycleRequest(session, cwd, nil, nil, sessionMeta{ExtraPathDirs: []string{first, second}}); err != nil {
-		t.Fatalf("equal ordered paths rejected: %v", err)
+	equal := sessionMeta{ExtraPathDirs: []string{first, second}, ExtraPathDirsSet: true}
+	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &equal); err != nil || rebind {
+		t.Fatalf("equal ordered paths = rebind %t, err %v", rebind, err)
 	}
-	err := applyActiveLifecycleRequest(session, cwd, nil, nil, sessionMeta{ExtraPathDirs: []string{second, first}})
-	requireLifecycleMismatch(t, err, hermesExtraPathDirsOptionPath)
+	omitted := sessionMeta{}
+	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &omitted); err != nil || rebind {
+		t.Fatalf("omitted carrier = rebind %t, err %v", rebind, err)
+	}
+	if !slices.Equal(omitted.ExtraPathDirs, []string{first, second}) {
+		t.Fatalf("omitted carrier resolved to env %#v dirs %#v", omitted.Env, omitted.ExtraPathDirs)
+	}
+	changed := sessionMeta{ExtraPathDirs: []string{second, first}, ExtraPathDirsSet: true}
+	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &changed); err != nil || !rebind {
+		t.Fatalf("changed ordered paths = rebind %t, err %v", rebind, err)
+	}
 }
 
 func requireLifecycleMismatch(t *testing.T, err error, field string) {
@@ -2741,6 +2756,62 @@ func TestClosedSessionRebindUsesRotatedCarrier(t *testing.T) {
 	}
 }
 
+func TestActiveSessionCarrierChangeContainsBeforeRebind(t *testing.T) {
+	oldDir := t.TempDir()
+	cwd := t.TempDir()
+	store := NewInMemorySessionStore()
+	first := newFakeHermesClient()
+	first.createSession = testNativeSession("native-active-rebind")
+	first.getSession = first.createSession
+	second := newFakeHermesClient()
+	second.getSession = testNativeSession("native-active-rebind")
+	clients := []*fakeHermesClient{first, second}
+	var starts []nativehermes.StartOptions
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store), func(options *Options) {
+		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			starts = append(starts, start)
+			client := clients[len(starts)-1]
+			client.xdg = start.ExistingXDG
+
+			return client, nil
+		}
+	})
+
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionHermesOptions(HermesOptions{
+		Env:           map[string]string{"WAGIE_API_TOKEN": "old-bearer"},
+		ExtraPathDirs: []string{oldDir},
+	})))
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	oldSession := agent.activeSession(created.SessionId)
+
+	if _, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(created.SessionId, cwd, WithSessionHermesOptions(HermesOptions{
+		Env: map[string]string{"WAGIE_API_TOKEN": "new-bearer"},
+	}))); err != nil {
+		t.Fatalf("active carrier rebind: %v", err)
+	}
+
+	newSession := agent.activeSession(created.SessionId)
+	if newSession == nil || newSession == oldSession {
+		t.Fatal("carrier change did not publish a fresh session incarnation")
+	}
+	if !first.closed {
+		t.Fatal("old native incarnation was not contained before rebind returned")
+	}
+	if len(starts) != 2 || starts[1].SessionEnv["WAGIE_API_TOKEN"] != "new-bearer" ||
+		!slices.Equal(starts[1].ExtraPathDirs, []string{oldDir}) {
+		t.Fatalf("replacement start = %#v", starts)
+	}
+	if starts[1].SessionEnv["WAGIE_API_TOKEN"] == starts[0].SessionEnv["WAGIE_API_TOKEN"] {
+		t.Fatal("old bearer reached replacement native start")
+	}
+
+	if err := agent.Close(); err != nil {
+		t.Fatalf("close agent: %v", err)
+	}
+}
+
 func TestForkSessionCarriesChildEnvironmentAndPath(t *testing.T) {
 	cwd := t.TempDir()
 	childDir := t.TempDir()
@@ -2777,6 +2848,48 @@ func TestForkSessionCarriesChildEnvironmentAndPath(t *testing.T) {
 	}
 	if len(starts) != 2 || starts[1].SessionEnv["WAGIE_API_TOKEN"] != "child-bearer" || !slices.Equal(starts[1].ExtraPathDirs, []string{childDir}) {
 		t.Fatalf("child start = %#v", starts)
+	}
+	if err := agent.Close(); err != nil {
+		t.Fatalf("close agent: %v", err)
+	}
+}
+
+func TestForkSessionInheritsOmittedEnvironmentAndPath(t *testing.T) {
+	cwd := t.TempDir()
+	parentDir := t.TempDir()
+	parent := newFakeHermesClient()
+	parent.createSession = testNativeSession("native-parent-inherited-carrier")
+	parent.getSession = parent.createSession
+	parent.forkSession = testNativeSession("native-child-inherited-carrier")
+	child := newFakeHermesClient()
+	child.getSession = testNativeSession("native-child-inherited-carrier")
+	clients := []*fakeHermesClient{parent, child}
+	var starts []nativehermes.StartOptions
+	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()), func(options *Options) {
+		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			starts = append(starts, start)
+			client := clients[len(starts)-1]
+			client.xdg = start.ExistingXDG
+
+			return client, nil
+		}
+	})
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionHermesOptions(HermesOptions{
+		Env:           map[string]string{"WAGIE_API_TOKEN": "parent-bearer"},
+		ExtraPathDirs: []string{parentDir},
+	})))
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parent.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.forkSession(t.Context(), ForkSessionRequest(created.SessionId, cwd)); err != nil {
+		t.Fatalf("fork session: %v", err)
+	}
+	if len(starts) != 2 || starts[1].SessionEnv["WAGIE_API_TOKEN"] != "parent-bearer" ||
+		!slices.Equal(starts[1].ExtraPathDirs, []string{parentDir}) {
+		t.Fatalf("inherited child start = %#v", starts)
 	}
 	if err := agent.Close(); err != nil {
 		t.Fatalf("close agent: %v", err)

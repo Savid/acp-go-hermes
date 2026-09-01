@@ -331,30 +331,37 @@ func (a *Agent) loadOrResumeSession(
 
 			return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 		}
-		if applyErr := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta); applyErr != nil {
+		rebind, applyErr := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, &meta)
+		if applyErr != nil {
 			releaseReuse()
 
 			return nil, applyErr
 		}
-		identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
-		orderedResponse = orderedResponse && identity.token != "" && existing.lifecycleStream() != nil
-		if replay && !orderedResponse {
-			if replayErr := existing.replayMessages(reuseCtx); replayErr != nil {
+		if rebind {
+			if rebindErr := a.closeActiveSessionForRebind(ctx, id, existing, releaseReuse); rebindErr != nil {
+				return nil, rebindErr
+			}
+		} else {
+			identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
+			orderedResponse = orderedResponse && identity.token != "" && existing.lifecycleStream() != nil
+			if replay && !orderedResponse {
+				if replayErr := existing.replayMessages(reuseCtx); replayErr != nil {
+					releaseReuse()
+
+					return nil, replayErr
+				}
+			}
+			if _, openErr := a.completeActiveReuse(reuseCtx, id, existing, replay, releaseReuse); openErr != nil {
 				releaseReuse()
 
-				return nil, replayErr
+				return nil, openErr
 			}
-		}
-		if _, openErr := a.completeActiveReuse(reuseCtx, id, existing, replay, releaseReuse); openErr != nil {
-			releaseReuse()
+			if !orderedResponse {
+				releaseReuse()
+			}
 
-			return nil, openErr
+			return existing, nil
 		}
-		if !orderedResponse {
-			releaseReuse()
-		}
-
-		return existing, nil
 	}
 	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
 	if constructionErr != nil {
@@ -756,27 +763,39 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	return nil
 }
 
-func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirectories []string, mcpServers []acp.McpServer, meta sessionMeta) error {
+// applyActiveLifecycleRequest resolves omitted carriers from the live session
+// and reports whether an explicitly changed carrier requires a new native
+// incarnation. Equal carriers can reuse the active incarnation; changed ones
+// cannot be mutated into a running hermes serve process.
+func applyActiveLifecycleRequest(
+	existing *session,
+	cwd string,
+	additionalDirectories []string,
+	mcpServers []acp.McpServer,
+	meta *sessionMeta,
+) (bool, error) {
 	snapshot := existing.snapshot()
 	if snapshot.cwd != "" && snapshot.cwd != cwd {
-		return lifecycleMismatch(jsonFieldCwd)
+		return false, lifecycleMismatch(jsonFieldCwd)
 	}
 
 	if !stringSetEqual(snapshot.additionalDirectories, additionalDirectories) {
-		return lifecycleMismatch("additionalDirectories")
+		return false, lifecycleMismatch("additionalDirectories")
 	}
 
 	if !mcpServerSetEqual(snapshot.mcpServers, mcpServers) {
-		return lifecycleMismatch("mcpServers")
+		return false, lifecycleMismatch("mcpServers")
 	}
 
-	if !stringMapsEqual(snapshot.env, meta.Env) {
-		return lifecycleMismatch(hermesEnvOptionPath)
+	if !meta.EnvSet {
+		meta.Env = cloneStringMap(snapshot.env)
 	}
 
-	if !slices.Equal(snapshot.extraPathDirs, meta.ExtraPathDirs) {
-		return lifecycleMismatch(hermesExtraPathDirsOptionPath)
+	if !meta.ExtraPathDirsSet {
+		meta.ExtraPathDirs = slices.Clone(snapshot.extraPathDirs)
 	}
+
+	rebind := !stringMapsEqual(snapshot.env, meta.Env) || !slices.Equal(snapshot.extraPathDirs, meta.ExtraPathDirs)
 
 	// A shape refusal, not a value gate. The gate this door used to carry asked
 	// a value question — is this the model already bound? — and answered no for
@@ -791,7 +810,11 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 	// carries model and provider as separate fields, so an unqualified value is
 	// representable there and Hermes resolves it itself.
 	if meta.Model != "" && nativehermes.ModelSelectionShapeError(meta.Model) != nil {
-		return unsupportedField(hermesModelOptionPath)
+		return false, unsupportedField(hermesModelOptionPath)
+	}
+
+	if rebind {
+		return true, nil
 	}
 
 	existing.mu.Lock()
@@ -800,6 +823,39 @@ func applyActiveLifecycleRequest(existing *session, cwd string, additionalDirect
 	}
 	existing.rawMessages = meta.RawMessages
 	existing.mu.Unlock()
+
+	return false, nil
+}
+
+// closeActiveSessionForRebind spends the old incarnation's ordinary close
+// boundary before its replacement can be prepared or published. The active
+// reuse reservation keeps prompts out until prepareClose permanently shuts the
+// old object; releasing it then lets settlement join without deadlocking on the
+// request that initiated the rebind.
+func (a *Agent) closeActiveSessionForRebind(
+	ctx context.Context,
+	id acp.SessionId,
+	existing *session,
+	releaseReuse func(),
+) error {
+	existing.prepareClose()
+	releaseReuse()
+
+	waitErr := existing.awaitSettlement(ctx)
+
+	existing.lifecycleMu.Lock()
+	closeErr := existing.settleClosedSession(ctx)
+	existing.lifecycleMu.Unlock()
+	a.recordIncompleteContainment(closeErr, id, hermesServerRoot(existing.client))
+
+	if err := errors.Join(waitErr, closeErr); err != nil {
+		return err
+	}
+
+	if !a.removeSessionIf(id, existing) {
+		return unknownSessionError()
+	}
+	a.observe.AddActiveSession(ctx, -1)
 
 	return nil
 }
@@ -1214,6 +1270,12 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 	parentSnapshot := parent.snapshot()
 	if meta.Model == "" {
 		meta.Model = modelSelectionValue(parentSnapshot.providerID, parentSnapshot.modelID)
+	}
+	if !meta.EnvSet {
+		meta.Env = cloneStringMap(parentSnapshot.env)
+	}
+	if !meta.ExtraPathDirsSet {
+		meta.ExtraPathDirs = slices.Clone(parentSnapshot.extraPathDirs)
 	}
 
 	var journal *sessionOperationJournal

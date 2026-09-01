@@ -422,8 +422,8 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"defaultEnabled": false,
 		},
 		"sessionStore": map[string]any{
-			"format":     SessionStoreFormat,
-			jsonFieldKey: []string{jsonFieldSessionID, "subpath"},
+			jsonFieldFormat: SessionStoreFormat,
+			jsonFieldKey:    []string{jsonFieldSessionID, "subpath"},
 		},
 	}
 

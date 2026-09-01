@@ -1,7 +1,6 @@
 package hermesacp
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,14 +47,7 @@ func InspectSessionStoreTerminalState(
 
 	var snapshot stateSnapshot
 
-	decoder := json.NewDecoder(bytes.NewReader(entries[0]))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&snapshot); err != nil {
-		return SessionStoreTerminalState{}, fmt.Errorf("decode Hermes session-store snapshot: %w", err)
-	}
-
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := decodeStrictStoreJSON(entries[0], &snapshot, stateSnapshotJSONShape); err != nil {
 		return SessionStoreTerminalState{}, fmt.Errorf("decode Hermes session-store snapshot: %w", err)
 	}
 

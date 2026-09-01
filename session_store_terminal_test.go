@@ -141,6 +141,93 @@ func TestInspectSessionStoreTerminalStateStrictlyValidatesSnapshot(t *testing.T)
 	}
 }
 
+func TestInspectSessionStoreTerminalStateRejectsAmbiguousJSONAtEveryDepth(t *testing.T) {
+	snapshot := terminalInspectorSnapshot(&stateSnapshotTerminal{
+		MessageID: "history-2",
+		Role:      valAssistant,
+		Finish:    "stop",
+	})
+	snapshot.Session.Model = stateSnapshotModel{ProviderID: "provider", ModelID: "model"}
+	snapshot.Session.Env = map[string]string{"TOKEN": "one"}
+	snapshot.Archives = map[string]archiveInfo{
+		"state-db": {Subpath: stateDBSubpath, SHA256: "digest", Bytes: 1},
+	}
+	snapshot.Wrapper.Foreground = &stateSnapshotForeground{
+		StreamID: "stream", TurnID: "turn", Outcome: string(lifecycle.OutcomeSuccess),
+		StopReason: string(acp.StopReasonEndTurn), CapturedAtUnixMilli: 1,
+	}
+	valid := string(mustStateJSON(t, snapshot))
+
+	mutate := func(old string, replacement string) SessionStoreEntry {
+		t.Helper()
+		if !strings.Contains(valid, old) {
+			t.Fatalf("strict snapshot fixture does not contain %q: %s", old, valid)
+		}
+
+		return SessionStoreEntry(strings.Replace(valid, old, replacement, 1))
+	}
+
+	for name, entry := range map[string]SessionStoreEntry{
+		"top unknown": mutate(
+			`{"format":`, `{"unknown":true,"format":`),
+		"top duplicate": mutate(
+			`"format":"hermes-state-db-v1"`, `"format":"hermes-state-db-v1","format":"hermes-state-db-v1"`),
+		"top case alias": mutate(
+			`"format":"hermes-state-db-v1"`, `"Format":"hermes-state-db-v1"`),
+		"session unknown": mutate(
+			`"session":{"sessionId":`, `"session":{"unknown":true,"sessionId":`),
+		"session duplicate": mutate(
+			`"sessionId":"session-1"`, `"sessionId":"session-1","sessionId":"session-1"`),
+		"session case alias": mutate(
+			`"sessionId":"session-1"`, `"SessionId":"session-1"`),
+		"model unknown": mutate(
+			`"model":{"providerID":`, `"model":{"unknown":true,"providerID":`),
+		"model duplicate": mutate(
+			`"providerID":"provider"`, `"providerID":"provider","providerID":"provider"`),
+		"model case alias": mutate(
+			`"providerID":"provider"`, `"providerId":"provider"`),
+		"environment duplicate": mutate(
+			`"env":{"TOKEN":"one"}`, `"env":{"TOKEN":"one","TOKEN":"two"}`),
+		"environment case alias": mutate(
+			`"env":{"TOKEN":"one"}`, `"env":{"TOKEN":"one","token":"two"}`),
+		"terminal unknown": mutate(
+			`"terminal":{"messageId":`, `"terminal":{"unknown":true,"messageId":`),
+		"terminal duplicate": mutate(
+			`"messageId":"history-2"`, `"messageId":"history-2","messageId":"history-3"`),
+		"terminal case alias": mutate(
+			`"messageId":"history-2"`, `"MessageId":"history-2"`),
+		"archives duplicate": mutate(
+			`"archives":{"state-db":`, `"archives":{"state-db":{"subpath":"state-db","sha256":"digest","bytes":1},"state-db":`),
+		"archives case alias": mutate(
+			`"archives":{"state-db":`, `"archives":{"STATE-DB":{"subpath":"state-db","sha256":"digest","bytes":1},"state-db":`),
+		"archive info unknown": mutate(
+			`"state-db":{"subpath":`, `"state-db":{"unknown":true,"subpath":`),
+		"archive info duplicate": mutate(
+			`"subpath":"state-db"`, `"subpath":"state-db","subpath":"state-db"`),
+		"archive info case alias": mutate(
+			`"subpath":"state-db"`, `"Subpath":"state-db"`),
+		"wrapper unknown": mutate(
+			`"wrapper":{"foreground":`, `"wrapper":{"unknown":true,"foreground":`),
+		"wrapper duplicate": mutate(
+			`"wrapper":{"foreground":`, `"wrapper":{"foreground":null,"foreground":`),
+		"wrapper case alias": mutate(
+			`"wrapper":{"foreground":`, `"wrapper":{"Foreground":`),
+		"foreground unknown": mutate(
+			`"foreground":{"streamId":`, `"foreground":{"unknown":true,"streamId":`),
+		"foreground duplicate": mutate(
+			`"streamId":"stream"`, `"streamId":"stream","streamId":"other"`),
+		"foreground case alias": mutate(
+			`"streamId":"stream"`, `"StreamId":"stream"`),
+		"trailing value": SessionStoreEntry(valid + ` {}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := InspectSessionStoreTerminalState("session-1", []SessionStoreEntry{entry}); err == nil {
+				t.Fatal("inspector accepted ambiguous durable JSON")
+			}
+		})
+	}
+}
+
 func TestPromptCommitsReplayStableTerminalIdentityAcrossTailCloseAndHydrate(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()

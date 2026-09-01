@@ -494,6 +494,75 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 	}
 }
 
+func TestHydrateStateFromStoreRejectsAmbiguousIDMapAndMainJSON(t *testing.T) {
+	validIDMap := string(mustStateJSON(t, validHydrateIDMap()))
+	validMain := string(mustStateJSON(t, validHydrateSnapshot()))
+	replace := func(source string, old string, replacement string) SessionStoreEntry {
+		t.Helper()
+		if !strings.Contains(source, old) {
+			t.Fatalf("strict hydrate fixture does not contain %q: %s", old, source)
+		}
+
+		return SessionStoreEntry(strings.Replace(source, old, replacement, 1))
+	}
+
+	tests := map[string]struct {
+		idmap SessionStoreEntry
+		main  SessionStoreEntry
+	}{
+		"idmap unknown": {
+			idmap: replace(validIDMap, `{"sessionId":`, `{"unknown":true,"sessionId":`),
+		},
+		"idmap duplicate": {
+			idmap: replace(validIDMap, `"sessionId":"s"`, `"sessionId":"s","sessionId":"s"`),
+		},
+		"idmap case alias": {
+			idmap: replace(validIDMap, `"nativeSessionId":"n"`, `"NativeSessionId":"n"`),
+		},
+		"idmap trailing": {
+			idmap: SessionStoreEntry(validIDMap + ` {}`),
+		},
+		"main nested unknown": {
+			main: replace(validMain, `"model":{}`, `"model":{"unknown":true}`),
+		},
+		"main nested duplicate": {
+			main: replace(validMain, `"sessionId":"s"`, `"sessionId":"s","sessionId":"s"`),
+		},
+		"main nested case alias": {
+			main: replace(validMain, `"extraPathDirs":[]`, `"ExtraPathDirs":[]`),
+		},
+		"main trailing": {
+			main: SessionStoreEntry(validMain + ` []`),
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			idmap := test.idmap
+			if idmap == nil {
+				idmap = SessionStoreEntry(validIDMap)
+			}
+			mainEntry := test.main
+			if mainEntry == nil {
+				mainEntry = SessionStoreEntry(validMain)
+			}
+
+			store := NewInMemorySessionStore()
+			mainKey := SessionKey{SessionID: "s", Subpath: SessionStoreMainSubpath}
+			require.NoError(t, store.Replace(t.Context(), mainKey, []SessionStoreReplacement{
+				{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
+				{Key: SessionKey{SessionID: "s", Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmap}},
+			}))
+
+			if _, _, _, err := hydrateStateFromStore(
+				t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+			); err == nil {
+				t.Fatal("hydrate accepted ambiguous durable JSON")
+			}
+		})
+	}
+}
+
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
 	xdg, err := testGenerationXDG(t.TempDir())
