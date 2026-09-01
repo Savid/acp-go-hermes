@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -56,15 +57,33 @@ func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ..
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := &liveAgent{stdin: stdin, stdout: stdout, wait: cmd.Wait}
+	agent := &liveAgent{stdin: stdin, stdout: stdout}
 	cmd.Stderr = &agent.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	waitDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(waitDone)
+	}()
+	agent.wait = func() error {
+		<-waitDone
+
+		return waitErr
+	}
 	agent.close = func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-waitDone:
+			return
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			<-waitDone
+		}
 	}
 	return agent
 }
