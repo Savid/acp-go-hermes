@@ -1009,7 +1009,14 @@ func TestSessionCloseCancelsAndJoinsActiveReplay(t *testing.T) {
 	client := newFakeHermesClient()
 	replayEntered := make(chan struct{})
 	replayCancelled := make(chan struct{})
+	var replayOnce sync.Once
 	client.messagesFunc = func(ctx context.Context, _ string) ([]nativehermes.NativeMessage, error) {
+		firstReplay := false
+		replayOnce.Do(func() { firstReplay = true })
+		if !firstReplay {
+			return nil, nil
+		}
+
 		close(replayEntered)
 		<-ctx.Done()
 		close(replayCancelled)
