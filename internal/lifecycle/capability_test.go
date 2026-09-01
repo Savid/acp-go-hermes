@@ -19,6 +19,7 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 		data string
 	}{
 		{"empty", `{}`},
+		{"not object", `[]`},
 		{"not json", ``},
 		{"truncated member", `{"`},
 		{"truncated close", `{"version":1`},

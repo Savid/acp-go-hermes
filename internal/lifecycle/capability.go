@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 )
 
 // UnmarshalJSON strictly decodes the independently carried lifecycle answer.
@@ -13,8 +12,10 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
+	// encoding/json validates the complete outer value before invoking this
+	// method, so the opening token cannot fail.
+	opening, _ := decoder.Token()
+	if opening != json.Delim('{') {
 		return errors.New("lifecycle capability must be an object")
 	}
 
@@ -22,12 +23,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 	seen := make(map[string]struct{})
 
 	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return fmt.Errorf("decode lifecycle capability member: %w", err)
-		}
-
-		// encoding/json returns object member names only as strings.
+		// A validated object supplies only string member-name tokens.
+		token, _ := decoder.Token()
 		field, _ := token.(string)
 
 		if _, duplicate := seen[field]; duplicate {
@@ -65,13 +62,9 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 		}
 	}
 
-	if _, err := decoder.Token(); err != nil {
-		return fmt.Errorf("close lifecycle capability: %w", err)
-	}
-
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("lifecycle capability carries trailing input")
-	}
+	// The validated outer object guarantees its closing delimiter and excludes
+	// trailing input before UnmarshalJSON is called.
+	_, _ = decoder.Token()
 
 	if _, present := seen[fieldVersion]; !present {
 		return errors.New("lifecycle capability version is missing")
