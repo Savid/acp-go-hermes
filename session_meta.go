@@ -17,6 +17,7 @@ const (
 	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
 	sessionPathEnvironmentKey     = "PATH"
 	sessionBashEnvironmentKey     = "BASH_ENV"
+	sessionShellEnvironmentKey    = "ENV"
 	sessionManagedPathEnvPrefix   = "ACP_GO_HERMES_PATH_DIR_"
 	runtimePlatformWindows        = "windows"
 )
@@ -165,6 +166,10 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
 			}
 
+			if sessionEnvironmentOwnsShellEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
+			}
+
 			if sessionEnvironmentOwnsManagedPath(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
 			}
@@ -180,6 +185,10 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 
 			if sessionEnvironmentOwnsBashEnv(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
+			}
+
+			if sessionEnvironmentOwnsShellEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
 			}
 
 			if sessionEnvironmentOwnsManagedPath(key) {
@@ -224,6 +233,18 @@ func sessionEnvironmentOwnsBashEnvForPlatform(key string, platform string) bool 
 	return key == sessionBashEnvironmentKey
 }
 
+func sessionEnvironmentOwnsShellEnv(key string) bool {
+	return sessionEnvironmentOwnsShellEnvForPlatform(key, runtime.GOOS)
+}
+
+func sessionEnvironmentOwnsShellEnvForPlatform(key string, platform string) bool {
+	if platform == runtimePlatformWindows {
+		return strings.EqualFold(key, sessionShellEnvironmentKey)
+	}
+
+	return key == sessionShellEnvironmentKey
+}
+
 func sessionEnvironmentOwnsManagedPath(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), sessionManagedPathEnvPrefix)
 }
@@ -233,7 +254,7 @@ func validatePathCarrierOptions(options Options) error {
 
 	for _, environment := range environments {
 		for key := range environment {
-			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
+			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsShellEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
 				return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
 			}
 		}

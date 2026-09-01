@@ -14,6 +14,7 @@ const (
 	hermesPathInitCountEnv    = hermesPathInitEnvironment + "COUNT"
 	hermesPathInitWindowsEnv  = hermesPathInitEnvironment + "WINDOWS"
 	hermesBashEnvKey          = "BASH_ENV"
+	hermesShellEnvKey         = "ENV"
 )
 
 // hermesPathInitScript is sourced by Bash through its supported BASH_ENV hook.
@@ -105,15 +106,17 @@ func hermesPathInitWrite(home string) seedWrite {
 	}
 }
 
-// installHermesPathCarrier removes every untrusted spelling of BASH_ENV and the
-// managed namespace, then installs validated directory values in numbered
-// slots. Values remain data rather than shell source, so spaces and shell
-// metacharacters in an absolute directory cannot change the init script syntax.
+// installHermesPathCarrier removes every untrusted spelling of the shell hooks
+// and the managed namespace, then installs validated directory values in
+// numbered slots. Values remain data rather than shell source, so spaces and
+// shell metacharacters in an absolute directory cannot change the init script
+// syntax.
 func installHermesPathCarrier(environment []string, home string, dirs []string) []string {
 	managed := make([]string, 0, len(environment)+len(dirs)+3)
 	for _, entry := range environment {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && (processEnvironmentKeyMatches(key, hermesBashEnvKey) || hermesPathCarrierEnvironmentKey(key)) {
+		if ok && (processEnvironmentKeyMatches(key, hermesBashEnvKey) ||
+			processEnvironmentKeyMatches(key, hermesShellEnvKey) || hermesPathCarrierEnvironmentKey(key)) {
 			continue
 		}
 
@@ -159,6 +162,8 @@ func validatePathCarrierEnvironment(env map[string]string) error {
 		switch {
 		case processEnvironmentKeyMatches(key, hermesBashEnvKey):
 			return errors.New("environment must not contain BASH_ENV")
+		case processEnvironmentKeyMatches(key, hermesShellEnvKey):
+			return errors.New("environment must not contain ENV")
 		case hermesPathCarrierEnvironmentKey(key):
 			return fmt.Errorf("environment must not contain adapter-managed path variable %q", key)
 		}

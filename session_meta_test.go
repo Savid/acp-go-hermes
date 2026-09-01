@@ -120,6 +120,15 @@ func TestLifecycleMetaRejectsRawPATH(t *testing.T) {
 		metaEnvKey: map[string]any{"BASH_ENV": "/untrusted/init"},
 	}}})
 	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".BASH_ENV")
+	_, err = sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{"ENV": "/untrusted/init"}}.Meta())
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".ENV")
+	_, err = sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
+		metaEnvKey: map[string]any{"ENV": "/untrusted/init"},
+	}}})
+	requireLifecycleMetaField(t, err, hermesEnvOptionPath+".ENV")
+	if !sessionEnvironmentOwnsShellEnvForPlatform("env", "windows") || sessionEnvironmentOwnsShellEnvForPlatform("env", "linux") {
+		t.Fatal("ENV platform comparison did not match native environment semantics")
+	}
 	if !sessionEnvironmentOwnsBashEnvForPlatform("bash_env", "windows") || sessionEnvironmentOwnsBashEnvForPlatform("bash_env", "linux") {
 		t.Fatal("BASH_ENV platform comparison did not match native environment semantics")
 	}

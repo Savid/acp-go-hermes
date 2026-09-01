@@ -373,6 +373,54 @@ func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T)
 	require.NotEqual(t, home, strings.TrimPrefix(events[serveStart+2], "reclaim:"))
 }
 
+func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
+	want := errors.New("managed serve start refused")
+	first := t.TempDir()
+	second := t.TempDir()
+	var serveRequest NativeRequest
+	opts := ProcessOptions{
+		ExecutablePath: "logical-hermes", Home: t.TempDir(), ScratchParent: t.TempDir(),
+		NativeEnvironment: map[string]string{"PATH": "/native/bin", "KEPT": "yes"},
+		AmbientEnvironment: map[string]string{
+			hermesBashEnvKey: "/ambient/bash-init", hermesShellEnvKey: "/ambient/sh-init",
+			hermesPathInitCountEnv: "99",
+		},
+		ExtraPathDirs:     []string{first, second},
+		PrepareNativeTree: func(context.Context, string) error { return nil },
+		StartNative: func(_ context.Context, request NativeRequest) (NativeProcess, error) {
+			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
+				return &probeTestProcess{
+					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stderr: io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+
+			serveRequest = request
+
+			return nil, want
+		},
+		ReclaimNativeTree: func(context.Context, string) error { return nil },
+	}
+
+	_, err := Start(t.Context(), opts)
+	require.ErrorIs(t, err, want)
+	require.NotEmpty(t, serveRequest.Environment)
+	path := envValueFold(serveRequest.Environment, "PATH", processRuntimePlatform == processPlatformWindows)
+	parts := strings.Split(path, string(os.PathListSeparator))
+	require.Len(t, parts, 4)
+	require.Equal(t, []string{first, second}, parts[:2])
+	require.Contains(t, parts[2], browserShimPrefix)
+	require.Equal(t, "/native/bin", parts[3])
+	require.Contains(t, serveRequest.Environment, "KEPT=yes")
+	for _, entry := range serveRequest.Environment {
+		key, _, ok := strings.Cut(entry, "=")
+		require.True(t, ok)
+		require.False(t, processEnvironmentKeyMatches(key, hermesBashEnvKey), "managed request carried %q", key)
+		require.False(t, processEnvironmentKeyMatches(key, "ENV"), "managed request carried %q", key)
+		require.False(t, hermesPathCarrierEnvironmentKey(key), "managed request carried %q", key)
+	}
+}
+
 type retryWaitProcess struct {
 	probeTestProcess
 	mu       sync.Mutex

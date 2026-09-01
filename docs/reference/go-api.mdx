@@ -38,7 +38,7 @@ arbitrary error text are intentionally omitted.
 | `WithHome` | Unsupported. Use `WithScratchDir` for isolated ephemeral state or `WithSharedHermesHome` for the explicit official-Hermes durable mode. |
 | `WithSharedHermesHome` | Absolute, already-clean, supported local-filesystem path used as the exact durable `HERMES_HOME` by each per-session official Hermes process of this adapter. The adapter claims the home root exclusively for the lifetime of those processes and refuses to start when another adapter already holds it. Native database/auth state is shared; processes, environments, events, and wrapper controls remain separate. With `WithProviderAuthRoot` also set, the adapter resolves this path's symlinks and uses the resolved path everywhere instead. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Static Agent-scoped environment overlaid on the authority's complete native environment, or on the captured sanitized ambient environment in ordinary mode, for version probing and each `hermes serve` process. This is the only API that may set the native base `PATH`. `BASH_ENV` and `ACP_GO_HERMES_PATH_DIR_*` are reserved for the adapter's terminal PATH carrier. |
+| `WithEnv` | Static Agent-scoped environment overlaid on the authority's complete native environment, or on the captured sanitized ambient environment in ordinary mode, for version probing and each `hermes serve` process. This is the only API that may set the native base `PATH`. `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` are reserved; the PATH carrier exists only in ordinary mode and never crosses the host-authority boundary. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
 | `WithSessionStoreLoadTimeout` | Bound on each store read (default 10s); writes use a fixed 60s bound. |
@@ -184,20 +184,22 @@ fields. `NewHermesOptions` builds one from `WithHermesModel`, `WithHermesEnv`,
 ahead of the base `PATH` for both that session's `hermes serve` process and its
 actual local terminal commands. Order and duplicates are semantic. Empty,
 relative, or path-list-separator-bearing entries are rejected with the exact
-indexed metadata field. Session `Env` cannot contain `PATH`, `BASH_ENV`, or an
-`ACP_GO_HERMES_PATH_DIR_*` key. `WithEnv` and the host authority environment
-also reserve the latter two namespaces, and an ambient `BASH_ENV` is scrubbed
-at launch. The dedicated ordered field is the sole session-scoped PATH
-authority.
+indexed metadata field. Session `Env` cannot contain `PATH`, `BASH_ENV`, `ENV`,
+or an `ACP_GO_HERMES_PATH_DIR_*` key. `WithEnv` and the host authority
+environment also reserve the latter three namespaces, and ambient shell hooks
+are scrubbed at ordinary launch. The dedicated ordered field is the sole
+session-scoped PATH authority.
 
 Hermes executable resolution and version probing see only the static base
 environment. The launched process sees operation directories first, the
 browser-launcher shim second when present, and the captured native base `PATH`
-last. For native terminal execution the adapter-owned Bash hook runs after the
-login profile has rewritten PATH and restores the operation directories first
-before Hermes records its shell snapshot. It then removes `BASH_ENV` and every
-private carrier variable from that snapshot and from the resulting terminal
-command environment. An installed `hermes` executable may itself be a Bash
+last. Managed execution sends that PATH directly through `StartNative`, with no
+shell startup hook or private carrier variable. For ordinary native terminal
+execution the adapter-owned Bash hook runs after the login profile has rewritten
+PATH and restores the operation directories first before Hermes records its
+shell snapshot. It then removes `BASH_ENV` and every private carrier variable
+from that snapshot and from the resulting terminal command environment. An
+installed `hermes` executable may itself be a Bash
 script that immediately execs the Python gateway; the process-local carrier is
 preserved through that launcher so the later snapshot Bash can consume it. The
 values are validated directory names, not credentials, and remain inaccessible

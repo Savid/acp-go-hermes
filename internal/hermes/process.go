@@ -231,7 +231,9 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	env = upsertProcessEnv(env, envHermesHome, home)
 	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
-	env = installHermesPathCarrier(env, home, extraPathDirs)
+	if opts.StartNative == nil {
+		env = installHermesPathCarrier(env, home, extraPathDirs)
+	}
 
 	shim, err := newProcessBrowserShim(opts.ScratchParent)
 	if err != nil {

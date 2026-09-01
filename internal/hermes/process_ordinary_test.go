@@ -98,6 +98,7 @@ func TestProcessCarrierValidation(t *testing.T) {
 
 	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
 	require.Error(t, validatePathCarrierEnvironment(map[string]string{"BASH_ENV": "/bad"}))
+	require.Error(t, validatePathCarrierEnvironment(map[string]string{"ENV": "/bad"}))
 	require.NoError(t, validateSessionEnvironmentNoPath(map[string]string{"TOKEN": "good"}))
 	require.True(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "windows"))
 	require.False(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "linux"))
@@ -106,9 +107,14 @@ func TestProcessCarrierValidation(t *testing.T) {
 		{ExtraPathDirs: []string{"relative"}},
 		{SessionEnv: map[string]string{"PATH": "/session"}},
 		{Env: map[string]string{hermesBashEnvKey: "/untrusted"}},
+		{Env: map[string]string{hermesShellEnvKey: "/untrusted"}},
 		{
 			StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return nil, errors.New("unused") },
 			NativeEnvironment: map[string]string{hermesBashEnvKey: "/untrusted"},
+		},
+		{
+			StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return nil, errors.New("unused") },
+			NativeEnvironment: map[string]string{hermesShellEnvKey: "/untrusted"},
 		},
 	} {
 		_, carrierErr := validatedProcessCarrier(options)

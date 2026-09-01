@@ -107,24 +107,27 @@ captured static native environment. Only the session process then receives its
 environment and effective PATH: operation directories in caller order, the
 browser-launcher containment directory when supported, and the captured base
 PATH. Empty PATH components are omitted and ambient PATH is never reread during
-session launch. Hermes' native terminal starts a login Bash which can replace
-that PATH from profile files, so the adapter supplies a production-owned
-`BASH_ENV` hook. It runs after login startup, restores the operation directories
-at the front of the PATH Hermes snapshots, and removes `BASH_ENV` plus the
-private `ACP_GO_HERMES_PATH_DIR_*` carrier from the snapshot before commands
-execute. When the installed `hermes` launcher is itself a Bash script, those
+session launch. Managed execution composes this final PATH directly and sends
+no `BASH_ENV`, `ENV`, `ACP_GO_HERMES_PATH_DIR_*`, or other startup-hook carrier
+through the host authority. In ordinary execution, Hermes' native terminal
+starts a login Bash which can replace that PATH from profile files, so the
+adapter supplies a production-owned `BASH_ENV` hook. It runs after login
+startup, restores the operation directories at the front of the PATH Hermes
+snapshots, and removes `BASH_ENV` plus the private
+`ACP_GO_HERMES_PATH_DIR_*` carrier from the snapshot before commands execute.
+When the installed `hermes` launcher is itself a Bash script, those
 process-local values pass through its immediate exec into the Python gateway;
-the later terminal snapshot Bash is their consumer. They contain only validated
-directory names, never session credentials, and callers cannot supply either
-reserved namespace. The hook is stored in both isolated and shared Hermes homes
-without editing operator `config.yaml`.
+the later terminal snapshot Bash is their consumer. They contain only
+validated directory names, never session credentials, and callers cannot
+supply either reserved namespace. The ordinary-mode hook is stored in both
+isolated and shared Hermes homes without editing operator `config.yaml`.
 
-Raw session `PATH`, `BASH_ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are refused.
-`WithEnv` and the host authority environment also reserve `BASH_ENV` and the
-private namespace; an inherited ambient `BASH_ENV` is deliberately scrubbed at
-the final process boundary. On Windows, validated native drive and UNC paths
-are converted directly to Git Bash path syntax without looking up or executing
-a converter from the effective PATH.
+Raw session `PATH`, `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are
+refused. `WithEnv` and the host authority environment also reserve `BASH_ENV`,
+`ENV`, and the private namespace; inherited ambient shell hooks are
+deliberately scrubbed at the ordinary process boundary. On Windows, validated
+native drive and UNC paths are converted directly to Git Bash path syntax
+without looking up or executing a converter from the effective PATH.
 
 On Windows, environment names are case-insensitive, so the launch environment
 is built that way rather than left to the child. The captured ambient

@@ -87,6 +87,7 @@ func TestImageLimitDefaults(t *testing.T) {
 func TestPathCarrierEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
 	for _, agent := range []*Agent{
 		NewAgent(WithEnv(map[string]string{"BASH_ENV": "/untrusted/init"})),
+		NewAgent(WithEnv(map[string]string{"ENV": "/untrusted/init"})),
 		NewAgent(WithEnv(map[string]string{"acp_go_hermes_path_dir_1": "/untrusted/bin"})),
 	} {
 		require.ErrorContains(t, agent.optionsErr, "reserved for the session PATH carrier")

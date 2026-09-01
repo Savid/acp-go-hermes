@@ -19,6 +19,7 @@ func TestInstallHermesPathCarrierOwnsNamespaceBashEnvAndOrder(t *testing.T) {
 	environment := []string{
 		"A=1",
 		hermesBashEnvKey + "=/untrusted/init",
+		hermesShellEnvKey + "=/untrusted/sh-init",
 		hermesPathInitCountEnv + "=99",
 		strings.ToLower(hermesPathInitEnvironment) + "1=untrusted",
 	}
@@ -33,7 +34,7 @@ func TestInstallHermesPathCarrierOwnsNamespaceBashEnvAndOrder(t *testing.T) {
 		hermesPathInitEnvironment + "2=" + second,
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("managed environment = %#v, want %#v", got, want)
+		t.Fatalf("carrier environment = %#v, want %#v", got, want)
 	}
 	if got := installHermesPathCarrier(environment, home, nil); !slices.Equal(got, []string{"A=1"}) {
 		t.Fatalf("empty carrier environment = %#v", got)
@@ -212,6 +213,7 @@ func TestValidateSessionEnvironmentRejectsManagedPathCarrierAndBashEnv(t *testin
 	for key := range map[string]struct{}{
 		hermesPathInitCountEnv: {},
 		hermesBashEnvKey:       {},
+		hermesShellEnvKey:      {},
 	} {
 		if err := validateSessionEnvironmentNoPath(map[string]string{key: "untrusted"}); err == nil {
 			t.Fatalf("reserved environment key %q was accepted", key)
