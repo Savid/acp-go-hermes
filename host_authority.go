@@ -19,6 +19,7 @@ var (
 type HostAuthority interface {
 	NativeEnvironment() map[string]string
 	PrepareNativeTree(context.Context, string) error
+	ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error)
 	ReclaimNativeTree(context.Context, string) error
 	StartNative(context.Context, NativeRequest) (NativeProcess, error)
 }
