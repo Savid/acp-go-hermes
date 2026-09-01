@@ -24,6 +24,7 @@ const defaultImageLimitBytes int64 = 6 * 1024 * 1024
 // Option configures the Hermes ACP agent.
 type Option func(*Options)
 
+// WithHostAuthority routes native processes and tree ownership through authority.
 func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
 		options.hostAuthoritySupplied = true
