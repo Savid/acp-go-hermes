@@ -731,6 +731,23 @@ func TestLoadSessionResidualBranches(t *testing.T) {
 	})
 }
 
+func TestApplyAdmittedActiveLifecycleRequest(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	meta := sessionMeta{}
+	if rebind, err := applyAdmittedActiveLifecycleRequest(
+		t.Context(), session, session.cwd, nil, nil, &meta,
+	); err != nil || rebind {
+		t.Fatalf("live reuse application = rebind:%v err:%v", rebind, err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := applyAdmittedActiveLifecycleRequest(
+		canceled, session, session.cwd, nil, nil, &meta,
+	); err == nil {
+		t.Fatalf("cancelled reuse rejection = %v", err)
+	}
+}
+
 func TestForkEarlyResidualBranches(t *testing.T) {
 	newForkAgent := func(t *testing.T) (*Agent, *session) {
 		t.Helper()
@@ -808,6 +825,45 @@ func TestSettlementManagedCompletionResidualBranch(t *testing.T) {
 	}
 	if err := session.settleClosedSession(t.Context()); !errors.Is(err, want) || session.owedCloseCommit == nil {
 		t.Fatalf("managed settlement completion = %v, retained=%v", err, session.owedCloseCommit != nil)
+	}
+}
+
+func TestQuestionRouteRetiresAfterHostWrite(t *testing.T) {
+	session, client, _, turnCtx, _ := activeQuestionSession(
+		t, acp.UnstableCreateElicitationResponse{}, nil,
+	)
+	session.afterHostControlWrite = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+	}
+	if err := session.handleQuestion(turnCtx, questionRequest("retired-after-write")); !errors.Is(err, errPromptCancelled) {
+		t.Fatalf("retired question route = %v", err)
+	}
+	if client.questionRejectCount() != 1 {
+		t.Fatalf("retired question rejects = %d", client.questionRejectCount())
+	}
+}
+
+func TestPumpBarrierDrainsClosedSourceDuringShutdown(t *testing.T) {
+	client := newFakeHermesClient()
+	session := testSession(newTestAgent(), client)
+	t.Cleanup(session.stopPump)
+	session.afterPumpBarrierAccept = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+		close(client.deliveries)
+	}
+	if err := session.synchronizePump(t.Context()); err != nil {
+		t.Fatalf("closed source barrier = %v", err)
+	}
+
+	deliveries := make(chan nativehermes.TurnDelivery)
+	close(deliveries)
+	closed, err := session.drainPumpBarrier(t.Context(), deliveries)
+	if err != nil || !closed {
+		t.Fatalf("closed source drain = closed:%v err:%v", closed, err)
 	}
 }
 

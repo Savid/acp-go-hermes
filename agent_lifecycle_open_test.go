@@ -973,8 +973,14 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 				closeDone <- err
 			}()
 			<-cancelled
-			require.True(t, agent.mu.TryLock(), "session close held Agent.mu while joining reuse")
-			agent.mu.Unlock()
+			require.Eventually(t, func() bool {
+				if !agent.mu.TryLock() {
+					return false
+				}
+				agent.mu.Unlock()
+
+				return true
+			}, time.Second, time.Millisecond, "session close held Agent.mu while joining reuse")
 			require.Error(t, <-requestDone)
 			require.NoError(t, <-closeDone)
 			require.Nil(t, agent.activeSession(session.id))

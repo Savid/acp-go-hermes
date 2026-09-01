@@ -114,18 +114,15 @@ func walkStrictJSONValue(decoder *json.Decoder, shape *strictJSONShape, path str
 		return nil
 	}
 
-	switch delimiter {
-	case '{':
+	if delimiter == '{' {
 		seen := map[string]struct{}{}
 		for decoder.More() {
 			member, memberErr := decoder.Token()
 			if memberErr != nil {
 				return memberErr
 			}
-			key, ok := member.(string)
-			if !ok {
-				return fmt.Errorf("%s has a non-string object member", path)
-			}
+			// encoding/json returns every successfully decoded object member name as a string.
+			key, _ := member.(string)
 
 			if _, duplicate := seen[key]; duplicate {
 				return fmt.Errorf("%s contains duplicate field %q", path, key)
@@ -159,23 +156,22 @@ func walkStrictJSONValue(decoder *json.Decoder, shape *strictJSONShape, path str
 		_, err = decoder.Token()
 
 		return err
-	case '[':
-		index := 0
-		for decoder.More() {
-			var elementShape *strictJSONShape
-			if shape != nil {
-				elementShape = shape.element
-			}
-			if walkErr := walkStrictJSONValue(decoder, elementShape, fmt.Sprintf("%s[%d]", path, index)); walkErr != nil {
-				return walkErr
-			}
-			index++
-		}
-
-		_, err = decoder.Token()
-
-		return err
-	default:
-		return fmt.Errorf("%s contains unexpected JSON delimiter %q", path, delimiter)
 	}
+
+	// A successful composite token at a JSON value boundary is either an object above or an array here.
+	index := 0
+	for decoder.More() {
+		var elementShape *strictJSONShape
+		if shape != nil {
+			elementShape = shape.element
+		}
+		if walkErr := walkStrictJSONValue(decoder, elementShape, fmt.Sprintf("%s[%d]", path, index)); walkErr != nil {
+			return walkErr
+		}
+		index++
+	}
+
+	_, err = decoder.Token()
+
+	return err
 }

@@ -332,12 +332,9 @@ func (a *Agent) loadOrResumeSession(
 		return nil, reuseErr
 	}
 	if existing != nil {
-		if context.Cause(reuseCtx) != nil {
-			releaseReuse()
-
-			return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
-		}
-		rebind, applyErr := applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, &meta)
+		rebind, applyErr := applyAdmittedActiveLifecycleRequest(
+			reuseCtx, existing, cwd, additionalDirectories, mcpServers, &meta,
+		)
 		if applyErr != nil {
 			releaseReuse()
 
@@ -872,6 +869,21 @@ func (a *Agent) closeActiveSessionForRebind(
 	a.observe.AddActiveSession(ctx, -1)
 
 	return nil
+}
+
+func applyAdmittedActiveLifecycleRequest(
+	reuseCtx context.Context,
+	existing *session,
+	cwd string,
+	additionalDirectories []string,
+	mcpServers []acp.McpServer,
+	meta *sessionMeta,
+) (bool, error) {
+	if context.Cause(reuseCtx) != nil {
+		return false, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
+	}
+
+	return applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta)
 }
 
 func lifecycleMismatch(field string) error {
