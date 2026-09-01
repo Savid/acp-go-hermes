@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -560,6 +561,29 @@ func TestHydrateStateFromStoreRejectsAmbiguousIDMapAndMainJSON(t *testing.T) {
 				t.Fatal("hydrate accepted ambiguous durable JSON")
 			}
 		})
+	}
+}
+
+func TestHydrateStateFromStoreAcceptsCaseDistinctDynamicKeys(t *testing.T) {
+	snapshot := validHydrateSnapshot()
+	snapshot.Session.Env = map[string]string{
+		"Token": "one",
+		"TOKEN": "two",
+	}
+	snapshot.Archives = map[string]archiveInfo{
+		"Archive": {Subpath: "first"},
+		"ARCHIVE": {Subpath: "second"},
+	}
+
+	store := NewInMemorySessionStore()
+	replaceHydrateRecords(t, t.Context(), store, validHydrateIDMap(), snapshot)
+
+	_, hydrated, ok, err := hydrateStateFromStore(
+		t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+	)
+	if err != nil || !ok || !reflect.DeepEqual(hydrated.Session.Env, snapshot.Session.Env) ||
+		!reflect.DeepEqual(hydrated.Archives, snapshot.Archives) {
+		t.Fatalf("case-distinct dynamic hydrate = snapshot %#v, ok %t, err %v", hydrated, ok, err)
 	}
 }
 

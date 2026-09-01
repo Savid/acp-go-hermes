@@ -116,7 +116,7 @@ func walkStrictJSONValue(decoder *json.Decoder, shape *strictJSONShape, path str
 
 	switch delimiter {
 	case '{':
-		seen := map[string]string{}
+		seen := map[string]struct{}{}
 		for decoder.More() {
 			member, memberErr := decoder.Token()
 			if memberErr != nil {
@@ -127,15 +127,10 @@ func walkStrictJSONValue(decoder *json.Decoder, shape *strictJSONShape, path str
 				return fmt.Errorf("%s has a non-string object member", path)
 			}
 
-			folded := strings.ToLower(key)
-			if previous, duplicate := seen[folded]; duplicate {
-				if previous == key {
-					return fmt.Errorf("%s contains duplicate field %q", path, key)
-				}
-
-				return fmt.Errorf("%s contains case-alias fields %q and %q", path, previous, key)
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("%s contains duplicate field %q", path, key)
 			}
-			seen[folded] = key
+			seen[key] = struct{}{}
 
 			var memberShape *strictJSONShape
 			if shape != nil {

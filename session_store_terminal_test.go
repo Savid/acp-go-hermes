@@ -188,8 +188,6 @@ func TestInspectSessionStoreTerminalStateRejectsAmbiguousJSONAtEveryDepth(t *tes
 			`"providerID":"provider"`, `"providerId":"provider"`),
 		"environment duplicate": mutate(
 			`"env":{"TOKEN":"one"}`, `"env":{"TOKEN":"one","TOKEN":"two"}`),
-		"environment case alias": mutate(
-			`"env":{"TOKEN":"one"}`, `"env":{"TOKEN":"one","token":"two"}`),
 		"terminal unknown": mutate(
 			`"terminal":{"messageId":`, `"terminal":{"unknown":true,"messageId":`),
 		"terminal duplicate": mutate(
@@ -198,8 +196,6 @@ func TestInspectSessionStoreTerminalStateRejectsAmbiguousJSONAtEveryDepth(t *tes
 			`"messageId":"history-2"`, `"MessageId":"history-2"`),
 		"archives duplicate": mutate(
 			`"archives":{"state-db":`, `"archives":{"state-db":{"subpath":"state-db","sha256":"digest","bytes":1},"state-db":`),
-		"archives case alias": mutate(
-			`"archives":{"state-db":`, `"archives":{"STATE-DB":{"subpath":"state-db","sha256":"digest","bytes":1},"state-db":`),
 		"archive info unknown": mutate(
 			`"state-db":{"subpath":`, `"state-db":{"unknown":true,"subpath":`),
 		"archive info duplicate": mutate(
@@ -225,6 +221,25 @@ func TestInspectSessionStoreTerminalStateRejectsAmbiguousJSONAtEveryDepth(t *tes
 				t.Fatal("inspector accepted ambiguous durable JSON")
 			}
 		})
+	}
+}
+
+func TestInspectSessionStoreTerminalStateAcceptsCaseDistinctDynamicKeys(t *testing.T) {
+	snapshot := terminalInspectorSnapshot(&stateSnapshotTerminal{})
+	snapshot.Session.Env = map[string]string{
+		"Token": "one",
+		"TOKEN": "two",
+	}
+	snapshot.Archives = map[string]archiveInfo{
+		"Archive": {Subpath: "first"},
+		"ARCHIVE": {Subpath: "second"},
+	}
+
+	state, err := InspectSessionStoreTerminalState(
+		"session-1", []SessionStoreEntry{mustStateJSON(t, snapshot)},
+	)
+	if err != nil || state != (SessionStoreTerminalState{}) {
+		t.Fatalf("case-distinct dynamic keys = state %#v, err %v", state, err)
 	}
 }
 
