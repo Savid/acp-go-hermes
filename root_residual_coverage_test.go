@@ -536,6 +536,157 @@ func TestSnapshotCaptureCancellationResidualBranches(t *testing.T) {
 	})
 }
 
+func TestAgentAndSessionLifecycleAdmissionResidualBranches(t *testing.T) {
+	closed := newTestAgent()
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := closed.beginActiveReuse(t.Context(), "session"); err == nil {
+		t.Fatal("closed agent admitted active reuse")
+	}
+	if _, _, err := closed.acquireSessionLifecycle(t.Context(), "session"); err == nil {
+		t.Fatal("closed agent admitted session lifecycle")
+	}
+	if _, err := closed.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session"}); err == nil {
+		t.Fatal("closed agent admitted session close")
+	}
+
+	agent := newTestAgent()
+	session := testSession(agent, newFakeHermesClient())
+	agent.sessions[session.id] = session
+	if err := agent.cleanupFailedStartedSession(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if agent.activeSession(session.id) != nil {
+		t.Fatal("failed started session remained active")
+	}
+}
+
+func TestSessionCleanupRetryEntryResidualBranches(t *testing.T) {
+	newAgentWithBadCleanup := func() *Agent {
+		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
+		agent.deleteCleanup["bad"] = deleteCleanupRecord{SessionID: "bad", XDGRoot: string([]byte{0})}
+
+		return agent
+	}
+	loadAgent := newAgentWithBadCleanup()
+	if _, err := loadAgent.LoadSession(t.Context(), LoadSessionRequest("missing", t.TempDir())); err == nil {
+		t.Fatal("missing load unexpectedly succeeded")
+	}
+	deleteAgent := newAgentWithBadCleanup()
+	if _, err := deleteAgent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("missing")); err != nil {
+		t.Fatalf("delete after cleanup retry = %v", err)
+	}
+}
+
+func TestRuntimeResumeEarlyResidualBranches(t *testing.T) {
+	t.Run("managed finish", func(t *testing.T) {
+		want := errors.New("managed finish refused")
+		managed := &managedHermesServer{managed: true, closed: true, closeErr: want}
+		session := testSession(newTestAgent(), newFakeHermesClient())
+		session.client = managed
+		session.runtimeNeedsResume = true
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
+			t.Fatalf("managed finish = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		session := testSession(newTestAgent(WithScratchDir(t.TempDir())), newFakeHermesClient())
+		session.runtimeNeedsResume = true
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
+			t.Fatalf("resume generation creation = %v", err)
+		}
+	})
+}
+
+func TestActiveRebindAndComparisonResidualBranches(t *testing.T) {
+	want := errors.New("close refused")
+	agent := newTestAgent()
+	failingClient := newFakeHermesClient()
+	failingClient.closeErr = want
+	failing := testSession(agent, failingClient)
+	if err := agent.closeActiveSessionForRebind(t.Context(), failing.id, failing, func() {}); !errors.Is(err, want) {
+		t.Fatalf("failed active rebind close = %v", err)
+	}
+
+	missing := testSession(agent, newFakeHermesClient())
+	if err := agent.closeActiveSessionForRebind(t.Context(), missing.id, missing, func() {}); err == nil {
+		t.Fatal("missing active rebind close succeeded")
+	}
+	if stringMapsEqual(map[string]string{"left": "one"}, map[string]string{}) {
+		t.Fatal("different-length maps compared equal")
+	}
+}
+
+func TestNewHermesClientResidualBranches(t *testing.T) {
+	t.Run("incomplete residence", func(t *testing.T) {
+		agent := newTestAgent()
+		agent.retainIncompleteHermesRoot("session", t.TempDir())
+		if _, err := agent.newHermesClient(t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}); !errors.Is(err, ErrContainmentIncomplete) {
+			t.Fatalf("incomplete residence = %v", err)
+		}
+	})
+
+	t.Run("generation creation", func(t *testing.T) {
+		originalCreate := createHermesGeneration
+		t.Cleanup(func() { createHermesGeneration = originalCreate })
+		want := errors.New("generation refused")
+		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
+			return nativehermes.XDGDirs{}, want
+		}
+		agent := newTestAgent(WithScratchDir(t.TempDir()))
+		if _, err := agent.newHermesClient(t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}); !errors.Is(err, want) {
+			t.Fatalf("client generation creation = %v", err)
+		}
+	})
+
+	t.Run("scratch parent", func(t *testing.T) {
+		blocked := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(blocked, []byte("blocked"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		agent := newTestAgent(WithScratchDir(blocked))
+		if _, err := agent.newHermesClientWithScratch(
+			t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
+		); err == nil {
+			t.Fatal("client accepted unusable scratch parent")
+		}
+	})
+
+	t.Run("retention bridge", func(t *testing.T) {
+		authority := &residualAuthority{}
+		agent := newTestAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+		firstRoot := filepath.Join(t.TempDir(), "incomplete")
+		secondRoot := filepath.Join(t.TempDir(), "busy")
+		agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+			if !start.RetainNativeTree(firstRoot, ErrContainmentIncomplete) {
+				t.Fatal("containment-incomplete root was not retained")
+			}
+			if !start.RetainNativeTree(secondRoot, ErrNativeTreeBusy) {
+				t.Fatal("busy root was not retained")
+			}
+
+			return newFakeHermesClient(), nil
+		}
+		client, err := agent.newHermesClientWithScratch(
+			t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{Root: t.TempDir()}, func() {},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 type residualValueAuthority struct{}
 
 func (residualValueAuthority) NativeEnvironment() map[string]string {
