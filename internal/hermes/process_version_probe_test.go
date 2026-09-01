@@ -490,9 +490,13 @@ type cachedTerminalProcess struct {
 	waitOnce    sync.Once
 }
 
-func (p *cachedTerminalProcess) Wait(context.Context) (NativeResult, error) {
+func (p *cachedTerminalProcess) Wait(ctx context.Context) (NativeResult, error) {
 	p.waitOnce.Do(func() { close(p.waitStarted) })
-	<-p.releaseWait
+	select {
+	case <-p.releaseWait:
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	}
 
 	return NativeResult{Revoked: true}, nil
 }

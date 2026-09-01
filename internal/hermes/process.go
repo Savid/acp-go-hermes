@@ -149,12 +149,20 @@ type Process struct {
 	containmentIncomplete error
 	nativeTreeBusy        error
 
-	waitMu     sync.Mutex
-	waitActive bool
-	waitDone   chan struct{}
-	waitResult NativeResult
-	waitErr    error
-	closeMu    sync.Mutex
+	waitMu        sync.Mutex
+	waitActive    bool
+	waitDone      chan struct{}
+	waitCancel    context.CancelFunc
+	waitResult    NativeResult
+	waitErr       error
+	outputMu      sync.Mutex
+	outputActive  bool
+	outputWorkers int
+	outputDone    chan struct{}
+	outputStdout  io.ReadCloser
+	outputStderr  io.ReadCloser
+	outputErr     error
+	closeMu       sync.Mutex
 }
 
 // BrowserLaunchContained reports whether this process runs with the launcher
@@ -1031,15 +1039,20 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 
 	revokeErr := p.native.Revoke(ctx)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return errors.Join(revokeErr, ctxErr)
-	}
+	callerErr := ctx.Err()
 
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), closeTimeout)
+	if callerErr != nil {
+		waitCancel()
+	}
 	defer waitCancel()
 
 	waitDone := p.beginWait()
 	result, waitErr := p.awaitCloseWait(waitDone, waitCtx)
+	outputErr := p.closeOutputDrains()
+	if callerErr != nil {
+		return errors.Join(revokeErr, callerErr, waitErr, outputErr)
+	}
 	if result.Revoked {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(waitErr, &exitErr) {
@@ -1047,10 +1060,10 @@ func (p *Process) Close(ctx context.Context) error {
 		}
 	}
 	if p.managed && waitErr != nil {
-		return errors.Join(waitErr, revokeErr)
+		return errors.Join(waitErr, revokeErr, outputErr)
 	}
 	if waitErr != nil && (errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded)) {
-		return errors.Join(waitErr, revokeErr)
+		return errors.Join(waitErr, revokeErr, outputErr)
 	}
 
 	reclaimCtx, reclaimCancel := context.WithTimeout(context.Background(), closeTimeout)
@@ -1058,23 +1071,54 @@ func (p *Process) Close(ctx context.Context) error {
 
 	reclaimErr := p.reclaimAndRemove(reclaimCtx)
 	if reclaimErr != nil {
-		return errors.Join(revokeErr, waitErr, reclaimErr)
+		return errors.Join(revokeErr, waitErr, outputErr, reclaimErr)
 	}
 
-	return waitErr
+	return errors.Join(waitErr, outputErr)
 }
 
 func (p *Process) awaitCloseWait(waitDone <-chan struct{}, waitCtx context.Context) (NativeResult, error) {
 	select {
 	case <-waitDone:
+		return p.waitOutcome()
+	case <-waitCtx.Done():
 		p.waitMu.Lock()
-		result, waitErr := p.waitResult, p.waitErr
+		cancel := p.waitCancel
 		p.waitMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+
+		// NativeProcess.Wait owns the context contract. Rejoin the exact flight
+		// unconditionally so Close cannot return with this adapter waiter live.
+		<-waitDone
+		result, waitErr := p.waitOutcome()
+		if errors.Is(waitErr, context.Canceled) && !errors.Is(waitErr, p.containmentIncomplete) {
+			p.clearCanceledWait()
+
+			return NativeResult{}, p.containmentFailure("wait for Hermes process", waitCtx.Err())
+		}
 
 		return result, waitErr
-	case <-waitCtx.Done():
-		return NativeResult{}, p.containmentFailure("wait for Hermes process", waitCtx.Err())
 	}
+}
+
+func (p *Process) waitOutcome() (NativeResult, error) {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+
+	return p.waitResult, p.waitErr
+}
+
+func (p *Process) clearCanceledWait() {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+
+	p.waitActive = false
+	p.waitDone = nil
+	p.waitCancel = nil
+	p.waitResult = NativeResult{}
+	p.waitErr = nil
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.
@@ -1084,13 +1128,18 @@ func (p *Process) awaitCloseWait(waitDone <-chan struct{}, waitCtx context.Conte
 func (p *Process) beginWait() <-chan struct{} {
 	p.waitMu.Lock()
 	if !p.waitActive {
+		waitCtx, waitCancel := context.WithCancel(context.Background())
 		p.waitActive = true
 		p.waitDone = make(chan struct{})
+		p.waitCancel = waitCancel
 		done := p.waitDone
 		go func() {
-			result, err := p.native.Wait(context.Background())
+			result, err := p.native.Wait(waitCtx)
 			p.waitMu.Lock()
 			p.waitResult, p.waitErr = result, err
+			if p.waitDone == done {
+				p.waitCancel = nil
+			}
 			p.waitMu.Unlock()
 			close(done)
 		}()
@@ -1105,8 +1154,62 @@ func (p *Process) drainOutput(writer io.Writer) {
 	if writer == nil {
 		writer = io.Discard
 	}
-	go func() { _, _ = io.Copy(writer, p.native.Stdout()) }()
-	go func() { _, _ = io.Copy(writer, p.native.Stderr()) }()
+
+	stdout := p.native.Stdout()
+	stderr := p.native.Stderr()
+	done := make(chan struct{})
+	p.outputMu.Lock()
+	p.outputActive = true
+	p.outputWorkers = 2
+	p.outputDone = done
+	p.outputStdout = stdout
+	p.outputStderr = stderr
+	p.outputMu.Unlock()
+	copyOutput := func(stream io.Reader) {
+		_, _ = io.Copy(writer, stream)
+		p.outputMu.Lock()
+		p.outputWorkers--
+		if p.outputWorkers == 0 {
+			close(done)
+		}
+		p.outputMu.Unlock()
+	}
+	go copyOutput(stdout)
+	go copyOutput(stderr)
+}
+
+func (p *Process) closeOutputDrains() error {
+	p.outputMu.Lock()
+	if !p.outputActive {
+		err := p.outputErr
+		p.outputMu.Unlock()
+
+		return err
+	}
+	stdout, stderr, done := p.outputStdout, p.outputStderr, p.outputDone
+	p.outputMu.Unlock()
+
+	closeErr := errors.Join(closeOutputStream(stdout), closeOutputStream(stderr))
+	<-done
+
+	p.outputMu.Lock()
+	p.outputActive = false
+	p.outputStdout = nil
+	p.outputStderr = nil
+	p.outputErr = errors.Join(p.outputErr, closeErr)
+	err := p.outputErr
+	p.outputMu.Unlock()
+
+	return err
+}
+
+func closeOutputStream(stream io.Closer) error {
+	err := stream.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+
+	return err
 }
 
 func (p *Process) startupFailure(cause error) error {

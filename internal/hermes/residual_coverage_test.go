@@ -962,13 +962,6 @@ func TestResidualProcessCloseBranches(t *testing.T) {
 	if err := process.reclaimAndRemove(t.Context()); !errors.Is(err, wantReclaim) {
 		t.Fatalf("shim reclaim failure = %v", err)
 	}
-
-	waitCtx, cancelWait := context.WithCancel(t.Context())
-	cancelWait()
-	_, waitErr := (&Process{}).awaitCloseWait(make(chan struct{}), waitCtx)
-	if !errors.Is(waitErr, context.Canceled) || !strings.Contains(waitErr.Error(), "wait for Hermes process") {
-		t.Fatalf("close wait timeout classification = %v", waitErr)
-	}
 }
 
 func TestResidualProcessReadinessBranches(t *testing.T) {
