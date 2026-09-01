@@ -13,13 +13,12 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 	var decoded Negotiated
 	require.NoError(t, json.Unmarshal([]byte(`{"version":1}`), &decoded))
 	require.Equal(t, Version, decoded.Version)
-	require.NoError(t, json.Unmarshal([]byte(`{}`), &decoded))
-	require.False(t, decoded.Present())
 
 	for _, test := range []struct {
 		name string
 		data string
 	}{
+		{"empty", `{}`},
 		{"missing", `{"updatesOutsidePrompt":true}`},
 		{"other integer", `{"version":2}`},
 		{"fractional", `{"version":1.0}`},

@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -28,16 +29,33 @@ type manifest struct {
 }
 
 type fixture struct {
-	Name       string         `json:"name"`
-	Purpose    string         `json:"purpose"`
-	Negotiated Negotiated     `json:"negotiated"`
-	Input      []fixtureInput `json:"input"`
+	Name       string            `json:"name"`
+	Purpose    string            `json:"purpose"`
+	Negotiated fixtureNegotiated `json:"negotiated"`
+	Input      []fixtureInput    `json:"input"`
 	// PostRefusal is delivered after the refusal. Fail closed latches, so every
 	// one of these must report the same token at the same identity: a consumer
 	// that stopped reducing and one that kept going past its own verdict are
 	// otherwise indistinguishable.
 	PostRefusal []fixtureInput  `json:"postRefusal"`
 	Expect      fixtureExpected `json:"expect"`
+}
+
+// fixtureNegotiated keeps the canonical battery's `{}` notation for an absent
+// capability out of the production strict decoder. Any present fixture value
+// still goes through Negotiated.UnmarshalJSON exactly as a wire capability does.
+type fixtureNegotiated struct {
+	Negotiated
+}
+
+func (n *fixtureNegotiated) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("{}")) {
+		n.Negotiated = Negotiated{}
+
+		return nil
+	}
+
+	return json.Unmarshal(data, &n.Negotiated)
 }
 
 // fixtureInput is either a delivered notification or an out-of-band control event
@@ -114,7 +132,7 @@ func TestReducerFixtures(t *testing.T) {
 			t.Parallel()
 
 			vector := loadFixture(t, entry.File)
-			reducer := NewReducer(Options{Negotiated: vector.Negotiated})
+			reducer := NewReducer(Options{Negotiated: vector.Negotiated.Negotiated})
 			refusal, refusedAt := driveFixture(t, reducer, vector)
 
 			switch vector.Expect.Verdict {

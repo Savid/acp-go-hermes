@@ -9,8 +9,6 @@ import (
 )
 
 // UnmarshalJSON strictly decodes the independently carried lifecycle answer.
-// The empty object represents an omitted capability in canonical fixtures; any
-// present answer carries the one exact integer version.
 func (n *Negotiated) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -77,10 +75,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 		return errors.New("lifecycle capability carries trailing input")
 	}
 
-	if len(seen) != 0 {
-		if _, present := seen[fieldVersion]; !present {
-			return errors.New("lifecycle capability version is missing")
-		}
+	if _, present := seen[fieldVersion]; !present {
+		return errors.New("lifecycle capability version is missing")
 	}
 
 	*n = decoded
