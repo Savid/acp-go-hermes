@@ -746,6 +746,85 @@ func TestHostAuthorityWaitFailureMapsAndLatchesContainment(t *testing.T) {
 	require.ErrorIs(t, agent.containmentErr, ErrContainmentIncomplete)
 }
 
+func TestHostAuthorityContainmentFailureStopsManagedAdmission(t *testing.T) {
+	tests := []struct {
+		name string
+		fail func(context.Context, nativehermes.NativeProcess) error
+	}{
+		{
+			name: "wait",
+			fail: func(ctx context.Context, process nativehermes.NativeProcess) error {
+				_, err := process.Wait(ctx)
+
+				return err
+			},
+		},
+		{
+			name: "revoke",
+			fail: func(ctx context.Context, process nativehermes.NativeProcess) error {
+				return process.Revoke(ctx)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			failure := errors.Join(errors.New("containment uncertain"), ErrContainmentIncomplete)
+			authority := newTestHostAuthority()
+			authority.process = &recordingNativeProcess{
+				stdin: recordingWriteCloser{}, stdout: io.NopCloser(strings.NewReader("")),
+				stderr: io.NopCloser(strings.NewReader("")), name: test.name, record: authority.record,
+				waitErr: failure, revokeErr: failure,
+			}
+			authority.start = nil
+			factoryCalls := 0
+			agent := NewAgent(
+				WithHostAuthority(authority),
+				WithScratchDir(t.TempDir()),
+				func(options *Options) {
+					options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+						factoryCalls++
+
+						return nil, errors.New("unexpected managed launch")
+					}
+				},
+			)
+			require.NoError(t, agent.optionsErr)
+
+			start := nativehermes.StartOptions{}
+			agent.configureHostAuthority(&start)
+			process, err := start.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+			require.NoError(t, err)
+			err = test.fail(t.Context(), process)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.NotErrorIs(t, err, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, agent.hostAuthorityAdmissionError(), ErrContainmentIncomplete)
+			require.NotErrorIs(t, agent.hostAuthorityAdmissionError(), ErrHostAuthorityUnavailable)
+			require.NoError(t, agent.authorityErr)
+
+			affectedID := acp.SessionId("affected-session")
+			retainedRoot := filepath.Join(t.TempDir(), "retained")
+			agent.recordIncompleteContainment(err, affectedID, retainedRoot)
+			eventsBeforeRefusal := append([]string(nil), authority.events...)
+
+			client, launchErr := agent.newHermesClientWithScratch(
+				t.Context(), "different-session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
+			)
+			require.Nil(t, client)
+			require.ErrorIs(t, launchErr, ErrContainmentIncomplete)
+			require.NotErrorIs(t, launchErr, ErrHostAuthorityUnavailable)
+			require.Equal(t, 0, factoryCalls)
+
+			require.ErrorIs(t, start.PrepareNativeTree(t.Context(), t.TempDir()), ErrContainmentIncomplete)
+			_, startErr := start.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+			require.ErrorIs(t, startErr, ErrContainmentIncomplete)
+			require.NotErrorIs(t, startErr, ErrHostAuthorityUnavailable)
+			require.Equal(t, eventsBeforeRefusal, authority.events)
+			require.Contains(t, agent.incompleteRoots[affectedID], retainedRoot)
+		})
+	}
+}
+
 func TestHostAuthorityRevokeLossFencesEveryActiveSession(t *testing.T) {
 	authority := newTestHostAuthority()
 	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))

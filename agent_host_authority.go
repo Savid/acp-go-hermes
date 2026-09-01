@@ -66,7 +66,7 @@ func (a *Agent) hostAuthorityAdmissionError() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	return a.authorityErr
+	return errors.Join(a.authorityErr, a.containmentErr)
 }
 
 func (a *Agent) recordHostAuthorityError(err error) error {
