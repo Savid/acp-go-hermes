@@ -2204,13 +2204,7 @@ func TestInstallRefusesATombstoneItDidNotCreate(t *testing.T) {
 	}
 }
 
-// TestLoadLosingTheRaceToADeleteInstallsNothing drives the same rule through the
-// whole load transaction: the delete completes after the scratch reservation,
-// the generation, the archive hydration, the native-owner acquisition, and the
-// runtime launch have all happened. However far the preparation got, the delete
-// wins — the prepared replacement is torn down and the caller is told what every
-// other door tells it about a deleted id.
-func TestLoadLosingTheRaceToADeleteInstallsNothing(t *testing.T) {
+func TestLoadSerializesADeleteStartedDuringNativeLaunch(t *testing.T) {
 	ctx := t.Context()
 	cwd := t.TempDir()
 	store := validHydrateStore(t, ctx)
@@ -2218,43 +2212,40 @@ func TestLoadLosingTheRaceToADeleteInstallsNothing(t *testing.T) {
 	loaded.getSession = testNativeSession("n")
 
 	var (
-		agent      *Agent
-		deleteOnce sync.Once
-		deleteErr  error
+		agent        *Agent
+		deleteOnce   sync.Once
+		deleteResult = make(chan error, 1)
 	)
 
 	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			loaded.xdg = opts.ExistingXDG
 			deleteOnce.Do(func() {
-				_, deleteErr = agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+				go func() {
+					_, deleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest("s"))
+					deleteResult <- deleteErr
+				}()
 			})
+			waitForLifecycleLeaseRefs(t, agent, "s", 2)
 
 			return loaded, nil
 		}
 	})
 
 	_, err := agent.LoadSession(ctx, LoadSessionRequest("s", cwd))
-	require.NoError(t, deleteErr, "the delete this load raced failed")
-	require.Error(t, err, "a load that lost the race to a delete installed its session")
-
-	var refusal *acp.RequestError
-	require.ErrorAs(t, err, &refusal)
-	require.Equal(t, acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID,
-	}), refusal, "a deleted id must be wire-indistinguishable from one that never existed")
-
-	require.True(t, agent.isDeleted("s"), "the losing install cleared the deletion marker")
-	require.Positive(t, loaded.closeCount(), "the prepared replacement was left running")
+	require.NoError(t, err)
+	require.NoError(t, <-deleteResult)
+	require.True(t, agent.isDeleted("s"))
+	require.Equal(t, 1, loaded.closeCount())
 
 	agent.mu.Lock()
 	_, live := agent.sessions["s"]
 	agent.mu.Unlock()
-	require.False(t, live, "a refused install left the session addressable")
+	require.False(t, live)
 
 	entries, loadErr := store.Load(ctx, SessionKey{SessionID: "s"})
 	require.NoError(t, loadErr)
-	require.Empty(t, entries, "the deleted row was durably resurrected")
+	require.Empty(t, entries)
 }
 
 // TestLoadRacingDeleteResurrectsNothing races the two for real. Either order is

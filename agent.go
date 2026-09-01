@@ -28,6 +28,7 @@ const (
 	valElicitation     = "elicitation"
 	valBackpressure    = "backpressure"
 	valUnknownSession  = "unknown session"
+	valSessionActive   = "session already active"
 	agentClosedMessage = "agent closed"
 	keyLimit           = "limit"
 )
@@ -61,6 +62,10 @@ type Agent struct {
 	constructing       int
 	constructionSeq    uint64
 	constructionCancel map[uint64]context.CancelCauseFunc
+	lifecycleOps       sync.WaitGroup
+	lifecycleSeq       uint64
+	lifecycleCancel    map[uint64]context.CancelCauseFunc
+	lifecycleLeases    map[acp.SessionId]*sessionLifecycleLease
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
@@ -128,6 +133,8 @@ func NewAgent(opts ...Option) *Agent {
 		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
 		retiredNativeRoots: make(map[string]bool),
 		constructionCancel: make(map[uint64]context.CancelCauseFunc),
+		lifecycleCancel:    make(map[uint64]context.CancelCauseFunc),
+		lifecycleLeases:    make(map[acp.SessionId]*sessionLifecycleLease),
 		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
 		ambientEnv:         ambientEnvironment(),
 		nativeEnv:          nativeEnv,
@@ -198,14 +205,23 @@ func (a *Agent) close() error {
 	for _, cancel := range a.constructionCancel {
 		constructionCancellations = append(constructionCancellations, cancel)
 	}
+	lifecycleCancellations := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancel))
+	for _, cancel := range a.lifecycleCancel {
+		lifecycleCancellations = append(lifecycleCancellations, cancel)
+	}
 	conn := a.conn
 	a.mu.Unlock()
+	closedErr := acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	for _, cancel := range constructionCancellations {
-		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage}))
+		cancel(closedErr)
+	}
+	for _, cancel := range lifecycleCancellations {
+		cancel(closedErr)
 	}
 
 	a.cancelStreamOpens()
 	var err error
+	a.lifecycleOps.Wait()
 	a.constructions.Wait()
 	if preparer, ok := conn.(interface{ PrepareTransportClose(context.Context) error }); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
@@ -281,9 +297,6 @@ func (a *Agent) beginActiveReuse(ctx context.Context, id acp.SessionId) (*sessio
 	admissionCtx, release, err := existing.beginReuse(ctx)
 	if err != nil {
 		return nil, nil, nil, err
-	}
-	if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
-		hook(admissionCtx)
 	}
 
 	return existing, admissionCtx, release, nil
@@ -669,6 +682,9 @@ func (a *Agent) storeStartedSessionLocked(session *session) error {
 
 	if _, deleted := a.deleted[session.id]; deleted {
 		return unknownSessionError()
+	}
+	if a.sessions[session.id] != nil {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionActive})
 	}
 
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {

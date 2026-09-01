@@ -292,6 +292,12 @@ func (a *Agent) loadOrResumeSession(
 	if id == "" {
 		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
+	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, id)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer releaseLifecycle()
+	ctx = lifecycleCtx
 
 	if a.isDeleted(id) {
 		_ = a.retryDeletedSessionCleanup(ctx)
@@ -336,6 +342,14 @@ func (a *Agent) loadOrResumeSession(
 			releaseReuse()
 
 			return nil, applyErr
+		}
+		if !rebind {
+			// The session reuse reservation orders this incarnation from here,
+			// including any replay deferred until after the response.
+			releaseLifecycle()
+		}
+		if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
+			hook(reuseCtx)
 		}
 		if rebind {
 			if rebindErr := a.closeActiveSessionForRebind(ctx, id, existing, releaseReuse); rebindErr != nil {
@@ -1009,6 +1023,13 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
+	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if lifecycleErr != nil {
+		return acp.CloseSessionResponse{}, lifecycleErr
+	}
+	defer releaseLifecycle()
+	ctx = lifecycleCtx
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
@@ -1056,6 +1077,12 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if params.SessionId == "" {
 		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
 	}
+	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if lifecycleErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, lifecycleErr
+	}
+	defer releaseLifecycle()
+	ctx = lifecycleCtx
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
 		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
