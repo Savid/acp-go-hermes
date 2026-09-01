@@ -248,9 +248,6 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 		containmentIncomplete: opts.ContainmentIncomplete, nativeTreeBusy: opts.NativeTreeBusy,
 	}
 	if process.managed {
-		if opts.PrepareNativeTree == nil || opts.ReclaimNativeTree == nil {
-			return nil, errors.Join(errors.New("host authority tree operations are unavailable"), process.removeUnpreparedTrees())
-		}
 		if shim != nil {
 			if prepareErr := opts.PrepareNativeTree(ctx, shim.dir); prepareErr != nil {
 				if !process.treeBusy(prepareErr) && process.retainNativeTree != nil {
@@ -1041,17 +1038,8 @@ func (p *Process) Close(ctx context.Context) error {
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer waitCancel()
 
-	var result NativeResult
-	var waitErr error
 	waitDone := p.beginWait()
-	select {
-	case <-waitDone:
-		p.waitMu.Lock()
-		result, waitErr = p.waitResult, p.waitErr
-		p.waitMu.Unlock()
-	case <-waitCtx.Done():
-		waitErr = p.containmentFailure("wait for Hermes process", waitCtx.Err())
-	}
+	result, waitErr := p.awaitCloseWait(waitDone, waitCtx)
 	if result.Revoked {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(waitErr, &exitErr) {
@@ -1074,6 +1062,19 @@ func (p *Process) Close(ctx context.Context) error {
 	}
 
 	return waitErr
+}
+
+func (p *Process) awaitCloseWait(waitDone <-chan struct{}, waitCtx context.Context) (NativeResult, error) {
+	select {
+	case <-waitDone:
+		p.waitMu.Lock()
+		result, waitErr := p.waitResult, p.waitErr
+		p.waitMu.Unlock()
+
+		return result, waitErr
+	case <-waitCtx.Done():
+		return NativeResult{}, p.containmentFailure("wait for Hermes process", waitCtx.Err())
+	}
 }
 
 // beginWait installs the process's sole waiter as soon as the child starts.

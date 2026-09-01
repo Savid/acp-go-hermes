@@ -39,19 +39,28 @@ func startOrdinaryNative(ctx context.Context, request NativeRequest) (NativeProc
 	cmd.Dir = request.WorkingDirectory
 	cmd.Env = append([]string(nil), request.Environment...)
 
-	stdin, err := cmd.StdinPipe()
+	return startOrdinaryNativeWithPipes(cmd, cmd.StdinPipe, cmd.StdoutPipe, cmd.StderrPipe)
+}
+
+func startOrdinaryNativeWithPipes(
+	cmd *exec.Cmd,
+	stdinPipe func() (io.WriteCloser, error),
+	stdoutPipe func() (io.ReadCloser, error),
+	stderrPipe func() (io.ReadCloser, error),
+) (NativeProcess, error) {
+	stdin, err := stdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("create native stdin: %w", err)
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := stdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 
 		return nil, fmt.Errorf("create native stdout: %w", err)
 	}
 
-	stderr, err := cmd.StderrPipe()
+	stderr, err := stderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()

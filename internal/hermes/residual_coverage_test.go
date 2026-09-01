@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,16 @@ type residualExitError struct{}
 
 func (residualExitError) Error() string { return "process exited" }
 func (residualExitError) ExitCode() int { return 1 }
+
+type residualPipe struct{ closed bool }
+
+func (*residualPipe) Read([]byte) (int, error)       { return 0, io.EOF }
+func (*residualPipe) Write(data []byte) (int, error) { return len(data), nil }
+func (p *residualPipe) Close() error {
+	p.closed = true
+
+	return nil
+}
 
 func TestResidualAuthAndStartupObserverBranches(t *testing.T) {
 	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -82,6 +93,128 @@ func TestResidualServerControlLockBranches(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResidualServerControlLockOperationFailures(t *testing.T) {
+	openCaptured := func(t *testing.T) (func(string, int, os.FileMode) (*os.File, error), **os.File) {
+		t.Helper()
+		var captured *os.File
+
+		return func(path string, flags int, mode os.FileMode) (*os.File, error) {
+			file, err := os.OpenFile(path, flags, mode)
+			captured = file
+
+			return file, err
+		}, &captured
+	}
+
+	t.Run("chmod", func(t *testing.T) {
+		openFile, captured := openCaptured(t)
+		_, err := acquireServerControlLockWithOps(
+			t.Context(), t.TempDir(), openFile,
+			func(*os.File, os.FileMode) error { return errors.New("chmod refused") },
+			tryLockSharedSessionSetFile,
+		)
+		if err == nil || !strings.Contains(err.Error(), "chmod refused") {
+			t.Fatalf("control chmod failure = %v", err)
+		}
+		if _, statErr := (*captured).Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("chmod failure retained file: %v", statErr)
+		}
+	})
+
+	t.Run("lock", func(t *testing.T) {
+		openFile, captured := openCaptured(t)
+		_, err := acquireServerControlLockWithOps(
+			t.Context(), t.TempDir(), openFile, (*os.File).Chmod,
+			func(*os.File, SharedSessionSetLockMode) (func() error, bool, error) {
+				return nil, false, errors.New("lock refused")
+			},
+		)
+		if err == nil || !strings.Contains(err.Error(), "lock refused") {
+			t.Fatalf("control lock failure = %v", err)
+		}
+		if _, statErr := (*captured).Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("lock failure retained file: %v", statErr)
+		}
+	})
+}
+
+func TestResidualOrdinaryPipeConstructionFailures(t *testing.T) {
+	stdinErr := errors.New("stdin refused")
+	order := make([]string, 0, 3)
+	_, err := startOrdinaryNativeWithPipes(
+		exec.Command("unused"),
+		func() (io.WriteCloser, error) {
+			order = append(order, "stdin")
+
+			return nil, stdinErr
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stdout")
+
+			return &residualPipe{}, nil
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stderr")
+
+			return &residualPipe{}, nil
+		},
+	)
+	if !errors.Is(err, stdinErr) || strings.Join(order, ",") != "stdin" {
+		t.Fatalf("stdin pipe failure = %v, order=%v", err, order)
+	}
+
+	stdin := &residualPipe{}
+	stdoutErr := errors.New("stdout refused")
+	order = order[:0]
+	_, err = startOrdinaryNativeWithPipes(
+		exec.Command("unused"),
+		func() (io.WriteCloser, error) {
+			order = append(order, "stdin")
+
+			return stdin, nil
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stdout")
+
+			return nil, stdoutErr
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stderr")
+
+			return &residualPipe{}, nil
+		},
+	)
+	if !errors.Is(err, stdoutErr) || strings.Join(order, ",") != "stdin,stdout" || !stdin.closed {
+		t.Fatalf("stdout pipe failure = %v, order=%v, stdin closed=%v", err, order, stdin.closed)
+	}
+
+	stdin = &residualPipe{}
+	stdout := &residualPipe{}
+	stderrErr := errors.New("stderr refused")
+	order = order[:0]
+	_, err = startOrdinaryNativeWithPipes(
+		exec.Command("unused"),
+		func() (io.WriteCloser, error) {
+			order = append(order, "stdin")
+
+			return stdin, nil
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stdout")
+
+			return stdout, nil
+		},
+		func() (io.ReadCloser, error) {
+			order = append(order, "stderr")
+
+			return nil, stderrErr
+		},
+	)
+	if !errors.Is(err, stderrErr) || strings.Join(order, ",") != "stdin,stdout,stderr" || !stdin.closed || !stdout.closed {
+		t.Fatalf("stderr pipe failure = %v, order=%v, closes=%v/%v", err, order, stdin.closed, stdout.closed)
 	}
 }
 
@@ -828,6 +961,13 @@ func TestResidualProcessCloseBranches(t *testing.T) {
 	}
 	if err := process.reclaimAndRemove(t.Context()); !errors.Is(err, wantReclaim) {
 		t.Fatalf("shim reclaim failure = %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	_, waitErr := (&Process{}).awaitCloseWait(make(chan struct{}), waitCtx)
+	if !errors.Is(waitErr, context.Canceled) || !strings.Contains(waitErr.Error(), "wait for Hermes process") {
+		t.Fatalf("close wait timeout classification = %v", waitErr)
 	}
 }
 
