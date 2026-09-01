@@ -84,6 +84,9 @@ type fakeGatewayServer struct {
 	activeNoID          bool
 	activeNoKey         bool
 	activeEmpty         bool
+	activeNil           bool
+	modelProvidersNil   bool
+	imageAttachedFalse  bool
 	notFoundMethods     map[string]int
 	malformedResponses  map[string]string
 }
@@ -369,7 +372,13 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		activeNoID := s.activeNoID
 		activeNoKey := s.activeNoKey
 		activeEmpty := s.activeEmpty
+		activeNil := s.activeNil
 		s.mu.Unlock()
+		if activeNil {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": nil})
+
+			return
+		}
 		if activeEmpty {
 			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{}})
 
@@ -474,7 +483,10 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		s.writeResult(ctx, conn, id, result)
 	case "image.attach_bytes":
-		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
+		s.mu.Lock()
+		attached := !s.imageAttachedFalse
+		s.mu.Unlock()
+		s.writeResult(ctx, conn, id, map[string]any{"attached": attached})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		s.mu.Lock()
@@ -604,6 +616,14 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		s.writeResult(ctx, conn, id, result)
 	case "model.options":
+		s.mu.Lock()
+		providersNil := s.modelProvidersNil
+		s.mu.Unlock()
+		if providersNil {
+			s.writeResult(ctx, conn, id, map[string]any{"providers": nil})
+
+			return
+		}
 		s.writeResult(ctx, conn, id, map[string]any{
 			"model":    "anthropic/claude-sonnet-4",
 			"provider": "",

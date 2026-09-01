@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+type residualRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f residualRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type residualExitError struct{}
+
+func (residualExitError) Error() string { return "process exited" }
+func (residualExitError) ExitCode() int { return 1 }
+
 func TestResidualAuthAndStartupObserverBranches(t *testing.T) {
 	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"unexpected"}`)
@@ -281,6 +292,11 @@ func residualManagedStartOptions(t *testing.T, serve func(context.Context, Nativ
 }
 
 func TestResidualProcessStartEarlyFailures(t *testing.T) {
+	if process, err := Start(t.Context(), ProcessOptions{
+		AmbientEnvironment: map[string]string{"PATH": t.TempDir()},
+	}); err == nil || process != nil {
+		t.Fatalf("default executable start = %#v, %v", process, err)
+	}
 	if process, err := Start(t.Context(), ProcessOptions{ExtraPathDirs: []string{"relative"}}); err == nil || process != nil {
 		t.Fatalf("invalid path carrier start = %#v, %v", process, err)
 	}
@@ -372,6 +388,35 @@ func TestResidualProcessStartEarlyFailures(t *testing.T) {
 		t.Fatalf("shim failure = %v", err)
 	}
 	newProcessBrowserShim = originalShim
+}
+
+func TestResidualOrdinaryEnvironmentStartFailures(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	processRuntimePlatform = processPlatformWindows
+
+	executable := fakeHermesExecutable(t, fakeProcessModeOK)
+	if process, err := Start(t.Context(), ProcessOptions{
+		ExecutablePath: executable,
+		AmbientEnvironment: map[string]string{
+			"PATH": os.Getenv("PATH"), "TOKEN": "one", "token": "two",
+		},
+	}); err == nil || process != nil {
+		t.Fatalf("duplicate ambient environment start = %#v, %v", process, err)
+	}
+
+	processRuntimePlatform = originalPlatform
+	executable = fakeHermesExecutable(t, fakeProcessModeOK)
+	processRuntimePlatform = processPlatformWindows
+	if process, err := Start(t.Context(), ProcessOptions{
+		ExecutablePath:     executable,
+		ScratchParent:      t.TempDir(),
+		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")},
+		SessionEnv:         map[string]string{"TOKEN": "one", "token": "two"},
+		Timeout:            time.Second,
+	}); err == nil || process != nil {
+		t.Fatalf("duplicate session environment start = %#v, %v", process, err)
+	}
 }
 
 func TestResidualManagedProcessStartTransactions(t *testing.T) {
@@ -469,5 +514,538 @@ func TestResidualManagedProcessStartTransactions(t *testing.T) {
 	})
 	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "unusable host stdio") {
 		t.Fatalf("unusable serve process = %v", err)
+	}
+
+	wantHomePrepare := errors.New("home prepare refused")
+	prepareCalls = 0
+	reclaimCalls = 0
+	retained = 0
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.PrepareNativeTree = func(context.Context, string) error {
+		prepareCalls++
+		if prepareCalls == 3 {
+			return wantHomePrepare
+		}
+
+		return nil
+	}
+	opts.ReclaimNativeTree = func(context.Context, string) error {
+		reclaimCalls++
+		if reclaimCalls > 1 {
+			return wantRollback
+		}
+
+		return nil
+	}
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantHomePrepare) || !errors.Is(err, wantRollback) || retained == 0 {
+		t.Fatalf("home preparation rollback = %v, retained=%d", err, retained)
+	}
+
+	parentFile = filepath.Join(t.TempDir(), "cleanup-parent-file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newProcessBrowserShim = func(string) (*browserShim, error) {
+		return &browserShim{dir: filepath.Join(parentFile, "shim")}, nil
+	}
+	prepareCalls = 0
+	retained = 0
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.PrepareNativeTree = func(context.Context, string) error {
+		prepareCalls++
+		if prepareCalls == 3 {
+			return wantHomePrepare
+		}
+
+		return nil
+	}
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantHomePrepare) || retained == 0 {
+		t.Fatalf("home preparation cleanup retention = %v, retained=%d", err, retained)
+	}
+	newProcessBrowserShim = originalShim
+}
+
+func TestResidualManagedEnvironmentBranches(t *testing.T) {
+	if _, err := managedEnvironment(nil); err == nil {
+		t.Fatal("nil managed environment was accepted")
+	}
+	if _, err := managedEnvironment(map[string]string{"BAD=KEY": "value"}); err == nil {
+		t.Fatal("invalid managed environment key was accepted")
+	}
+
+	originalPlatform := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	processRuntimePlatform = processPlatformWindows
+	if _, err := managedEnvironment(map[string]string{"PATH": "one", "Path": "two"}); err == nil {
+		t.Fatal("duplicate folded managed environment key was accepted")
+	}
+}
+
+func TestResidualVersionProbeTransactions(t *testing.T) {
+	originalMkdirTemp := mkdirTemp
+	originalRemoveAll := removeAll
+	t.Cleanup(func() {
+		mkdirTemp = originalMkdirTemp
+		removeAll = originalRemoveAll
+	})
+
+	mkdirTemp = func(string, string) (string, error) { return "", errors.New("probe mkdir refused") }
+	if err := probeExecutableVersion(t.Context(), "hermes", ProcessOptions{}); err == nil {
+		t.Fatal("probe generation failure was ignored")
+	}
+	mkdirTemp = originalMkdirTemp
+
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(),
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			return nil, errors.New("unexpected start")
+		},
+	}
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); err == nil || !strings.Contains(err.Error(), "environment") {
+		t.Fatalf("probe environment failure = %v", err)
+	}
+
+	opts.NativeEnvironment = map[string]string{"PATH": os.Getenv("PATH")}
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); err == nil || !strings.Contains(err.Error(), "tree operations") {
+		t.Fatalf("missing probe authority = %v", err)
+	}
+
+	wantBusy := errors.New("probe busy")
+	retained := 0
+	removeAll = func(string) error { return errors.New("probe remove refused") }
+	opts.PrepareNativeTree = func(context.Context, string) error { return wantBusy }
+	opts.ReclaimNativeTree = func(context.Context, string) error { return nil }
+	opts.NativeTreeBusy = wantBusy
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); !errors.Is(err, wantBusy) || retained == 0 {
+		t.Fatalf("busy probe preparation = %v, retained=%d", err, retained)
+	}
+	removeAll = originalRemoveAll
+
+	wantPrepare := errors.New("probe prepare refused")
+	retained = 0
+	opts.NativeTreeBusy = errors.New("other busy")
+	opts.PrepareNativeTree = func(context.Context, string) error { return wantPrepare }
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); !errors.Is(err, wantPrepare) || retained == 0 {
+		t.Fatalf("probe preparation failure = %v, retained=%d", err, retained)
+	}
+
+	wantContainment := errors.New("probe containment")
+	retained = 0
+	opts.PrepareNativeTree = func(context.Context, string) error { return nil }
+	opts.ContainmentIncomplete = wantContainment
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) { return nil, wantContainment }
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); !errors.Is(err, wantContainment) || retained == 0 {
+		t.Fatalf("contained probe start = %v, retained=%d", err, retained)
+	}
+
+	wantStart := errors.New("probe start refused")
+	wantReclaim := errors.New("probe reclaim refused")
+	opts.ContainmentIncomplete = errors.New("other containment")
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) { return nil, wantStart }
+	opts.ReclaimNativeTree = func(context.Context, string) error { return wantReclaim }
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); !errors.Is(err, wantStart) || !errors.Is(err, wantReclaim) {
+		t.Fatalf("failed probe cleanup = %v", err)
+	}
+
+	opts.ReclaimNativeTree = func(context.Context, string) error { return nil }
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, nil //nolint:nilnil // Exercises a host returning no process and no error.
+	}
+	retained = 0
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); err == nil || retained == 0 {
+		t.Fatalf("nil probe process = %v, retained=%d", err, retained)
+	}
+
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
+		return &probeTestProcess{}, nil
+	}
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); err == nil || !strings.Contains(err.Error(), "unusable host stdio") {
+		t.Fatalf("settled unusable probe = %v", err)
+	}
+
+	opts.PrepareNativeTree = func(context.Context, string) error { return nil }
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
+		return &probeTestProcess{
+			stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+			stderr: io.NopCloser(strings.NewReader("")), err: context.Canceled,
+		}, nil
+	}
+	retained = 0
+	if err := probeExecutableVersion(t.Context(), "hermes", opts); err == nil || retained == 0 {
+		t.Fatalf("uncertain managed probe wait = %v, retained=%d", err, retained)
+	}
+
+	ordinary := ProcessOptions{ScratchParent: t.TempDir(), AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}}
+	if err := probeExecutableVersion(t.Context(), filepath.Join(t.TempDir(), "missing"), ordinary); err == nil {
+		t.Fatal("ordinary probe start failure was ignored")
+	}
+}
+
+func TestResidualProbeSettlementAndReclaimBranches(t *testing.T) {
+	settled, err := settleProbeProcess(nil)
+	if settled || err == nil {
+		t.Fatalf("nil probe settlement = %v, %v", settled, err)
+	}
+
+	wantRevoke := errors.New("revoke refused")
+	wantWait := errors.New("wait refused")
+	settled, err = settleProbeProcess(&probeTestProcess{revoke: wantRevoke, err: wantWait})
+	if settled || !errors.Is(err, wantRevoke) || !errors.Is(err, wantWait) {
+		t.Fatalf("failed probe settlement = %v, %v", settled, err)
+	}
+
+	originalRemoveAll := removeAll
+	t.Cleanup(func() { removeAll = originalRemoveAll })
+	retained := 0
+	wantReclaim := errors.New("reclaim refused")
+	opts := ProcessOptions{
+		ReclaimNativeTree: func(context.Context, string) error { return wantReclaim },
+		RetainNativeTree: func(string, error) bool {
+			retained++
+
+			return true
+		},
+	}
+	if err := reclaimProbeTree(opts, t.TempDir(), true); !errors.Is(err, wantReclaim) || retained != 1 {
+		t.Fatalf("probe reclaim failure = %v, retained=%d", err, retained)
+	}
+
+	removeAll = func(string) error { return errors.New("remove refused") }
+	if err := reclaimProbeTree(opts, t.TempDir(), false); err == nil || retained != 2 {
+		t.Fatalf("probe remove failure = %v, retained=%d", err, retained)
+	}
+}
+
+func TestResidualProcessRollbackRemovalFailures(t *testing.T) {
+	originalRemoveAll := removeAll
+	t.Cleanup(func() { removeAll = originalRemoveAll })
+	retained := 0
+	removeAll = func(string) error { return errors.New("home remove refused") }
+	process := &Process{
+		Home: t.TempDir(), preparedHome: true,
+		reclaimNativeTree: func(context.Context, string) error { return nil },
+		retainNativeTree: func(string, error) bool {
+			retained++
+
+			return true
+		},
+	}
+	if err := process.rollbackPreparedTrees(t.Context()); err == nil || retained != 1 {
+		t.Fatalf("home rollback removal = %v, retained=%d", err, retained)
+	}
+	removeAll = originalRemoveAll
+
+	parentFile := filepath.Join(t.TempDir(), "parent-file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	process = &Process{
+		shim: &browserShim{dir: filepath.Join(parentFile, "shim")}, preparedShim: true,
+		reclaimNativeTree: func(context.Context, string) error { return nil },
+		retainNativeTree: func(string, error) bool {
+			retained++
+
+			return true
+		},
+	}
+	if err := process.rollbackPreparedTrees(t.Context()); err == nil || retained != 2 {
+		t.Fatalf("shim rollback removal = %v, retained=%d", err, retained)
+	}
+}
+
+func TestResidualProcessCloseBranches(t *testing.T) {
+	if err := (&Process{managed: true}).Close(t.Context()); err == nil {
+		t.Fatal("managed process without native handle closed cleanly")
+	}
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	wantRevoke := errors.New("revoke refused")
+	process := &Process{native: &probeTestProcess{revoke: wantRevoke}}
+	if err := process.Close(cancelled); !errors.Is(err, wantRevoke) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled process close = %v", err)
+	}
+
+	wantWait := errors.New("wait refused")
+	process = &Process{managed: true, native: &probeTestProcess{err: wantWait}}
+	if err := process.Close(t.Context()); !errors.Is(err, wantWait) {
+		t.Fatalf("managed wait failure = %v", err)
+	}
+
+	process = &Process{native: &probeTestProcess{err: context.Canceled}}
+	if err := process.Close(t.Context()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ordinary cancelled wait = %v", err)
+	}
+
+	process = &Process{
+		native: &probeTestProcess{result: NativeResult{Revoked: true}, err: residualExitError{}},
+		shim:   &browserShim{dir: t.TempDir()},
+	}
+	if err := process.Close(t.Context()); err != nil {
+		t.Fatalf("revoked exit close = %v", err)
+	}
+
+	wantReclaim := errors.New("close reclaim refused")
+	process = &Process{
+		managed: true, native: &probeTestProcess{}, Home: t.TempDir(), preparedHome: true,
+		reclaimNativeTree: func(context.Context, string) error { return wantReclaim },
+	}
+	if err := process.Close(t.Context()); !errors.Is(err, wantReclaim) {
+		t.Fatalf("close reclaim failure = %v", err)
+	}
+
+	wantContainment := errors.New("containment incomplete")
+	process = &Process{
+		managed: true, native: &probeTestProcess{err: errors.New("native wait failed")},
+		preparedHome: true, containmentIncomplete: wantContainment,
+	}
+	if err := process.startupFailure(errors.New("startup refused")); !errors.Is(err, wantContainment) {
+		t.Fatalf("startup failure normalization = %v", err)
+	}
+
+	process = &Process{
+		managed: true, shim: &browserShim{dir: t.TempDir()}, preparedShim: true,
+		reclaimNativeTree: func(context.Context, string) error { return wantReclaim },
+	}
+	if err := process.reclaimAndRemove(t.Context()); !errors.Is(err, wantReclaim) {
+		t.Fatalf("shim reclaim failure = %v", err)
+	}
+}
+
+func TestResidualProcessReadinessBranches(t *testing.T) {
+	if err := (&Process{StatusURL: "://bad", waitDone: make(chan struct{})}).waitReady(t.Context()); err == nil {
+		t.Fatal("invalid status URL was accepted")
+	}
+
+	originalHTTPClient := newStatusHTTPClient
+	originalAfter := after
+	t.Cleanup(func() {
+		newStatusHTTPClient = originalHTTPClient
+		after = originalAfter
+	})
+
+	wantHTTP := errors.New("status refused")
+	newStatusHTTPClient = func() *http.Client {
+		return &http.Client{Transport: residualRoundTripper(func(*http.Request) (*http.Response, error) {
+			return nil, wantHTTP
+		})}
+	}
+	exited := make(chan struct{})
+	close(exited)
+	process := &Process{StatusURL: "http://example.test/status", waitDone: exited, waitResult: NativeResult{ExitCode: 7}}
+	if err := process.waitReady(t.Context()); err == nil || !strings.Contains(err.Error(), "exit code 7") {
+		t.Fatalf("early process exit readiness = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	process = &Process{StatusURL: "http://example.test/status", waitDone: make(chan struct{})}
+	if err := process.waitReady(ctx); !errors.Is(err, wantHTTP) {
+		t.Fatalf("status request cancellation = %v", err)
+	}
+
+	newStatusHTTPClient = func() *http.Client {
+		return &http.Client{Transport: residualRoundTripper(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})}
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	cancel()
+	if err := process.waitReady(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("non-ready status cancellation = %v", err)
+	}
+
+	requests := 0
+	newStatusHTTPClient = func() *http.Client {
+		return &http.Client{Transport: residualRoundTripper(func(*http.Request) (*http.Response, error) {
+			requests++
+			status := http.StatusServiceUnavailable
+			if requests > 1 {
+				status = http.StatusOK
+			}
+
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})}
+	}
+	after = func(time.Duration) <-chan time.Time {
+		ready := make(chan time.Time, 1)
+		ready <- time.Now()
+
+		return ready
+	}
+	process = &Process{StatusURL: "http://example.test/status", waitDone: make(chan struct{})}
+	if err := process.waitReady(t.Context()); err != nil || requests != 2 {
+		t.Fatalf("readiness retry = %v, requests=%d", err, requests)
+	}
+
+	deliveries := make(chan GatewayDelivery)
+	close(deliveries)
+	if err := (&Process{Client: &Client{deliveries: deliveries}}).waitGatewayReady(t.Context()); err == nil {
+		t.Fatal("closed gateway deliveries were accepted")
+	}
+	wantDelivery := errors.New("gateway delivery refused")
+	deliveries = make(chan GatewayDelivery, 1)
+	deliveries <- GatewayDelivery{Err: wantDelivery}
+	if err := (&Process{Client: &Client{deliveries: deliveries}}).waitGatewayReady(t.Context()); !errors.Is(err, wantDelivery) {
+		t.Fatalf("gateway delivery error = %v", err)
+	}
+	deliveries = make(chan GatewayDelivery, 2)
+	deliveries <- GatewayDelivery{Event: &Event{Type: "other"}}
+	deliveries <- GatewayDelivery{Event: &Event{Type: eventGatewayReady}}
+	if err := (&Process{Client: &Client{deliveries: deliveries}}).waitGatewayReady(t.Context()); err != nil {
+		t.Fatalf("gateway readiness = %v", err)
+	}
+	cancelledGateway, cancelGateway := context.WithCancel(t.Context())
+	cancelGateway()
+	if err := (&Process{Client: &Client{deliveries: make(chan GatewayDelivery)}}).waitGatewayReady(cancelledGateway); !errors.Is(err, context.Canceled) {
+		t.Fatalf("gateway readiness cancellation = %v", err)
+	}
+}
+
+func TestResidualOrdinaryNativeFallbackKill(t *testing.T) {
+	native, err := startOrdinaryNative(t.Context(), ordinaryNativeHelperRequest(t, "block"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, ok := native.(*ordinaryNativeProcess)
+	if !ok {
+		t.Fatalf("ordinary process type = %T", native)
+	}
+	process.kill = nil
+	if err := process.Revoke(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Wait(t.Context()); err == nil {
+		t.Fatal("killed ordinary native process returned a clean wait")
+	}
+}
+
+func TestResidualOrdinaryProcessStartupFailures(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "hermes")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes 0.20.0'; rm \"$0\"; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(t.Context(), ProcessOptions{
+		ExecutablePath: executable, ScratchParent: t.TempDir(),
+		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: time.Second,
+	}); err == nil {
+		t.Fatal("ordinary serve spawn failure was ignored")
+	}
+
+	for _, mode := range []string{fakeProcessModeStatusOnly, fakeProcessModeNoGatewayReady} {
+		t.Run(mode, func(t *testing.T) {
+			if _, err := Start(t.Context(), ProcessOptions{
+				ExecutablePath: fakeHermesExecutable(t, mode), ScratchParent: t.TempDir(),
+				AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: 100 * time.Millisecond,
+			}); err == nil {
+				t.Fatal("incomplete gateway startup was accepted")
+			}
+		})
+	}
+}
+
+func TestResidualImageAttachmentRefusal(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.imageAttachedFalse = true
+	client := fake.dialClient(t)
+	t.Cleanup(func() { _ = client.Close(1000, "done") })
+	if err := client.AttachImageBytes(t.Context(), "live", []byte{0}); err == nil {
+		t.Fatal("negative image attachment result was accepted")
+	}
+}
+
+func TestResidualGatewayMethodProbeFailures(t *testing.T) {
+	run := func(t *testing.T, configure func(*fakeGatewayServer)) error {
+		t.Helper()
+		fake := newFakeGatewayServer(t)
+		configure(fake)
+		client := fake.dialClient(t)
+		defer func() { _ = client.Close(1000, "done") }()
+
+		return (&Process{Client: client, Home: t.TempDir()}).probeGatewayMethods(t.Context())
+	}
+
+	for _, test := range []struct {
+		name      string
+		configure func(*fakeGatewayServer)
+	}{
+		{"create failure", func(fake *fakeGatewayServer) { fake.setFail("session.create") }},
+		{"create schema", func(fake *fakeGatewayServer) { fake.setCreateNoStored() }},
+		{"cleanup close failure", func(fake *fakeGatewayServer) { fake.setFail("session.close") }},
+		{"cleanup delete failure", func(fake *fakeGatewayServer) { fake.setFail("session.delete") }},
+		{"resume failure", func(fake *fakeGatewayServer) { fake.setFail("session.resume") }},
+		{"resume schema", func(fake *fakeGatewayServer) { fake.setResumeNoKey() }},
+		{"active failure", func(fake *fakeGatewayServer) { fake.setFail("session.active_list") }},
+		{"active schema", func(fake *fakeGatewayServer) { fake.activeNil = true }},
+		{"models schema", func(fake *fakeGatewayServer) { fake.modelProvidersNil = true }},
+		{"prompt failure", func(fake *fakeGatewayServer) { fake.setFail("prompt.submit") }},
+		{"image failure", func(fake *fakeGatewayServer) { fake.setFail("image.attach_bytes") }},
+		{"approval failure", func(fake *fakeGatewayServer) { fake.setFail("approval.respond") }},
+		{"clarify failure", func(fake *fakeGatewayServer) { fake.setFail("clarify.respond") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := run(t, test.configure); err == nil {
+				t.Fatal("gateway probe failure was ignored")
+			}
+		})
+	}
+
+	t.Run("resume domain refusal proves presence", func(t *testing.T) {
+		if err := run(t, func(fake *fakeGatewayServer) { fake.setNotFound("session.resume", 1) }); err != nil {
+			t.Fatalf("domain refusal did not prove resume presence: %v", err)
+		}
+	})
+}
+
+func TestResidualStartServerOwnershipAndLockFailures(t *testing.T) {
+	home := t.TempDir()
+	if _, err := EnsureSharedHermesAdapterControlDir(home); err != nil {
+		t.Fatal(err)
+	}
+	file, unlock, acquired := rawSharedHomeLock(t, home)
+	if !acquired {
+		t.Fatal("fixture did not acquire shared home lock")
+	}
+	options := StartOptions{
+		ACPSessionID: "owner-refusal", Cwd: t.TempDir(), ExistingXDG: testXDGDirs(t),
+		SharedHermesHome: home, ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
+	}
+	if server, err := StartServer(t.Context(), options); err == nil || server != nil {
+		t.Fatalf("claimed home server start = %#v, %v", server, err)
+	}
+	if err := errors.Join(unlock(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	controlDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(controlDir, "server.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options = StartOptions{
+		ACPSessionID: "control-refusal", Cwd: t.TempDir(), ExistingXDG: testXDGDirs(t),
+		ControlDir: controlDir, ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
+	}
+	if server, err := StartServer(t.Context(), options); err == nil || server != nil {
+		t.Fatalf("blocked control lock server start = %#v, %v", server, err)
 	}
 }
