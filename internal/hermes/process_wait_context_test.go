@@ -99,6 +99,95 @@ func (p *contextRespectingWaitProcess) attemptCount() int {
 	return p.attempts
 }
 
+type releaseWaitProcess struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	result  NativeResult
+}
+
+func (p *releaseWaitProcess) Stdin() io.WriteCloser { return waitTestWriteCloser{Writer: io.Discard} }
+func (p *releaseWaitProcess) Stdout() io.ReadCloser { return io.NopCloser(strings.NewReader("")) }
+func (p *releaseWaitProcess) Stderr() io.ReadCloser { return io.NopCloser(strings.NewReader("")) }
+func (p *releaseWaitProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+		return p.result, nil
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	}
+}
+func (*releaseWaitProcess) Revoke(context.Context) error { return nil }
+
+type synchronizedWriterWitness struct {
+	owner    *synchronizedWriter
+	writes   int
+	unlocked bool
+}
+
+func (w *synchronizedWriterWitness) Write(data []byte) (int, error) {
+	if w.owner.mu.TryLock() {
+		w.unlocked = true
+		w.owner.mu.Unlock()
+	}
+	w.writes++
+
+	return len(data), nil
+}
+
+func TestProcessWaitFlightClearUsesExactIdentity(t *testing.T) {
+	stale := make(chan struct{})
+	close(stale)
+	native := &releaseWaitProcess{
+		started: make(chan struct{}), release: make(chan struct{}), result: NativeResult{ExitCode: 7},
+	}
+	process := &Process{native: native, waitActive: true, waitDone: stale, waitErr: errors.New("uncertain")}
+	process.clearWaitFlight(stale)
+	replacement := process.beginWait()
+	<-native.started
+
+	process.clearWaitFlight(stale)
+	process.waitMu.Lock()
+	active, current := process.waitActive, process.waitDone
+	process.waitMu.Unlock()
+	if !active || current != replacement {
+		t.Fatalf("stale clear replaced current flight: active=%v current=%p replacement=%p", active, current, replacement)
+	}
+
+	close(native.release)
+	result, err := process.awaitCloseWait(replacement, t.Context())
+	if err != nil || result != native.result {
+		t.Fatalf("replacement flight = %#v, %v", result, err)
+	}
+}
+
+func TestSynchronizedWriterSerializesUnderlyingWrites(t *testing.T) {
+	serialized := &synchronizedWriter{}
+	witness := &synchronizedWriterWitness{owner: serialized}
+	serialized.writer = witness
+
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 32 {
+				if _, err := serialized.Write([]byte("output")); err != nil {
+					t.Errorf("write failed: %v", err)
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	if witness.unlocked {
+		t.Fatal("underlying writer was entered without serialization lock")
+	}
+	if witness.writes != 8*32 {
+		t.Fatalf("writes = %d", witness.writes)
+	}
+}
+
 func TestProcessWaitCancellationRejoinsAndRetries(t *testing.T) {
 	native := &contextRespectingWaitProcess{
 		firstStarted: make(chan struct{}), firstCanceled: make(chan struct{}), releaseFirst: make(chan struct{}),

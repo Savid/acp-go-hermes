@@ -20,6 +20,20 @@ type authorityProbeStarter struct {
 	serves     int
 }
 
+type authorityProbeProcess struct{ NativeProcess }
+
+func (p authorityProbeProcess) Wait(ctx context.Context) (NativeResult, error) {
+	result, err := p.NativeProcess.Wait(ctx)
+	if result.Revoked {
+		var exitErr interface{ ExitCode() int }
+		if errors.As(err, &exitErr) {
+			err = nil
+		}
+	}
+
+	return result, err
+}
+
 func (s *authorityProbeStarter) start(ctx context.Context, request NativeRequest) (NativeProcess, error) {
 	s.mu.Lock()
 	if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
@@ -30,7 +44,12 @@ func (s *authorityProbeStarter) start(ctx context.Context, request NativeRequest
 	s.mu.Unlock()
 	request.Executable = s.executable
 
-	return startOrdinaryNative(ctx, request)
+	process, err := startOrdinaryNative(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	return authorityProbeProcess{NativeProcess: process}, nil
 }
 
 func managedProbeOptions(t *testing.T, starter *authorityProbeStarter) ProcessOptions {

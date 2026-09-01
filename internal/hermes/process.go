@@ -130,6 +130,18 @@ func (b *synchronizedBuffer) String() string {
 	return b.buffer.String()
 }
 
+type synchronizedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *synchronizedWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.writer.Write(data)
+}
+
 type Process struct {
 	Client                *Client
 	Home                  string
@@ -796,7 +808,15 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 
 		return fmt.Errorf("hermes --version probe failed: %w", errors.Join(err, reclaimProbeTree(opts, probeRoot, managed)))
 	}
-	if process == nil || process.Stdin() == nil || process.Stdout() == nil || process.Stderr() == nil {
+	var stdin io.WriteCloser
+
+	var stdoutPipe, stderrPipe io.ReadCloser
+
+	if process != nil {
+		stdin, stdoutPipe, stderrPipe = process.Stdin(), process.Stdout(), process.Stderr()
+	}
+
+	if process == nil || stdin == nil || stdoutPipe == nil || stderrPipe == nil {
 		settled, settleErr := settleProbeProcess(process)
 		if !settled {
 			uncertainErr := errors.Join(
@@ -814,11 +834,11 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 			errors.New("native process returned unusable host stdio"), settleErr, reclaimProbeTree(opts, probeRoot, managed),
 		))
 	}
-	_ = process.Stdin().Close()
+	_ = stdin.Close()
 	var output synchronizedBuffer
 	drained := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(&output, process.Stdout()); drained <- struct{}{} }()
-	go func() { _, _ = io.Copy(&output, process.Stderr()); drained <- struct{}{} }()
+	go func() { _, _ = io.Copy(&output, stdoutPipe); drained <- struct{}{} }()
+	go func() { _, _ = io.Copy(&output, stderrPipe); drained <- struct{}{} }()
 	result, waitErr := process.Wait(ctx)
 	settled := waitErr == nil || (!managed && ctx.Err() == nil)
 	if waitErr != nil {
@@ -832,6 +852,17 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 		settled = finalWaitErr == nil || (!managed && !errors.Is(finalWaitErr, context.Canceled) && !errors.Is(finalWaitErr, context.DeadlineExceeded))
 		waitErr = errors.Join(waitErr, revokeErr, finalWaitErr)
 	}
+	var outputErr error
+	if settled {
+		<-drained
+		<-drained
+		outputErr = errors.Join(closeOutputStream(stdoutPipe), closeOutputStream(stderrPipe))
+	} else {
+		outputErr = errors.Join(closeOutputStream(stdoutPipe), closeOutputStream(stderrPipe))
+		<-drained
+		<-drained
+	}
+	waitErr = errors.Join(waitErr, outputErr)
 	if !settled {
 		uncertainErr := errors.Join(waitErr, opts.ContainmentIncomplete)
 		if opts.RetainNativeTree != nil {
@@ -841,8 +872,6 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 		return fmt.Errorf("hermes --version probe failed: %w", uncertainErr)
 	}
 
-	<-drained
-	<-drained
 	err = waitErr
 	err = errors.Join(err, reclaimProbeTree(opts, probeRoot, managed))
 	if result.ExitCode != 0 || result.Signal != 0 || result.Revoked {
@@ -1049,11 +1078,14 @@ func (p *Process) Close(ctx context.Context) error {
 
 	waitDone := p.beginWait()
 	result, waitErr := p.awaitCloseWait(waitDone, waitCtx)
+	if p.managed && waitErr != nil {
+		p.clearWaitFlight(waitDone)
+	}
 	outputErr := p.closeOutputDrains()
 	if callerErr != nil {
 		return errors.Join(revokeErr, callerErr, waitErr, outputErr)
 	}
-	if result.Revoked {
+	if result.Revoked && !p.managed {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(waitErr, &exitErr) {
 			waitErr = nil
@@ -1094,9 +1126,11 @@ func (p *Process) awaitCloseWait(waitDone <-chan struct{}, waitCtx context.Conte
 		<-waitDone
 		result, waitErr := p.waitOutcome()
 		if errors.Is(waitErr, context.Canceled) && !errors.Is(waitErr, p.containmentIncomplete) {
-			p.clearCanceledWait()
+			p.clearWaitFlight(waitDone)
 
-			return NativeResult{}, p.containmentFailure("wait for Hermes process", waitCtx.Err())
+			return NativeResult{}, errors.Join(
+				p.containmentFailure("wait for Hermes process", waitCtx.Err()), waitErr,
+			)
 		}
 
 		return result, waitErr
@@ -1110,9 +1144,12 @@ func (p *Process) waitOutcome() (NativeResult, error) {
 	return p.waitResult, p.waitErr
 }
 
-func (p *Process) clearCanceledWait() {
+func (p *Process) clearWaitFlight(waitDone <-chan struct{}) {
 	p.waitMu.Lock()
 	defer p.waitMu.Unlock()
+	if p.waitDone != waitDone {
+		return
+	}
 
 	p.waitActive = false
 	p.waitDone = nil
@@ -1154,6 +1191,7 @@ func (p *Process) drainOutput(writer io.Writer) {
 	if writer == nil {
 		writer = io.Discard
 	}
+	writer = &synchronizedWriter{writer: writer}
 
 	stdout := p.native.Stdout()
 	stderr := p.native.Stderr()

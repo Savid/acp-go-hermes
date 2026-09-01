@@ -51,6 +51,38 @@ func (r *blockingReadCloser) Close() error {
 	return nil
 }
 
+type stubbornProbeOutput struct {
+	started     chan struct{}
+	closeCalled chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	closeOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newStubbornProbeOutput() *stubbornProbeOutput {
+	return &stubbornProbeOutput{
+		started: make(chan struct{}), closeCalled: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (r *stubbornProbeOutput) Read([]byte) (int, error) {
+	r.startOnce.Do(func() { close(r.started) })
+	<-r.release
+
+	return 0, io.EOF
+}
+
+func (r *stubbornProbeOutput) Close() error {
+	r.closeOnce.Do(func() { close(r.closeCalled) })
+
+	return nil
+}
+
+func (r *stubbornProbeOutput) Release() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
 func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 	var mu sync.Mutex
 	events := make([]string, 0, 4)
@@ -322,6 +354,68 @@ func TestVersionProbeWaitFailureDoesNotWaitForPipeEOF(t *testing.T) {
 	}
 }
 
+func TestVersionProbeUncertainSettlementClosesAndJoinsOutputWorkers(t *testing.T) {
+	want := errors.New("managed wait uncertain")
+	wantContainment := errors.New("containment incomplete")
+	stdout := newStubbornProbeOutput()
+	stderr := newStubbornProbeOutput()
+	t.Cleanup(func() {
+		stdout.Release()
+		stderr.Release()
+	})
+	var root string
+	reclaims := 0
+	retained := false
+	native := &retryWaitProcess{
+		probeTestProcess: probeTestProcess{
+			stdin: &nopWriteCloser{}, stdout: stdout, stderr: stderr,
+		},
+		waitErrs: []error{want, want},
+	}
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) { return native, nil },
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+		RetainNativeTree: func(path string, err error) bool {
+			retained = path == root && errors.Is(err, want) && errors.Is(err, wantContainment)
+
+			return retained
+		},
+		ContainmentIncomplete: wantContainment,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- probeExecutableVersion(t.Context(), "hermes", opts) }()
+	<-stdout.started
+	<-stderr.started
+	<-stdout.closeCalled
+	<-stderr.closeCalled
+	select {
+	case err := <-done:
+		t.Fatalf("probe returned before its output workers joined: %v", err)
+	default:
+	}
+	stdout.Release()
+	stderr.Release()
+	err := <-done
+	require.ErrorIs(t, err, want)
+	require.ErrorIs(t, err, wantContainment)
+	require.True(t, retained)
+	require.Zero(t, reclaims)
+	require.Equal(t, 2, native.waitCount())
+	_, statErr := os.Stat(root)
+	require.NoError(t, statErr)
+}
+
 func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T) {
 	want := errors.New("managed serve start refused")
 	home := t.TempDir()
@@ -424,12 +518,14 @@ func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
 type retryWaitProcess struct {
 	probeTestProcess
 	mu       sync.Mutex
+	waits    int
 	waitErrs []error
 }
 
 func (p *retryWaitProcess) Wait(context.Context) (NativeResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.waits++
 	if len(p.waitErrs) == 0 {
 		return p.result, nil
 	}
@@ -439,7 +535,14 @@ func (p *retryWaitProcess) Wait(context.Context) (NativeResult, error) {
 	return p.result, err
 }
 
-func TestManagedProcessCloseDoesNotRetryUncertainWait(t *testing.T) {
+func (p *retryWaitProcess) waitCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.waits
+}
+
+func TestManagedProcessCloseRetriesUncertainWaitForTerminalProof(t *testing.T) {
 	want := errors.New("wait uncertain")
 	root := t.TempDir()
 	reclaims := 0
@@ -457,8 +560,9 @@ func TestManagedProcessCloseDoesNotRetryUncertainWait(t *testing.T) {
 	require.Zero(t, reclaims)
 	_, err := os.Stat(root)
 	require.NoError(t, err)
-	require.ErrorIs(t, process.Close(t.Context()), want)
-	require.Zero(t, reclaims)
+	require.NoError(t, process.Close(t.Context()))
+	require.Equal(t, 1, reclaims)
+	require.Equal(t, 2, native.waitCount())
 }
 
 func TestManagedProcessCloseAcceptsTerminalWaitAfterRevokeError(t *testing.T) {
