@@ -1023,7 +1023,11 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
-	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	// Close is a mandatory settlement boundary once accepted. Caller
+	// cancellation must not skip the keyed ordering gate any more than it may
+	// skip containment or the lifecycle facts that follow it; Agent.Close still
+	// cancels the registered lifecycle operation explicitly.
+	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(context.WithoutCancel(ctx), params.SessionId)
 	if lifecycleErr != nil {
 		return acp.CloseSessionResponse{}, lifecycleErr
 	}
