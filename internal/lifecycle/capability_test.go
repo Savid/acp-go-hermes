@@ -19,6 +19,9 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 		data string
 	}{
 		{"empty", `{}`},
+		{"not json", ``},
+		{"truncated member", `{"`},
+		{"truncated close", `{"version":1`},
 		{"missing", `{"updatesOutsidePrompt":true}`},
 		{"other integer", `{"version":2}`},
 		{"fractional", `{"version":1.0}`},
@@ -26,13 +29,17 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 		{"boolean", `{"version":true}`},
 		{"duplicate", `{"version":1,"version":1}`},
 		{"unknown", `{"version":1,"unknown":true}`},
+		{"invalid updates outside prompt", `{"version":1,"updatesOutsidePrompt":"true"}`},
+		{"invalid authoritative quiescence", `{"version":1,"authoritativeQuiescence":"true"}`},
+		{"invalid quiescence source", `{"version":1,"quiescenceSource":1}`},
+		{"invalid activity kinds", `{"version":1,"activityKinds":true}`},
 		{"trailing", `{"version":1} {}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
 			var value Negotiated
-			require.Error(t, json.Unmarshal([]byte(test.data), &value))
+			require.Error(t, value.UnmarshalJSON([]byte(test.data)))
 		})
 	}
 }
