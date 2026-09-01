@@ -27,10 +27,8 @@ func (n *Negotiated) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("decode lifecycle capability member: %w", err)
 		}
 
-		field, ok := token.(string)
-		if !ok {
-			return errors.New("lifecycle capability member name must be a string")
-		}
+		// encoding/json returns object member names only as strings.
+		field, _ := token.(string)
 
 		if _, duplicate := seen[field]; duplicate {
 			return fmt.Errorf("duplicate lifecycle capability field %q", field)
