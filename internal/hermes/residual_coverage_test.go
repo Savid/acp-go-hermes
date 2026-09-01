@@ -252,3 +252,222 @@ func TestResidualProcessPrimitiveFailures(t *testing.T) {
 		t.Fatal("directory web dist was rejected")
 	}
 }
+
+func residualManagedStartOptions(t *testing.T, serve func(context.Context, NativeRequest) (NativeProcess, error)) ProcessOptions {
+	t.Helper()
+
+	return ProcessOptions{
+		ExecutablePath: "logical-hermes",
+		Home:           t.TempDir(),
+		ScratchParent:  t.TempDir(),
+		NativeEnvironment: map[string]string{
+			"PATH": os.Getenv("PATH"),
+		},
+		StartNative: func(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
+				return &probeTestProcess{
+					stdin:  &nopWriteCloser{},
+					stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stderr: io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+
+			return serve(ctx, request)
+		},
+		PrepareNativeTree: func(context.Context, string) error { return nil },
+		ReclaimNativeTree: func(context.Context, string) error { return nil },
+		Timeout:           time.Second,
+	}
+}
+
+func TestResidualProcessStartEarlyFailures(t *testing.T) {
+	if process, err := Start(t.Context(), ProcessOptions{ExtraPathDirs: []string{"relative"}}); err == nil || process != nil {
+		t.Fatalf("invalid path carrier start = %#v, %v", process, err)
+	}
+	if process, err := Start(t.Context(), ProcessOptions{
+		ExecutablePath: "hermes", AmbientEnvironment: map[string]string{"BAD\x00KEY": "value"},
+	}); err == nil || process != nil {
+		t.Fatalf("invalid ambient environment start = %#v, %v", process, err)
+	}
+	if process, err := Start(t.Context(), ProcessOptions{
+		ExecutablePath: "missing-hermes-residual", AmbientEnvironment: map[string]string{"PATH": t.TempDir()},
+	}); err == nil || process != nil {
+		t.Fatalf("missing executable start = %#v, %v", process, err)
+	}
+
+	originalMkdirTemp := mkdirTemp
+	originalMkdirAll := mkdirAll
+	originalListen := listenTCP
+	originalRand := randReader
+	originalShim := newProcessBrowserShim
+	t.Cleanup(func() {
+		mkdirTemp = originalMkdirTemp
+		mkdirAll = originalMkdirAll
+		listenTCP = originalListen
+		randReader = originalRand
+		newProcessBrowserShim = originalShim
+	})
+
+	mkdirTemp = func(string, string) (string, error) { return "", errors.New("runtime home refused") }
+	opts := residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.Home = ""
+	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "runtime home refused") {
+		t.Fatalf("runtime home creation error = %v", err)
+	}
+	mkdirTemp = originalMkdirTemp
+
+	mkdirAll = func(string, os.FileMode) error { return errors.New("runtime home chmod refused") }
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "runtime home chmod refused") {
+		t.Fatalf("runtime home mkdir error = %v", err)
+	}
+	mkdirAll = originalMkdirAll
+
+	wantVersion := errors.New("version spawn refused")
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) { return nil, wantVersion }
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantVersion) {
+		t.Fatalf("version failure = %v", err)
+	}
+
+	wantSharedPrepare := errors.New("shared prepare refused")
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.SharedHome = true
+	opts.PrepareSharedHome = func(context.Context, string) error { return wantSharedPrepare }
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantSharedPrepare) {
+		t.Fatalf("shared preparation failure = %v", err)
+	}
+
+	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("port refused") }
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "port refused") {
+		t.Fatalf("port failure = %v", err)
+	}
+	listenTCP = originalListen
+
+	randReader = strings.NewReader("")
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	if _, err := Start(t.Context(), opts); err == nil {
+		t.Fatal("token entropy failure was ignored")
+	}
+	randReader = originalRand
+
+	newProcessBrowserShim = func(string) (*browserShim, error) { return nil, errors.New("shim refused") }
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "shim refused") {
+		t.Fatalf("shim failure = %v", err)
+	}
+	newProcessBrowserShim = originalShim
+}
+
+func TestResidualManagedProcessStartTransactions(t *testing.T) {
+	wantPrepare := errors.New("prepare refused")
+	prepareCalls := 0
+	retained := 0
+	opts := residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.PrepareNativeTree = func(context.Context, string) error {
+		prepareCalls++
+		if prepareCalls == 2 {
+			return wantPrepare
+		}
+
+		return nil
+	}
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantPrepare) || retained == 0 {
+		t.Fatalf("shim prepare failure = %v, retained=%d", err, retained)
+	}
+
+	wantBusy := errors.New("tree busy")
+	originalShim := newProcessBrowserShim
+	t.Cleanup(func() { newProcessBrowserShim = originalShim })
+	parentFile := filepath.Join(t.TempDir(), "parent-file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newProcessBrowserShim = func(string) (*browserShim, error) {
+		return &browserShim{dir: filepath.Join(parentFile, "shim")}, nil
+	}
+	prepareCalls = 0
+	retained = 0
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, errors.New("unexpected serve")
+	})
+	opts.NativeTreeBusy = wantBusy
+	opts.PrepareNativeTree = func(context.Context, string) error {
+		prepareCalls++
+		if prepareCalls == 2 {
+			return wantBusy
+		}
+
+		return nil
+	}
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantBusy) || retained == 0 {
+		t.Fatalf("busy shim prepare failure = %v, retained=%d", err, retained)
+	}
+	newProcessBrowserShim = originalShim
+
+	containment := errors.New("containment incomplete")
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, containment
+	})
+	opts.ContainmentIncomplete = containment
+	opts.RetainNativeTree = func(string, error) bool {
+		retained++
+
+		return true
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, containment) {
+		t.Fatalf("containment spawn failure = %v", err)
+	}
+
+	wantSpawn := errors.New("spawn refused")
+	wantRollback := errors.New("rollback refused")
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return nil, wantSpawn
+	})
+	reclaimCalls := 0
+	opts.ReclaimNativeTree = func(context.Context, string) error {
+		reclaimCalls++
+		if reclaimCalls == 1 {
+			return nil
+		}
+
+		return wantRollback
+	}
+	if _, err := Start(t.Context(), opts); !errors.Is(err, wantSpawn) || !errors.Is(err, wantRollback) {
+		t.Fatalf("spawn rollback failure = %v", err)
+	}
+
+	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
+		return &probeTestProcess{}, nil
+	})
+	if _, err := Start(t.Context(), opts); err == nil || !strings.Contains(err.Error(), "unusable host stdio") {
+		t.Fatalf("unusable serve process = %v", err)
+	}
+}
