@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -238,8 +239,8 @@ func TestVersionProbeRevokeErrorReclaimsAfterSuccessfulWait(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
-func TestVersionProbeStartErrorRetainsPreparedTree(t *testing.T) {
-	want := errors.New("managed start uncertain")
+func TestVersionProbeStartErrorReclaimsPreparedTree(t *testing.T) {
+	want := errors.New("managed start refused")
 	var root string
 	reclaims := 0
 	opts := ProcessOptions{
@@ -255,6 +256,34 @@ func TestVersionProbeStartErrorRetainsPreparedTree(t *testing.T) {
 
 			return nil
 		},
+	}
+
+	err := probeExecutableVersion(t.Context(), "hermes", opts)
+	require.ErrorIs(t, err, want)
+	require.Equal(t, 1, reclaims)
+	_, err = os.Stat(root)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestVersionProbeStartContainmentFailureRetainsPreparedTree(t *testing.T) {
+	incomplete := errors.New("containment incomplete")
+	want := errors.Join(errors.New("managed start uncertain"), incomplete)
+	var root string
+	reclaims := 0
+	opts := ProcessOptions{
+		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		PrepareNativeTree: func(_ context.Context, path string) error {
+			root = path
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) { return nil, want },
+		ReclaimNativeTree: func(context.Context, string) error {
+			reclaims++
+
+			return nil
+		},
+		ContainmentIncomplete: incomplete,
 	}
 
 	err := probeExecutableVersion(t.Context(), "hermes", opts)
@@ -293,30 +322,38 @@ func TestVersionProbeWaitFailureDoesNotWaitForPipeEOF(t *testing.T) {
 	}
 }
 
-func TestManagedServeStartErrorRetainsPreparedTrees(t *testing.T) {
-	want := errors.New("managed serve start uncertain")
+func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T) {
+	want := errors.New("managed serve start refused")
+	home := t.TempDir()
 	prepared := make(map[string]struct{})
 	reclaimed := make(map[string]struct{})
+	events := make([]string, 0, 8)
 	opts := ProcessOptions{
-		ExecutablePath: "logical-hermes", Home: t.TempDir(), ScratchParent: t.TempDir(),
+		ExecutablePath: "logical-hermes", Home: home, ScratchParent: t.TempDir(),
 		NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, root string) error {
 			prepared[root] = struct{}{}
+			events = append(events, "prepare:"+root)
 
 			return nil
 		},
 		StartNative: func(_ context.Context, request NativeRequest) (NativeProcess, error) {
 			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
+				events = append(events, "start:version")
+
 				return &probeTestProcess{
 					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
 					stderr: io.NopCloser(strings.NewReader("")),
 				}, nil
 			}
 
+			events = append(events, "start:serve")
+
 			return nil, want
 		},
 		ReclaimNativeTree: func(_ context.Context, root string) error {
 			reclaimed[root] = struct{}{}
+			events = append(events, "reclaim:"+root)
 
 			return nil
 		},
@@ -324,16 +361,16 @@ func TestManagedServeStartErrorRetainsPreparedTrees(t *testing.T) {
 
 	_, err := Start(t.Context(), opts)
 	require.ErrorIs(t, err, want)
-	retained := 0
 	for root := range prepared {
-		if _, ok := reclaimed[root]; ok {
-			continue
-		}
-		retained++
+		require.Contains(t, reclaimed, root)
 		_, statErr := os.Stat(root)
-		require.NoError(t, statErr, "managed serve StartNative error must retain prepared tree %q", root)
+		require.ErrorIs(t, statErr, os.ErrNotExist, "managed serve refusal must remove tree %q", root)
 	}
-	require.GreaterOrEqual(t, retained, 2, "serve residence and browser shim must remain host-owned")
+	serveStart := slices.Index(events, "start:serve")
+	require.GreaterOrEqual(t, serveStart, 0)
+	require.Len(t, events[serveStart+1:], 2)
+	require.Equal(t, "reclaim:"+home, events[serveStart+1])
+	require.NotEqual(t, home, strings.TrimPrefix(events[serveStart+2], "reclaim:"))
 }
 
 type retryWaitProcess struct {

@@ -645,27 +645,61 @@ func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	authority := newTestHostAuthority()
+	authority.moveTrees = true
 	markerErr := errors.New("authority refused launch")
 	authority.start = func(NativeRequest) (NativeProcess, error) {
 		return nil, markerErr
 	}
 	err := startWithRecordingAuthority(t, authority, WithHostAuthority(authority), executable)
 	require.ErrorIs(t, err, markerErr)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ordinary fallback executed managed selector: %v", err)
 	}
 	if eventIndex(authority.events, "start:"+executable+" --version") < 0 {
 		t.Fatalf("authority did not receive managed probe: %v", authority.events)
 	}
+	require.Empty(t, authority.prepared)
 	for _, event := range authority.events {
-		if strings.HasPrefix(event, "reclaim:") {
-			t.Fatalf("managed StartNative error was followed by reclaim: %v", authority.events)
-		}
 		if root, ok := strings.CutPrefix(event, "prepare:"); ok {
+			require.Greater(t, eventIndex(authority.events, "reclaim:"+root), eventIndex(authority.events, event))
 			_, statErr := os.Stat(root)
-			require.NoError(t, statErr, "managed StartNative error must retain the prepared tree")
+			require.ErrorIs(t, statErr, os.ErrNotExist, "refused managed start must remove reclaimed tree")
 		}
+	}
+}
+
+func TestHostAuthorityStartErrorPreservesAuthorityVerdict(t *testing.T) {
+	tests := []struct {
+		name            string
+		want            error
+		wantUnavailable bool
+		wantIncomplete  bool
+	}{
+		{name: "ordinary refusal", want: errors.New("admission refused")},
+		{name: "authority unavailable", want: ErrHostAuthorityUnavailable, wantUnavailable: true},
+		{name: "containment incomplete", want: ErrContainmentIncomplete, wantIncomplete: true},
+		{
+			name: "unavailable and incomplete", want: errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete),
+			wantUnavailable: true, wantIncomplete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authority := newTestHostAuthority()
+			authority.start = func(NativeRequest) (NativeProcess, error) { return nil, tt.want }
+			agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+			options := nativehermes.StartOptions{}
+			agent.configureHostAuthority(&options)
+
+			_, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
+			require.Equal(t, tt.want, err)
+			require.Equal(t, tt.wantUnavailable, errors.Is(err, ErrHostAuthorityUnavailable))
+			require.Equal(t, tt.wantIncomplete, errors.Is(err, ErrContainmentIncomplete))
+			require.Equal(t, tt.wantUnavailable, errors.Is(agent.hostAuthorityAdmissionError(), ErrHostAuthorityUnavailable))
+			require.Equal(t, tt.wantIncomplete, errors.Is(agent.containmentErr, ErrContainmentIncomplete))
+		})
 	}
 }
 
@@ -682,6 +716,7 @@ func TestHostAuthorityLossStopsNativeAdmission(t *testing.T) {
 	if _, err := options.StartNative(t.Context(), request); !errors.Is(err, ErrHostAuthorityUnavailable) {
 		t.Fatalf("first launch = %v", err)
 	}
+	require.NoError(t, agent.containmentErr)
 	authority.start = func(NativeRequest) (NativeProcess, error) {
 		t.Fatal("authority was called after terminal loss")
 

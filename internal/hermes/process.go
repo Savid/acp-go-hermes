@@ -300,7 +300,19 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		observeHermesStartupStage(ctx, opts.ObserveStartupStage, "session", "spawn", spawnStarted, err)
 		if process.managed {
-			process.retainPreparedTrees(err)
+			if errors.Is(err, process.containmentIncomplete) {
+				process.retainPreparedTrees(err)
+
+				return nil, err
+			}
+
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), closeTimeout)
+			rollbackErr := process.rollbackPreparedTrees(rollbackCtx)
+			rollbackCancel()
+			process.retainPreparedTrees(rollbackErr)
+			if rollbackErr != nil {
+				return nil, errors.Join(err, rollbackErr)
+			}
 
 			return nil, err
 		}
@@ -759,8 +771,17 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 	})
 	if err != nil {
 		if managed {
-			if opts.RetainNativeTree != nil {
-				_ = opts.RetainNativeTree(probeRoot, err)
+			if errors.Is(err, opts.ContainmentIncomplete) {
+				if opts.RetainNativeTree != nil {
+					_ = opts.RetainNativeTree(probeRoot, err)
+				}
+
+				return fmt.Errorf("hermes --version probe failed: %w", err)
+			}
+
+			cleanupErr := reclaimProbeTree(opts, probeRoot, true)
+			if cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
 			}
 
 			return fmt.Errorf("hermes --version probe failed: %w", err)
@@ -1136,6 +1157,45 @@ func (p *Process) removeUnpreparedTrees() error {
 	}
 	if p.Home != "" && !p.preparedHome {
 		err = errors.Join(err, removeAll(p.Home))
+	}
+
+	return err
+}
+
+// rollbackPreparedTrees unwinds the successfully prepared server trees after
+// StartNative refuses admission. A refusal proves that no process handle or
+// ambiguous identity remains, so the adapter can reclaim and remove in reverse
+// preparation order.
+func (p *Process) rollbackPreparedTrees(ctx context.Context) error {
+	var err error
+	if p.preparedHome {
+		if reclaimErr := p.reclaimNativeTree(ctx, p.Home); reclaimErr != nil {
+			err = errors.Join(err, reclaimErr)
+		} else {
+			p.preparedHome = false
+			removeErr := removeAll(p.Home)
+			if removeErr != nil && p.retainNativeTree != nil {
+				_ = p.retainNativeTree(p.Home, nil)
+			}
+			err = errors.Join(err, removeErr)
+		}
+	}
+
+	if p.preparedShim && p.shim != nil {
+		if reclaimErr := p.reclaimNativeTree(ctx, p.shim.dir); reclaimErr != nil {
+			err = errors.Join(err, reclaimErr)
+		} else {
+			p.preparedShim = false
+			removeErr := p.shim.remove()
+			if removeErr != nil && p.retainNativeTree != nil {
+				_ = p.retainNativeTree(p.shim.dir, nil)
+			}
+			err = errors.Join(err, removeErr)
+		}
+	}
+
+	if err == nil && p.nativeTreeSettled != nil {
+		p.nativeTreeSettled()
 	}
 
 	return err

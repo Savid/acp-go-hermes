@@ -70,16 +70,25 @@ func (a *Agent) hostAuthorityAdmissionError() error {
 }
 
 func (a *Agent) recordHostAuthorityError(err error) error {
+	return a.recordHostAuthorityVerdict(err, true)
+}
+
+func (a *Agent) recordHostAuthorityStartError(err error) error {
+	return a.recordHostAuthorityVerdict(err, false)
+}
+
+func (a *Agent) recordHostAuthorityVerdict(err error, unavailableMeansIncomplete bool) error {
 	if err == nil {
 		return nil
 	}
 
 	authorityUnavailable := errors.Is(err, ErrHostAuthorityUnavailable)
-	if authorityUnavailable {
+	if authorityUnavailable && unavailableMeansIncomplete {
 		err = errors.Join(err, ErrContainmentIncomplete)
 	}
 
-	if !authorityUnavailable && !errors.Is(err, ErrContainmentIncomplete) {
+	containmentIncomplete := errors.Is(err, ErrContainmentIncomplete)
+	if !authorityUnavailable && !containmentIncomplete {
 		return err
 	}
 
@@ -90,7 +99,7 @@ func (a *Agent) recordHostAuthorityError(err error) error {
 		a.authorityErr = err
 	}
 
-	if a.containmentErr == nil {
+	if containmentIncomplete && a.containmentErr == nil {
 		a.containmentErr = err
 	}
 
@@ -183,7 +192,7 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 			Environment: append([]string(nil), request.Environment...), WorkingDirectory: request.WorkingDirectory,
 		})
 		if err != nil {
-			return nil, a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
+			return nil, a.recordHostAuthorityStartError(err)
 		}
 
 		if nativeProcessNil(hostProcess) {
