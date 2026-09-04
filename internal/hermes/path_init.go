@@ -149,7 +149,7 @@ func hermesPathCarrierEnvironmentKey(key string) bool {
 
 func validateSessionEnvironmentNoPath(env map[string]string) error {
 	for key := range env {
-		if processEnvironmentKeyMatches(key, "PATH") {
+		if processEnvironmentKeyMatches(key, envPath) {
 			return errors.New("session environment must not contain PATH")
 		}
 	}

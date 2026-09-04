@@ -531,8 +531,10 @@ func TestResidualOrdinaryEnvironmentStartFailures(t *testing.T) {
 	executable := fakeHermesExecutable(t, fakeProcessModeOK)
 	if process, err := Start(t.Context(), ProcessOptions{
 		ExecutablePath: executable,
+		// Only an inherited name reaches the phase merge; a duplicate of a
+		// name the allowlist never admits is dropped rather than refused.
 		AmbientEnvironment: map[string]string{
-			"PATH": os.Getenv("PATH"), "TOKEN": "one", "token": "two",
+			"PATH": os.Getenv("PATH"), "TEMP": "one", "temp": "two",
 		},
 	}); err == nil || process != nil {
 		t.Fatalf("duplicate ambient environment start = %#v, %v", process, err)

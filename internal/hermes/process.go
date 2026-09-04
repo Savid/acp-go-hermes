@@ -492,7 +492,7 @@ func prependPathDirs(env []string, dirs []string) []string {
 
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !processEnvironmentKeyMatches(key, "PATH") {
+		if !ok || !processEnvironmentKeyMatches(key, envPath) {
 			kept = append(kept, entry)
 
 			continue

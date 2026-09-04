@@ -145,7 +145,7 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 		map[string]string{"PATH": harnessDir, "PathExt": ".BAT"},
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"KEPT=yes", "PATH=" + harnessDir, "PathExt=.BAT"}, environment)
+	require.Equal(t, []string{"PATH=" + harnessDir, "PathExt=.BAT"}, environment, "KEPT is not an inherited name")
 
 	resolved, err := lookOrdinaryPathWithRules("hermes", environment, windowsExecutableRules(environment))
 	require.NoError(t, err)
@@ -168,9 +168,9 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	require.Empty(t, processEnvironmentValue(map[string]string{"OTHER": "x"}, envHermesWebDist))
 
 	processRuntimePlatform = processPlatformLinux
-	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir}, map[string]string{"PATH": harnessDir})
+	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir, "PATH": "/ambient/bin"}, map[string]string{"PATH": harnessDir})
 	require.NoError(t, err)
-	require.Equal(t, []string{"PATH=" + harnessDir, "Path=" + decoyDir}, unfolded)
+	require.Equal(t, []string{"PATH=" + harnessDir}, unfolded, "off Windows an inherited Path is a different variable and not an inherited name")
 	require.Empty(t, processEnvironmentValue(map[string]string{"Hermes_Web_Dist": "/opt/web"}, envHermesWebDist))
 	require.Equal(t, "/opt/web", processEnvironmentValue(map[string]string{envHermesWebDist: "/opt/web"}, envHermesWebDist))
 }
@@ -325,4 +325,71 @@ func TestProcessScalarHelpers(t *testing.T) {
 	require.NoError(t, methodPresent("domain.method", &RPCError{Code: 4001, Message: "domain"}))
 	require.Error(t, methodPresent("missing.method", &RPCError{Code: -32601, Message: "missing"}))
 	require.Error(t, methodPresent("broken.method", errors.New("broken")))
+}
+
+func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+
+	ambient := map[string]string{
+		// Inherited: what a process needs to run, reach the network, and serve.
+		"PATH": "/usr/bin", "HOME": "/home/operator", "TMPDIR": "/tmp/op", "LANG": "en_AU.UTF-8",
+		"LC_ALL": "C.UTF-8", "TERM": "xterm-256color", "HTTPS_PROXY": "http://proxy:3128",
+		"https_proxy": "http://proxy:3128", "NO_PROXY": "localhost", "SSL_CERT_FILE": "/etc/ssl/ca.pem",
+		"REQUESTS_CA_BUNDLE": "/etc/ssl/ca.pem", envHermesWebDist: "/opt/hermes/web",
+		// Not inherited: every credential Hermes would seed its pool from, and
+		// everything else the operator happens to have exported.
+		"OPENAI_API_KEY": "sk-openai", "ANTHROPIC_API_KEY": "sk-ant", "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+		"OPENROUTER_API_KEY": "sk-or", "GITHUB_TOKEN": "ghp", "GH_TOKEN": "gho", "XAI_API_KEY": "xai",
+		"SSH_AUTH_SOCK": "/run/agent.sock", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus",
+		"XDG_CONFIG_HOME": "/home/operator/.config", "EDITOR": "vim", "TZ": "Australia/Brisbane",
+		// Off Windows a differently-cased spelling is a different variable, and
+		// the allowlist names none of them.
+		"path": "/lower/bin", "Home": "/mixed/home", "lc_all": "lower",
+		envHermesHome: "/foreign/home",
+	}
+
+	processRuntimePlatform = processPlatformLinux
+	environment, err := ordinaryEnvironment(ambient)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"HERMES_WEB_DIST=/opt/hermes/web",
+		"HOME=/home/operator",
+		"HTTPS_PROXY=http://proxy:3128",
+		"LANG=en_AU.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"NO_PROXY=localhost",
+		"PATH=/usr/bin",
+		"REQUESTS_CA_BUNDLE=/etc/ssl/ca.pem",
+		"SSL_CERT_FILE=/etc/ssl/ca.pem",
+		"TERM=xterm-256color",
+		"TMPDIR=/tmp/op",
+		"https_proxy=http://proxy:3128",
+	}, environment)
+
+	// A credential still reaches the harness when the caller hands it over
+	// explicitly: the allowlist governs inheritance, not WithEnv.
+	explicit, err := ordinaryEnvironment(ambient, map[string]string{"OPENAI_API_KEY": "sk-explicit"})
+	require.NoError(t, err)
+	require.Contains(t, explicit, "OPENAI_API_KEY=sk-explicit")
+	require.NotContains(t, explicit, "ANTHROPIC_API_KEY=sk-ant")
+
+	// Where the platform folds names, the allowlist folds with it: "Path" and
+	// "lc_all" are the search path and a locale there, and the leftover
+	// spellings are one variable each rather than two.
+	processRuntimePlatform = processPlatformWindows
+	folded, err := ordinaryEnvironment(map[string]string{
+		"Path": `C:\bin`, "lc_all": "lower", "PathExt": ".EXE", "SystemRoot": `C:\Windows`,
+		"OPENAI_API_KEY": "sk-openai", "Openai_Api_Key": "sk-mixed", "GITHUB_TOKEN": "ghp",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"Path=C:\\bin", "PathExt=.EXE", "SystemRoot=C:\\Windows", "lc_all=lower"}, folded)
+
+	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HERMES_HOME", "SSH_AUTH_SOCK", "TZ"} {
+		require.False(t, inheritOrdinaryEnvironmentKey(name), name)
+	}
+
+	for _, name := range []string{"PATH", "HOME", "LC_MESSAGES", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "PATHEXT", "COMSPEC", "USERPROFILE", "__CF_USER_TEXT_ENCODING", envHermesWebDist} {
+		require.True(t, inheritOrdinaryEnvironmentKey(name), name)
+	}
 }

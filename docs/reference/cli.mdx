@@ -10,9 +10,21 @@ acp-go-hermes [flags]
 ## Standalone execution
 
 The command runs Hermes as its own operating-system account. It captures the
-ambient environment once, removes adapter-private and native-state variables,
-and uses the resulting environment for executable lookup and every session.
-Host-managed execution is available only through the embedded Go API.
+ambient environment once and inherits only a closed allowlist of it for
+executable lookup and every session: `PATH`, `HOME`, `USER`, `LOGNAME`,
+`SHELL`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `TERM`, `COLORTERM`, `NO_COLOR`,
+`FORCE_COLOR`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `USERPROFILE`,
+`__CF_USER_TEXT_ENCODING`, every `LC_*` name, the proxy names `HTTP_PROXY`,
+`HTTPS_PROXY`, `NO_PROXY`, and `ALL_PROXY` in either case, the TLS bundle names
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE`,
+and `HERMES_WEB_DIST`. Nothing else in the shell reaches Hermes. Hermes treats
+more than fifty environment names as provider credentials, its own and other
+harnesses' included, copies each one it finds into the session home's auth
+store, and probes every provider it seeded on each fresh-home start, so an
+inherited key is a login the operator never configured. Hand a key to Hermes
+explicitly with `-env NAME=value`; session `env` and seeded files are the other
+explicit routes. Host-managed execution is available only through the
+embedded Go API.
 
 ## Flags
 

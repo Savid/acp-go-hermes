@@ -124,6 +124,11 @@ Unless explicitly requested, ask before:
 - **IMPORTANT**: Do not manage the user's real Hermes authentication state.
   Sessions use isolated temp homes except for the explicit shared-home proof,
   which uses one disposable temp residence.
+- Ordinary execution inherits only the allowlist in
+  `internal/hermes/process_ordinary.go`. Hermes seeds its credential pool from
+  more than fifty environment names, so never widen that list with a name
+  that can carry a credential; a key reaches Hermes through `WithEnv` or
+  session `env` alone.
 - Do not log auth material, user secrets, prompts, tool input, tool output, or
   raw Hermes gateway event bodies by default.
 - Keep permission rules session-scoped. Copy them only through intentional
