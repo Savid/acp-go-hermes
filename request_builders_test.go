@@ -22,8 +22,8 @@ func TestRequestBuilders(t *testing.T) {
 	sseServer := acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse", Url: "https://sse.example"}}
 	acpServer := acp.McpServer{Acp: &acp.McpServerAcpInline{Id: "acp-1", Name: "acp"}}
 	meta := map[string]any{"foreign": map[string]any{"a": []any{"b"}}}
-	req := NewSessionRequest("/tmp/project",
-		WithSessionAdditionalDirectories("/tmp/other"),
+	req := NewSessionRequest(absTestPath("tmp", "project"),
+		WithSessionAdditionalDirectories(absTestPath("tmp", "other")),
 		WithSessionMCPServers(httpServer, stdioServer, sseServer, acpServer),
 		WithSessionMeta(meta),
 		WithSessionRawEvents(true),
@@ -33,7 +33,7 @@ func TestRequestBuilders(t *testing.T) {
 			WithHermesEnv(map[string]string{"K": "V"}),
 		)),
 	)
-	if req.Cwd != "/tmp/project" || len(req.McpServers) != 4 || len(req.AdditionalDirectories) != 1 {
+	if req.Cwd != absTestPath("tmp", "project") || len(req.McpServers) != 4 || len(req.AdditionalDirectories) != 1 {
 		t.Fatalf("NewSessionRequest = %#v", req)
 	}
 	if !rawMessageConfigFromMeta(req.Meta).Enabled() {
@@ -45,7 +45,7 @@ func TestRequestBuilders(t *testing.T) {
 	if options[metaModelKey] != "openai/gpt" || envMap["K"] != "V" {
 		t.Fatalf("options not set in meta: %#v", req.Meta)
 	}
-	if ResumeSessionRequest("s", "/tmp/project", WithSessionMCPServers(httpServer)).SessionId != "s" {
+	if ResumeSessionRequest("s", absTestPath("tmp", "project"), WithSessionMCPServers(httpServer)).SessionId != "s" {
 		t.Fatal("ResumeSessionRequest did not set session id")
 	}
 	if prompt := TextPromptRequest("s", "turn-1", "hello"); prompt.SessionId != "s" || len(prompt.Prompt) != 1 {
@@ -86,7 +86,7 @@ func assertMCPServerConversions(t *testing.T, servers []acp.McpServer) {
 }
 
 func TestRequestBuilderCloneEdgeBranches(t *testing.T) {
-	rawOnly := NewSessionRequest("/tmp/project", WithSessionRawEvents(true))
+	rawOnly := NewSessionRequest(absTestPath("tmp", "project"), WithSessionRawEvents(true))
 	if !rawMessageConfigFromMeta(rawOnly.Meta).Enabled() {
 		t.Fatalf("rawOnly meta = %#v", rawOnly.Meta)
 	}
@@ -234,7 +234,7 @@ func TestCallForkSessionHelper(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			conn, closeConn := forkClientConnection(t, handler)
 			defer closeConn()
-			resp, err := CallForkSession(ctx, conn, ForkSessionRequest("s", "/tmp/project"))
+			resp, err := CallForkSession(ctx, conn, ForkSessionRequest("s", absTestPath("tmp", "project")))
 			switch name {
 			case "success":
 				if err != nil || resp.SessionId != "forked" {
@@ -461,7 +461,7 @@ func TestBuildersRejectReservedCallerMeta(t *testing.T) {
 
 	// A host's own namespace, and this adapter's, are merged as before.
 	allowed := map[string]any{"host.example/trace": "t", hermesMetaKey: map[string]any{"options": map[string]any{}}}
-	request := NewSessionRequest("/tmp/project", WithSessionMeta(allowed))
+	request := NewSessionRequest(absTestPath("tmp", "project"), WithSessionMeta(allowed))
 	if request.Meta["host.example/trace"] != "t" {
 		t.Fatalf("caller meta was not merged: %#v", request.Meta)
 	}

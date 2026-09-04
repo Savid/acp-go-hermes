@@ -3345,7 +3345,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 			keyField:       fmt.Sprintf("seedFiles[%q]", relative),
 		})
 	}
-	if strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) {
+	if strings.TrimSpace(relative) == "" || absolutePathSpelling(relative) {
 		return "", "", invalid()
 	}
 	// Reject any ".." segment so the cleaned join can never escape home; a

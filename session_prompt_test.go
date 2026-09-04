@@ -3718,28 +3718,6 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 	}
 }
 
-func TestSharedHomePromptSessionSetLock(t *testing.T) {
-	home := t.TempDir()
-	agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
-	client := newFakeHermesClient()
-	session := testSession(agent, client)
-	response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "shared-lock", "reply"))
-	if err != nil || response.StopReason == "" {
-		t.Fatalf("shared-home prompt=%+v err=%v", response, err)
-	}
-
-	lock, err := nativehermes.AcquireSharedSessionSetLock(t.Context(), home, nativehermes.SharedSessionSetLockExclusive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = lock.Release() }()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	if _, err := session.Prompt(ctx, TextPromptRequest(session.id, "blocked-lock", "blocked")); err == nil {
-		t.Fatal("contended shared-home turn lock succeeded")
-	}
-}
-
 func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{

@@ -6,14 +6,42 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute working directory" rather than a spelling only one
+// platform accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+
+	return filepath.Join(append([]string{root}, segments...)...)
+}
+
+// awaitTestSignal waits for a rendezvous the rest of a test cannot proceed
+// without, so a step that never runs fails the test where it stalled instead of
+// hanging the whole package until its timeout.
+func awaitTestSignal(t *testing.T, signal <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-signal:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
 
 func newTestAgent(opts ...Option) *Agent {
 	return NewAgent(opts...)
@@ -742,7 +770,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 		}
 	}
 
-	return newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
+	return newSession(agent, "session-1", absTestPath("tmp", "project"), nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
 		SessionID:       "session-1",
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,

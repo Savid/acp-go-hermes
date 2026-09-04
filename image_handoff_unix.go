@@ -2,7 +2,10 @@
 
 package hermesacp
 
-import "syscall"
+import (
+	"path/filepath"
+	"syscall"
+)
 
 // handoffOpenFlags carries the one flag a root-relative handoff open still
 // needs. Containment is the read root's and no open flag can add to it: the
@@ -12,3 +15,9 @@ import "syscall"
 // descriptor's regular-file check instead of blocking the turn inside open(2),
 // and it changes nothing about how a regular file reads.
 const handoffOpenFlags = syscall.O_NONBLOCK
+
+// handoffURILocalPath maps the path component of a file URI to a local path.
+// A POSIX file URI's path is already the local path once its separators are.
+func handoffURILocalPath(path string) string {
+	return filepath.FromSlash(path)
+}

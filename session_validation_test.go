@@ -17,10 +17,10 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if err := validateRequiredAbsolutePath("cwd", ""); err == nil {
 		t.Fatal("empty required absolute path accepted")
 	}
-	if err := validateSessionStartPaths("/tmp/project", []string{"relative"}); err == nil {
+	if err := validateSessionStartPaths(absTestPath("tmp", "project"), []string{"relative"}); err == nil {
 		t.Fatal("relative additional directory accepted")
 	}
-	value := "/tmp/project"
+	value := absTestPath("tmp", "project")
 	if err := validateOptionalAbsolutePath("cwd", &value); err != nil {
 		t.Fatalf("validateOptionalAbsolutePath: %v", err)
 	}

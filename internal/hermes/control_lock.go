@@ -15,8 +15,18 @@ func acquireServerControlLock(ctx context.Context, dir string) (*SharedSessionSe
 		dir,
 		os.OpenFile,
 		(*os.File).Chmod,
-		tryLockSharedSessionSetFile,
+		tryLockServerControlFile,
 	)
+}
+
+// tryLockServerControlFile fences one Hermes server generation's control
+// directory. The claim is always exclusive and the OS releases it when the
+// adapter exits, so it needs only the single-writer file lock every supported
+// platform provides. It deliberately does not reuse the session-set backend:
+// that one also has to offer a shared claim, which is why Windows refuses it,
+// and a server generation never asks for one.
+func tryLockServerControlFile(file *os.File, _ SharedSessionSetLockMode) (func() error, bool, error) {
+	return tryLockHermesFile(file)
 }
 
 func acquireServerControlLockWithOps(

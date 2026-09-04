@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2168,8 +2169,8 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("stat %q: %v", relative, err)
 			}
-			if info.Mode().Perm() != 0o600 {
-				t.Fatalf("seed %q mode = %v, want 0600", relative, info.Mode().Perm())
+			if want := wantRestrictedPerm(false); info.Mode().Perm() != want {
+				t.Fatalf("seed %q mode = %v, want %v", relative, info.Mode().Perm(), want)
 			}
 		}
 		if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
@@ -3678,17 +3679,14 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 	if err != nil {
 		t.Fatalf("test executable: %v", err)
 	}
-	script := filepath.Join(t.TempDir(), "fake-hermes")
-	extra := ""
-	for _, arg := range extraArgs {
-		extra += fmt.Sprintf("%q ", arg)
-	}
-	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_GATEWAY_HELPER=1 ACP_GO_HERMES_GATEWAY_MODE=%s exec %q -test.run=TestFakeHermesGatewayProcessHelper -- %s\"$@\"\n", mode, testBinary, extra)
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatalf("write fake executable: %v", err)
-	}
+	args := append([]string{"-test.run=TestFakeHermesGatewayProcessHelper", "--"}, extraArgs...)
 
-	return script
+	return writeTestBinaryLauncher(t, t.TempDir(), "fake-hermes", testBinary,
+		map[string]string{
+			"ACP_GO_HERMES_GATEWAY_HELPER": "1",
+			"ACP_GO_HERMES_GATEWAY_MODE":   mode,
+		},
+		args)
 }
 
 // exitWhenParentTestExits is the fake gateway generation's own teardown. The
@@ -3698,14 +3696,13 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 // It reaps itself the moment the test binary that launched it is gone.
 func exitWhenParentTestExits() {
 	owner := os.Getppid()
-
-	go func() {
-		for range time.Tick(100 * time.Millisecond) {
-			if os.Getppid() != owner {
-				os.Exit(0)
-			}
+	if value := os.Getenv(fakeLauncherOwnerPIDEnv); value != "" {
+		if pid, convErr := strconv.Atoi(value); convErr == nil {
+			owner = pid
 		}
-	}()
+	}
+
+	watchFakeLauncherOwner(owner)
 }
 
 func runFakeHermesGatewayProcess(args []string, mode string) error {

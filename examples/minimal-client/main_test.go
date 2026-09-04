@@ -213,10 +213,7 @@ func TestStartAgentProcess(t *testing.T) {
 	originalCommand := commandContext
 	t.Cleanup(func() { commandContext = originalCommand })
 
-	script := filepath.Join(t.TempDir(), "fake-agent")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	script := writeFakeAgent(t, t.TempDir())
 	commandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, script)
 	}

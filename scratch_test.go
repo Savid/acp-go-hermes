@@ -43,8 +43,8 @@ func TestEnsureScratchParent(t *testing.T) {
 		if !info.IsDir() {
 			t.Fatalf("created scratch parent is not a directory")
 		}
-		if perm := info.Mode().Perm(); perm != 0o700 {
-			t.Fatalf("created scratch parent perm = %o, want 700", perm)
+		if perm, want := info.Mode().Perm(), wantRestrictedPerm(true); perm != want {
+			t.Fatalf("created scratch parent perm = %o, want %o", perm, want)
 		}
 	})
 

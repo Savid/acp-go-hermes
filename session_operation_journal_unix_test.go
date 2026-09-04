@@ -37,3 +37,18 @@ func TestSessionOperationAtomicWriteSyncFailure(t *testing.T) {
 		t.Fatalf("/dev/null mode changed: mode=%v", current.Mode().Perm())
 	}
 }
+
+// TestSessionOperationEnsureRequiresTheParentFlush pins that ensuring the
+// journal root includes flushing its parent: a parent that vanished between the
+// chmod and the flush fails the ensure rather than passing silently.
+func TestSessionOperationEnsureRequiresTheParentFlush(t *testing.T) {
+	previousChmod := sessionOperationChmod
+	t.Cleanup(func() { sessionOperationChmod = previousChmod })
+
+	path := filepath.Join(t.TempDir(), "operations")
+	sessionOperationChmod = func(string, os.FileMode) error { return os.RemoveAll(filepath.Dir(path)) }
+
+	if err := ensureSessionOperationDirectory(path); err == nil {
+		t.Fatal("sync parent failure ignored")
+	}
+}

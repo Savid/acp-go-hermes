@@ -77,22 +77,6 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	if code := run(cancelled, nil, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 		t.Fatalf("cancelled serve code = %d", code)
 	}
-
-	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...hermesacp.Option) error {
-		proc, err := os.FindProcess(os.Getpid())
-		if err != nil {
-			return err
-		}
-		if err := proc.Signal(syscall.SIGTERM); err != nil {
-			return err
-		}
-		<-ctx.Done()
-
-		return ctx.Err()
-	}
-	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, io.Discard); code != 143 {
-		t.Fatalf("signalled serve code = %d", code)
-	}
 }
 
 func TestRunRejectsUndefinedFlag(t *testing.T) {

@@ -24,7 +24,7 @@ func TestOrdinaryRevokeDoesNotMarkNaturalExitWhenKillLoses(t *testing.T) {
 				kill: func() error { return killErr },
 			}
 			err := process.Revoke(t.Context())
-			if errors.Is(killErr, os.ErrProcessDone) {
+			if nativeProcessAlreadyFinished(killErr) {
 				require.NoError(t, err)
 			} else {
 				require.ErrorIs(t, err, killErr)

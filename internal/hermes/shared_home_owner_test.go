@@ -1,3 +1,10 @@
+//go:build !windows
+
+// Every test in this file drives the shared Hermes home. Windows refuses that
+// home — its inherited session-owner lock handles are unavailable — so the
+// surface these tests exercise does not exist there; the Windows expectation is
+// the refusal itself, proven once beside the code that makes it.
+
 package hermes
 
 import (

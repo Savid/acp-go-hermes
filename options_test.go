@@ -20,10 +20,10 @@ func TestApplyOptions(t *testing.T) {
 		WithAgentTitle("title"),
 		WithAgentVersion("version"),
 		WithExecutablePath("hermes"),
-		WithHome("/tmp/home"),
-		WithScratchDir("/tmp/scratch"),
-		WithProviderAuthRoot("/tmp/provider-ledger"),
-		WithSharedHermesHome("/tmp/provider-home"),
+		WithHome(absTestPath("tmp", "home")),
+		WithScratchDir(absTestPath("tmp", "scratch")),
+		WithProviderAuthRoot(absTestPath("tmp", "provider-ledger")),
+		WithSharedHermesHome(absTestPath("tmp", "provider-home")),
 		WithDefaultModel("openai/gpt"),
 		WithEnv(map[string]string{"A": "1"}),
 		WithTracerProvider(tracenoop.NewTracerProvider()),
@@ -44,10 +44,10 @@ func TestApplyOptions(t *testing.T) {
 		opts.Env["A"] != "1" || opts.SessionStore != store {
 		t.Fatalf("options = %#v", opts)
 	}
-	if opts.Home != "/tmp/home" || opts.ScratchDir != "/tmp/scratch" {
+	if opts.Home != absTestPath("tmp", "home") || opts.ScratchDir != absTestPath("tmp", "scratch") {
 		t.Fatalf("home/scratch options = %q / %q", opts.Home, opts.ScratchDir)
 	}
-	if opts.ProviderAuthRoot != "/tmp/provider-ledger" || opts.SharedHermesHome != "/tmp/provider-home" {
+	if opts.ProviderAuthRoot != absTestPath("tmp", "provider-ledger") || opts.SharedHermesHome != absTestPath("tmp", "provider-home") {
 		t.Fatalf("provider auth options = %q / %q",
 			opts.ProviderAuthRoot,
 			opts.SharedHermesHome,

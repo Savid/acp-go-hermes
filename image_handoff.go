@@ -291,7 +291,7 @@ func handoffURIPath(uri *string) (string, *handoffError) {
 		return "", handoffInvalid(handoffURIRemoteHostMessage)
 	}
 
-	path := filepath.FromSlash(parsed.Path)
+	path := handoffURILocalPath(parsed.Path)
 	if !filepath.IsAbs(path) {
 		return "", handoffInvalid(handoffURIRelativeMessage)
 	}

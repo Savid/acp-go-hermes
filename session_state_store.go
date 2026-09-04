@@ -1110,7 +1110,7 @@ func decodeXDGArchive(data []byte, target string) error {
 			return err
 		}
 
-		if header.Name == "" || filepath.IsAbs(header.Name) || strings.Contains(header.Name, "..") {
+		if header.Name == "" || absolutePathSpelling(header.Name) || strings.Contains(header.Name, "..") {
 			return fmt.Errorf("archive path rejected: %s", header.Name)
 		}
 

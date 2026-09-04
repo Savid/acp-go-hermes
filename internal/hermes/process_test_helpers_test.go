@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,13 +51,13 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 	if err != nil {
 		t.Fatalf("test executable: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "hermes")
-	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_INTERNAL_HELPER=1 ACP_GO_HERMES_INTERNAL_MODE=%s exec %q -test.run=TestFakeHermesProcessHelper -- \"$@\"\n", mode, testBinary)
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-		t.Fatalf("write fake executable: %v", err)
-	}
 
-	return path
+	return writeTestBinaryLauncher(t, t.TempDir(), "hermes", testBinary,
+		map[string]string{
+			"ACP_GO_HERMES_INTERNAL_HELPER": "1",
+			"ACP_GO_HERMES_INTERNAL_MODE":   mode,
+		},
+		[]string{"-test.run=TestFakeHermesProcessHelper", "--"})
 }
 
 //nolint:gocyclo // The fake keeps the gateway's complete deterministic method matrix in one server.
@@ -158,6 +157,11 @@ func runFakeHermesProcess(args []string, mode string) error {
 			}
 		})
 	}
+	// The fake serves until it is killed, and a launcher that cannot exec leaves
+	// it running when its own process is killed instead. Reap it against the
+	// test process it belongs to so no platform can strand it.
+	exitWhenParentTestExits()
+
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	return server.ListenAndServe()

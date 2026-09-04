@@ -462,9 +462,15 @@ func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T)
 	}
 	serveStart := slices.Index(events, "start:serve")
 	require.GreaterOrEqual(t, serveStart, 0)
-	require.Len(t, events[serveStart+1:], 2)
-	require.Equal(t, "reclaim:"+home, events[serveStart+1])
-	require.NotEqual(t, home, strings.TrimPrefix(events[serveStart+2], "reclaim:"))
+	// The home tree is reclaimed first and every other prepared tree after it.
+	// A platform with no browser shim prepares one tree fewer.
+	after := events[serveStart+1:]
+	require.Len(t, after, 1+browserShimTreeCount)
+	require.Equal(t, "reclaim:"+home, after[0])
+
+	for _, event := range after[1:] {
+		require.NotEqual(t, home, strings.TrimPrefix(event, "reclaim:"))
+	}
 }
 
 func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
@@ -501,10 +507,16 @@ func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
 	require.NotEmpty(t, serveRequest.Environment)
 	path := envValueFold(serveRequest.Environment, "PATH", processRuntimePlatform == processPlatformWindows)
 	parts := strings.Split(path, string(os.PathListSeparator))
-	require.Len(t, parts, 4)
+	// The carrier directories lead, the browser shim follows on a platform that
+	// installs one, and the native PATH stays last.
+	require.Len(t, parts, 3+browserShimTreeCount)
 	require.Equal(t, []string{first, second}, parts[:2])
-	require.Contains(t, parts[2], browserShimPrefix)
-	require.Equal(t, "/native/bin", parts[3])
+
+	for _, part := range parts[2 : 2+browserShimTreeCount] {
+		require.Contains(t, part, browserShimPrefix)
+	}
+
+	require.Equal(t, "/native/bin", parts[len(parts)-1])
 	require.Contains(t, serveRequest.Environment, "KEPT=yes")
 	for _, entry := range serveRequest.Environment {
 		key, _, ok := strings.Cut(entry, "=")

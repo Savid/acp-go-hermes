@@ -2,10 +2,8 @@ package hermes
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -126,7 +124,7 @@ func (p *ordinaryNativeProcess) Revoke(ctx context.Context) error {
 			switch {
 			case p.revokeErr == nil:
 				p.revoked = true
-			case errors.Is(p.revokeErr, os.ErrProcessDone):
+			case nativeProcessAlreadyFinished(p.revokeErr):
 				p.revokeErr = nil
 			}
 		}

@@ -390,3 +390,24 @@ func TestAgentAndSessionLifecycleAdmissionResidualBranches(t *testing.T) {
 		t.Fatal("failed started session remained active")
 	}
 }
+
+// TestAcquireSessionLifecycleRefusesAnAlreadyCancelledRequest pins that a
+// request whose context is already cancelled never receives a lease, whichever
+// way the acquisition falls. With the lease token free and the context already
+// done, both arms of the select are ready on every call and the runtime picks
+// between them, so the refusal has to be reached through either one.
+func TestAcquireSessionLifecycleRefusesAnAlreadyCancelledRequest(t *testing.T) {
+	agent := newTestAgent()
+	want := errors.New("request abandoned")
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(want)
+
+	for range 64 {
+		operationCtx, release, err := agent.acquireSessionLifecycle(ctx, acp.SessionId("lease-cancelled"))
+		require.ErrorIs(t, err, want)
+		require.Nil(t, operationCtx)
+		require.Nil(t, release)
+		require.Empty(t, agent.lifecycleLeases)
+	}
+}

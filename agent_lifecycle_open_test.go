@@ -556,7 +556,7 @@ func TestLifecycleResponsesCorrelateByExactRequestIdentity(t *testing.T) {
 			nativeID := "same-native-" + method
 			client := newFakeHermesClient()
 			native := testNativeSession(nativeID)
-			session := newSession(agent, logicalID, "/tmp/project", nil, nil, native, client, sessionMeta{}, idmapRecord{
+			session := newSession(agent, logicalID, absTestPath("tmp", "project"), nil, nil, native, client, sessionMeta{}, idmapRecord{
 				SessionID: string(logicalID), NativeSessionID: nativeID, Format: SessionStoreFormat,
 			})
 			require.NoError(t, session.openLifecycleStream())
@@ -653,7 +653,7 @@ func TestDuplicateLifecycleResponseIDsKeepExactOpaqueOwnership(t *testing.T) {
 
 	makeSession := func(id acp.SessionId, requestCtx context.Context) (*session, []byte) {
 		native := testNativeSession("native-" + string(id))
-		session := newSession(agent, id, "/tmp/project", nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
+		session := newSession(agent, id, absTestPath("tmp", "project"), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
 			SessionID: string(id), NativeSessionID: native.ID, Format: SessionStoreFormat,
 		})
 		require.NoError(t, session.openLifecycleStream())
@@ -715,7 +715,7 @@ func TestLifecycleResponseFailureFencesOnlyItsExactRequestIdentity(t *testing.T)
 
 			makeSession := func(id acp.SessionId, requestID int) *session {
 				native := testNativeSession("same-native")
-				s := newSession(agent, id, "/tmp/project", nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
+				s := newSession(agent, id, absTestPath("tmp", "project"), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
 					SessionID: string(id), NativeSessionID: native.ID, Format: SessionStoreFormat,
 				})
 				require.NoError(t, s.openLifecycleStream())
@@ -917,13 +917,13 @@ func TestActiveLifecycleReuseAdmissionCannotCrossAgentClose(t *testing.T) {
 				responseReady <- err
 			}()
 
-			<-admitted
+			awaitTestSignal(t, admitted, "active reuse admission")
 			require.True(t, agent.mu.TryLock(), "active reuse held Agent.mu across post-admission work")
 			agent.mu.Unlock()
 
 			closed := make(chan error, 1)
 			go func() { closed <- agent.Close() }()
-			<-cancelled
+			awaitTestSignal(t, cancelled, "admission cancellation")
 			require.Error(t, <-responseReady)
 			require.NoError(t, <-closed)
 		})
@@ -965,14 +965,14 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 				_, err := agent.ResumeSession(requestCtx, ResumeSessionRequest(session.id, session.cwd))
 				requestDone <- err
 			}()
-			<-admitted
+			awaitTestSignal(t, admitted, "active reuse admission")
 
 			closeDone := make(chan error, 1)
 			go func() {
 				_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 				closeDone <- err
 			}()
-			<-cancelled
+			awaitTestSignal(t, cancelled, "admission cancellation")
 			require.Eventually(t, func() bool {
 				if !agent.mu.TryLock() {
 					return false

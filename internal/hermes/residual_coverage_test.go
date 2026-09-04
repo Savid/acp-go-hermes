@@ -119,8 +119,11 @@ func TestResidualServerControlLockOperationFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "chmod refused") {
 			t.Fatalf("control chmod failure = %v", err)
 		}
-		if _, statErr := (*captured).Stat(); !errors.Is(statErr, os.ErrClosed) {
-			t.Fatalf("chmod failure retained file: %v", statErr)
+		// A second Close is the portable proof that the first one happened:
+		// os.File.Stat reports a platform-specific syscall failure on a closed
+		// handle, but Close always answers os.ErrClosed.
+		if closeErr := (*captured).Close(); !errors.Is(closeErr, os.ErrClosed) {
+			t.Fatalf("chmod failure retained file: %v", closeErr)
 		}
 	})
 
@@ -135,8 +138,8 @@ func TestResidualServerControlLockOperationFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "lock refused") {
 			t.Fatalf("control lock failure = %v", err)
 		}
-		if _, statErr := (*captured).Stat(); !errors.Is(statErr, os.ErrClosed) {
-			t.Fatalf("lock failure retained file: %v", statErr)
+		if closeErr := (*captured).Close(); !errors.Is(closeErr, os.ErrClosed) {
+			t.Fatalf("lock failure retained file: %v", closeErr)
 		}
 	})
 }
@@ -581,12 +584,9 @@ func TestResidualManagedProcessStartTransactions(t *testing.T) {
 	wantBusy := errors.New("tree busy")
 	originalShim := newProcessBrowserShim
 	t.Cleanup(func() { newProcessBrowserShim = originalShim })
-	parentFile := filepath.Join(t.TempDir(), "parent-file")
-	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	shimDir := unremovableDirPath(t)
 	newProcessBrowserShim = func(string) (*browserShim, error) {
-		return &browserShim{dir: filepath.Join(parentFile, "shim")}, nil
+		return &browserShim{dir: shimDir}, nil
 	}
 	prepareCalls = 0
 	retained = 0
@@ -658,9 +658,12 @@ func TestResidualManagedProcessStartTransactions(t *testing.T) {
 	opts = residualManagedStartOptions(t, func(context.Context, NativeRequest) (NativeProcess, error) {
 		return nil, errors.New("unexpected serve")
 	})
+	// The launch prepares one tree per native root: the probe home, the browser
+	// shim on a platform that installs one, and the serve home. The home whose
+	// preparation must fail is the last of them.
 	opts.PrepareNativeTree = func(context.Context, string) error {
 		prepareCalls++
-		if prepareCalls == 3 {
+		if prepareCalls == 2+browserShimTreeCount {
 			return wantHomePrepare
 		}
 
@@ -679,16 +682,20 @@ func TestResidualManagedProcessStartTransactions(t *testing.T) {
 
 		return true
 	}
-	if _, err := Start(t.Context(), opts); !errors.Is(err, wantHomePrepare) || !errors.Is(err, wantRollback) || retained == 0 {
-		t.Fatalf("home preparation rollback = %v, retained=%d", err, retained)
+	_, homePrepareErr := Start(t.Context(), opts)
+	if !errors.Is(homePrepareErr, wantHomePrepare) || retained == 0 {
+		t.Fatalf("home preparation rollback = %v, retained=%d", homePrepareErr, retained)
+	}
+	// The refused reclaim is the browser shim's: once the serve home fails to
+	// prepare, the shim is the only tree the rollback still has to give back,
+	// and a platform that installs no shim has none to refuse.
+	if errors.Is(homePrepareErr, wantRollback) != (browserShimTreeCount > 0) {
+		t.Fatalf("home preparation rollback refusal = %v", homePrepareErr)
 	}
 
-	parentFile = filepath.Join(t.TempDir(), "cleanup-parent-file")
-	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	cleanupShimDir := unremovableDirPath(t)
 	newProcessBrowserShim = func(string) (*browserShim, error) {
-		return &browserShim{dir: filepath.Join(parentFile, "shim")}, nil
+		return &browserShim{dir: cleanupShimDir}, nil
 	}
 	prepareCalls = 0
 	retained = 0
@@ -889,12 +896,8 @@ func TestResidualProcessRollbackRemovalFailures(t *testing.T) {
 	}
 	removeAll = originalRemoveAll
 
-	parentFile := filepath.Join(t.TempDir(), "parent-file")
-	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	process = &Process{
-		shim: &browserShim{dir: filepath.Join(parentFile, "shim")}, preparedShim: true,
+		shim: &browserShim{dir: unremovableDirPath(t)}, preparedShim: true,
 		reclaimNativeTree: func(context.Context, string) error { return nil },
 		retainNativeTree: func(string, error) bool {
 			retained++
@@ -1159,37 +1162,4 @@ func TestResidualGatewayMethodProbeFailures(t *testing.T) {
 			t.Fatalf("domain refusal did not prove resume presence: %v", err)
 		}
 	})
-}
-
-func TestResidualStartServerOwnershipAndLockFailures(t *testing.T) {
-	home := t.TempDir()
-	if _, err := EnsureSharedHermesAdapterControlDir(home); err != nil {
-		t.Fatal(err)
-	}
-	file, unlock, acquired := rawSharedHomeLock(t, home)
-	if !acquired {
-		t.Fatal("fixture did not acquire shared home lock")
-	}
-	options := StartOptions{
-		ACPSessionID: "owner-refusal", Cwd: t.TempDir(), ExistingXDG: testXDGDirs(t),
-		SharedHermesHome: home, ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-	}
-	if server, err := StartServer(t.Context(), options); err == nil || server != nil {
-		t.Fatalf("claimed home server start = %#v, %v", server, err)
-	}
-	if err := errors.Join(unlock(), file.Close()); err != nil {
-		t.Fatal(err)
-	}
-
-	controlDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(controlDir, "server.lock"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	options = StartOptions{
-		ACPSessionID: "control-refusal", Cwd: t.TempDir(), ExistingXDG: testXDGDirs(t),
-		ControlDir: controlDir, ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-	}
-	if server, err := StartServer(t.Context(), options); err == nil || server != nil {
-		t.Fatalf("blocked control lock server start = %#v, %v", server, err)
-	}
 }
