@@ -4,6 +4,8 @@ package hermesacp
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -41,4 +43,11 @@ func TestHandoffFIFOInsideRootIsRejected(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("opening a FIFO inside the handoff root blocked the read")
 	}
+}
+
+// handoffEntryStamp is the state of one entry under a read root that a handoff
+// read must leave alone. POSIX updates a directory's modification time as part
+// of the change that caused it, so the time is a sound witness for every entry.
+func handoffEntryStamp(info os.FileInfo) string {
+	return fmt.Sprintf("%v|%d|%v", info.Mode(), info.Size(), info.ModTime())
 }

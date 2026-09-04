@@ -5,6 +5,7 @@ package hermesacp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,5 +23,26 @@ func TestSessionOperationEnsureDoesNotFlushTheParent(t *testing.T) {
 
 	if err := ensureSessionOperationDirectory(path); err != nil {
 		t.Fatalf("ensure session-operation directory: %v", err)
+	}
+}
+
+// TestSessionOperationJournalRefusesTheSharedHomeOnWindows pins that the
+// shared session-operation journal is refused for the same reason, so a
+// shared-home session mutation cannot begin here rather than half-beginning.
+func TestSessionOperationJournalRefusesTheSharedHomeOnWindows(t *testing.T) {
+	journal, err := beginSessionOperationJournal(t.TempDir(), sessionOperationJournalFields{
+		OperationID: "operation", Kind: sessionOperationKindNew, Mode: sessionOperationModeShared,
+		LogicalSessionID: "session-1",
+	})
+	if err == nil {
+		t.Fatal("windows began a shared session-operation journal")
+	}
+
+	if journal != nil {
+		t.Fatal("refused journal was returned anyway")
+	}
+
+	if !strings.Contains(err.Error(), windowsSharedHomeRefusal) {
+		t.Fatalf("journal refusal = %v", err)
 	}
 }

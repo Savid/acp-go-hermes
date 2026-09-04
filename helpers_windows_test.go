@@ -4,6 +4,10 @@ package hermesacp
 
 import "os"
 
+// windowsSharedHomeRefusal is the message every shared-home surface answers
+// with on this platform.
+const windowsSharedHomeRefusal = "shared Hermes home is unsupported on windows"
+
 // wantRestrictedPerm is the permission a path the adapter restricted to owner
 // access reports back. Windows has no POSIX mode: os.Stat synthesises 0777 for
 // a directory and 0666 for a writable file, and the access control that
