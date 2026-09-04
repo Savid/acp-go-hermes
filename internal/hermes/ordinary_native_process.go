@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -28,6 +29,9 @@ type ordinaryNativeProcess struct {
 	revoked    bool
 }
 
+// newProcessPipe is the seam the pipe-exhaustion branches are proven through.
+var newProcessPipe = os.Pipe
+
 func startOrdinaryNative(ctx context.Context, request NativeRequest) (NativeProcess, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -37,46 +41,103 @@ func startOrdinaryNative(ctx context.Context, request NativeRequest) (NativeProc
 	cmd.Dir = request.WorkingDirectory
 	cmd.Env = append([]string(nil), request.Environment...)
 
-	return startOrdinaryNativeWithPipes(cmd, cmd.StdinPipe, cmd.StdoutPipe, cmd.StderrPipe)
+	return startOrdinaryNativeWithPipes(cmd, newProcessPipe)
 }
 
-func startOrdinaryNativeWithPipes(
-	cmd *exec.Cmd,
-	stdinPipe func() (io.WriteCloser, error),
-	stdoutPipe func() (io.ReadCloser, error),
-	stderrPipe func() (io.ReadCloser, error),
-) (NativeProcess, error) {
-	stdin, err := stdinPipe()
+func startOrdinaryNativeWithPipes(cmd *exec.Cmd, newPipe func() (*os.File, *os.File, error)) (NativeProcess, error) {
+	pipes, err := ordinaryProcessPipes(cmd, newPipe)
 	if err != nil {
-		return nil, fmt.Errorf("create native stdin: %w", err)
-	}
-
-	stdout, err := stdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-
-		return nil, fmt.Errorf("create native stdout: %w", err)
-	}
-
-	stderr, err := stderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-
-		return nil, fmt.Errorf("create native stderr: %w", err)
+		return nil, err
 	}
 
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
+		pipes.closeChildEnds()
+		pipes.closeParentEnds()
 
 		return nil, err
 	}
 
+	// The child holds its own copies now; keeping the parent's copies of the
+	// child ends open would leave every reader waiting on an EOF that never
+	// arrives.
+	pipes.closeChildEnds()
+
 	return &ordinaryNativeProcess{
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, kill: cmd.Process.Kill, waitDone: make(chan struct{}),
+		cmd: cmd, stdin: pipes.stdin, stdout: pipes.stdout, stderr: pipes.stderr, kill: cmd.Process.Kill, waitDone: make(chan struct{}),
 	}, nil
+}
+
+// ordinaryPipes holds both ends of the child's three standard streams while the
+// process is being started, so a failure at any point releases every descriptor
+// it already claimed.
+type ordinaryPipes struct {
+	stdin  *os.File
+	stdout *os.File
+	stderr *os.File
+
+	childStdin  *os.File
+	childStdout *os.File
+	childStderr *os.File
+}
+
+func (p *ordinaryPipes) closeChildEnds() {
+	closeFile(p.childStdin)
+	closeFile(p.childStdout)
+	closeFile(p.childStderr)
+}
+
+func (p *ordinaryPipes) closeParentEnds() {
+	closeFile(p.stdin)
+	closeFile(p.stdout)
+	closeFile(p.stderr)
+}
+
+func closeFile(file *os.File) {
+	if file != nil {
+		_ = file.Close()
+	}
+}
+
+// ordinaryProcessPipes wires the child's three standard streams as ordinary OS
+// pipes this process owns outright.
+//
+// exec.Cmd's own StdinPipe/StdoutPipe/StderrPipe hand their parent ends to
+// Cmd.Wait, which closes them the moment the child exits — a close that races
+// whoever is still draining what the child already wrote. The version probe
+// reads a short-lived child whose whole answer lands just before it exits, so
+// on a busy machine that race is lost routinely and the probe reads an empty
+// version. Owning the pipes keeps each parent end open until its reader sees
+// EOF, so the child's bytes survive whatever the scheduler does with the exit.
+func ordinaryProcessPipes(cmd *exec.Cmd, newPipe func() (*os.File, *os.File, error)) (_ *ordinaryPipes, err error) {
+	pipes := &ordinaryPipes{}
+
+	defer func() {
+		if err != nil {
+			pipes.closeChildEnds()
+			pipes.closeParentEnds()
+		}
+	}()
+
+	pipes.childStdin, pipes.stdin, err = newPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create native stdin: %w", err)
+	}
+
+	pipes.stdout, pipes.childStdout, err = newPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create native stdout: %w", err)
+	}
+
+	pipes.stderr, pipes.childStderr, err = newPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create native stderr: %w", err)
+	}
+
+	cmd.Stdin = pipes.childStdin
+	cmd.Stdout = pipes.childStdout
+	cmd.Stderr = pipes.childStderr
+
+	return pipes, nil
 }
 
 func (p *ordinaryNativeProcess) Stdin() io.WriteCloser { return p.stdin }

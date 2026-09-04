@@ -1241,13 +1241,11 @@ func (p *Process) closeOutputDrains() error {
 	return err
 }
 
+// closeOutputStream releases a parent pipe end once its drain has finished.
+// The backend owns both ends of every pipe, so nothing else closes one first
+// and a refusal here is a real refusal.
 func closeOutputStream(stream io.Closer) error {
-	err := stream.Close()
-	if errors.Is(err, os.ErrClosed) {
-		return nil
-	}
-
-	return err
+	return stream.Close()
 }
 
 func (p *Process) startupFailure(cause error) error {

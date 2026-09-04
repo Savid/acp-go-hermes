@@ -964,10 +964,15 @@ func TestPermissionOperationUsesOneClientCallLeaseOverPipes(t *testing.T) {
 	client.mu.Lock()
 	order := append([]string(nil), client.order...)
 	client.mu.Unlock()
+	// The connection dispatches a request on a goroutine of its own and queues
+	// notifications for sequential handling, so a notification the agent wrote
+	// before the request can be handled after it. What the lease proves is
+	// that the announcement is published while the request is still pending —
+	// RequestPermission above blocks until it arrives — and lands after it.
 	permissionIndex := slices.Index(order, "permission")
 	actionIndex := slices.Index(order, "action-pending")
 	require.NotEqual(t, -1, permissionIndex, "order: %v", order)
-	require.Equal(t, permissionIndex+1, actionIndex, "order: %v", order)
+	require.Greater(t, actionIndex, permissionIndex, "order: %v", order)
 	require.Equal(t, "once", native.permissionReply(0).reply)
 }
 

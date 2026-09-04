@@ -25,16 +25,6 @@ type residualExitError struct{}
 func (residualExitError) Error() string { return "process exited" }
 func (residualExitError) ExitCode() int { return 1 }
 
-type residualPipe struct{ closed bool }
-
-func (*residualPipe) Read([]byte) (int, error)       { return 0, io.EOF }
-func (*residualPipe) Write(data []byte) (int, error) { return len(data), nil }
-func (p *residualPipe) Close() error {
-	p.closed = true
-
-	return nil
-}
-
 func TestResidualAuthAndStartupObserverBranches(t *testing.T) {
 	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"unexpected"}`)
@@ -145,80 +135,82 @@ func TestResidualServerControlLockOperationFailures(t *testing.T) {
 }
 
 func TestResidualOrdinaryPipeConstructionFailures(t *testing.T) {
-	stdinErr := errors.New("stdin refused")
-	order := make([]string, 0, 3)
-	_, err := startOrdinaryNativeWithPipes(
-		exec.Command("unused"),
-		func() (io.WriteCloser, error) {
-			order = append(order, "stdin")
+	// Each stream's pipe is claimed in order, and a refusal at any point releases
+	// every descriptor already claimed — proven by the earlier ends answering a
+	// second Close with os.ErrClosed.
+	for failAt, want := range []string{"create native stdin", "create native stdout", "create native stderr"} {
+		var opened []*os.File
+		calls := 0
+		refused := errors.New("pipe refused")
+		_, err := startOrdinaryNativeWithPipes(exec.Command("unused"), func() (*os.File, *os.File, error) {
+			if calls == failAt {
+				return nil, nil, refused
+			}
+			calls++
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				return nil, nil, pipeErr
+			}
+			opened = append(opened, r, w)
 
-			return nil, stdinErr
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stdout")
-
-			return &residualPipe{}, nil
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stderr")
-
-			return &residualPipe{}, nil
-		},
-	)
-	if !errors.Is(err, stdinErr) || strings.Join(order, ",") != "stdin" {
-		t.Fatalf("stdin pipe failure = %v, order=%v", err, order)
+			return r, w, nil
+		})
+		if !errors.Is(err, refused) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("pipe failure %d = %v, want %q", failAt, err, want)
+		}
+		if len(opened) != 2*failAt {
+			t.Fatalf("pipe failure %d claimed %d descriptors, want %d", failAt, len(opened), 2*failAt)
+		}
+		for _, file := range opened {
+			if closeErr := file.Close(); !errors.Is(closeErr, os.ErrClosed) {
+				t.Fatalf("pipe failure %d retained descriptor: %v", failAt, closeErr)
+			}
+		}
 	}
 
-	stdin := &residualPipe{}
-	stdoutErr := errors.New("stdout refused")
-	order = order[:0]
-	_, err = startOrdinaryNativeWithPipes(
-		exec.Command("unused"),
-		func() (io.WriteCloser, error) {
-			order = append(order, "stdin")
+	// A start that fails releases both ends of every pipe.
+	var opened []*os.File
+	_, err := startOrdinaryNativeWithPipes(exec.Command(filepath.Join(t.TempDir(), "missing")), func() (*os.File, *os.File, error) {
+		r, w, pipeErr := os.Pipe()
+		if pipeErr == nil {
+			opened = append(opened, r, w)
+		}
 
-			return stdin, nil
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stdout")
-
-			return nil, stdoutErr
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stderr")
-
-			return &residualPipe{}, nil
-		},
-	)
-	if !errors.Is(err, stdoutErr) || strings.Join(order, ",") != "stdin,stdout" || !stdin.closed {
-		t.Fatalf("stdout pipe failure = %v, order=%v, stdin closed=%v", err, order, stdin.closed)
+		return r, w, pipeErr
+	})
+	if err == nil {
+		t.Fatal("missing executable started")
 	}
-
-	stdin = &residualPipe{}
-	stdout := &residualPipe{}
-	stderrErr := errors.New("stderr refused")
-	order = order[:0]
-	_, err = startOrdinaryNativeWithPipes(
-		exec.Command("unused"),
-		func() (io.WriteCloser, error) {
-			order = append(order, "stdin")
-
-			return stdin, nil
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stdout")
-
-			return stdout, nil
-		},
-		func() (io.ReadCloser, error) {
-			order = append(order, "stderr")
-
-			return nil, stderrErr
-		},
-	)
-	if !errors.Is(err, stderrErr) || strings.Join(order, ",") != "stdin,stdout,stderr" || !stdin.closed || !stdout.closed {
-		t.Fatalf("stderr pipe failure = %v, order=%v, closes=%v/%v", err, order, stdin.closed, stdout.closed)
+	for _, file := range opened {
+		if closeErr := file.Close(); !errors.Is(closeErr, os.ErrClosed) {
+			t.Fatalf("failed start retained descriptor: %v", closeErr)
+		}
 	}
+}
+
+// TestOrdinaryNativeOutputSurvivesAnEarlyWait pins that a child's whole answer
+// reaches the reader even when Wait reaps the child before the read begins:
+// the parent ends are owned here rather than closed by exec.Cmd.Wait.
+func TestOrdinaryNativeOutputSurvivesAnEarlyWait(t *testing.T) {
+	payload := strings.Repeat("hermes output line\n", 2000)
+	script := filepath.Join(t.TempDir(), "speak")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$PAYLOAD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	process, err := startOrdinaryNative(t.Context(), NativeRequest{Executable: script, Environment: []string{"PAYLOAD=" + payload}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = process.Stdin().Close()
+	if _, err = process.Wait(t.Context()); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	got, err := io.ReadAll(process.Stdout())
+	if err != nil || string(got) != payload {
+		t.Fatalf("stdout after wait: err=%v len=%d want %d", err, len(got), len(payload))
+	}
+	_ = process.Stdout().Close()
+	_ = process.Stderr().Close()
 }
 
 func TestResidualSharedOwnerBranches(t *testing.T) {
