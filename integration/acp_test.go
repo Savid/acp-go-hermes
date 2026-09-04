@@ -150,7 +150,7 @@ func TestHermesACPAgentLiveCompletionText(t *testing.T) {
 	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
 		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
 	}
-	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir()))
+	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(t.TempDir(), liveTokenSessionOptions()...))
 	if err != nil {
 		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
@@ -188,7 +188,9 @@ func TestHermesACPAgentLiveAuthorizedMCPReload(t *testing.T) {
 	}
 	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(
 		t.TempDir(),
-		hermesacp.WithSessionMCPServers(hermesacp.HTTPMCPServer("wagie", mcpServer.URL, nil)),
+		append(liveTokenSessionOptions(),
+			hermesacp.WithSessionMCPServers(hermesacp.HTTPMCPServer("wagie", mcpServer.URL, nil)),
+		)...,
 	))
 	if err != nil {
 		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
@@ -307,11 +309,10 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 
 	home := t.TempDir()
 
-	// Wire this live turn to the operator's xAI login: seed a config selecting
-	// the tool-capable grok-4.5/xai-oauth provider and point native Hermes at its
-	// durable auth home. The default openrouter/free router is not reliably
-	// tool-capable and never issues the terminal / question tool calls that this
-	// test asserts on.
+	// Wire this live turn to the tier's selected provider, seeded into the
+	// session's own isolated config root. The turn needs a tool-capable model:
+	// a router that never issues the terminal / question tool calls this test
+	// asserts on cannot prove the approval and clarify conversions.
 	//
 	// Hermes's approval.request flow is architecturally scoped to TERMINAL
 	// COMMANDS: the write_file tool is never approval-gated, so a file-write
@@ -325,26 +326,13 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 	// dangerous-classified command to the gateway approval callback, which the
 	// adapter converts to session/request_permission — the exact surface this
 	// test asserts on. Approvals are never auto-granted by this config.
-	hermesAuthHome := filepath.Join(os.Getenv("HOME"), ".hermes")
-	if _, statErr := os.Stat(filepath.Join(hermesAuthHome, "auth.json")); statErr != nil {
-		t.Skipf("ambient Hermes auth not available: %v", statErr)
-	}
-	xaiConfig := filepath.Join(t.TempDir(), "config.yaml")
-	const hermesProbeConfig = "model:\n" +
-		"  provider: xai-oauth\n" +
-		"  default: grok-4.5\n" +
-		"  base_url: https://api.x.ai/v1\n" +
-		"  max_tokens: 4096\n" +
-		"approvals:\n" +
-		"  mode: manual\n"
-	if err := os.WriteFile(xaiConfig, []byte(hermesProbeConfig), 0o600); err != nil {
-		t.Fatalf("write xai config: %v", err)
+	probeConfig := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(probeConfig, []byte(liveToolTokenHermesConfig()), 0o600); err != nil {
+		t.Fatalf("write live-test Hermes config: %v", err)
 	}
 	args := []string{
 		"-debug",
-		"-seed-file", "config.yaml=" + xaiConfig,
-		"-provider-auth-root", t.TempDir(),
-		"-shared-hermes-home", hermesAuthHome,
+		"-seed-file", "config.yaml=" + probeConfig,
 	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
@@ -363,7 +351,7 @@ func TestHermesACPAgentLivePromptPermissionElicitation(t *testing.T) {
 		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 	cwd := t.TempDir()
-	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
+	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd, liveTokenSessionOptions()...))
 	if err != nil {
 		t.Fatalf("new session: %v\nstderr:\n%s", err, agent.stderrString())
 	}

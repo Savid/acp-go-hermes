@@ -67,10 +67,14 @@ ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=240s -v
 `make test-integration-smoke` runs the tier that can skip without live auth.
 `make test-integration-live` adds `ACP_GO_HERMES_RUN_LIVE_TOKENS=1` and may
 spend model tokens. Use `make test-integration-cover` for compiled
-`acp-go-hermes` coverage through `GOCOVERDIR`. Set `ACP_GO_HERMES_MODEL` to
-override the model used by live tests. Live tests use disposable temp homes and
-never touch the user's real Hermes home; the explicit shared-home lane may
-share one temp residence across processes.
+`acp-go-hermes` coverage through `GOCOVERDIR`. Set `ACP_GO_HERMES_MODEL` to the
+provider-qualified `provider/model` live tests should route through; the native
+config those tiers seed takes its provider and model from that same value. Set
+`ACP_GO_HERMES_LIVE_KEY_ENV` to the environment variable holding that provider's
+key (default `OPENROUTER_API_KEY`); the tier forwards that one variable as
+explicit launch environment and never writes a key into a seeded file. Live
+tests use disposable temp homes and never touch the user's real Hermes home; the
+explicit shared-home lane may share one temp residence across processes.
 
 `make test-integration-attended` sets `ACP_GO_HERMES_RUN_ATTENDED=1` and runs the
 provider-auth flows a human must approve at the provider.

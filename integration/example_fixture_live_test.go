@@ -27,6 +27,10 @@ const shippedResumeFixture = "../examples/resume-from-file/session.jsonl"
 // session/load. A fixture whose snapshot names no state-db archive reaches a
 // fresh Hermes home that never heard of the native session, and the gateway
 // answers 4007 instead, so this is the test that keeps the fixture honest.
+//
+// session.resume refuses a session before any turn unless some inference
+// provider is configured, so the isolated home receives the smoke placeholder
+// key. No prompt is submitted and no provider request is made.
 func TestLiveShippedResumeFixtureLoads(t *testing.T) {
 	requireRunIntegration(t)
 
@@ -45,6 +49,7 @@ func TestLiveShippedResumeFixtureLoads(t *testing.T) {
 		hermesacp.WithExecutablePath(integrationHermesPath(t)),
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
+		hermesacp.WithEnv(map[string]string{"OPENAI_API_KEY": smokePlaceholderProviderKey}),
 	)
 	defer func() {
 		if err := agent.Close(); err != nil {
