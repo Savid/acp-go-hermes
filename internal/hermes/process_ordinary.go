@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
 
-// Ordinary same-identity execution is what an omitted policy selects. It is a
-// genuinely separate strategy rather than a relaxed policy: nothing here reads
-// a ProcessIsolation, requests a credential change, or consults an authority
-// root. What it does own is the sanitized ambient environment the native
+// Ordinary same-identity execution is what an omitted authority selects. It is
+// a genuinely separate strategy: nothing here
+// requests a credential change or consults an authority. What it does own is
+// the sanitized ambient environment the native
 // harness inherits, and the executable resolution rules that go with an
-// ordinary shell environment rather than a closed policy one.
+// ordinary shell environment.
 
 // The adapter-managed Hermes state keys. Each is written by the adapter from a
 // value it generated, so these are the names an inherited environment must
@@ -25,6 +26,11 @@ const (
 	// envHermesWebDist is operator-supplied rather than adapter-managed, so it
 	// is read out of a phase map rather than scrubbed out of one.
 	envHermesWebDist = "HERMES_WEB_DIST"
+	// envPath, envHome, and envPathExt are named once for the allowlist and
+	// the places executable resolution reads them.
+	envPath    = "PATH"
+	envHome    = "HOME"
+	envPathExt = "PATHEXT"
 )
 
 // ordinaryManagedEnvironmentKeys names the adapter-managed Hermes state an
@@ -34,37 +40,94 @@ const (
 // credential residence most of all.
 var ordinaryManagedEnvironmentKeys = []string{envHermesHome, envHermesSessionToken}
 
-// ordinaryPrivateEnvironmentKeys names the adapter-private markers that live
-// outside the private prefix. They travel between the wrapper and its own
-// containment bootstrap, so an ambient copy is a forged one.
-var ordinaryPrivateEnvironmentKeys = []string{envRuntimeID, envScratchRoot}
+var processRuntimePlatform = runtime.GOOS
 
-// scrubOrdinaryEnvironmentKey reports whether an ambient key is adapter-private
-// or adapter-managed state. Matching is case-insensitive because the comparison
-// exists to stop a spoofed variable, and a case variant is exactly how one
-// would be spelled.
+const (
+	processPlatformLinux   = "linux"
+	processPlatformWindows = "windows"
+)
+
+// scrubOrdinaryEnvironmentKey reports whether an ambient key is adapter-managed
+// state. Matching is case-insensitive because a case variant must not bypass
+// the boundary.
 func scrubOrdinaryEnvironmentKey(key string) bool {
 	upper := strings.ToUpper(key)
 
-	if strings.HasPrefix(upper, privateSupervisorEnvPrefix) || strings.HasPrefix(upper, processSupervisorEnvPrefix) {
-		return true
-	}
-
-	return slices.Contains(ordinaryPrivateEnvironmentKeys, upper) || slices.Contains(ordinaryManagedEnvironmentKeys, upper)
+	return slices.Contains(ordinaryManagedEnvironmentKeys, upper)
 }
 
-// ordinaryEnvironment builds the native environment for an omitted policy: the
-// adapter's own ambient environment minus its private and managed state, with
-// the caller overlay applied on top. The overlay is scrubbed on the same terms
-// as the base, so a caller cannot reintroduce through WithEnv what the ambient
-// scrub just removed. Each overlay is a later phase, so where names fold it
-// replaces the spelling an earlier phase installed rather than joining it.
+// ordinaryInheritedEnvironmentKeys is the closed set of ambient names an
+// ordinary launch inherits. Hermes reads more than fifty environment names as
+// provider credentials — its own, and those of every other harness in the
+// family, OAuth tokens included — copies each one it finds into the session
+// home's auth store, and lists models at every provider it seeded on every
+// fresh-home start. An inherited environment therefore hands the harness every
+// key the operator happens to have exported, so the base is an allowlist: the
+// names a process needs to find its executable, its home, a temp directory,
+// a locale, a terminal, and a network, and nothing that carries a credential.
+// A credential reaches the harness only through WithEnv, session env, seed
+// files, or a shared home's provider auth, each of them explicit.
+//
+// The first nineteen names and the LC_ prefix are the family's base; the
+// proxy, TLS bundle, and web-dist names are what a Python harness reaches the
+// network and serves its dashboard with. Both spellings of each proxy name are
+// listed because Unix treats them as distinct variables and Python honours
+// either.
+var ordinaryInheritedEnvironmentKeys = []string{
+	envPath, envHome, "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "TERM",
+	"COLORTERM", "NO_COLOR", "FORCE_COLOR", "SYSTEMROOT", "WINDIR", "COMSPEC", envPathExt,
+	"USERPROFILE", "__CF_USER_TEXT_ENCODING",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+	"http_proxy", "https_proxy", "no_proxy", "all_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+	envHermesWebDist,
+}
+
+// ordinaryInheritedEnvironmentPrefix admits the locale family as a whole.
+const ordinaryInheritedEnvironmentPrefix = "LC_"
+
+// inheritOrdinaryEnvironmentKey reports whether an ambient name is one an
+// ordinary launch inherits. Names are compared the way the platform resolves
+// them: folded where the platform folds, so an inherited "Path" is the search
+// path on Windows, and exactly elsewhere, where "Path" is a different variable
+// from "PATH" and inheriting it would carry a name the allowlist never named.
+func inheritOrdinaryEnvironmentKey(key string) bool {
+	if processEnvironmentKeysFold() {
+		return strings.HasPrefix(strings.ToUpper(key), ordinaryInheritedEnvironmentPrefix) ||
+			slices.ContainsFunc(ordinaryInheritedEnvironmentKeys, func(name string) bool { return strings.EqualFold(name, key) })
+	}
+
+	return strings.HasPrefix(key, ordinaryInheritedEnvironmentPrefix) ||
+		slices.Contains(ordinaryInheritedEnvironmentKeys, key)
+}
+
+func envValueFold(env []string, name string, fold bool) string {
+	matched := ""
+
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && (key == name || fold && strings.EqualFold(key, name)) {
+			matched = value
+		}
+	}
+
+	return matched
+}
+
+// ordinaryEnvironment builds the native environment for an omitted authority:
+// the inherited subset of the adapter's own ambient environment, with the
+// caller overlay applied on top. The base admits only the names in
+// ordinaryInheritedEnvironmentKeys, which is what keeps every ambient
+// credential out of the harness; the overlay is scrubbed of the adapter's
+// managed state, so a caller cannot redirect through WithEnv the native roots
+// the adapter itself sets. Each overlay is a later phase, so where names fold
+// it replaces the spelling an earlier phase installed rather than joining it.
 func ordinaryEnvironment(ambient map[string]string, overlays ...map[string]string) ([]string, error) {
 	phases := make([]map[string]string, 0, len(overlays)+1)
 
 	base := make(map[string]string, len(ambient))
 	for key, value := range ambient {
-		if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 || scrubOrdinaryEnvironmentKey(key) {
+		if key == "" || strings.ContainsRune(key, '=') || strings.IndexByte(key, 0) >= 0 || !inheritOrdinaryEnvironmentKey(key) {
 			continue
 		}
 
@@ -133,7 +196,7 @@ func unixExecutableRules() executableSearchRules {
 func windowsExecutableRules(environment []string) executableSearchRules {
 	return executableSearchRules{
 		pathSeparators:      `:\/`,
-		extensions:          executableExtensionList(envValueFold(environment, "PATHEXT", true)),
+		extensions:          executableExtensionList(envValueFold(environment, envPathExt, true)),
 		foldEnvironmentKeys: true,
 	}
 }
@@ -169,11 +232,10 @@ func executableExtensionList(pathext string) []string {
 }
 
 // lookOrdinaryPathInEnvironment resolves the harness executable for ordinary
-// execution. A closed policy may require every PATH entry to be absolute
-// because the policy author wrote the whole environment; an ordinary launch
-// inherits whatever shell environment the operator already has, where
+// execution. An ordinary launch inherits whatever shell environment the
+// operator already has, where
 // "PATH=bin:/usr/bin" and a relative configured executable are both ordinary.
-// Refusing those would turn policy omission into an app-start blocker, so the
+// Refusing those would turn authority omission into an app-start blocker, so the
 // rule here is only that the result must exist and be runnable on this platform.
 func lookOrdinaryPathInEnvironment(file string, environment []string) (string, error) {
 	return lookOrdinaryPathWithRules(file, environment, ordinaryExecutableRules(environment))
@@ -194,7 +256,7 @@ func lookOrdinaryPathWithRules(file string, environment []string, rules executab
 		return absoluteOrdinaryExecutable(file, rules)
 	}
 
-	for _, dir := range filepath.SplitList(envValueFold(environment, "PATH", rules.foldEnvironmentKeys)) {
+	for _, dir := range filepath.SplitList(envValueFold(environment, envPath, rules.foldEnvironmentKeys)) {
 		// An empty PATH entry means the current directory, matching the
 		// resolution an ordinary shell would perform.
 		if dir == "" {

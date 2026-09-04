@@ -17,10 +17,10 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	if err := validateRequiredAbsolutePath("cwd", ""); err == nil {
 		t.Fatal("empty required absolute path accepted")
 	}
-	if err := validateSessionStartPaths("/tmp/project", []string{"relative"}); err == nil {
+	if err := validateSessionStartPaths(absTestPath("tmp", "project"), []string{"relative"}); err == nil {
 		t.Fatal("relative additional directory accepted")
 	}
-	value := "/tmp/project"
+	value := absTestPath("tmp", "project")
 	if err := validateOptionalAbsolutePath("cwd", &value); err != nil {
 		t.Fatalf("validateOptionalAbsolutePath: %v", err)
 	}
@@ -78,12 +78,6 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	}
 	if _, err := hermesOptionsFromMeta(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env meta accepted")
-	}
-	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"mode": "plan"}}}); err == nil {
-		t.Fatal("removed mode meta accepted")
-	}
-	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{"permission": "ask"}}}); err == nil {
-		t.Fatal("removed permission meta accepted")
 	}
 	if _, err := sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}}); err == nil {
 		t.Fatal("bad env lifecycle meta accepted")

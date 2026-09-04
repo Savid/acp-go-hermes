@@ -2,7 +2,7 @@
   "name": "background-action-keeps-foreground",
   "purpose": "Only an action blocking the current foreground cycle projects requires_action. A pending action owned by a background activity keeps that activity incomplete and leaves foreground state exactly where it was.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

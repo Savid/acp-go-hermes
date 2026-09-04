@@ -2,7 +2,7 @@
   "name": "terminal-restatement-identical-progress",
   "purpose": "Progress participates in the member-wise comparison the same way every other carried member does, so it refuses a restatement only when it differs. A restatement carrying the terminal state and an identical progress object carries no difference at all and is suppressed as a no-op patch, consuming its sequence and leaving the reduced progress and the projection exactly where they stood. The pair of this vector and the refused progress change fixes the whole predicate: equality suppresses, difference refuses, and the member's opaque interior changes neither answer.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "blocked-cycle-reports-running",
   "purpose": "A blocking action never moves the foreground by itself, and the cycle it stopped reports requires_action before it reports anything else. A cycle that goes straight back to running leaves the blocked state the host must render unrepresented, so it is refused rather than reduced as a cycle that was never blocked.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

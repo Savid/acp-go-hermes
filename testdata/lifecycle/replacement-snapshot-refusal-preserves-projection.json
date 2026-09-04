@@ -2,7 +2,7 @@
   "name": "replacement-snapshot-refusal-preserves-projection",
   "purpose": "A snapshot announcing a new incarnation is judged whole before the standing projection is touched, so a replacement that fails its own validation swaps nothing. Here strm-1 is open and holds an accepted turn when a strm-2 snapshot names an action owner it does not introduce: the refusal is unknown_entity, and the projection stays strm-1's, its turn included, exactly as it stood at the moment of refusal. The reducer latches over what it holds and never over an emptied replacement, because fail-closed handling terminalizes what it holds and an emptied projection has nothing to terminalize. The latch is proven, not assumed: a legal strm-1 delta and a fresh strm-3 snapshot are both refused with the same token at the same identity, and the projection still stands.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": false,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -15,6 +15,8 @@ import (
 	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
+const capabilityScopeSession = "session"
+
 const (
 	listSessionsPageSize            = 50
 	defaultMaxActiveSessions        = 32
@@ -26,6 +28,7 @@ const (
 	valElicitation     = "elicitation"
 	valBackpressure    = "backpressure"
 	valUnknownSession  = "unknown session"
+	valSessionActive   = "session already active"
 	agentClosedMessage = "agent closed"
 	keyLimit           = "limit"
 )
@@ -38,32 +41,39 @@ var (
 
 // Agent exposes Hermes through ACP.
 type Agent struct {
-	options         Options
-	log             *slog.Logger
-	observe         *observer.Observer
-	optionsErr      error
-	processes       *providerProcessTracker
-	containmentMode RuntimeContainmentMode
-	providerAuth    *providerAuth
+	options      Options
+	log          *slog.Logger
+	observe      *observer.Observer
+	optionsErr   error
+	providerAuth *providerAuth
 	// ambientEnv is the adapter's environment as it stood at construction. It is
-	// the base ordinary same-identity execution sanitizes; an explicit policy
-	// never reads it.
+	// the base ordinary same-identity execution sanitizes; managed execution
+	// uses the authority's environment instead.
 	ambientEnv map[string]string
+	nativeEnv  map[string]string
 
 	mu                 sync.Mutex
 	closed             bool
 	closeOnce          sync.Once
 	closeErr           error
 	containmentErr     error
+	authorityErr       error
 	constructions      sync.WaitGroup
 	constructing       int
 	constructionSeq    uint64
 	constructionCancel map[uint64]context.CancelCauseFunc
+	lifecycleOps       sync.WaitGroup
+	lifecycleSeq       uint64
+	lifecycleCancel    map[uint64]context.CancelCauseFunc
+	lifecycleLeases    map[acp.SessionId]*sessionLifecycleLease
 	conn               agentClient
 	sessions           map[acp.SessionId]*session
 	deleted            map[acp.SessionId]struct{}
 	deleteCleanup      map[acp.SessionId]deleteCleanupRecord
 	incompleteRoots    map[acp.SessionId]map[string]struct{}
+	retiredNativeRoots map[string]bool
+	retiredNativeRetry sync.Mutex
+	nativeAdmissionMu  sync.Mutex
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -87,7 +97,7 @@ var (
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, validateContainmentOptions(options), validateImageLimits(options.ImageLimits),
+	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
 		validateSharedHermesHomeOptions(options), validatePathCarrierOptions(options))
 	options.ConcurrencyLimits = limits
@@ -107,15 +117,9 @@ func NewAgent(opts ...Option) *Agent {
 		TracerProvider: options.TracerProvider,
 		Version:        options.AgentVersion,
 	})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-	mode := containmentMode(options)
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
+	var nativeEnv map[string]string
+	if options.hostAuthoritySupplied && optionsErr == nil {
+		nativeEnv, optionsErr = readHostEnvironment(options.HostAuthority)
 	}
 
 	agent := &Agent{
@@ -127,28 +131,22 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:            make(map[acp.SessionId]struct{}),
 		deleteCleanup:      make(map[acp.SessionId]deleteCleanupRecord),
 		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
+		retiredNativeRoots: make(map[string]bool),
 		constructionCancel: make(map[uint64]context.CancelCauseFunc),
+		lifecycleCancel:    make(map[uint64]context.CancelCauseFunc),
+		lifecycleLeases:    make(map[acp.SessionId]*sessionLifecycleLease),
 		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
-		containmentMode:    mode,
 		ambientEnv:         ambientEnvironment(),
+		nativeEnv:          nativeEnv,
 	}
-	agent.processes = newProviderProcessTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle())
 	// Invalid option combinations must be side-effect free. In particular,
 	// provider-auth initialization prepares the durable Hermes residence, which
-	// must never happen after shared-home/process-isolation validation failed.
-	if optionsErr == nil {
+	// must never happen after shared-home or host-authority validation failed.
+	if optionsErr == nil && options.HostAuthority == nil {
 		agent.providerAuth = newProviderAuth(agent)
 	}
 
 	return agent
-}
-
-func (a *Agent) ContainmentMode() RuntimeContainmentMode {
-	if a == nil {
-		return RuntimeContainmentUnavailable
-	}
-
-	return a.containmentMode
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
@@ -207,14 +205,23 @@ func (a *Agent) close() error {
 	for _, cancel := range a.constructionCancel {
 		constructionCancellations = append(constructionCancellations, cancel)
 	}
+	lifecycleCancellations := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancel))
+	for _, cancel := range a.lifecycleCancel {
+		lifecycleCancellations = append(lifecycleCancellations, cancel)
+	}
 	conn := a.conn
 	a.mu.Unlock()
+	closedErr := acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
 	for _, cancel := range constructionCancellations {
-		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage}))
+		cancel(closedErr)
+	}
+	for _, cancel := range lifecycleCancellations {
+		cancel(closedErr)
 	}
 
 	a.cancelStreamOpens()
 	var err error
+	a.lifecycleOps.Wait()
 	a.constructions.Wait()
 	if preparer, ok := conn.(interface{ PrepareTransportClose(context.Context) error }); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
@@ -259,6 +266,9 @@ func (a *Agent) close() error {
 
 		cancel()
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	err = errors.Join(err, a.retryRetiredNativeRoots(ctx))
+	cancel()
 	a.mu.Lock()
 	a.conn = nil
 	a.mu.Unlock()
@@ -287,9 +297,6 @@ func (a *Agent) beginActiveReuse(ctx context.Context, id acp.SessionId) (*sessio
 	admissionCtx, release, err := existing.beginReuse(ctx)
 	if err != nil {
 		return nil, nil, nil, err
-	}
-	if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
-		hook(admissionCtx)
 	}
 
 	return existing, admissionCtx, release, nil
@@ -418,7 +425,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		valElicitation: map[string]any{
 			"unstable": true,
-			"scope":    "session",
+			"scope":    capabilityScopeSession,
 			"tracks":   "ACP v1 elicitation",
 		},
 		rawEventCapabilityKey: map[string]any{
@@ -428,8 +435,8 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 			"defaultEnabled": false,
 		},
 		"sessionStore": map[string]any{
-			"format":     SessionStoreFormat,
-			jsonFieldKey: []string{jsonFieldSessionID, "subpath"},
+			jsonFieldFormat: SessionStoreFormat,
+			jsonFieldKey:    []string{jsonFieldSessionID, "subpath"},
 		},
 	}
 
@@ -439,7 +446,7 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 
 	capabilityMeta := capabilityMediaMeta(a.options)
 	capabilityMeta[hermesMetaKey] = hermesMeta
-	capabilityMeta[routeMetaKey] = map[string]any{keyVersions: []int{routeVersion}}
+	capabilityMeta[routeMetaKey] = map[string]any{keyVersion: routeVersion}
 
 	return acp.InitializeResponse{
 		Meta:            lifecycleMeta,
@@ -675,6 +682,9 @@ func (a *Agent) storeStartedSessionLocked(session *session) error {
 
 	if _, deleted := a.deleted[session.id]; deleted {
 		return unknownSessionError()
+	}
+	if a.sessions[session.id] != nil {
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionActive})
 	}
 
 	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {

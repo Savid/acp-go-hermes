@@ -2,7 +2,7 @@
   "name": "snapshot-resumes-mid-turn",
   "purpose": "A snapshot reporting running names the turn holding the foreground and that turn's origin, and the consumer projects it as an open turn. Without the origin member a resumed turn would have no recorded provenance, and without the projected record every later reference to it would be unresolvable.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

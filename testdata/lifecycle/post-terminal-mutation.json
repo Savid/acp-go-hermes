@@ -2,7 +2,7 @@
   "name": "post-terminal-mutation",
   "purpose": "A terminal activity state is final. A later update returning it to a nonterminal state would silently reopen a boundary that may already have been reported, so it is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "terminal-progress-change-refused",
   "purpose": "The terminal record is judged member-wise, and every member the event carries counts — not the state alone. A restatement holding the terminal state while carrying a different progress asserts that a finished activity moved after it finished, which is a carried difference from the reduced terminal record and is refused. Progress is rendered rather than reduced, and that is exactly why it may not be rewritten under a state that is over.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

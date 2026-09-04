@@ -32,7 +32,7 @@ func (r *blockingSessionIDReader) Read(buffer []byte) (int, error) {
 func TestServeCloseErrorAndAgentCloneFallbacks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := newFakeHermesClient()
-	client.closeErr = errors.Join(errors.New("close failed"), ErrProcessContainmentIncomplete)
+	client.closeErr = errors.Join(errors.New("close failed"), ErrContainmentIncomplete)
 	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
@@ -54,7 +54,7 @@ func TestServeCloseErrorAndAgentCloneFallbacks(t *testing.T) {
 	go func() { errCh <- Serve(ctx, input, io.Discard) }()
 	<-started
 	cancel()
-	if err := <-errCh; !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if err := <-errCh; !errors.Is(err, ErrContainmentIncomplete) {
 		t.Fatalf("Serve close proof error = %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestAgentCloseSingleflightPreservesContainmentEvidence(t *testing.T) {
 		startedOnce.Do(func() { close(started) })
 		<-release
 
-		return ErrProcessContainmentIncomplete
+		return ErrContainmentIncomplete
 	}
 	agent := newTestAgent()
 	session := testSession(agent, client)
@@ -110,10 +110,10 @@ func TestAgentCloseSingleflightPreservesContainmentEvidence(t *testing.T) {
 
 	close(release)
 	for range 2 {
-		require.ErrorIs(t, <-results, ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, <-results, ErrContainmentIncomplete)
 	}
 	require.Equal(t, 1, client.closeCalls)
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
@@ -130,7 +130,7 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 				close(spawnStarted)
 				<-releaseSpawn
 
-				return nil, nativehermes.ErrProcessContainmentIncomplete
+				return nil, ErrContainmentIncomplete
 			}
 		},
 	)
@@ -180,10 +180,10 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 	}
 
 	close(releaseSpawn)
-	require.ErrorIs(t, <-newSessionErr, nativehermes.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeErr, nativehermes.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-serveErr, nativehermes.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), nativehermes.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-newSessionErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-serveErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
@@ -205,32 +205,6 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 		require.ErrorContains(t, <-done, "agent closed")
 	})
 
-	t.Run("load after deleted cleanup", func(t *testing.T) {
-		oldReap := reapHermesLeaseFile
-		entered := make(chan struct{})
-		release := make(chan struct{})
-		reapHermesLeaseFile = func(string, *slog.Logger) bool {
-			close(entered)
-			<-release
-
-			return false
-		}
-		t.Cleanup(func() { reapHermesLeaseFile = oldReap })
-
-		agent := newTestAgent()
-		cleanupRoot := t.TempDir()
-		agent.deleteCleanup["deleted"] = deleteCleanupRecord{SessionID: "deleted", XDGRoot: cleanupRoot}
-		done := make(chan error, 1)
-		go func() {
-			_, err := agent.loadOrResumeSession(context.Background(), "load", t.TempDir(), nil, nil, nil, false)
-			done <- err
-		}()
-		<-entered
-		require.NoError(t, agent.Close())
-		close(release)
-		require.ErrorContains(t, <-done, "agent closed")
-	})
-
 	t.Run("fork", func(t *testing.T) {
 		agent := newTestAgent()
 		require.NoError(t, agent.Close())
@@ -246,25 +220,25 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 // its sweep re-reaches.
 func TestFailedContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
-	client.closeErr = ErrProcessContainmentIncomplete
+	client.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.NotNil(t, agent.activeSession(session.id), "the failed boundary detached the id its retry needs")
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestServePreservesContainmentEvidenceAfterFailedClose(t *testing.T) {
 	client := newFakeHermesClient()
-	client.closeErr = ErrProcessContainmentIncomplete
+	client.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent()
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 
 	started := make(chan struct{})
 	previousNewAgent := newAgentForServe
@@ -284,7 +258,7 @@ func TestServePreservesContainmentEvidenceAfterFailedClose(t *testing.T) {
 	go func() { result <- Serve(ctx, input, io.Discard) }()
 	<-started
 	cancel()
-	require.ErrorIs(t, <-result, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-result, ErrContainmentIncomplete)
 }
 
 func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
@@ -332,7 +306,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 		MaxActiveSessions: 1, MaxConcurrentClientCalls: 1,
 	}))
 	bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	first := testSession(bounded, newFakeHermesClient())
 	require.NoError(t, first.openLifecycleStream())
@@ -347,7 +321,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 
 	deferredBounded := newTestAgent()
 	deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	deferred := testSession(deferredBounded, newFakeHermesClient())
 	require.NoError(t, deferred.openLifecycleStream())
@@ -365,7 +339,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.createErr = errors.New("create failed")
-	client.closeErr = ErrProcessContainmentIncomplete
+	client.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent(func(options *Options) {
 		options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return client, nil
@@ -373,6 +347,6 @@ func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {
 	})
 
 	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }

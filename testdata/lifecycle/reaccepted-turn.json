@@ -2,7 +2,7 @@
   "name": "reaccepted-turn",
   "purpose": "Acceptance introduces its turn, so it happens once per turn. A second prompt_accepted reusing a turn the stream already introduced changes that turn's identity rather than reporting a new one, and two records for one turn would leave every later reference to it ambiguous.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -17,16 +17,19 @@ const (
 	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
 	sessionPathEnvironmentKey     = "PATH"
 	sessionBashEnvironmentKey     = "BASH_ENV"
+	sessionShellEnvironmentKey    = "ENV"
 	sessionManagedPathEnvPrefix   = "ACP_GO_HERMES_PATH_DIR_"
 	runtimePlatformWindows        = "windows"
 )
 
 type sessionMeta struct {
-	Model         string
-	Env           map[string]string
-	ExtraPathDirs []string
-	OutputSchema  any
-	RawMessages   rawMessageConfig
+	Model            string
+	Env              map[string]string
+	EnvSet           bool
+	ExtraPathDirs    []string
+	ExtraPathDirsSet bool
+	OutputSchema     any
+	RawMessages      rawMessageConfig
 }
 
 func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
@@ -40,17 +43,21 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 	}
 
 	return sessionMeta{
-		Model:         options.Model,
-		Env:           cloneStringMap(options.Env),
-		ExtraPathDirs: slices.Clone(options.ExtraPathDirs),
-		RawMessages:   rawMessageConfigFromMeta(meta),
+		Model:            options.Model,
+		Env:              cloneStringMap(options.Env),
+		EnvSet:           options.EnvSet,
+		ExtraPathDirs:    slices.Clone(options.ExtraPathDirs),
+		ExtraPathDirsSet: options.ExtraPathDirsSet,
+		RawMessages:      rawMessageConfigFromMeta(meta),
 	}, nil
 }
 
 type hermesMetaOptions struct {
-	Model         string
-	Env           map[string]string
-	ExtraPathDirs []string
+	Model            string
+	Env              map[string]string
+	EnvSet           bool
+	ExtraPathDirs    []string
+	ExtraPathDirsSet bool
 }
 
 func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
@@ -73,6 +80,7 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 
 		options.Env = env
+		options.EnvSet = true
 	}
 
 	if rawDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
@@ -82,6 +90,7 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 		}
 
 		options.ExtraPathDirs = dirs
+		options.ExtraPathDirsSet = true
 	}
 
 	return options, nil
@@ -165,6 +174,10 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
 			}
 
+			if sessionEnvironmentOwnsShellEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
+			}
+
 			if sessionEnvironmentOwnsManagedPath(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
 			}
@@ -180,6 +193,10 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 
 			if sessionEnvironmentOwnsBashEnv(key) {
 				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
+			}
+
+			if sessionEnvironmentOwnsShellEnv(key) {
+				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
 			}
 
 			if sessionEnvironmentOwnsManagedPath(key) {
@@ -224,19 +241,28 @@ func sessionEnvironmentOwnsBashEnvForPlatform(key string, platform string) bool 
 	return key == sessionBashEnvironmentKey
 }
 
+func sessionEnvironmentOwnsShellEnv(key string) bool {
+	return sessionEnvironmentOwnsShellEnvForPlatform(key, runtime.GOOS)
+}
+
+func sessionEnvironmentOwnsShellEnvForPlatform(key string, platform string) bool {
+	if platform == runtimePlatformWindows {
+		return strings.EqualFold(key, sessionShellEnvironmentKey)
+	}
+
+	return key == sessionShellEnvironmentKey
+}
+
 func sessionEnvironmentOwnsManagedPath(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), sessionManagedPathEnvPrefix)
 }
 
 func validatePathCarrierOptions(options Options) error {
 	environments := []map[string]string{options.Env}
-	if options.ProcessIsolation != nil {
-		environments = append(environments, options.ProcessIsolation.BaseEnvironment)
-	}
 
 	for _, environment := range environments {
 		for key := range environment {
-			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
+			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsShellEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
 				return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
 			}
 		}

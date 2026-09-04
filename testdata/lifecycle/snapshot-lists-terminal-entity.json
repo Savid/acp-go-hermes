@@ -2,7 +2,7 @@
   "name": "snapshot-lists-terminal-entity",
   "purpose": "A snapshot states the complete nonterminal sets. An entry that is already terminal asserts as current a state that is over, so it is malformed rather than reduced as history a consumer could not act on.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

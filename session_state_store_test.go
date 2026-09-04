@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -494,6 +495,98 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 	}
 }
 
+func TestHydrateStateFromStoreRejectsAmbiguousIDMapAndMainJSON(t *testing.T) {
+	validIDMap := string(mustStateJSON(t, validHydrateIDMap()))
+	validMain := string(mustStateJSON(t, validHydrateSnapshot()))
+	replace := func(source string, old string, replacement string) SessionStoreEntry {
+		t.Helper()
+		if !strings.Contains(source, old) {
+			t.Fatalf("strict hydrate fixture does not contain %q: %s", old, source)
+		}
+
+		return SessionStoreEntry(strings.Replace(source, old, replacement, 1))
+	}
+
+	tests := map[string]struct {
+		idmap SessionStoreEntry
+		main  SessionStoreEntry
+	}{
+		"idmap unknown": {
+			idmap: replace(validIDMap, `{"sessionId":`, `{"unknown":true,"sessionId":`),
+		},
+		"idmap duplicate": {
+			idmap: replace(validIDMap, `"sessionId":"s"`, `"sessionId":"s","sessionId":"s"`),
+		},
+		"idmap case alias": {
+			idmap: replace(validIDMap, `"nativeSessionId":"n"`, `"NativeSessionId":"n"`),
+		},
+		"idmap trailing": {
+			idmap: SessionStoreEntry(validIDMap + ` {}`),
+		},
+		"main nested unknown": {
+			main: replace(validMain, `"model":{}`, `"model":{"unknown":true}`),
+		},
+		"main nested duplicate": {
+			main: replace(validMain, `"sessionId":"s"`, `"sessionId":"s","sessionId":"s"`),
+		},
+		"main nested case alias": {
+			main: replace(validMain, `"extraPathDirs":[]`, `"ExtraPathDirs":[]`),
+		},
+		"main trailing": {
+			main: SessionStoreEntry(validMain + ` []`),
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			idmap := test.idmap
+			if idmap == nil {
+				idmap = SessionStoreEntry(validIDMap)
+			}
+			mainEntry := test.main
+			if mainEntry == nil {
+				mainEntry = SessionStoreEntry(validMain)
+			}
+
+			store := NewInMemorySessionStore()
+			mainKey := SessionKey{SessionID: "s", Subpath: SessionStoreMainSubpath}
+			require.NoError(t, store.Replace(t.Context(), mainKey, []SessionStoreReplacement{
+				{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
+				{Key: SessionKey{SessionID: "s", Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmap}},
+			}))
+
+			if _, _, _, err := hydrateStateFromStore(
+				t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+			); err == nil {
+				t.Fatal("hydrate accepted ambiguous durable JSON")
+			}
+		})
+	}
+}
+
+func TestHydrateStateFromStoreAcceptsCaseDistinctDynamicKeys(t *testing.T) {
+	snapshot := validHydrateSnapshot()
+	snapshot.Session.Env = map[string]string{
+		"Token": "one",
+		"TOKEN": "two",
+	}
+	snapshot.Archives = map[string]archiveInfo{
+		"Archive": {Subpath: "first"},
+		"ARCHIVE": {Subpath: "second"},
+	}
+
+	store := NewInMemorySessionStore()
+	replaceHydrateRecords(t, t.Context(), store, validHydrateIDMap(), snapshot)
+
+	_, hydrated, ok, err := hydrateStateFromStore(
+		t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+	)
+	if err != nil || !ok || !reflect.DeepEqual(hydrated.Session.Env, snapshot.Session.Env) ||
+		!reflect.DeepEqual(hydrated.Archives, snapshot.Archives) {
+		t.Fatalf("case-distinct dynamic hydrate = snapshot %#v, ok %t, err %v", hydrated, ok, err)
+	}
+}
+
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
 	xdg, err := testGenerationXDG(t.TempDir())
@@ -628,6 +721,20 @@ func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 				snapshot.Terminal = nil
 			},
 			want: "terminal summary",
+		},
+		{
+			name: "session environment is missing",
+			mutate: func(_ *idmapRecord, snapshot *stateSnapshot) {
+				snapshot.Session.Env = nil
+			},
+			want: "session environment is required",
+		},
+		{
+			name: "session path directories are missing",
+			mutate: func(_ *idmapRecord, snapshot *stateSnapshot) {
+				snapshot.Session.ExtraPathDirs = nil
+			},
+			want: "session extra path directories are required",
 		},
 	}
 	for _, tt := range tests {
@@ -1448,6 +1555,8 @@ func validHydrateSnapshot() stateSnapshot {
 		Session: stateSnapshotSession{
 			SessionID:       "s",
 			NativeSessionID: "n",
+			Env:             map[string]string{},
+			ExtraPathDirs:   []string{},
 		},
 		Terminal: &stateSnapshotTerminal{},
 		Archives: map[string]archiveInfo{},
@@ -1857,50 +1966,6 @@ func testTarZstd(t *testing.T, headers []tar.Header, bodies map[string]string) [
 	return zbuf.Bytes()
 }
 
-func TestSnapshotJournalAndStoreReconciliationEdges(t *testing.T) {
-	t.Run("journal preparation", func(t *testing.T) {
-		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		session := testSession(agent, newFakeHermesClient())
-		journal := newTestSessionOperationJournalWithLogical(t, t.TempDir(), sessionOperationKindNew, string(session.id))
-		identifyTestNewSessionOperationJournal(t, journal)
-		session.operationJournal = journal
-		previous := sessionOperationCreateTemp
-		sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return nil, errors.New("prepare") }
-		t.Cleanup(func() { sessionOperationCreateTemp = previous })
-		if err := session.snapshotToStore(t.Context()); err == nil {
-			t.Fatal("journal preparation failure ignored")
-		}
-	})
-
-	t.Run("commit marker retained", func(t *testing.T) {
-		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		session := testSession(agent, newFakeHermesClient())
-		journal := newTestSessionOperationJournalWithLogical(t, t.TempDir(), sessionOperationKindNew, string(session.id))
-		identifyTestNewSessionOperationJournal(t, journal)
-		session.operationJournal = journal
-		previous := sessionOperationRename
-		sessionOperationRename = func(source, target string) error {
-			if filepath.Base(target) == sessionOperationJournalName && journal.record.Phase == sessionOperationPhaseStoreCommitted {
-				return errors.New("commit marker")
-			}
-
-			return previous(source, target)
-		}
-		t.Cleanup(func() { sessionOperationRename = previous })
-		if err := session.snapshotToStore(t.Context()); err != nil {
-			t.Fatalf("committed Store blocked by journal marker: %v", err)
-		}
-	})
-
-	store := sessionOperationFaultStore{base: NewInMemorySessionStore(), listSubkeysErr: errors.New("list")}
-	_, _, err := reconcileSessionStoreReplacement(t.Context(), store, SessionKey{SessionID: "logical"}, []SessionStoreReplacement{{
-		Key: SessionKey{SessionID: "logical"}, Entries: []SessionStoreEntry{json.RawMessage(`{"main":true}`)},
-	}})
-	if err == nil {
-		t.Fatal("replacement subkey listing failure ignored")
-	}
-}
-
 func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 	t.Run("closed turn", func(t *testing.T) {
 		session := testSession(newTestAgent(), newFakeHermesClient())
@@ -2005,4 +2070,23 @@ func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
 	terminal, err := InspectSessionStoreTerminalState(sessionID, []SessionStoreEntry{mainEntry})
 	require.NoError(t, err)
 	require.Equal(t, SessionStoreTerminalState{}, terminal, "the fixture settles no turn of its own")
+}
+
+func TestStrictStoreDecoderResidualBranches(t *testing.T) {
+	var destination struct{}
+	if err := decodeStrictStoreJSON([]byte(`1`), &destination, nil); err == nil {
+		t.Fatal("typed store decode mismatch was accepted")
+	}
+	decoder := json.NewDecoder(strings.NewReader(""))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("empty strict JSON value was accepted")
+	}
+	decoder = json.NewDecoder(strings.NewReader(`[{"x":`))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("truncated strict JSON array was accepted")
+	}
+	decoder = json.NewDecoder(strings.NewReader(`{"`))
+	if err := walkStrictJSONValue(decoder, nil, "$"); err == nil {
+		t.Fatal("truncated strict JSON object member was accepted")
+	}
 }

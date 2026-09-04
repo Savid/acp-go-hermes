@@ -2,7 +2,7 @@
   "name": "false-quiescence-while-live",
   "purpose": "A positive quiescence fact asserts that nothing rooted at or before its watermark is live. One delivered while the foreground is running and an activity is nonterminal is disproved by the stream that carries it, and a disproved proof fails closed rather than certifying nothing: a consumer that swallowed it could not tell a lie from a loss. This is the compound case, where both conditions hold at once; each of them alone is pinned by its own vector.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

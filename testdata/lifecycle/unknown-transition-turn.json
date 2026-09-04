@@ -2,7 +2,7 @@
   "name": "unknown-transition-turn",
   "purpose": "Exactly two events open a turn: an acceptance, and an activity-caused running transition bearing a turn the stream has not introduced. A session-caused transition reports the foreground moving for a reason the host did not cause, which is never a reason to invent an owner for it, so its turn must already be open and a fresh one is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "duplicate-number-value-equal",
   "purpose": "Lifecycle value equality compares JSON numbers as exact mathematical values, so the spelling a number arrived in is not content. Two deliveries at the same identity whose only difference is an integer written 1 against the same integer written 1.0 carry the same value, and the second is an exact retransmission: it is suppressed wholesale, changes nothing, and is counted. A reducer comparing lexemes would call this a conflicting duplicate and fail a stream that repeated itself faithfully.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -1,8 +1,8 @@
 {
   "name": "fractional-sequence-malformed",
-  "purpose": "The integer-typed members of this extension — version, sequence, watermark, and the negotiated versions array — are lexically integral, not merely integer-valued. A sequence written 2.0 names the same mathematical value as 2, and it is still malformed: an ordering identity carrying a fraction part has no integral spelling to be contiguous against, and admitting it would make the loss detector depend on how a number was written. The number-equality rule that suppresses 1 against 1.0 inside an opaque progress object stops exactly at the members this contract types as integers.",
+  "purpose": "The integer-typed members of this extension — capability version, envelope version, sequence, and watermark — are lexically integral, not merely integer-valued. A sequence written 2.0 names the same mathematical value as 2, and it is still malformed: an ordering identity carrying a fraction part has no integral spelling to be contiguous against, and admitting it would make the loss detector depend on how a number was written. The number-equality rule that suppresses 1 against 1.0 inside an opaque progress object stops exactly at the members this contract types as integers.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -69,8 +69,6 @@ carrying a cancelled explanation, and the ACP prompt returns the `cancelled`
 stop reason. If the client is unavailable when a request arrives, the adapter
 also replies `reject` so Hermes never blocks on a missing host.
 
-<Note>
 Permission decisions are session-scoped. `always` grants persist only within the
 session that made them; they are copied to a new session only through explicit
 fork behavior.
-</Note>

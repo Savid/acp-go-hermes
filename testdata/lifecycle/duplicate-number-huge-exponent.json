@@ -2,7 +2,7 @@
   "name": "duplicate-number-huge-exponent",
   "purpose": "A number's value is decided without ever materializing it. Both deliveries at this identity carry the same twelve-byte literal whose decimal expansion no machine will hold, and the frames are equal, so the second is suppressed as an exact retransmission. The vector pins two things and no more: that such a literal is decodable rather than a refusal, and that the verdict is suppression. How a reducer reaches it — the normalized decimal triple the contract fixes, or a digest of a canonical form implementing the same predicate — is its own business, but expanding the literal to compare it is not an implementation of the predicate.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

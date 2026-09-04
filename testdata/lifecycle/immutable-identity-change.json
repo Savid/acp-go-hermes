@@ -2,7 +2,7 @@
   "name": "immutable-identity-change",
   "purpose": "An activity's identity is established on first sight and never changes. A later update may restate an immutable field only with its first-sight value; restating it with a different one is an identity change, not an unknown member, and is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

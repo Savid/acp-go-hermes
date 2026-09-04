@@ -2,7 +2,7 @@
   "name": "close-containment-fences-stream",
   "purpose": "A completed close fences the stream. The final quiescence fact names the containment proof that produced it, and any later event bearing that streamId is stale rather than a new incarnation. The close-fenced settlement order itself is not a wire fact and is not asserted here: the containment proof, the two commits, and the close response are not notifications.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

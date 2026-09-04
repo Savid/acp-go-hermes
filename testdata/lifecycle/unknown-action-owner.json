@@ -2,7 +2,7 @@
   "name": "unknown-action-owner",
   "purpose": "An action is owned by exactly one turn or activity. One hung off a turn the stream never opened could never be attributed, so it is refused rather than reduced as an ownerless pending request.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

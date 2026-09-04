@@ -2,7 +2,7 @@
   "name": "snapshot-running-omits-turn",
   "purpose": "The foreground presence rule binds in both directions. An idle foreground carrying a turn is malformed, and so is a running one carrying none: a snapshot that resumes mid-turn introduces the turn it reports, and every reference a later delta makes to that turn resolves against it. A running foreground with neither turnId nor origin asserts a live cycle no turn owns, which is a state no stream may reach and one a resumed projection could never repair — the whole assertion is refused rather than projected as a foreground nothing introduced.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

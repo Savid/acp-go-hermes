@@ -22,9 +22,8 @@ var captureAmbientEnvironment = os.Environ
 // twice is resolved by that block's own order rather than carried forward as
 // two live variables.
 //
-// This snapshot is not a ProcessIsolation and never becomes one. An explicit
-// policy supplies its own complete replacement environment and ignores this
-// value entirely.
+// An explicit authority supplies its own complete replacement environment and
+// ignores this value entirely.
 func ambientEnvironment() map[string]string {
 	return nativehermes.AmbientEnvironmentSnapshot(captureAmbientEnvironment())
 }

@@ -2,7 +2,7 @@
   "name": "snapshot-resumes-blocked-cycle",
   "purpose": "A snapshot may resume a cycle a blocking action stopped, carrying both the requires_action foreground and the action blocking it. The blocker blocks the cycle current at its first sight, so the cycle returns to running only after that action terminalizes.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

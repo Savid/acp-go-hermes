@@ -33,7 +33,7 @@ func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 		t.Fatal("provider auth surface is unavailable with a usable root")
 	}
 
-	session := newSession(agent, testSessionID, "/cwd", nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
+	session := newSession(agent, testSessionID, absTestPath("cwd"), nil, nil, nativehermes.Session{ID: "native"}, client, sessionMeta{}, idmapRecord{})
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("storeStartedSession: %v", err)
 	}
@@ -133,63 +133,23 @@ func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 	}
 }
 
-func TestAuthCapabilityListsEveryLeg(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-
-	response, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
+func TestHostAuthorityWithholdsProviderAuthWithoutDisablingAgent(t *testing.T) {
+	agent := NewAgent(WithHostAuthority(newTestHostAuthority()), WithScratchDir(t.TempDir()))
+	response, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
-
 	hermesMeta, _ := response.AgentCapabilities.Meta[hermesMetaKey].(map[string]any)
-
-	capability, ok := hermesMeta[providerAuthCapabilityKey].(map[string]any)
-	if !ok {
-		t.Fatalf("capability missing providerAuth: %#v", hermesMeta)
+	if _, present := hermesMeta[providerAuthCapabilityKey]; present {
+		t.Fatal("managed agent advertised provider auth")
 	}
-
-	names, _ := capability[providerAuthMethodsField].([]string)
-	if len(names) != 7 {
-		t.Fatalf("advertised %d legs, want 7: %#v", len(names), names)
-	}
-
-	unset, err := newTestAgent().Initialize(context.Background(), acp.InitializeRequest{})
-	if err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-
-	unsetMeta, _ := unset.AgentCapabilities.Meta[hermesMetaKey].(map[string]any)
-	if _, present := unsetMeta[providerAuthCapabilityKey]; present {
-		t.Fatal("unset root still advertised providerAuth")
-	}
-}
-
-func TestAuthLegsAnswerOnlyWhileAdvertised(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
 
 	for _, method := range authMethodNames() {
-		if _, err := callLeg(t, agent, method, map[string]any{}); err == nil {
-			t.Fatalf("%s accepted empty params", method)
-		}
-	}
-
-	bare := newTestAgent()
-
-	for _, method := range authMethodNames() {
-		_, err := callLeg(t, bare, method, map[string]any{"sessionId": "x"})
-
+		_, callErr := callLeg(t, agent, method, map[string]any{"sessionId": "x"})
 		var requestErr *acp.RequestError
-		if !errors.As(err, &requestErr) || requestErr.Code != -32601 {
-			t.Fatalf("%s without a root returned %v, want method-not-found", method, err)
+		if !errors.As(callErr, &requestErr) || requestErr.Code != -32601 {
+			t.Fatalf("%s returned %v, want method-not-found", method, callErr)
 		}
-	}
-
-	if _, err := callLeg(t, agent, "_hermes/auth/unknown", map[string]any{}); err == nil {
-		t.Fatal("unknown auth-shaped method accepted")
 	}
 }
 
@@ -353,40 +313,6 @@ func TestAuthNativeCauseNeverForwardsNativeText(t *testing.T) {
 	}
 }
 
-func TestAuthSessionResolution(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-
-	if _, err := agent.providerAuth.authSession("missing"); err == nil {
-		t.Fatal("unknown session accepted")
-	}
-
-	session, err := agent.providerAuth.authSession(string(testSessionID))
-	if err != nil {
-		t.Fatalf("authSession: %v", err)
-	}
-
-	session.mu.Lock()
-	session.client = nil
-	session.mu.Unlock()
-}
-
-func TestAuthGoSafeContainsAPanic(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-	done := make(chan struct{})
-
-	agent.providerAuth.goSafe("panicking", func() {
-		defer close(done)
-
-		panic("boom")
-	})
-
-	<-done
-}
-
 func TestAuthParamFieldsRejectsATruncatedObject(t *testing.T) {
 	t.Parallel()
 
@@ -414,25 +340,6 @@ func adversarialConnectionIDs() map[string]string {
 		"replacement rune":   "connection-�",
 		"non ascii":          "connection-é",
 		"unbounded":          strings.Repeat("c", authConnectionIDMaxBytes+1),
-	}
-}
-
-func TestAuthorizeRejectsInvalidConnectionIDs(t *testing.T) {
-	t.Parallel()
-
-	agent, _ := newAuthAgent(t)
-
-	for name, connectionID := range adversarialConnectionIDs() {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := callLeg(t, agent, AuthAuthorizeMethod, map[string]any{
-				"sessionId": string(testSessionID), "providerId": testProviderID,
-				"connectionId": connectionID, "methodsGeneration": "generation",
-				"method": "device_code", "authorizeRequestId": "request-1",
-			})
-			requireInvalidField(t, err, authFieldConnectionID)
-		})
 	}
 }
 

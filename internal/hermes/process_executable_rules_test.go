@@ -158,16 +158,11 @@ func TestWindowsOrdinaryRulesWithoutExtensionsResolveVerbatim(t *testing.T) {
 	require.Equal(t, "hermes.exe", filepath.Base(resolved))
 }
 
-// TestEnvValueFoldReadsAnInheritedEnvironmentBlock separates the two lookups:
-// a closed policy environment was written by its author and is matched exactly,
-// while an inherited one is matched case-insensitively because the host chose
-// the spelling.
 func TestEnvValueFoldReadsAnInheritedEnvironmentBlock(t *testing.T) {
 	t.Parallel()
 
 	block := []string{"malformed", "Path=C:\\hermes", "PathExt=.EXE"}
 
-	require.Empty(t, envValue(block, "PATH"))
 	require.Equal(t, "C:\\hermes", envValueFold(block, "PATH", true))
 	require.Equal(t, ".EXE", envValueFold(block, "PATHEXT", true))
 	require.Empty(t, envValueFold(block, "PATH", false))

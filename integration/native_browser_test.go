@@ -29,6 +29,7 @@ const (
 	nativeBrowserAdapterPath = "/usr/local/bin/acp-go-hermes.test"
 	nativeBrowserTracePath   = "/tmp/native-browser.trace"
 	nativeBrowserHermesPath  = "/usr/local/bin/hermes"
+	nativeBrowserStatePath   = "/native-browser-state"
 	nativeBrowserHostname    = "native-browser-canary"
 	nativeBrowserInsideEnv   = "ACP_GO_HERMES_NATIVE_BROWSER_INSIDE"
 	nativeBrowserTestName    = "TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher"
@@ -72,7 +73,7 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	authorityVolume := fmt.Sprintf("acp-go-hermes-browser-%d-%d", os.Getpid(), time.Now().UnixNano())
+	stateVolume := fmt.Sprintf("acp-go-hermes-browser-%d-%d", os.Getpid(), time.Now().UnixNano())
 	fixture, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			FromDockerfile: testcontainers.FromDockerfile{
@@ -87,10 +88,9 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 			HostConfigModifier: func(config *container.HostConfig) {
 				config.ExtraHosts = []string{nativeBrowserHostname + ":127.0.0.1"}
 				config.NetworkMode = container.NetworkMode("none")
-				config.PidMode = container.PidMode("host")
 			},
 			Mounts: testcontainers.ContainerMounts{
-				testcontainers.VolumeMount(authorityVolume, "/var/lib/acp-go/agent-identities"),
+				testcontainers.VolumeMount(stateVolume, nativeBrowserStatePath),
 			},
 			WaitingFor: wait.ForExec([]string{"/bin/true"}).WithStartupTimeout(5 * time.Minute),
 		},
@@ -101,7 +101,7 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if terminateErr := fixture.Terminate(
-			context.WithoutCancel(ctx), testcontainers.RemoveVolumes(authorityVolume),
+			context.WithoutCancel(ctx), testcontainers.RemoveVolumes(stateVolume),
 		); terminateErr != nil {
 			t.Errorf("terminate native browser fixture: %v", terminateErr)
 		}
@@ -119,56 +119,25 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	if inspection.HostConfig == nil {
 		t.Fatal("native browser fixture lacks host configuration")
 	}
-	var authorityMount *container.MountPoint
+	var stateMount *container.MountPoint
 	for index := range inspection.Mounts {
-		if inspection.Mounts[index].Destination == "/var/lib/acp-go/agent-identities" {
-			authorityMount = &inspection.Mounts[index]
+		if inspection.Mounts[index].Destination == nativeBrowserStatePath {
+			stateMount = &inspection.Mounts[index]
 
 			break
 		}
 	}
-	if authorityMount == nil || authorityMount.Type != "volume" || authorityMount.Driver != "local" ||
-		authorityMount.Name != authorityVolume || !authorityMount.RW {
-		t.Fatalf("native browser authority mount is not a writable local volume: %#v", authorityMount)
+	if stateMount == nil || stateMount.Type != "volume" || stateMount.Driver != "local" ||
+		stateMount.Name != stateVolume || !stateMount.RW {
+		t.Fatalf("native browser state mount is not a writable local volume: %#v", stateMount)
 	}
 	if inspection.HostConfig.NetworkMode != container.NetworkMode("none") {
 		t.Fatalf("native browser fixture network mode = %q, want none", inspection.HostConfig.NetworkMode)
-	}
-	if inspection.HostConfig.PidMode != container.PidMode("host") {
-		t.Fatalf("native browser fixture PID mode = %q, want host", inspection.HostConfig.PidMode)
-	}
-	if inspection.HostConfig.Privileged {
-		t.Fatal("native browser fixture unexpectedly has privileged access")
-	}
-	if inspection.AppArmorProfile != "" && inspection.AppArmorProfile != "docker-default" {
-		t.Fatalf("native browser fixture AppArmor profile = %q, want docker-default", inspection.AppArmorProfile)
-	}
-	securityOptions := inspection.HostConfig.SecurityOpt
-	if len(securityOptions) > 1 || len(securityOptions) == 1 && securityOptions[0] != "label=disable" {
-		t.Fatalf(
-			"native browser fixture security options = %q, want none or Docker's automatic host-PID label disablement",
-			securityOptions,
-		)
 	}
 	wantExtraHost := nativeBrowserHostname + ":127.0.0.1"
 	if len(inspection.HostConfig.ExtraHosts) != 1 || inspection.HostConfig.ExtraHosts[0] != wantExtraHost {
 		t.Fatalf("native browser fixture extra hosts = %q, want [%q]", inspection.HostConfig.ExtraHosts, wantExtraHost)
 	}
-	code, output, err := fixture.Exec(ctx, []string{
-		"/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0700",
-		"/var/lib/acp-go", "/var/lib/acp-go/agent-identities",
-	}, tcexec.Multiplexed())
-	if err != nil {
-		t.Fatalf("prepare native identity authority: %v", err)
-	}
-	authorityOutput, readErr := io.ReadAll(output)
-	if readErr != nil {
-		t.Fatalf("read native identity authority preparation output: %v", readErr)
-	}
-	if code != 0 {
-		t.Fatalf("prepare native identity authority exited %d: %s", code, authorityOutput)
-	}
-
 	if copyErr := fixture.CopyFileToContainer(ctx, buildNativeBrowserProbe(t), nativeBrowserProbePath, 0o755); copyErr != nil {
 		t.Fatalf("copy native browser probe: %v", copyErr)
 	}
@@ -176,12 +145,15 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 		t.Fatalf("copy adapter binary: %v", copyErr)
 	}
 
-	code, output, err = fixture.Exec(ctx, []string{
+	code, output, err := fixture.Exec(ctx, []string{
 		"/usr/bin/env",
 		nativeBrowserInsideEnv + "=1",
 		envRunIntegration + "=1",
 		envAgentBinary + "=" + nativeBrowserAdapterPath,
 		envHermesPath + "=" + nativeBrowserHermesPath,
+		"/usr/bin/timeout",
+		"--kill-after=10s",
+		"180s",
 		"/usr/bin/strace",
 		"-f",
 		"-qq",
@@ -224,6 +196,7 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 func runNativeHermesProviderAuthCanary(t *testing.T) {
 	t.Helper()
 
+	t.Log("native browser phase: version")
 	versionOutput, err := exec.CommandContext(t.Context(), nativeBrowserHermesPath, "--version").CombinedOutput()
 	if err != nil {
 		t.Fatalf("run pinned Hermes version: %v: %s", err, versionOutput)
@@ -233,7 +206,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("Hermes version = %q, want exact official v0.20.0 release", versionLine)
 	}
 
-	root := "/var/lib/acp-go/agent-identities"
+	root := nativeBrowserStatePath
 	sharedHome := filepath.Join(root, "hermes-home")
 	ledgerRoot := filepath.Join(root, "ledger")
 	cwd := filepath.Join(root, "workspace")
@@ -245,6 +218,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
+	t.Log("native browser phase: start adapter")
 	agent := startLiveAgent(t, ctx, root,
 		"-provider-auth-root", ledgerRoot,
 		"-shared-hermes-home", sharedHome,
@@ -252,6 +226,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	defer agent.close()
 
 	conn := acp.NewClientSideConnection(&recordingClient{}, agent.stdin, agent.stdout)
+	t.Log("native browser phase: initialize")
 	initialized, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		t.Fatalf("initialize production adapter: %v\nstderr:\n%s", err, agent.stderrString())
@@ -261,12 +236,14 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("provider auth capability absent: %#v\nstderr:\n%s", hermesMeta, agent.stderrString())
 	}
 
+	t.Log("native browser phase: new session")
 	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("new production Hermes session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
 
 	var methods authMethodsWire
+	t.Log("native browser phase: methods")
 	if callErr := callAuthLeg(t, ctx, conn, hermesacp.AuthMethodsMethod, map[string]any{
 		"sessionId": string(session.SessionId),
 	}, &methods); callErr != nil {
@@ -286,6 +263,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	}
 
 	var authorization authAuthorizeWire
+	t.Log("native browser phase: authorize")
 	err = callAuthLeg(t, ctx, conn, hermesacp.AuthAuthorizeMethod, map[string]any{
 		"sessionId":          string(session.SessionId),
 		"providerId":         "anthropic",
@@ -301,6 +279,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("native authorization presentation = %#v", authorization)
 	}
 
+	t.Log("native browser phase: cancel")
 	if callErr := callAuthLeg(t, ctx, conn, hermesacp.AuthCancelMethod, map[string]any{
 		"sessionId":  string(session.SessionId),
 		"providerId": "anthropic",

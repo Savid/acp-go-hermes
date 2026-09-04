@@ -2,7 +2,7 @@
   "name": "activity-first-sight-missing-identity",
   "purpose": "An activity's first sight carries every immutable identity field, because the identity a later patch may restate is fixed there and nowhere else. A first sight omitting one states an identity that can never be completed, so it is refused as an identity change rather than reduced as an activity whose origin is unknown.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

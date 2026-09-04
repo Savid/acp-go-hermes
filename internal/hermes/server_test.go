@@ -11,11 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +85,9 @@ type fakeGatewayServer struct {
 	activeNoID          bool
 	activeNoKey         bool
 	activeEmpty         bool
+	activeNil           bool
+	modelProvidersNil   bool
+	imageAttachedFalse  bool
 	notFoundMethods     map[string]int
 	malformedResponses  map[string]string
 }
@@ -371,7 +373,13 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		activeNoID := s.activeNoID
 		activeNoKey := s.activeNoKey
 		activeEmpty := s.activeEmpty
+		activeNil := s.activeNil
 		s.mu.Unlock()
+		if activeNil {
+			s.writeResult(ctx, conn, id, map[string]any{"sessions": nil})
+
+			return
+		}
 		if activeEmpty {
 			s.writeResult(ctx, conn, id, map[string]any{"sessions": []map[string]any{}})
 
@@ -476,7 +484,10 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		s.writeResult(ctx, conn, id, result)
 	case "image.attach_bytes":
-		s.writeResult(ctx, conn, id, map[string]any{"attached": true})
+		s.mu.Lock()
+		attached := !s.imageAttachedFalse
+		s.mu.Unlock()
+		s.writeResult(ctx, conn, id, map[string]any{"attached": attached})
 	case "prompt.submit":
 		live, _ := params["session_id"].(string)
 		s.mu.Lock()
@@ -606,6 +617,14 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		s.writeResult(ctx, conn, id, result)
 	case "model.options":
+		s.mu.Lock()
+		providersNil := s.modelProvidersNil
+		s.mu.Unlock()
+		if providersNil {
+			s.writeResult(ctx, conn, id, map[string]any{"providers": nil})
+
+			return
+		}
 		s.writeResult(ctx, conn, id, map[string]any{
 			"model":    "anthropic/claude-sonnet-4",
 			"provider": "",
@@ -974,7 +993,6 @@ func newGatewayBackedHermesServer(t *testing.T, fake *fakeGatewayServer, default
 	t.Helper()
 
 	server := &hermesServer{
-		cmd:            &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 		xdg:            testXDGDirs(t),
 		log:            slog.New(slog.DiscardHandler),
 		deliveries:     make(chan TurnDelivery, 32),
@@ -997,7 +1015,6 @@ func TestHermesGatewayServerMethods(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	client := fake.dialClient(t)
 	server := &hermesServer{
-		cmd:            &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 		xdg:            testXDGDirs(t),
 		log:            slog.New(slog.DiscardHandler),
 		deliveries:     make(chan TurnDelivery, 32),
@@ -2119,9 +2136,6 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
 		t.Fatal("materializeHermesConfig ignored marshal error")
 	}
-	if err := WriteLease(t.TempDir(), ServerLease{}); err == nil {
-		t.Fatal("WriteLease ignored marshal error")
-	}
 	hermesMarshalIndent = originalMarshalIndent
 	homeFile := filepath.Join(t.TempDir(), "home-file")
 	if err := os.WriteFile(homeFile, []byte("file"), 0o600); err != nil {
@@ -2155,8 +2169,8 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("stat %q: %v", relative, err)
 			}
-			if info.Mode().Perm() != 0o600 {
-				t.Fatalf("seed %q mode = %v, want 0600", relative, info.Mode().Perm())
+			if want := wantRestrictedPerm(false); info.Mode().Perm() != want {
+				t.Fatalf("seed %q mode = %v, want %v", relative, info.Mode().Perm(), want)
 			}
 		}
 		if script, err := os.ReadFile(filepath.Join(home, hermesPathInitFileName)); err != nil || !bytes.Equal(script, hermesPathInitScript) {
@@ -2682,7 +2696,7 @@ func TestGatewayPublicMethodsRefuseMissingTransport(t *testing.T) { //nolint:goc
 		t.Fatalf("closed server admitted transport %#v", transport)
 	}
 	closedTurn.endGatewayTurn()
-	(&hermesServer{closed: make(chan struct{})}).superviseGateway()
+	(&hermesServer{closed: make(chan struct{})}).runGatewayReconnectLoop()
 
 	processClose := &hermesServer{
 		closed: make(chan struct{}), deliveries: make(chan TurnDelivery, 1), process: &Process{},
@@ -2702,7 +2716,7 @@ func TestFailedBranchCleanupTreatsNativeNotFoundAsSuccess(t *testing.T) {
 	}
 }
 
-func TestSupervisorCloseAfterClientDonePrecedesDispatcherDone(t *testing.T) {
+func TestReconnectLoopCloseAfterClientDonePrecedesDispatcherDone(t *testing.T) {
 	clientDone := make(chan struct{})
 	close(clientDone)
 	dispatcherDone := make(chan struct{})
@@ -2716,7 +2730,7 @@ func TestSupervisorCloseAfterClientDonePrecedesDispatcherDone(t *testing.T) {
 	server.afterGatewayClientDone = func() { close(observed) }
 	returned := make(chan struct{})
 	go func() {
-		server.superviseGateway()
+		server.runGatewayReconnectLoop()
 		close(returned)
 	}()
 	<-observed
@@ -3053,13 +3067,8 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if server.xdg.Root == "" || !strings.HasPrefix(filepath.Base(server.xdg.Root), "acp-go-hermes-runtime-") {
 		t.Fatalf("xdg dirs = %#v", server.xdg)
 	}
-	leasePath := filepath.Join(ControlDirForXDG(server.xdg.Root), LeaseFileName)
-	leaseData, err := os.ReadFile(leasePath)
-	if err != nil {
-		t.Fatalf("read lease: %v", err)
-	}
-	if !strings.Contains(string(leaseData), `"tokenHash"`) || strings.Contains(string(leaseData), "PasswordHash") {
-		t.Fatalf("lease = %s", leaseData)
+	if server.controlLock == nil {
+		t.Fatal("server did not retain its runtime-owned control lock")
 	}
 	configData, err := os.ReadFile(filepath.Join(server.xdg.Root, "config.yaml"))
 	if err != nil {
@@ -3074,78 +3083,6 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	if err := client.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lease after close = %v", err)
-	}
-}
-
-func TestStartHermesServerLeaseRecoveryIsSessionScoped(t *testing.T) {
-	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
-	root := testTraversableTempDir(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	start := func(id ACPSessionIDString) Server {
-		t.Helper()
-
-		server, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
-			ACPSessionID:   id,
-			ScratchParent:  root,
-			Cwd:            t.TempDir(),
-			ExecutablePath: helper,
-			HealthTimeout:  5 * time.Second,
-			Logger:         slog.New(slog.DiscardHandler),
-		}))
-		if err != nil {
-			t.Fatalf("StartServer(%q): %v", id, err)
-		}
-
-		return server
-	}
-
-	first := start("session-a")
-	firstClosed := false
-	defer func() {
-		if !firstClosed {
-			_ = first.Close(context.Background())
-		}
-	}()
-	if _, err := first.CreateSession(ctx, "first-before-second"); err != nil {
-		t.Fatalf("first CreateSession before second startup: %v", err)
-	}
-
-	firstLease := readServerLease(t, first.XDGDirs())
-	second := start("session-b")
-	secondClosed := false
-	defer func() {
-		if !secondClosed {
-			_ = second.Close(context.Background())
-		}
-	}()
-
-	if _, err := InspectProcess(firstLease.PID); err != nil {
-		t.Fatalf("distinct session startup reaped first process: %v", err)
-	}
-	if got := readServerLease(t, first.XDGDirs()); got.PID != firstLease.PID || got.ProcessStartTime != firstLease.ProcessStartTime {
-		t.Fatalf("first lease changed across distinct session startup: before=%#v after=%#v", firstLease, got)
-	}
-	if _, err := first.CreateSession(ctx, "first-after-second"); err != nil {
-		t.Fatalf("first CreateSession after second startup: %v", err)
-	}
-	if _, err := second.CreateSession(ctx, "second"); err != nil {
-		t.Fatalf("second CreateSession: %v", err)
-	}
-	if err := second.Close(ctx); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
-	secondClosed = true
-	if _, err := first.CreateSession(ctx, "first-after-second-close"); err != nil {
-		t.Fatalf("first CreateSession after second close: %v", err)
-	}
-	if err := first.Close(ctx); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	firstClosed = true
 }
 
 func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
@@ -3172,8 +3109,6 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 			_ = first.Close(context.Background())
 		}
 	}()
-	oldLease := readServerLease(t, first.XDGDirs())
-
 	replacement, err := StartServer(ctx, darwinTestStartOptions(t, options))
 	if err != nil {
 		t.Fatalf("replacement StartServer: %v", err)
@@ -3184,17 +3119,10 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 			_ = replacement.Close(context.Background())
 		}
 	}()
-	newLease := readServerLease(t, replacement.XDGDirs())
 	if first.XDGDirs().Root == replacement.XDGDirs().Root {
 		t.Fatalf("same-session replacement reused generation root %q", first.XDGDirs().Root)
 	}
 
-	if newLease.PID == oldLease.PID && newLease.ProcessStartTime == oldLease.ProcessStartTime {
-		t.Fatalf("same-session replacement retained old process identity: old=%#v new=%#v", oldLease, newLease)
-	}
-	if identity, inspectErr := InspectProcess(oldLease.PID); inspectErr != nil || identity.StartTime != oldLease.ProcessStartTime {
-		t.Fatalf("fresh generation disturbed predecessor process %d: %#v, %v", oldLease.PID, identity, inspectErr)
-	}
 	if _, err := first.CreateSession(ctx, "predecessor"); err != nil {
 		t.Fatalf("independent predecessor gateway became unusable: %v", err)
 	}
@@ -3202,9 +3130,6 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 		t.Fatalf("predecessor Close: %v", err)
 	}
 	firstClosed = true
-	if got := readServerLease(t, replacement.XDGDirs()); got != newLease {
-		t.Fatalf("predecessor Close changed replacement lease: want=%#v got=%#v", newLease, got)
-	}
 	if _, err := replacement.CreateSession(ctx, "replacement"); err != nil {
 		t.Fatalf("replacement CreateSession: %v", err)
 	}
@@ -3212,36 +3137,6 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 		t.Fatalf("replacement Close: %v", err)
 	}
 	replacementClosed = true
-	if _, err := os.Stat(filepath.Join(ControlDirForXDG(replacement.XDGDirs().Root), LeaseFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("replacement lease after owner Close = %v", err)
-	}
-}
-
-func TestStartHermesServerRequiresDiscoveryResourceCallbacks(t *testing.T) {
-	_, err := StartServer(t.Context(), StartOptions{})
-	if err == nil || !strings.Contains(err.Error(), "resource callbacks are required") {
-		t.Fatalf("StartServer missing discovery callbacks error = %v", err)
-	}
-}
-
-func readServerLease(t *testing.T, dirs XDGDirs) ServerLease {
-	t.Helper()
-
-	directory := dirs.State
-	if dirs.Root != "" {
-		directory = ControlDirForXDG(dirs.Root)
-	}
-	data, err := os.ReadFile(filepath.Join(directory, LeaseFileName))
-	if err != nil {
-		t.Fatalf("read server lease: %v", err)
-	}
-
-	var lease ServerLease
-	if err := json.Unmarshal(data, &lease); err != nil {
-		t.Fatalf("decode server lease: %v", err)
-	}
-
-	return lease
 }
 
 func TestStartHermesServerGatewayFaults(t *testing.T) {
@@ -3252,10 +3147,7 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ScratchParent: string([]byte{0})})); err == nil {
 		t.Fatal("invalid scratch parent unexpectedly succeeded")
 	}
-	if _, err := StartServer(ctx, StartOptions{
-		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
-		RetainDiscoveryRoot:       func(string, error) {},
-	}); err == nil {
+	if _, err := StartServer(ctx, StartOptions{}); err == nil {
 		t.Fatal("missing scratch parent unexpectedly succeeded")
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ACPSessionID: ACPSessionIDString(string([]byte{0}))})); err == nil {
@@ -3287,30 +3179,6 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 		t.Fatalf("control chmod error = %v", err)
 	}
 	hermesControlChmod = os.Chmod
-	hermesNativeHandoff = func(string, *ProcessIsolation) error { return errors.New("native handoff") }
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil ||
-		!strings.Contains(err.Error(), "native handoff") {
-		t.Fatalf("native handoff error = %v", err)
-	}
-	hermesNativeHandoff = handoffGeneratedNativeTree
-
-	hermesReapLeaseFile = func(string, *slog.Logger) bool { return true }
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: testXDGDirs(t)})); err == nil || !strings.Contains(err.Error(), "remains live") {
-		t.Fatalf("retained lease error = %v", err)
-	}
-	hermesReapLeaseFile = ReapLeaseFile
-
-	hermesWriteLease = func(string, ServerLease) error {
-		return errors.New("lease failed")
-	}
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
-		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeOK),
-		ExistingXDG:    testXDGDirs(t),
-		HealthTimeout:  5 * time.Second,
-	})); err == nil || !strings.Contains(err.Error(), "lease failed") {
-		t.Fatalf("lease failure error = %v", err)
-	}
-
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
 		ExecutablePath: fakeHermesGatewayExecutable(t, fakeGatewayModeStatusOnly),
 		ExistingXDG:    testXDGDirs(t),
@@ -3320,10 +3188,10 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	}
 }
 
-// TestGatewaySupervisorReconnectsOnIdleDisconnect proves HW4 idle reconnect:
-// when the WebSocket drops while no turn is in progress, the supervisor redials
+// TestGatewayReconnectsOnIdleDisconnect proves HW4 idle reconnect:
+// when the WebSocket drops while no turn is in progress, the reconnect loop redials
 // the still-running process and swaps in the new connection.
-func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
+func TestGatewayReconnectsOnIdleDisconnect(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	redialed := make(chan struct{}, 2)
@@ -3341,7 +3209,7 @@ func TestGatewaySupervisorReconnectsOnIdleDisconnect(t *testing.T) {
 	select {
 	case <-redialed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("supervisor did not reconnect after idle disconnect")
+		t.Fatal("reconnect loop did not run after idle disconnect")
 	}
 	swapDeadline := time.After(2 * time.Second)
 	swapPoll := time.NewTicker(5 * time.Millisecond)
@@ -3644,7 +3512,7 @@ func TestGatewayOperationsPinOneTransportTupleAcrossRPCs(t *testing.T) {
 	}
 }
 
-func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
+func TestGatewayReconnectWaitsForTurnBeforeReconnect(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	reconnies := make(chan struct{}, 4)
@@ -3675,7 +3543,7 @@ func TestGatewaySupervisorWaitsForTurnBeforeReconnect(t *testing.T) {
 	}
 }
 
-func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
+func TestGatewayReconnectLoopStopsAfterTurnWhenClosed(t *testing.T) {
 	reachedIdle := make(chan struct{})
 	releaseIdle := make(chan struct{})
 
@@ -3699,21 +3567,21 @@ func TestSuperviseGatewayStopsAfterTurnWhenClosed(t *testing.T) {
 	server.endGatewayTurn()
 	<-reachedIdle
 
-	// Shut down after the turn becomes idle but before the supervisor can
-	// redial; the supervisor must stop without reconnecting.
+	// Shut down after the turn becomes idle but before the reconnect loop can
+	// redial; the loop must stop without reconnecting.
 	close(server.closed)
 	close(releaseIdle)
-	server.supervisorWG.Wait()
+	server.reconnectWG.Wait()
 
 	select {
 	case <-reconnied:
-		t.Fatal("supervisor reconnected during shutdown")
+		t.Fatal("reconnect loop ran during shutdown")
 	case <-time.After(150 * time.Millisecond):
 	}
 	_ = original.Close(websocket.StatusNormalClosure, "done")
 }
 
-func TestSuperviseGatewayStopsWhileWaitingForClosedTurn(t *testing.T) {
+func TestGatewayReconnectLoopStopsWhileWaitingForClosedTurn(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	server.enableReconnect(func(context.Context) (*Client, error) {
@@ -3727,13 +3595,11 @@ func TestSuperviseGatewayStopsWhileWaitingForClosedTurn(t *testing.T) {
 	time.Sleep(25 * time.Millisecond)
 	close(server.closed)
 	server.endGatewayTurn()
-	server.supervisorWG.Wait()
+	server.reconnectWG.Wait()
 }
 
 func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 	const secret = "redial-secret-sentinel"
-	restoreLeaseReapSeams(t)
-	leaseReapSleep = func(time.Duration) {}
 	fake := newFakeGatewayServer(t)
 	server := newGatewayBackedHermesServer(t, fake, "")
 	var logs bytes.Buffer
@@ -3764,193 +3630,6 @@ func TestReconnectGatewayRedialErrorBranches(t *testing.T) {
 	// endGatewayTurn is safe with no active turn and without reconnect wired.
 	plain := &hermesServer{}
 	plain.endGatewayTurn()
-}
-
-func TestXDGLeaseAndHelpers(t *testing.T) {
-	root := t.TempDir()
-	xdg, err := CreateGenerationXDGDirs(root)
-	if err != nil {
-		t.Fatalf("CreateGenerationXDGDirs: %v", err)
-	}
-	if err := ensureXDGDirs(XDGDirs{Root: "", Data: "x", Config: "x", Cache: "x", State: "x"}); err == nil {
-		t.Fatal("ensureXDGDirs accepted empty root")
-	}
-	if err := WriteLease(xdg.State, ServerLease{PID: 0, Port: 1, TokenHash: PasswordHash("token")}); err != nil {
-		t.Fatalf("WriteLease: %v", err)
-	}
-	zeroPIDLease := filepath.Join(xdg.State, LeaseFileName)
-	if retained := ReapLeaseFile(zeroPIDLease, nil); retained {
-		t.Fatal("zero-PID lease was retained")
-	}
-	if _, err := os.Stat(zeroPIDLease); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("zero-PID lease after reap = %v", err)
-	}
-	badRoot := string([]byte{0})
-	if err := WriteLease(badRoot, ServerLease{}); err == nil {
-		t.Fatal("WriteLease accepted invalid path")
-	}
-	if err := os.MkdirAll(filepath.Join(root, "bad", "state"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	malformedLease := filepath.Join(root, "bad", "state", LeaseFileName)
-	if err := os.WriteFile(malformedLease, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if retained := ReapLeaseFile(malformedLease, nil); retained {
-		t.Fatal("malformed lease was retained")
-	}
-	if _, err := os.Stat(malformedLease); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("malformed lease after reap = %v", err)
-	}
-}
-
-func TestRemoveLeaseFileIfOwned(t *testing.T) {
-	owner := ServerLease{
-		PID:              123,
-		Port:             456,
-		StartedAt:        789,
-		TokenHash:        PasswordHash("owner"),
-		XDGRoot:          t.TempDir(),
-		ProcessStartTime: "start",
-	}
-	state := t.TempDir()
-	leasePath := filepath.Join(state, LeaseFileName)
-
-	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
-		t.Fatalf("remove absent lease: %v", err)
-	}
-	if err := removeLeaseFileIfOwned(state, owner); err == nil {
-		t.Fatal("remove directory lease unexpectedly succeeded")
-	}
-	if err := os.WriteFile(leasePath, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeLeaseFileIfOwned(leasePath, owner); err == nil {
-		t.Fatal("remove malformed lease unexpectedly succeeded")
-	}
-
-	other := owner
-	other.TokenHash = PasswordHash("other")
-	if err := WriteLease(state, other); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
-		t.Fatalf("remove foreign lease: %v", err)
-	}
-	if got := readServerLease(t, XDGDirs{State: state}); got != other {
-		t.Fatalf("foreign lease changed: want=%#v got=%#v", other, got)
-	}
-
-	if err := WriteLease(state, owner); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeLeaseFileIfOwned(leasePath, owner); err != nil {
-		t.Fatalf("remove owned lease: %v", err)
-	}
-	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("owned lease after remove = %v", err)
-	}
-}
-
-func TestLeaseReaperVerifiesProcessIdentity(t *testing.T) {
-	root := t.TempDir()
-	xdg, err := CreateGenerationXDGDirs(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leasePath := filepath.Join(xdg.State, LeaseFileName)
-	baseIdentity := ProcessIdentity{
-		StartTime: "start",
-		Cmdline:   []string{"/usr/bin/hermes", "serve"},
-		Env: map[string]string{
-			"HERMES_HOME":                    xdg.Root,
-			"HERMES_DASHBOARD_SESSION_TOKEN": "token",
-		},
-	}
-	baseLease := ServerLease{
-		PID:              999999,
-		TokenHash:        PasswordHash("token"),
-		XDGRoot:          xdg.Root,
-		ProcessStartTime: "start",
-	}
-
-	restoreHermesClientSeams(t)
-	InspectProcess = func(int) (ProcessIdentity, error) {
-		return baseIdentity, nil
-	}
-	if !leaseMatchesProcess(baseLease) {
-		t.Fatal("matching lease did not match")
-	}
-	if !cmdlineLooksLikeHermesServe([]string{"/tmp/hermes"}) || cmdlineLooksLikeHermesServe([]string{"node"}) {
-		t.Fatal("cmdline Hermes detection mismatch")
-	}
-	if leaseMatchesProcess(ServerLease{PID: 0, ProcessStartTime: "start"}) {
-		t.Fatal("zero pid lease matched")
-	}
-	if leaseMatchesProcess(ServerLease{PID: 1}) {
-		t.Fatal("missing start time lease matched")
-	}
-
-	for _, tt := range []struct {
-		name     string
-		identity ProcessIdentity
-		lease    ServerLease
-		err      error
-	}{
-		{name: "inspect error", identity: baseIdentity, lease: baseLease, err: errors.New("inspect failed")},
-		{name: "start mismatch", identity: ProcessIdentity{StartTime: "other", Cmdline: baseIdentity.Cmdline, Env: baseIdentity.Env}, lease: baseLease},
-		{name: "home mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": t.TempDir(), "HERMES_DASHBOARD_SESSION_TOKEN": "token"}}, lease: baseLease},
-		{name: "token mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: baseIdentity.Cmdline, Env: map[string]string{"HERMES_HOME": xdg.Root, "HERMES_DASHBOARD_SESSION_TOKEN": "wrong"}}, lease: baseLease},
-		{name: "root mismatch", identity: baseIdentity, lease: ServerLease{PID: baseLease.PID, TokenHash: baseLease.TokenHash, XDGRoot: t.TempDir(), ProcessStartTime: baseLease.ProcessStartTime}},
-		{name: "cmdline mismatch", identity: ProcessIdentity{StartTime: "start", Cmdline: []string{"node"}, Env: baseIdentity.Env}, lease: baseLease},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			InspectProcess = func(int) (ProcessIdentity, error) {
-				return tt.identity, tt.err
-			}
-			if leaseMatchesProcess(tt.lease) {
-				t.Fatal("mismatched lease matched")
-			}
-		})
-	}
-
-	restoreLeaseReapSeams(t)
-	LeaseReapTimeout = 40 * time.Millisecond
-	LeaseReapPollInterval = time.Millisecond
-
-	// Confirmed dead: the process matches for identity but is gone when the
-	// ladder verifies it, so the lease is removed.
-	inspectCalls := 0
-	InspectProcess = func(int) (ProcessIdentity, error) {
-		inspectCalls++
-		if inspectCalls == 1 {
-			return baseIdentity, nil
-		}
-
-		return ProcessIdentity{}, os.ErrNotExist
-	}
-	if err := WriteLease(xdg.State, baseLease); err != nil {
-		t.Fatal(err)
-	}
-	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
-	if _, err := os.Stat(leasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lease after reap of dead process = %v", err)
-	}
-
-	// Survives termination: the process stays alive and identity-matched, so
-	// the lease is KEPT for the next startup retry.
-	InspectProcess = func(int) (ProcessIdentity, error) {
-		return baseIdentity, nil
-	}
-	if err := WriteLease(xdg.State, baseLease); err != nil {
-		t.Fatal(err)
-	}
-	ReapLeaseFile(leasePath, slog.New(slog.DiscardHandler))
-	if _, err := os.Stat(leasePath); err != nil {
-		t.Fatalf("lease of surviving process was removed: %v", err)
-	}
-	_ = os.Remove(leasePath)
-	ReapLeaseFile(t.TempDir(), nil)
 }
 
 func TestNativeUnmarshalErrors(t *testing.T) {
@@ -4000,17 +3679,14 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 	if err != nil {
 		t.Fatalf("test executable: %v", err)
 	}
-	script := filepath.Join(t.TempDir(), "fake-hermes")
-	extra := ""
-	for _, arg := range extraArgs {
-		extra += fmt.Sprintf("%q ", arg)
-	}
-	body := fmt.Sprintf("#!/bin/sh\nACP_GO_HERMES_GATEWAY_HELPER=1 ACP_GO_HERMES_GATEWAY_MODE=%s exec %q -test.run=TestFakeHermesGatewayProcessHelper -- %s\"$@\"\n", mode, testBinary, extra)
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatalf("write fake executable: %v", err)
-	}
+	args := append([]string{"-test.run=TestFakeHermesGatewayProcessHelper", "--"}, extraArgs...)
 
-	return script
+	return writeTestBinaryLauncher(t, t.TempDir(), "fake-hermes", testBinary,
+		map[string]string{
+			"ACP_GO_HERMES_GATEWAY_HELPER": "1",
+			"ACP_GO_HERMES_GATEWAY_MODE":   mode,
+		},
+		args)
 }
 
 // exitWhenParentTestExits is the fake gateway generation's own teardown. The
@@ -4020,14 +3696,13 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 // It reaps itself the moment the test binary that launched it is gone.
 func exitWhenParentTestExits() {
 	owner := os.Getppid()
-
-	go func() {
-		for range time.Tick(100 * time.Millisecond) {
-			if os.Getppid() != owner {
-				os.Exit(0)
-			}
+	if value := os.Getenv(fakeLauncherOwnerPIDEnv); value != "" {
+		if pid, convErr := strconv.Atoi(value); convErr == nil {
+			owner = pid
 		}
-	}()
+	}
+
+	watchFakeLauncherOwner(owner)
 }
 
 func runFakeHermesGatewayProcess(args []string, mode string) error {
@@ -4167,34 +3842,12 @@ func writeGatewayEvent(ctx context.Context, conn *websocket.Conn, event Event) {
 func restoreHermesClientSeams(t *testing.T) {
 	t.Helper()
 	marshalIndent := hermesMarshalIndent
-	writeLease2 := hermesWriteLease
-	reapLeaseFile := hermesReapLeaseFile
 	controlMkdir := hermesControlMkdir
 	controlChmod := hermesControlChmod
-	nativeHandoff := hermesNativeHandoff
-	inspectProcess := InspectProcess
 	t.Cleanup(func() {
 		hermesMarshalIndent = marshalIndent
-		hermesWriteLease = writeLease2
-		hermesReapLeaseFile = reapLeaseFile
 		hermesControlMkdir = controlMkdir
 		hermesControlChmod = controlChmod
-		hermesNativeHandoff = nativeHandoff
-		InspectProcess = inspectProcess
-	})
-}
-
-func restoreLeaseReapSeams(t *testing.T) {
-	t.Helper()
-	timeout := LeaseReapTimeout
-	interval := LeaseReapPollInterval
-	sleep := leaseReapSleep
-	now := leaseReapNow
-	t.Cleanup(func() {
-		LeaseReapTimeout = timeout
-		LeaseReapPollInterval = interval
-		leaseReapSleep = sleep
-		leaseReapNow = now
 	})
 }
 
@@ -4229,15 +3882,6 @@ func testXDGDirs(t *testing.T) XDGDirs {
 func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
 	t.Helper()
 	options.AmbientEnvironment = testAmbientEnvironment()
-	if options.AcquireDiscoveryResources == nil {
-		options.AcquireDiscoveryResources = testDiscoveryResourceAdmission
-	}
-	if options.RetainDiscoveryRoot == nil {
-		options.RetainDiscoveryRoot = func(string, error) {}
-	}
-	if runtime.GOOS == "darwin" {
-		options.DarwinBestEffortContainment = true
-	}
 	if strings.ContainsRune(options.ScratchParent, '\x00') {
 		return options
 	}

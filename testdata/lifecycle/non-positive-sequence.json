@@ -2,7 +2,7 @@
   "name": "non-positive-sequence",
   "purpose": "Sequences are contiguous positive integers claimed before delivery is attempted, so zero names no event. Structural validity is checked before ordering, which is why this reports the malformed envelope rather than a regression below the stream's boundary.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

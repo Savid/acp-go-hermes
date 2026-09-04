@@ -22,7 +22,7 @@ import (
 func TestLifecycleOpeningIsOrderedAfterResponse(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -234,7 +234,7 @@ func (w *gatedLifecycleWriter) Write(value []byte) (int, error) {
 func TestLifecycleOpeningWaitsForItsCompleteExactResponse(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -267,7 +267,7 @@ func TestLifecycleOpeningWaitsForItsCompleteExactResponse(t *testing.T) {
 func TestActiveLoadReplayStartsAfterItsExactResponse(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -303,7 +303,7 @@ func TestActiveLoadReplayStartsAfterItsExactResponse(t *testing.T) {
 func TestAgentCloseJoinsBlockedLifecycleResponseWrite(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
@@ -339,7 +339,7 @@ func TestAgentCloseJoinsBlockedLifecycleResponseWrite(t *testing.T) {
 func TestAgentClosePreservesAdmittedFullLifecycleResponse(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
@@ -496,7 +496,7 @@ func TestResponseOrderedWriterConcurrentCloseJoinsOneExactAttempt(t *testing.T) 
 func TestLifecycleResponseWriteFailureDischargesOpening(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
@@ -515,7 +515,7 @@ func TestLifecycleResponseWriteFailureDischargesOpening(t *testing.T) {
 func TestAgentCloseCancelsUnwrittenLifecycleOpening(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	session := testSession(agent, newFakeHermesClient())
 	conn := newRecordingAgentClient()
@@ -541,7 +541,7 @@ func TestAgentCloseCancelsUnwrittenLifecycleOpening(t *testing.T) {
 func TestLifecycleResponsesCorrelateByExactRequestIdentity(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -556,7 +556,7 @@ func TestLifecycleResponsesCorrelateByExactRequestIdentity(t *testing.T) {
 			nativeID := "same-native-" + method
 			client := newFakeHermesClient()
 			native := testNativeSession(nativeID)
-			session := newSession(agent, logicalID, "/tmp/project", nil, nil, native, client, sessionMeta{}, idmapRecord{
+			session := newSession(agent, logicalID, absTestPath("tmp", "project"), nil, nil, native, client, sessionMeta{}, idmapRecord{
 				SessionID: string(logicalID), NativeSessionID: nativeID, Format: SessionStoreFormat,
 			})
 			require.NoError(t, session.openLifecycleStream())
@@ -617,7 +617,7 @@ func (c *lifecycleOpenBarrierClient) SessionUpdate(
 func TestDuplicateLifecycleResponseIDsKeepExactOpaqueOwnership(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := &lifecycleOpenBarrierClient{
 		recordingAgentClient: newRecordingAgentClient(),
@@ -653,7 +653,7 @@ func TestDuplicateLifecycleResponseIDsKeepExactOpaqueOwnership(t *testing.T) {
 
 	makeSession := func(id acp.SessionId, requestCtx context.Context) (*session, []byte) {
 		native := testNativeSession("native-" + string(id))
-		session := newSession(agent, id, "/tmp/project", nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
+		session := newSession(agent, id, absTestPath("tmp", "project"), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
 			SessionID: string(id), NativeSessionID: native.ID, Format: SessionStoreFormat,
 		})
 		require.NoError(t, session.openLifecycleStream())
@@ -708,14 +708,14 @@ func TestLifecycleResponseFailureFencesOnlyItsExactRequestIdentity(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			agent := newTestAgent()
 			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 			})
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
 
 			makeSession := func(id acp.SessionId, requestID int) *session {
 				native := testNativeSession("same-native")
-				s := newSession(agent, id, "/tmp/project", nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
+				s := newSession(agent, id, absTestPath("tmp", "project"), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{
 					SessionID: string(id), NativeSessionID: native.ID, Format: SessionStoreFormat,
 				})
 				require.NoError(t, s.openLifecycleStream())
@@ -751,7 +751,7 @@ func TestLifecycleResponseFailureFencesOnlyItsExactRequestIdentity(t *testing.T)
 func TestLifecycleOpeningObligationsAreBoundedAndRetired(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
@@ -792,7 +792,7 @@ func TestActiveReuseRefusalsRemainExactAndReleaseAdmission(t *testing.T) {
 	t.Run("lifecycle response backpressure", func(t *testing.T) {
 		agent := newTestAgent()
 		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-			Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 		})
 		session := testSession(agent, newFakeHermesClient())
 		require.NoError(t, session.openLifecycleStream())
@@ -818,7 +818,7 @@ func TestActiveReuseRefusalsRemainExactAndReleaseAdmission(t *testing.T) {
 func TestLifecycleOpeningRemainingHardCutBranches(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
@@ -829,7 +829,7 @@ func TestLifecycleOpeningRemainingHardCutBranches(t *testing.T) {
 
 	agent = newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	session = testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
@@ -887,7 +887,7 @@ func TestActiveLifecycleReuseAdmissionCannotCrossAgentClose(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			agent := newTestAgent()
 			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 			})
 			client := newFakeHermesClient()
 			session := testSession(agent, client)
@@ -917,13 +917,13 @@ func TestActiveLifecycleReuseAdmissionCannotCrossAgentClose(t *testing.T) {
 				responseReady <- err
 			}()
 
-			<-admitted
+			awaitTestSignal(t, admitted, "active reuse admission")
 			require.True(t, agent.mu.TryLock(), "active reuse held Agent.mu across post-admission work")
 			agent.mu.Unlock()
 
 			closed := make(chan error, 1)
 			go func() { closed <- agent.Close() }()
-			<-cancelled
+			awaitTestSignal(t, cancelled, "admission cancellation")
 			require.Error(t, <-responseReady)
 			require.NoError(t, <-closed)
 		})
@@ -936,7 +936,7 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 			store := NewInMemorySessionStore()
 			agent := newTestAgent(WithSessionStore(store))
 			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 			})
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
@@ -965,16 +965,22 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 				_, err := agent.ResumeSession(requestCtx, ResumeSessionRequest(session.id, session.cwd))
 				requestDone <- err
 			}()
-			<-admitted
+			awaitTestSignal(t, admitted, "active reuse admission")
 
 			closeDone := make(chan error, 1)
 			go func() {
 				_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 				closeDone <- err
 			}()
-			<-cancelled
-			require.True(t, agent.mu.TryLock(), "session close held Agent.mu while joining reuse")
-			agent.mu.Unlock()
+			awaitTestSignal(t, cancelled, "admission cancellation")
+			require.Eventually(t, func() bool {
+				if !agent.mu.TryLock() {
+					return false
+				}
+				agent.mu.Unlock()
+
+				return true
+			}, time.Second, time.Millisecond, "session close held Agent.mu while joining reuse")
 			require.Error(t, <-requestDone)
 			require.NoError(t, <-closeDone)
 			require.Nil(t, agent.activeSession(session.id))
@@ -996,14 +1002,21 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 func TestSessionCloseCancelsAndJoinsActiveReplay(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
 	replayEntered := make(chan struct{})
 	replayCancelled := make(chan struct{})
+	var replayOnce sync.Once
 	client.messagesFunc = func(ctx context.Context, _ string) ([]nativehermes.NativeMessage, error) {
+		firstReplay := false
+		replayOnce.Do(func() { firstReplay = true })
+		if !firstReplay {
+			return nil, nil
+		}
+
 		close(replayEntered)
 		<-ctx.Done()
 		close(replayCancelled)
@@ -1045,7 +1058,7 @@ func TestSuccessfulSessionCloseCannotPrecedeActiveReuseResponse(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
 			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-				Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 			})
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
@@ -1105,7 +1118,7 @@ func TestSuccessfulSessionCloseCannotPrecedeActiveReuseResponse(t *testing.T) {
 func TestLifecycleOpenFailureFencesStream(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New("opening failed")
@@ -1122,7 +1135,7 @@ func TestLifecycleOpenFailureLogOmitsArbitraryErrorText(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	agent := newTestAgent(WithLogger(logger))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New(secret)

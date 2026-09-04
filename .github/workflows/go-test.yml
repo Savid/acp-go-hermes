@@ -24,10 +24,10 @@ jobs:
         uses: ./.github/workflows/go-setup
 
       - name: Build
-        run: go build ./...
+        run: make build
 
       - name: Test and coverage gate
-        run: .github/scripts/run-privileged-suite.sh coverage-check
+        run: make coverage-check
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tee coverage-summary.txt
@@ -36,9 +36,7 @@ jobs:
         run: make test-cross-compile
 
       - name: Check module tidiness
-        run: |
-          go mod tidy -diff
-          git diff --exit-code -- go.mod go.sum
+        run: make tidy
 
       - name: Check modernization drift
         run: make modernize-check
@@ -50,6 +48,18 @@ jobs:
           path: |
             coverage.out
             coverage-summary.txt
+
+  native-browser:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: ./.github/workflows/go-setup
+
+      - name: Native browser canary
+        run: make test-integration-native-browser
 
   # Ordinary same-identity execution is supported on Windows, and compiling it
   # there is not evidence that it runs there: the resolver has to read an
@@ -72,27 +82,3 @@ jobs:
       - name: Ordinary launch runtime suite
         shell: bash
         run: .github/scripts/run-windows-behavior-proof.sh
-
-  trusted-supervisor:
-    runs-on: [self-hosted]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Setup Go
-        uses: ./.github/workflows/go-setup
-
-      - name: Trusted supervisor security suite
-        run: .github/scripts/run-privileged-suite.sh test-trusted-supervisor
-
-  native-browser:
-    runs-on: [self-hosted]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Setup Go
-        uses: ./.github/workflows/go-setup
-
-      - name: Native browser containment canary
-        run: .github/scripts/with-privileged-lock.sh make test-integration-native-browser

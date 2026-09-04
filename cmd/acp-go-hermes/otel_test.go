@@ -185,7 +185,6 @@ func TestJoinedSlogHandler(t *testing.T) {
 }
 
 func TestRunHandlesTelemetryConfigError(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	t.Cleanup(func() { serve = originalServe })
 
@@ -199,14 +198,13 @@ func TestRunHandlesTelemetryConfigError(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "invalid")
 
 	var stderr bytes.Buffer
-	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "configure OpenTelemetry") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }
 
 func TestRunHandlesTelemetryShutdownError(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	t.Cleanup(func() {
@@ -222,7 +220,7 @@ func TestRunHandlesTelemetryShutdownError(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "shutdown OpenTelemetry") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}

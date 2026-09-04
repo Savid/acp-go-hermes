@@ -256,16 +256,11 @@ the returned error chain for the exact native cause.
 A timeout is a failure, not a user cancel, so it surfaces as
 `hermes_turn_failed` with `cause: "timeout"` — never the `cancelled` stop
 reason. A turn cancelled by the client returns the `cancelled` stop reason
-instead. Neither result settles after Hermes' cooperative interrupt alone.
-The adapter first completes the selected native containment boundary. Linux
-authoritatively empties the native tree, including background tools that Hermes
-intentionally leaves running. Windows runs the ordinary same-identity boundary
-and completes exactly the child it started; only an explicit Unix UID/GID
-isolation policy fails closed there. Darwin best effort
-only reaps the direct child and observes the captured original process group
-absent; a `setsid(2)` descendant may remain live. If the selected boundary does
-not complete, the prompt fails and the session is poisoned instead of reporting
-a normal timeout or cancellation.
+instead. Neither result settles after Hermes' cooperative interrupt alone. The
+adapter closes the gateway, revokes the session-owned native launch, waits for
+its terminal result, and then reclaims every prepared tree. If an authority
+cannot complete that boundary, the prompt fails and the session is poisoned
+instead of reporting a normal timeout or cancellation.
 </Note>
 
 A turn Hermes itself ends with `status: "interrupted"` — a native stop, steer,

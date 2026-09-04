@@ -2,7 +2,7 @@
   "name": "snapshot-cross-set-id-legal",
   "purpose": "Uniqueness is per set because activities and actions are distinct id spaces. The same opaque string naming an activity in one set and an action in the other is two entities, not a collision: a sibling minting both from one native counter is emitting a legal stream. The snapshot reduces, and the later patches prove the two were never conflated — the action resolves while the activity stays live, and each reaches its own state.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

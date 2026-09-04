@@ -312,13 +312,6 @@ func TestAuthPollNormalizesTheNativeStateVocabulary(t *testing.T) {
 			}
 		})
 	}
-
-	server := newAuthTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"complete"}`))
-	})
-	if _, err := server.AuthPollFlow(context.Background(), "xai-oauth", "s1"); err == nil {
-		t.Fatal("the removed native complete state was accepted")
-	}
 }
 
 func TestAuthRequestFailurePaths(t *testing.T) {

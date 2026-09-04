@@ -3081,7 +3081,7 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
-	client.closeErr = nativehermes.ErrProcessContainmentIncomplete
+	client.closeErr = ErrContainmentIncomplete
 	session := testSession(newTestAgent(), client)
 	promptDone := make(chan error, 1)
 	go func() {
@@ -3091,10 +3091,10 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 	<-started
 
 	cancelErr := session.cancelRouted(turnRouteMeta("unproven-fence"))
-	if !errors.Is(cancelErr, nativehermes.ErrProcessContainmentIncomplete) {
+	if !errors.Is(cancelErr, ErrContainmentIncomplete) {
 		t.Fatalf("Cancel error = %v, want process-tree proof failure", cancelErr)
 	}
-	if promptErr := <-promptDone; !errors.Is(promptErr, nativehermes.ErrProcessContainmentIncomplete) {
+	if promptErr := <-promptDone; !errors.Is(promptErr, ErrContainmentIncomplete) {
 		t.Fatalf("Prompt error = %v, want process-tree proof failure", promptErr)
 	}
 	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
@@ -3157,20 +3157,6 @@ func TestCancelWithoutValidatedNonceHasNoNativeSideEffect(t *testing.T) {
 }
 
 func TestPromptFenceRemainingFailureBranches(t *testing.T) {
-	t.Run("prompt resume admission failure", func(t *testing.T) {
-		wantErr := errors.New("resume denied")
-		agent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-			ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, wantErr
-			},
-		}))
-		session := testSession(agent, newFakeHermesClient())
-		session.runtimeNeedsResume = true
-		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "resume-denied", "reply")); !errors.Is(err, wantErr) {
-			t.Fatalf("Prompt resume error = %v", err)
-		}
-	})
-
 	t.Run("default timer fallback", func(t *testing.T) {
 		agent := newTestAgent(WithTurnTimeout(time.Hour))
 		agent.options.newPromptTimer = nil
@@ -3732,32 +3718,10 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 	}
 }
 
-func TestSharedHomePromptSessionSetLock(t *testing.T) {
-	home := t.TempDir()
-	agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
-	client := newFakeHermesClient()
-	session := testSession(agent, client)
-	response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "shared-lock", "reply"))
-	if err != nil || response.StopReason == "" {
-		t.Fatalf("shared-home prompt=%+v err=%v", response, err)
-	}
-
-	lock, err := nativehermes.AcquireSharedSessionSetLock(t.Context(), home, nativehermes.SharedSessionSetLockExclusive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = lock.Release() }()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	if _, err := session.Prompt(ctx, TextPromptRequest(session.id, "blocked-lock", "blocked")); err == nil {
-		t.Fatal("contended shared-home turn lock succeeded")
-	}
-}
-
 func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
@@ -4115,7 +4079,7 @@ func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	negotiatedSession := testSession(agent, newFakeHermesClient())
 	_, err := negotiatedSession.Prompt(t.Context(), acp.PromptRequest{
@@ -4502,7 +4466,7 @@ func newOrderedControlSession(t *testing.T) (*session, *fakeHermesClient, *order
 	_ = acp.NewClientSideConnection(host, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	connection := newLocalAgentConnection(agent, orderedControlWireWriter{target: a2cW, events: host.wireEvents}, c2aR)

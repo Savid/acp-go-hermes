@@ -2,7 +2,7 @@
   "name": "snapshot-duplicate-with-unnegotiated-kind",
   "purpose": "The ordering holds whatever the repeated entry's own defect is. Here the second entry for a twice-listed activityId names a kind absent from the answer's activityKinds, which alone would be an unnegotiated fact. Set membership is judged first, so the repeated id decides the verdict — malformed_envelope, the set's failure, rather than the unnegotiated kind the entry would have reported standing alone — and the refused snapshot opens nothing.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

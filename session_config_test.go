@@ -97,7 +97,7 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	// A harness that enumerated nothing, for a session that has selected
 	// nothing, leaves the config surface with nothing to publish rather than an
 	// empty select a host would render as a broken picker.
-	unselected := newSession(agent, "unselected", "/tmp/project", nil, nil, nativehermes.Session{ID: "native-unselected"}, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
+	unselected := newSession(agent, "unselected", absTestPath("tmp", "project"), nil, nil, nativehermes.Session{ID: "native-unselected"}, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
 	if options := unselected.configOptions(ctx); options != nil {
 		t.Fatalf("empty enumeration config options = %#v", options)
 	}
@@ -423,7 +423,7 @@ func TestSetSessionConfigNativeSetterFailure(t *testing.T) {
 	}}}
 	wantErr := errors.New("set model")
 	agent := newTestAgent()
-	session := newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), modelSetterTestServer{Server: client, err: wantErr}, sessionMeta{}, idmapRecord{
+	session := newSession(agent, "session-1", absTestPath("tmp", "project"), nil, nil, testNativeSession("native-1"), modelSetterTestServer{Server: client, err: wantErr}, sessionMeta{}, idmapRecord{
 		SessionID: "session-1", NativeSessionID: "native-1", Format: SessionStoreFormat,
 	})
 	agent.sessions[session.id] = session

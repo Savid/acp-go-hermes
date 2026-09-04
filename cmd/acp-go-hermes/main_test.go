@@ -32,7 +32,6 @@ func TestRunVersionAndFlagError(t *testing.T) {
 }
 
 func TestRunServeSuccessAndError(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	agentVersion = func() string { return "v-test" }
@@ -49,7 +48,6 @@ func TestRunServeSuccessAndError(t *testing.T) {
 		return nil
 	}
 	if code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "hermes",
 		"-scratch-dir", "/tmp/scratch",
 		"-model", "openai/gpt-test",
@@ -60,19 +58,11 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	if len(gotOptions) == 0 {
 		t.Fatal("serve received no options")
 	}
-	var configured hermesacp.Options
-	for _, option := range gotOptions {
-		option(&configured)
-	}
-	if configured.ProcessIsolation == nil || configured.ProcessIsolation.UID != 20001 {
-		t.Fatalf("process isolation = %#v", configured.ProcessIsolation)
-	}
-
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return errors.New("boom")
 	}
 	var stderr bytes.Buffer
-	if code := run(context.Background(), isolatedArgs(), strings.NewReader(""), io.Discard, &stderr); code != 1 {
+	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, &stderr); code != 1 {
 		t.Fatalf("serve error code = %d", code)
 	}
 	if !strings.Contains(stderr.String(), "boom") {
@@ -84,66 +74,20 @@ func TestRunServeSuccessAndError(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return context.Canceled
 	}
-	if code := run(cancelled, isolatedArgs(), strings.NewReader(""), io.Discard, io.Discard); code != 0 {
+	if code := run(cancelled, nil, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 		t.Fatalf("cancelled serve code = %d", code)
-	}
-
-	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...hermesacp.Option) error {
-		proc, err := os.FindProcess(os.Getpid())
-		if err != nil {
-			return err
-		}
-		if err := proc.Signal(syscall.SIGTERM); err != nil {
-			return err
-		}
-		<-ctx.Done()
-
-		return ctx.Err()
-	}
-	if code := run(context.Background(), isolatedArgs(), strings.NewReader(""), io.Discard, io.Discard); code != 143 {
-		t.Fatalf("signalled serve code = %d", code)
 	}
 }
 
-// TestRunContainmentDispatchAndUndefinedFlag pins two rules of the entrypoint's
-// argument handling: the containment subcommand is dispatched rather than parsed
-// as flags, and a flag this binary does not define is refused with the parser's
-// own diagnostic instead of being ignored.
-func TestRunContainmentDispatchAndUndefinedFlag(t *testing.T) {
+func TestRunRejectsUndefinedFlag(t *testing.T) {
 	restore := replaceGlobals(t)
 	defer restore()
-	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"containment"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
-		t.Fatalf("containment dispatch code = %d", code)
-	}
-
-	stderr.Reset()
+	var stderr bytes.Buffer
 	if code := run(context.Background(), []string{"-not-a-flag"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
 		t.Fatalf("undefined flag code = %d", code)
 	}
 	if !strings.Contains(stderr.String(), "flag provided but not defined") {
 		t.Fatalf("undefined flag stderr = %q", stderr.String())
-	}
-}
-
-func TestRunRejectsUnreadableProcessIsolationConfig(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	originalLoader := processIsolationConfigLoader
-	t.Cleanup(func() { processIsolationConfigLoader = originalLoader })
-
-	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
-		return processIsolationConfig{}, errors.New("unreadable policy")
-	}
-	var stderr bytes.Buffer
-	if code := run(
-		t.Context(), []string{"-process-isolation-config", "/missing"},
-		strings.NewReader(""), io.Discard, &stderr,
-	); code != 1 {
-		t.Fatalf("process isolation config error code = %d", code)
-	}
-	if !strings.Contains(stderr.String(), "unreadable policy") {
-		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
@@ -178,7 +122,6 @@ func TestSeedFileFlag(t *testing.T) {
 }
 
 func TestRunSeedFileFlag(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	agentVersion = func() string { return "v-test" }
@@ -197,7 +140,6 @@ func TestRunSeedFileFlag(t *testing.T) {
 		return nil
 	}
 	if code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "config.yaml=" + hostPath,
 	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 		t.Fatalf("seed-file run code = %d", code)
@@ -214,7 +156,6 @@ func TestRunSeedFileFlag(t *testing.T) {
 
 	var stderr bytes.Buffer
 	if code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-seed-file", "config.yaml=" + filepath.Join(dir, "absent"),
 	}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
 		t.Fatalf("missing host file code = %d, want 2", code)
@@ -246,7 +187,6 @@ func TestSignals(t *testing.T) {
 }
 
 func TestMainAndVersion(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	restore := replaceGlobals(t)
 	defer restore()
 	oldArgs := os.Args
@@ -259,7 +199,7 @@ func TestMainAndVersion(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
 		return errors.New("main failed")
 	}
-	os.Args = []string{"acp-go-hermes", "-process-isolation-config", testProcessIsolationConfigPath}
+	os.Args = []string{"acp-go-hermes"}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 	main()

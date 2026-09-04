@@ -2,7 +2,7 @@
   "name": "malformed-precedes-unknown-type",
   "purpose": "Structural validity is checked before the discriminant. An envelope whose sequence is not an integer has no ordering identity to report a verdict against, so the malformed envelope wins over the unknown event type it also carries.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

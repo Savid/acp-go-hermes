@@ -8,23 +8,16 @@ coordinates native OAuth flows and records only values-free lineage.
 
 ## Standalone credential input
 
-Under an explicit `-process-isolation-config` policy the standalone root
-supervisor never forwards its ambient environment. To pass provider API-key
-variables there, name each variable explicitly in the `inheritEnvironment` array
-of the root-owned policy. The value must be set in the supervisor environment or
-startup fails; identity, path, loader, XDG/native-home, and adapter-private
-variables cannot be inherited. File-backed or provider-broker credentials must
-live only in the explicit target-owned native home described by the adapter. No
-such standalone path reads root `HOME`, root native config, or an unlisted root
-credential.
-
-In ordinary mode — the default, with no policy supplied — Hermes inherits the
-adapter's own environment, so provider API-key variables set for the adapter are
-already visible to it. The adapter still removes its private
-`ACP_GO_HERMES_INTERNAL_*` and supervisor variables, its runtime and scratch
-markers, and the Hermes state roots it manages itself (`HERMES_HOME` and
+In ordinary mode Hermes receives the adapter's captured, sanitized environment,
+so provider API-key variables set for the adapter are visible to it. The
+adapter removes its private variables, runtime and scratch markers, and the
+Hermes state roots it manages itself (`HERMES_HOME` and
 `HERMES_DASHBOARD_SESSION_TOKEN`). Unsupported state-residence overrides are
 scrubbed from the child environment.
+
+When `WithHostAuthority` is supplied, the authority provides the complete
+native environment and the provider-auth extension methods remain unavailable.
+ACP session creation and prompting remain usable.
 
 ## No ACP auth methods
 
@@ -40,17 +33,9 @@ home. This intentionally shares Hermes' SQLite session state, config, and
 `auth.json`; the adapter never parses, copies, returns, injects, or snapshots
 credential material.
 
-One adapter owns that home root exclusively. Before its first native writer
-starts, the adapter takes a home-root claim — an OS-held lock plus a record of
-its own PID and kernel start time — and holds it until its last native writer
-has settled. A second adapter asking for the same home root is refused with
-`shared Hermes home root is already claimed by a live writer`, not admitted
-beside the first. The lock descriptor is inherited by every native process the
-adapter launches, so an adapter that dies leaves the root fenced by its
-surviving harness; the next adapter is admitted only after the recorded PID and
-kernel start time prove that claimant dead. A start whose native containment
-could not be proven keeps the claim for the rest of the adapter's life rather
-than releasing a root descendants may still be writing.
+One ordinary adapter owns that home root exclusively while its native writers
+are active. A second adapter asking for the same home root is refused rather
+than admitted beside the first.
 
 Inside that one adapter the per-session processes stay independent: each has a
 distinct port, dashboard token, browser shim, event stream, operation
@@ -92,11 +77,8 @@ Windows has no shim: `CreateProcess` resolves `cmd.exe`, `explorer.exe`, and
 `rundll32.exe` out of the system directory ahead of every `PATH` entry, and the
 `start` that opens a URL is a `cmd.exe` builtin with no image to shadow, so a
 shim directory on `PATH` neutralizes nothing there. Windows also refuses the
-shared Hermes home outright, because the inheritable lock handles that fence a
-shared residence do not exist there, so a shared-home session cannot start on
-Windows in the first place. Ordinary same-identity launch and every non-auth
-session leg remain available; the explicit Unix UID/GID isolation policy is
-rejected there as well.
+shared Hermes home, so a shared-home session cannot start there. Ordinary
+same-account launch and every non-auth session leg remain available.
 
 Hermes' dashboard auth endpoint returns the authorization URL to its caller,
 and the dashboard UI owns opening it; the adapter relays that returned URL. The

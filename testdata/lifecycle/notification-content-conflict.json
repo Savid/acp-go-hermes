@@ -2,7 +2,7 @@
   "name": "notification-content-conflict",
   "purpose": "The dedup identity covers the whole delivered notification, carrier and every other member included, not the envelope alone. The same envelope arriving a second time beside notification content the first delivery did not carry — here a reserved propagation key on the same session's frame — reuses that identity with different content, so it is a conflicting duplicate rather than a suppressible retransmission: a consumer cannot tell which of the two the emitter meant to deliver.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

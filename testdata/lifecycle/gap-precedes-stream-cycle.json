@@ -2,7 +2,7 @@
   "name": "gap-precedes-stream-cycle",
   "purpose": "Ordering identity is validated before the event is reduced, so a snapshot arriving out of contiguity reports the gap rather than the cycle. Contiguity is the loss detector, and a consumer that reported the cycle here would have swallowed the evidence that something was dropped.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

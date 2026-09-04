@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -32,17 +31,12 @@ func TestLiveServeRoundTrip(t *testing.T) {
 			"NO_COLOR": "1",
 			"PATH":     os.Getenv("PATH"),
 		},
-		AcquireDiscoveryResources: testDiscoveryResourceAdmission,
-		RetainDiscoveryRoot:       func(string, error) {},
 	}
 	// image.attach_bytes is a local upload rather than a model call, but the
 	// gateway refuses it until some inference provider is configured. A
 	// placeholder key satisfies that precondition; no prompt is submitted and
 	// no credential or real Hermes home is involved.
 	opts.Env["OPENAI_API_KEY"] = "acp-go-hermes-smoke-placeholder-not-a-credential"
-	if runtime.GOOS == "darwin" {
-		opts.DarwinBestEffortContainment = true
-	}
 	proc, err := Start(ctx, opts)
 	if err != nil {
 		t.Fatalf("start hermes serve: %v", err)

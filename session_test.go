@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -32,18 +31,6 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 }
 
 func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
-	wantResumeErr := errors.New("resume admission")
-	resumeAgent := newTestAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
-		ReserveScratchRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-			return nil, wantResumeErr
-		},
-	}))
-	resumeSession := testSession(resumeAgent, newFakeHermesClient())
-	resumeSession.runtimeNeedsResume = true
-	if _, _, err := resumeSession.preparePromptTurn(t.Context(), "resume-error"); !errors.Is(err, wantResumeErr) {
-		t.Fatalf("prepare resume error = %v", err)
-	}
-
 	nilClient := testSession(newTestAgent(), newFakeHermesClient())
 	nilClient.client = nil
 	nilClient.cancelTurn()

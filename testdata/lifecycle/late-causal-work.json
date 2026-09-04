@@ -2,7 +2,7 @@
   "name": "late-causal-work",
   "purpose": "A certified quiescence fences causal work rooted at or before its watermark. A first-sight activity whose origin turn was first seen at or before that watermark is old causal work discovered late: it can never reopen the settled boundary, so it is refused rather than reduced into it.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

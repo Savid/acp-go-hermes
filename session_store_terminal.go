@@ -1,7 +1,6 @@
 package hermesacp
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,14 +47,7 @@ func InspectSessionStoreTerminalState(
 
 	var snapshot stateSnapshot
 
-	decoder := json.NewDecoder(bytes.NewReader(entries[0]))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&snapshot); err != nil {
-		return SessionStoreTerminalState{}, fmt.Errorf("decode Hermes session-store snapshot: %w", err)
-	}
-
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := decodeStrictStoreJSON(entries[0], &snapshot, stateSnapshotJSONShape); err != nil {
 		return SessionStoreTerminalState{}, fmt.Errorf("decode Hermes session-store snapshot: %w", err)
 	}
 
@@ -152,6 +144,22 @@ func validateStateSnapshotTerminal(terminal *stateSnapshotTerminal) error {
 }
 
 func validateStateSnapshotRequiredSections(snapshot stateSnapshot) error {
+	if snapshot.Session.Env == nil {
+		return errors.New("session environment is required")
+	}
+
+	if snapshot.Session.ExtraPathDirs == nil {
+		return errors.New("session extra path directories are required")
+	}
+
+	if _, err := stringMapFromMeta(snapshot.Session.Env); err != nil {
+		return fmt.Errorf("session environment: %w", err)
+	}
+
+	if _, err := extraPathDirsFromMeta(snapshot.Session.ExtraPathDirs); err != nil {
+		return fmt.Errorf("session extra path directories: %w", err)
+	}
+
 	if snapshot.Archives == nil {
 		return errors.New("archives section is required")
 	}

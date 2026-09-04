@@ -1,6 +1,8 @@
 package hermes
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,85 +11,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testAmbientEnvironment is the adapter environment an ordinary launch
-// inherits. Tests that exercise process lifecycle rather than the isolation
-// policy use it with a nil Isolation, which is what the ordinary default
-// actually selects.
-func testAmbientEnvironment() map[string]string {
-	return map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")}
-}
-
-func TestOrdinaryEnvironmentScrubsPrivateAndManagedState(t *testing.T) {
-	ambient := map[string]string{
-		"PATH":                           "/usr/bin",
-		"HOME":                           "/home/operator",
-		"HERMES_WEB_DIST":                "/opt/hermes/web",
-		privateSupervisorEnvPrefix + "X": "spoofed",
-		"acp_go_hermes_internal_lower":   "spoofed",
-		processSupervisorEnvPrefix:       "guardian",
-		envRuntimeID:                     "forged-runtime",
-		envScratchRoot:                   "/forged/scratch",
-		"HERMES_HOME":                    "/operator/real/home",
-		"HERMES_DASHBOARD_SESSION_TOKEN": "forged-token",
-		"":                               "empty key",
-		"BAD=KEY":                        "invalid",
-		"NUL\x00KEY":                     "invalid",
-	}
-
-	environment, err := ordinaryEnvironment(ambient)
+func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
+	environment, err := ordinaryEnvironment(map[string]string{
+		"PATH":                                 "/usr/bin",
+		"HOME":                                 "/home/operator",
+		"HERMES_WEB_DIST":                      "/opt/hermes/web",
+		envHermesHome:                          "/foreign/home",
+		envHermesSessionToken:                  "foreign-token",
+		strings.ToLower(envHermesHome):         "/foreign/lower-home",
+		strings.ToLower(envHermesSessionToken): "foreign-lower-token",
+		"":                                     "empty key",
+		"BAD=KEY":                              "invalid",
+		"NUL\x00KEY":                           "invalid",
+	})
 	require.NoError(t, err)
-
 	require.Equal(t, []string{
 		"HERMES_WEB_DIST=/opt/hermes/web",
 		"HOME=/home/operator",
 		"PATH=/usr/bin",
 	}, environment)
-}
 
-func TestOrdinaryEnvironmentOverlayCannotReintroduceScrubbedState(t *testing.T) {
-	environment, err := ordinaryEnvironment(
+	environment, err = ordinaryEnvironment(
 		map[string]string{"PATH": "/usr/bin"},
 		map[string]string{
-			"MODEL":                          "sonnet",
-			"PATH":                           "/opt/bin",
-			privateSupervisorEnvPrefix + "X": "spoofed",
+			"MODEL":       "sonnet",
+			"PATH":        "/opt/bin",
+			envHermesHome: "/overlay/home",
 		},
 	)
 	require.NoError(t, err)
-
-	// The overlay wins for ordinary keys and is scrubbed on the same terms as
-	// the ambient base for adapter-private and adapter-managed ones.
 	require.Equal(t, []string{"MODEL=sonnet", "PATH=/opt/bin"}, environment)
 
 	_, err = ordinaryEnvironment(nil, map[string]string{"BAD=KEY": "value"})
 	require.ErrorContains(t, err, "invalid key")
 }
 
-func TestProcessPATHOrdersOperationBeforeBrowserShimAndNativePATH(t *testing.T) {
+func TestProcessPATHOrdersOperationBeforeBrowserShimAndBase(t *testing.T) {
 	separator := string(os.PathListSeparator)
 	operationOne := filepath.Join(t.TempDir(), "operation-one")
 	operationTwo := filepath.Join(t.TempDir(), "operation-two")
 	shimDir := filepath.Join(t.TempDir(), "browser-shim")
-	nativeOne := filepath.Join(t.TempDir(), "native-one")
-	nativeTwo := filepath.Join(t.TempDir(), "native-two")
+	baseOne := filepath.Join(t.TempDir(), "base-one")
+	baseTwo := filepath.Join(t.TempDir(), "base-two")
 
 	base := []string{
 		"STATIC=1",
-		"PATH=" + separator + nativeOne + separator + separator + nativeTwo + separator,
+		"PATH=" + separator + baseOne + separator + separator + baseTwo + separator,
 	}
 	withShim := browserShimEnviron(base, shimDir)
 	actual := prependPathDirs(withShim, []string{operationOne, operationTwo, operationOne})
 	require.Equal(t,
-		strings.Join([]string{operationOne, operationTwo, operationOne, shimDir, nativeOne, nativeTwo}, separator),
-		envValue(actual, "PATH"),
+		strings.Join([]string{operationOne, operationTwo, operationOne, shimDir, baseOne, baseTwo}, separator),
+		envValueFold(actual, "PATH", false),
 	)
-	require.NotContains(t, strings.Split(envValue(actual, "PATH"), separator), "")
+	require.NotContains(t, strings.Split(envValueFold(actual, "PATH", false), separator), "")
+	require.Equal(t, browserShimCommand(shimDir), envValueFold(actual, browserShimBrowserEnv, false))
 
 	absent := prependPathDirs([]string{"STATIC=1"}, []string{operationOne, operationTwo})
-	require.Equal(t, strings.Join([]string{operationOne, operationTwo}, separator), envValue(absent, "PATH"))
+	require.Equal(t, strings.Join([]string{operationOne, operationTwo}, separator), envValueFold(absent, "PATH", false))
 
 	noPath := prependPathDirs([]string{"STATIC=1", "PATH=" + separator + separator}, nil)
-	require.Empty(t, envValue(noPath, "PATH"))
+	require.Empty(t, envValueFold(noPath, "PATH", false))
 	require.Equal(t, []string{"STATIC=1"}, noPath)
 }
 
@@ -114,43 +98,37 @@ func TestProcessCarrierValidation(t *testing.T) {
 
 	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
 	require.Error(t, validatePathCarrierEnvironment(map[string]string{"BASH_ENV": "/bad"}))
+	require.Error(t, validatePathCarrierEnvironment(map[string]string{"ENV": "/bad"}))
 	require.NoError(t, validateSessionEnvironmentNoPath(map[string]string{"TOKEN": "good"}))
 	require.True(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "windows"))
 	require.False(t, processEnvironmentKeyMatchesForPlatform("Path", "PATH", "linux"))
 
-	_, err = validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{"relative"}})
-	require.Error(t, err)
-	_, err = validatedProcessCarrier(ProcessOptions{SessionEnv: map[string]string{"PATH": "/bad"}})
-	require.Error(t, err)
-	_, err = validatedProcessCarrier(ProcessOptions{Env: map[string]string{"BASH_ENV": "/bad"}})
-	require.Error(t, err)
-	_, err = validatedProcessCarrier(ProcessOptions{Isolation: &ProcessIsolation{BaseEnvironment: map[string]string{
-		hermesPathInitCountEnv: "1",
-	}}})
-	require.Error(t, err)
+	for _, options := range []ProcessOptions{
+		{ExtraPathDirs: []string{"relative"}},
+		{SessionEnv: map[string]string{"PATH": "/session"}},
+		{Env: map[string]string{hermesBashEnvKey: "/untrusted"}},
+		{Env: map[string]string{hermesShellEnvKey: "/untrusted"}},
+		{
+			StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return nil, errors.New("unused") },
+			NativeEnvironment: map[string]string{hermesBashEnvKey: "/untrusted"},
+		},
+		{
+			StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return nil, errors.New("unused") },
+			NativeEnvironment: map[string]string{hermesShellEnvKey: "/untrusted"},
+		},
+	} {
+		_, carrierErr := validatedProcessCarrier(options)
+		require.Error(t, carrierErr)
+	}
+
 	carrier, err := validatedProcessCarrier(ProcessOptions{ExtraPathDirs: []string{absolute}})
 	require.NoError(t, err)
 	require.Equal(t, []string{absolute}, carrier)
 
-	_, err = Start(t.Context(), ProcessOptions{ExtraPathDirs: []string{"relative"}})
-	require.Error(t, err)
-	invalidSessionEnvironment := darwinTestProcessOptions(t, ProcessOptions{
-		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:           t.TempDir(),
-		SessionEnv:     map[string]string{"BAD=KEY": "value"},
-	})
-	_, err = Start(t.Context(), invalidSessionEnvironment)
+	_, err = processSessionLaunchEnvironment(ProcessOptions{SessionEnv: map[string]string{"BAD=KEY": "value"}})
 	require.ErrorContains(t, err, "invalid key")
 }
 
-// TestProcessEnvironmentPhasesFoldWindowsNames is the portable half of the
-// conflicting-case evidence, run with the platform seam pinned so every host
-// exercises it. Windows names environment variables case-insensitively, so an
-// inherited "Path" and a "PATH" written by a later phase are one variable. The
-// rule has to be decided here rather than left to the child, because this
-// adapter resolves the harness executable out of the same block it is about to
-// hand over: a first-match read against a block the child deduplicates to the
-// last value would search a PATH the harness never sees.
 func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	originalPlatform := processRuntimePlatform
 	processRuntimePlatform = processPlatformWindows
@@ -162,58 +140,37 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	harness := filepath.Join(harnessDir, "hermes.bat")
 	require.NoError(t, os.WriteFile(harness, []byte("@echo fixture\n"), 0o600))
 
-	// The ambient block spells both names the way an inherited Windows block
-	// does; the Agent-scoped overlay is a later phase and spells them
-	// differently. Only one spelling of each may survive, carrying the later
-	// phase's value.
 	environment, err := ordinaryEnvironment(
 		map[string]string{"Path": decoyDir, "PATHEXT": ".COM;.EXE", "KEPT": "yes"},
 		map[string]string{"PATH": harnessDir, "PathExt": ".BAT"},
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"KEPT=yes", "PATH=" + harnessDir, "PathExt=.BAT"}, environment)
+	require.Equal(t, []string{"PATH=" + harnessDir, "PathExt=.BAT"}, environment, "KEPT is not an inherited name")
 
-	// Resolution reads the surviving values, so the decoy image the ambient
-	// phase pointed at is unreachable under both the search path and the
-	// extension list the last phase installed. The Windows rules are driven
-	// directly because the selector that reaches them, ordinaryExecutableRules,
-	// is build-tagged even though windowsExecutableRules itself compiles
-	// everywhere; the native lane proves the same block against a real Windows
-	// child.
 	resolved, err := lookOrdinaryPathWithRules("hermes", environment, windowsExecutableRules(environment))
 	require.NoError(t, err)
 	require.Equal(t, harness, resolved)
 
-	// Two spellings inside one phase have no order at all, so they are refused
-	// rather than settled by map iteration.
 	_, err = ordinaryEnvironment(nil, map[string]string{"Path": decoyDir, "PATH": harnessDir})
 	require.ErrorContains(t, err, `process environment names PATH twice, as "PATH" and "Path"`)
 
-	// A folded read reports the value the child keeps, which is the last one.
 	block := []string{"Path=" + decoyDir, "PATH=" + harnessDir}
 	require.Equal(t, harnessDir, envValueFold(block, "PATH", true))
 
-	// The carrier rewrite collapses every spelling into the single entry it
-	// emits, so no second owner of the search path reaches the child.
-	separator := string(os.PathListSeparator)
 	operationDir := t.TempDir()
 	rewritten := prependPathDirs(append([]string{"KEPT=yes"}, block...), []string{operationDir})
-	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + separator + harnessDir}, rewritten)
+	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + string(os.PathListSeparator) + harnessDir}, rewritten)
 
-	// A Hermes variable an operator wrote in another case is the same variable
-	// to Hermes itself, so the serve arguments derived from one are too.
 	require.Contains(t,
 		processServeArgs(ProcessOptions{SessionEnv: map[string]string{"Hermes_Web_Dist": "/opt/web"}}, 1),
 		"--skip-build",
 	)
 	require.Empty(t, processEnvironmentValue(map[string]string{"OTHER": "x"}, envHermesWebDist))
 
-	// Off Windows the two spellings are genuinely different variables and both
-	// survive untouched, and only the exact name is read.
 	processRuntimePlatform = processPlatformLinux
-	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir}, map[string]string{"PATH": harnessDir})
+	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir, "PATH": "/ambient/bin"}, map[string]string{"PATH": harnessDir})
 	require.NoError(t, err)
-	require.Equal(t, []string{"PATH=" + harnessDir, "Path=" + decoyDir}, unfolded)
+	require.Equal(t, []string{"PATH=" + harnessDir}, unfolded, "off Windows an inherited Path is a different variable and not an inherited name")
 	require.Empty(t, processEnvironmentValue(map[string]string{"Hermes_Web_Dist": "/opt/web"}, envHermesWebDist))
 	require.Equal(t, "/opt/web", processEnvironmentValue(map[string]string{envHermesWebDist: "/opt/web"}, envHermesWebDist))
 }
@@ -232,17 +189,13 @@ func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
 	}
 	base, err := processLaunchEnvironment(options)
 	require.NoError(t, err)
-	resolved, err := resolveHarnessExecutable(nil, options.ExecutablePath, base)
+	resolved, err := resolveHarnessExecutable(options.ExecutablePath, base)
 	require.NoError(t, err)
 	require.Equal(t, want, resolved)
 	require.NotContains(t, base, "WAGIE_API_TOKEN=session")
-	require.Equal(t, staticDir, envValue(base, "PATH"))
+	require.Equal(t, staticDir, envValueFold(base, "PATH", processRuntimePlatform == processPlatformWindows))
 }
 
-// writeTestHarness writes a harness image under dir under the name this
-// platform's ordinary resolution of a bare "hermes" will actually find, and
-// returns it. Windows resolves a bare name through PATHEXT, so the fixture has
-// to carry an extension those rules list.
 func writeTestHarness(t *testing.T, dir string) string {
 	t.Helper()
 
@@ -257,115 +210,186 @@ func writeTestHarness(t *testing.T, dir string) string {
 	return path
 }
 
-// TestOrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment pins the
-// split from strict policy resolution: a relative PATH entry and a relative
-// configured executable are ordinary, and refusing them would turn policy
-// omission into an app-start blocker.
-func TestOrdinaryExecutableResolutionAcceptsAnOrdinaryShellEnvironment(t *testing.T) {
+func TestOrdinaryExecutableResolutionAcceptsShellEnvironment(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	require.NoError(t, os.MkdirAll(binDir, 0o700))
-
 	harness := writeTestHarness(t, binDir)
-
-	// t.Chdir rather than a manual save-and-restore: it restores the directory
-	// itself and panics if this test or any parent is parallel, which is the
-	// guard a process-wide mutation in a package full of parallel tests needs.
 	t.Chdir(root)
 
 	separator := string(os.PathListSeparator)
-
 	for name, search := range map[string]string{
 		"relative entry": "bin" + separator + binDir,
 		"absolute entry": binDir,
 		"empty entry":    separator + "bin",
 	} {
 		t.Run(name, func(t *testing.T) {
-			resolved, lookErr := lookOrdinaryPathInEnvironment("hermes", []string{"PATH=" + search})
-			require.NoError(t, lookErr)
-			require.True(t, filepath.IsAbs(resolved), "resolved path %q must be absolute", resolved)
+			resolved, err := lookOrdinaryPathInEnvironment("hermes", []string{"PATH=" + search})
+			require.NoError(t, err)
+			require.True(t, filepath.IsAbs(resolved))
 			require.Equal(t, filepath.Base(harness), filepath.Base(resolved))
 		})
 	}
 
-	// A relative configured executable resolves against the working directory
-	// and is returned absolute, because exec.Cmd would otherwise evaluate it
-	// against the session cwd instead.
 	resolved, err := lookOrdinaryPathInEnvironment(filepath.Join("bin", "hermes"), nil)
 	require.NoError(t, err)
 	require.True(t, filepath.IsAbs(resolved))
 
 	_, err = lookOrdinaryPathInEnvironment("", nil)
 	require.ErrorContains(t, err, "empty")
-
 	_, err = lookOrdinaryPathInEnvironment("hermes", []string{"PATH=" + filepath.Join(root, "nonexistent")})
 	require.ErrorContains(t, err, "not found in PATH")
-
 	_, err = lookOrdinaryPathInEnvironment(filepath.Join("bin", "missing"), nil)
 	require.Error(t, err)
 }
 
-// TestResolveHarnessExecutableSplitsByMode proves the resolver picks the strict
-// resolver for a supplied policy and the ordinary one for an omitted policy,
-// which is what keeps an ordinary relative PATH from being judged by
-// closed-policy rules and vice versa.
-func TestResolveHarnessExecutableSplitsByMode(t *testing.T) {
-	root := t.TempDir()
-	binDir := filepath.Join(root, "bin")
-	require.NoError(t, os.MkdirAll(binDir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "hermes"), []byte("#!/bin/sh\n"), 0o700))
-
-	policy := &ProcessIsolation{UID: 1, GID: 1, BaseEnvironment: map[string]string{}}
-
-	resolved, err := resolveHarnessExecutable(policy, "hermes", []string{"PATH=" + binDir})
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(binDir, "hermes"), resolved)
-
-	// The strict resolver refuses a relative PATH entry even though the same
-	// entry is ordinary for an omitted policy.
-	_, err = resolveHarnessExecutable(policy, "hermes", []string{"PATH=bin"})
-	require.ErrorContains(t, err, "resolve Hermes executable")
-	require.ErrorContains(t, err, "not absolute")
-
-	t.Chdir(root)
-
-	resolved, err = resolveHarnessExecutable(nil, "hermes", []string{"PATH=bin"})
-	require.NoError(t, err)
-	require.Equal(t, "hermes", filepath.Base(resolved))
-
-	_, err = resolveHarnessExecutable(nil, "hermes", []string{"PATH=/nonexistent"})
-	require.ErrorContains(t, err, "resolve Hermes executable")
-}
-
-// TestStrictPolicyResolutionKeepsItsAbsolutePathRule proves the ordinary
-// relaxation above did not leak into the closed-policy resolver, whose author
-// writes the whole environment and is held to absolute entries.
-func TestStrictPolicyResolutionKeepsItsAbsolutePathRule(t *testing.T) {
-	_, err := lookPathInEnvironment("hermes", []string{"PATH=bin:/usr/bin"})
-	require.ErrorContains(t, err, "not absolute")
-
-	_, err = lookPathInEnvironment("hermes", nil)
-	require.ErrorContains(t, err, "without policy PATH")
-
-	_, err = lookPathInEnvironment(filepath.Join("bin", "hermes"), nil)
-	require.ErrorContains(t, err, "not absolute")
-
-	_, err = lookPathInEnvironment("", nil)
-	require.ErrorContains(t, err, "empty")
-}
-
 func TestScrubOrdinaryEnvironmentKeyIsCaseInsensitive(t *testing.T) {
 	for _, key := range []string{
-		privateSupervisorEnvPrefix + "MODE",
-		strings.ToLower(privateSupervisorEnvPrefix) + "mode",
-		processSupervisorEnvPrefix,
-		strings.ToLower(envRuntimeID),
-		"Hermes_Home",
+		envHermesHome,
+		strings.ToLower(envHermesHome),
+		envHermesSessionToken,
+		strings.ToLower(envHermesSessionToken),
 	} {
 		require.True(t, scrubOrdinaryEnvironmentKey(key), "key %q must be scrubbed", key)
 	}
 
-	for _, key := range []string{"PATH", "HOME", "HERMES_WEB_DIST", "ACP_GO_HERMES_MODEL"} {
+	for _, key := range []string{"PATH", "HOME", envHermesWebDist, "ACP_GO_HERMES_MODEL"} {
 		require.False(t, scrubOrdinaryEnvironmentKey(key), "key %q must be inherited", key)
+	}
+}
+
+func TestManagedEnvironmentStartsFromAuthorityBase(t *testing.T) {
+	environment, err := managedEnvironment(
+		map[string]string{"PATH": "/native/bin", "BASE": "base"},
+		map[string]string{"BASE": "agent", "AGENT": "yes"},
+		map[string]string{"SESSION": "yes"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "/native/bin", envValueFold(environment, "PATH", false))
+	require.Equal(t, "agent", envValueFold(environment, "BASE", false))
+	require.Equal(t, "yes", envValueFold(environment, "AGENT", false))
+	require.Equal(t, "yes", envValueFold(environment, "SESSION", false))
+}
+
+func TestManagedEnvironmentFoldsWindowsNamesAndScrubsAdapterState(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	processRuntimePlatform = processPlatformWindows
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+
+	environment, err := managedEnvironment(
+		map[string]string{
+			"Path":                                 `C:\\native`,
+			"BASE":                                 "base",
+			strings.ToLower(envHermesHome):         `C:\\foreign-home`,
+			strings.ToLower(envHermesSessionToken): "foreign-token",
+		},
+		map[string]string{"PATH": `C:\\agent`, "base": "agent"},
+		map[string]string{"SESSION": "yes", envHermesHome: `C:\\session-home`},
+	)
+	require.NoError(t, err)
+	require.Equal(t, `C:\\agent`, envValueFold(environment, "PATH", true))
+	require.Equal(t, "agent", envValueFold(environment, "BASE", true))
+	require.Equal(t, "yes", envValueFold(environment, "SESSION", true))
+	require.Empty(t, envValueFold(environment, envHermesHome, true))
+	require.Empty(t, envValueFold(environment, envHermesSessionToken, true))
+
+	upserted := upsertProcessEnv([]string{
+		"Path=old-path",
+		"PATH=other-old-path",
+		"KEPT=yes",
+	}, "PATH", `C:\\final`)
+	require.Equal(t, []string{"KEPT=yes", `PATH=C:\\final`}, upserted)
+}
+
+func TestProcessScalarHelpers(t *testing.T) {
+	port, err := freePort()
+	require.NoError(t, err)
+	require.Positive(t, port)
+
+	token, err := randomToken()
+	require.NoError(t, err)
+	require.NotEmpty(t, token)
+
+	require.Positive(t, compareVersions("1.2.3", "1.2.2"))
+	require.Zero(t, compareVersions("1.2.3", "1.2.3"))
+
+	executableProbeMu.Lock()
+	executableProbed[t.Name()] = true
+	executableProbeMu.Unlock()
+	t.Cleanup(func() {
+		executableProbeMu.Lock()
+		delete(executableProbed, t.Name())
+		executableProbeMu.Unlock()
+	})
+	require.NoError(t, ensureExecutableVersion(t.Context(), t.Name(), ProcessOptions{}))
+	require.NoError(t, methodPresent("domain.method", &RPCError{Code: 4001, Message: "domain"}))
+	require.Error(t, methodPresent("missing.method", &RPCError{Code: -32601, Message: "missing"}))
+	require.Error(t, methodPresent("broken.method", errors.New("broken")))
+}
+
+func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
+	originalPlatform := processRuntimePlatform
+	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+
+	ambient := map[string]string{
+		// Inherited: what a process needs to run, reach the network, and serve.
+		"PATH": "/usr/bin", "HOME": "/home/operator", "TMPDIR": "/tmp/op", "LANG": "en_AU.UTF-8",
+		"LC_ALL": "C.UTF-8", "TERM": "xterm-256color", "HTTPS_PROXY": "http://proxy:3128",
+		"https_proxy": "http://proxy:3128", "NO_PROXY": "localhost", "SSL_CERT_FILE": "/etc/ssl/ca.pem",
+		"REQUESTS_CA_BUNDLE": "/etc/ssl/ca.pem", envHermesWebDist: "/opt/hermes/web",
+		// Not inherited: every credential Hermes would seed its pool from, and
+		// everything else the operator happens to have exported.
+		"OPENAI_API_KEY": "sk-openai", "ANTHROPIC_API_KEY": "sk-ant", "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+		"OPENROUTER_API_KEY": "sk-or", "GITHUB_TOKEN": "ghp", "GH_TOKEN": "gho", "XAI_API_KEY": "xai",
+		"SSH_AUTH_SOCK": "/run/agent.sock", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus",
+		"XDG_CONFIG_HOME": "/home/operator/.config", "EDITOR": "vim", "TZ": "Australia/Brisbane",
+		// Off Windows a differently-cased spelling is a different variable, and
+		// the allowlist names none of them.
+		"path": "/lower/bin", "Home": "/mixed/home", "lc_all": "lower",
+		envHermesHome: "/foreign/home",
+	}
+
+	processRuntimePlatform = processPlatformLinux
+	environment, err := ordinaryEnvironment(ambient)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"HERMES_WEB_DIST=/opt/hermes/web",
+		"HOME=/home/operator",
+		"HTTPS_PROXY=http://proxy:3128",
+		"LANG=en_AU.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"NO_PROXY=localhost",
+		"PATH=/usr/bin",
+		"REQUESTS_CA_BUNDLE=/etc/ssl/ca.pem",
+		"SSL_CERT_FILE=/etc/ssl/ca.pem",
+		"TERM=xterm-256color",
+		"TMPDIR=/tmp/op",
+		"https_proxy=http://proxy:3128",
+	}, environment)
+
+	// A credential still reaches the harness when the caller hands it over
+	// explicitly: the allowlist governs inheritance, not WithEnv.
+	explicit, err := ordinaryEnvironment(ambient, map[string]string{"OPENAI_API_KEY": "sk-explicit"})
+	require.NoError(t, err)
+	require.Contains(t, explicit, "OPENAI_API_KEY=sk-explicit")
+	require.NotContains(t, explicit, "ANTHROPIC_API_KEY=sk-ant")
+
+	// Where the platform folds names, the allowlist folds with it: "Path" and
+	// "lc_all" are the search path and a locale there, and the leftover
+	// spellings are one variable each rather than two.
+	processRuntimePlatform = processPlatformWindows
+	folded, err := ordinaryEnvironment(map[string]string{
+		"Path": `C:\bin`, "lc_all": "lower", "PathExt": ".EXE", "SystemRoot": `C:\Windows`,
+		"OPENAI_API_KEY": "sk-openai", "Openai_Api_Key": "sk-mixed", "GITHUB_TOKEN": "ghp",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"Path=C:\\bin", "PathExt=.EXE", "SystemRoot=C:\\Windows", "lc_all=lower"}, folded)
+
+	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HERMES_HOME", "SSH_AUTH_SOCK", "TZ"} {
+		require.False(t, inheritOrdinaryEnvironmentKey(name), name)
+	}
+
+	for _, name := range []string{"PATH", "HOME", "LC_MESSAGES", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "PATHEXT", "COMSPEC", "USERPROFILE", "__CF_USER_TEXT_ENCODING", envHermesWebDist} {
+		require.True(t, inheritOrdinaryEnvironmentKey(name), name)
 	}
 }

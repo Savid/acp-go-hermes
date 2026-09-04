@@ -108,25 +108,12 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	hermesAuthHome := filepath.Join(os.Getenv("HOME"), ".hermes")
-	if _, statErr := os.Stat(filepath.Join(hermesAuthHome, "auth.json")); statErr != nil {
-		t.Skipf("ambient Hermes auth not available: %v", statErr)
-	}
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	const config = "model:\n" +
-		"  provider: xai-oauth\n" +
-		"  default: grok-4.5\n" +
-		"  base_url: https://api.x.ai/v1\n" +
-		"  max_tokens: 4096\n" +
-		"approvals:\n" +
-		"  mode: manual\n"
-	if writeErr := os.WriteFile(configPath, []byte(config), 0o600); writeErr != nil {
+	if writeErr := os.WriteFile(configPath, []byte(liveToolTokenHermesConfig()), 0o600); writeErr != nil {
 		t.Fatalf("write live-test Hermes config: %v", writeErr)
 	}
 	args := []string{
 		"-seed-file", "config.yaml=" + configPath,
-		"-provider-auth-root", t.TempDir(),
-		"-shared-hermes-home", hermesAuthHome,
 	}
 	if model := os.Getenv("ACP_GO_HERMES_MODEL"); model != "" {
 		args = append(args, "-model", model)
@@ -207,10 +194,10 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 		firstSession.SessionId,
 		rotated.cwd,
 		hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{
-			Env: map[string]string{
+			Env: liveTokenEnv(map[string]string{
 				"WAGIE_API_TOKEN":    rotated.token,
 				"WAGIE_OPERATION_ID": rotated.operation,
-			},
+			}),
 			ExtraPathDirs: []string{rotated.dir},
 		}),
 	)); err != nil {
@@ -231,10 +218,10 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 
 func liveSessionCLIRequest(carrier liveSessionCLICarrier) acp.NewSessionRequest {
 	return hermesacp.NewSessionRequest(carrier.cwd, hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{
-		Env: map[string]string{
+		Env: liveTokenEnv(map[string]string{
 			"WAGIE_API_TOKEN":    carrier.token,
 			"WAGIE_OPERATION_ID": carrier.operation,
-		},
+		}),
 		ExtraPathDirs: []string{carrier.dir},
 	}))
 }

@@ -18,7 +18,7 @@ import (
 
 func autonomousLifecycleNegotiation() lifecycle.Negotiated {
 	return lifecycle.Negotiated{
-		Versions:                []int{lifecycle.Version},
+		Version:                 lifecycle.Version,
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
@@ -1766,7 +1766,6 @@ func TestSessionPumpCloseResolvesDeferredAutonomousProjectionOnce(t *testing.T) 
 	agent.setAgentClient(connection)
 	base := newFakeHermesClient()
 	s := testSession(agent, base)
-	s.client = treeInventoryServer{fakeHermesClient: base, vacant: true}
 	require.NoError(t, s.openLifecycleStream())
 	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
@@ -1989,7 +1988,7 @@ func TestSessionPumpDeferredGenerationLossFailsClosed(t *testing.T) {
 }
 
 func TestPumpContainmentCertifiesVacancyBeforeFencingStream(t *testing.T) {
-	agent := newTestAgent()
+	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
 	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
@@ -1999,8 +1998,7 @@ func TestPumpContainmentCertifiesVacancyBeforeFencingStream(t *testing.T) {
 	require.NoError(t, s.openLifecycleStream())
 	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
-	inventory := treeInventoryServer{fakeHermesClient: base, vacant: true}
-	var current nativehermes.Server = inventory
+	var current nativehermes.Server = base
 	s.mu.Lock()
 	s.client = current
 	s.mu.Unlock()
@@ -2300,4 +2298,43 @@ func TestCloseWaitsForPublishedPumpContainmentOutcome(t *testing.T) {
 		require.ErrorIs(t, s.closeLocked(t.Context(), false), want)
 		s.stopPump()
 	})
+}
+
+func TestQuestionRouteRetiresAfterHostWrite(t *testing.T) {
+	session, client, _, turnCtx, _ := activeQuestionSession(
+		t, acp.UnstableCreateElicitationResponse{}, nil,
+	)
+	session.afterHostControlWrite = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+	}
+	if err := session.handleQuestion(turnCtx, questionRequest("retired-after-write")); !errors.Is(err, errPromptCancelled) {
+		t.Fatalf("retired question route = %v", err)
+	}
+	if client.questionRejectCount() != 1 {
+		t.Fatalf("retired question rejects = %d", client.questionRejectCount())
+	}
+}
+
+func TestPumpBarrierDrainsClosedSourceDuringShutdown(t *testing.T) {
+	client := newFakeHermesClient()
+	session := testSession(newTestAgent(), client)
+	t.Cleanup(session.stopPump)
+	session.afterPumpBarrierAccept = func() {
+		session.pumpMu.Lock()
+		session.pumpStopping = true
+		session.pumpMu.Unlock()
+		close(client.deliveries)
+	}
+	if err := session.synchronizePump(t.Context()); err != nil {
+		t.Fatalf("closed source barrier = %v", err)
+	}
+
+	deliveries := make(chan nativehermes.TurnDelivery)
+	close(deliveries)
+	closed, err := session.drainPumpBarrier(t.Context(), deliveries)
+	if err != nil || !closed {
+		t.Fatalf("closed source drain = closed:%v err:%v", closed, err)
+	}
 }

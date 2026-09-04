@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,30 +28,28 @@ type idmapLineage struct {
 
 func TestLiveAgentStoreRestore(t *testing.T) {
 	requireRunLiveTokens(t)
-	t.Setenv("ACP_GO_HERMES_FORCE_GATEWAY", "1")
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
+	agent := startInProcessAgent(t, ctx,
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
+		hermesacp.WithEnv(liveTokenEnv(nil)),
 	)
 	cwd := t.TempDir()
-	newResp, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
+	newResp, err := agent.conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-one", "Reply with exactly ACP_HERMES_STORE_ONE.")); err != nil {
+	if _, err := agent.conn.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-one", "Reply with exactly ACP_HERMES_STORE_ONE.")); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	if entries, err := store.Load(ctx, hermesacp.SessionKey{SessionID: string(newResp.SessionId), Subpath: stateDBSubpath}); err != nil || len(entries) == 0 {
 		t.Fatalf("state-db snapshot entries=%d err=%v", len(entries), err)
 	}
-	if err := agent.Close(); err != nil {
+	if err := agent.stop(); err != nil {
 		t.Fatalf("Close first agent: %v", err)
 	}
 	if err := os.RemoveAll(home); err != nil {
@@ -58,21 +57,20 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
+	restored := startInProcessAgent(t, ctx,
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
+		hermesacp.WithEnv(liveTokenEnv(nil)),
 	)
-	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
+	if _, err := restored.conn.LoadSession(ctx, hermesacp.LoadSessionRequest(newResp.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession after native delete: %v", err)
 	}
 	restoredRoot := requireRestoredHermesStateDB(t, restoreHome, newResp.SessionId)
-	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-two", "Reply with exactly ACP_HERMES_STORE_TWO.")); err != nil {
+	if _, err := restored.conn.Prompt(ctx, hermesacp.TextPromptRequest(newResp.SessionId, "turn-store-two", "Reply with exactly ACP_HERMES_STORE_TWO.")); err != nil {
 		t.Fatalf("Prompt after restore: %v", err)
 	}
-	if err := restored.Close(); err != nil {
+	if err := restored.stop(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
 	requireRemovedHermesRoot(t, restoredRoot)
@@ -80,38 +78,28 @@ func TestLiveAgentStoreRestore(t *testing.T) {
 
 func TestLiveAgentForkStoreRestore(t *testing.T) {
 	requireRunLiveTokens(t)
-	t.Setenv("ACP_GO_HERMES_FORCE_GATEWAY", "1")
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	store := hermesacp.NewInMemorySessionStore()
 	home := t.TempDir()
-	agent := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
+	agent := startInProcessAgent(t, ctx,
 		hermesacp.WithScratchDir(home),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
+		hermesacp.WithEnv(liveTokenEnv(nil)),
 	)
 	cwd := t.TempDir()
-	parent, err := agent.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
+	parent, err := agent.conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "turn-fork-parent", "Reply with exactly ACP_HERMES_FORK_PARENT.")); err != nil {
+	if _, err := agent.conn.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "turn-fork-parent", "Reply with exactly ACP_HERMES_FORK_PARENT.")); err != nil {
 		t.Fatalf("Prompt parent: %v", err)
 	}
-	forkRaw, err := json.Marshal(hermesacp.ForkSessionRequest(parent.SessionId, cwd))
-	if err != nil {
-		t.Fatalf("marshal fork request: %v", err)
-	}
-	forkAny, err := agent.HandleExtensionMethod(ctx, hermesacp.ForkSessionMethod, forkRaw)
+	fork, err := hermesacp.CallForkSession(ctx, agent.conn, hermesacp.ForkSessionRequest(parent.SessionId, cwd))
 	if err != nil {
 		t.Fatalf("fork extension: %v", err)
-	}
-	fork, ok := forkAny.(acp.UnstableForkSessionResponse)
-	if !ok {
-		t.Fatalf("fork response type = %T", forkAny)
 	}
 	if fork.SessionId == "" || fork.SessionId == parent.SessionId {
 		t.Fatalf("fork response = %#v", fork)
@@ -130,10 +118,10 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if entries, err := store.Load(ctx, hermesacp.SessionKey{SessionID: string(fork.SessionId), Subpath: stateDBSubpath}); err != nil || len(entries) == 0 {
 		t.Fatalf("fork state-db snapshot entries=%d err=%v", len(entries), err)
 	}
-	if _, err := agent.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-child", "Reply with exactly ACP_HERMES_FORK_CHILD.")); err != nil {
+	if _, err := agent.conn.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-child", "Reply with exactly ACP_HERMES_FORK_CHILD.")); err != nil {
 		t.Fatalf("Prompt child: %v", err)
 	}
-	if err := agent.Close(); err != nil {
+	if err := agent.stop(); err != nil {
 		t.Fatalf("Close first agent: %v", err)
 	}
 	if err := os.RemoveAll(home); err != nil {
@@ -141,21 +129,20 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	}
 
 	restoreHome := t.TempDir()
-	restored := hermesacp.NewAgent(
-		integrationProcessIsolationOption(),
+	restored := startInProcessAgent(t, ctx,
 		hermesacp.WithScratchDir(restoreHome),
 		hermesacp.WithSessionStore(store),
 		hermesacp.WithSeedFiles(liveTokenSeedFiles()),
-		integrationContainmentOption(),
+		hermesacp.WithEnv(liveTokenEnv(nil)),
 	)
-	if _, err := restored.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
+	if _, err := restored.conn.LoadSession(ctx, hermesacp.LoadSessionRequest(fork.SessionId, cwd)); err != nil {
 		t.Fatalf("LoadSession fork after native delete: %v", err)
 	}
 	restoredRoot := requireRestoredHermesStateDB(t, restoreHome, fork.SessionId)
-	if _, err := restored.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-restored", "Reply with exactly ACP_HERMES_FORK_RESTORED.")); err != nil {
+	if _, err := restored.conn.Prompt(ctx, hermesacp.TextPromptRequest(fork.SessionId, "turn-fork-restored", "Reply with exactly ACP_HERMES_FORK_RESTORED.")); err != nil {
 		t.Fatalf("Prompt fork after restore: %v", err)
 	}
-	if err := restored.Close(); err != nil {
+	if err := restored.stop(); err != nil {
 		t.Fatalf("Close restored agent: %v", err)
 	}
 	requireRemovedHermesRoot(t, restoredRoot)
@@ -170,10 +157,20 @@ func requireRestoredHermesStateDB(t *testing.T, scratch string, sessionID acp.Se
 	if globErr != nil {
 		t.Fatalf("locate restored Hermes runtime root for %q: %v", sessionID, globErr)
 	}
-	if len(roots) != 1 {
-		t.Fatalf("restored Hermes runtime roots for %q = %v, want exactly one", sessionID, roots)
+
+	// A generation root's containment control directory is a sibling of the
+	// generation rather than one of its own, so the glob matches both.
+	generations := make([]string, 0, len(roots))
+	for _, candidate := range roots {
+		if !strings.HasSuffix(candidate, ".control") {
+			generations = append(generations, candidate)
+		}
 	}
-	root := roots[0]
+
+	if len(generations) != 1 {
+		t.Fatalf("restored Hermes generation roots for %q = %v, want exactly one", sessionID, generations)
+	}
+	root := generations[0]
 	path := filepath.Join(root, "state.db")
 	contents, err := os.ReadFile(path)
 	if err != nil {

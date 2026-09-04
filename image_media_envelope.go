@@ -11,7 +11,7 @@ const (
 	mediaEnvelopeFieldImageFormats    = "imageFormats"
 	mediaEnvelopeFieldDocumentFormats = "documentFormats"
 
-	keyVersions = "versions"
+	keyVersion = "version"
 )
 
 // mediaEnvelopeMaxDimension is 0: Hermes enforces no per-dimension pixel bound.
@@ -51,7 +51,7 @@ func capabilityMediaMeta(options Options) map[string]any {
 	}
 
 	if options.InputHandoffRoot != "" {
-		meta[handoffMetaKey] = map[string]any{keyVersions: []int{handoffVersion}}
+		meta[handoffMetaKey] = map[string]any{keyVersion: handoffVersion}
 	}
 
 	return meta

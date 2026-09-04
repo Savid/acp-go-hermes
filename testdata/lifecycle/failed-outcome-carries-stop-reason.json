@@ -2,7 +2,7 @@
   "name": "failed-outcome-carries-stop-reason",
   "purpose": "An ending idle whose outcome is failed MUST omit the stop reason. No ACP v1 stop reason names a failure, so one stamped beside a failed outcome is an invented variant rather than extra detail, and the envelope is malformed.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

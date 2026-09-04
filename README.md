@@ -103,6 +103,12 @@ shared home fails `initialize` instead. Configuring both also canonicalizes the
 shared home — the adapter resolves its symlinks and uses the resolved path as
 `HERMES_HOME`.
 
+An embedded host can pass `WithHostAuthority` to supply the complete native
+environment, prepare and reclaim native trees, and launch every managed Hermes
+process. A supplied authority is mandatory for that agent instance: errors do
+not fall back to direct execution. Provider-auth extensions are not advertised
+in this mode; ordinary ACP sessions remain available.
+
 ## What It Provides
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
@@ -117,21 +123,13 @@ shared home — the adapter resolves its symlinks and uses the resolved path as
   URL on this API path without executing a browser launcher; a required pinned
   Linux canary verifies that no-launch behavior through the production adapter.
 - One `hermes serve` process per session. By default each has a freshly
-  generated isolated `HERMES_HOME`. The explicit shared-home mode keeps
-  separate processes, ports, tokens, browser shims, event streams, environment,
-  and wrapper control roots while official Hermes shares its native database
-  and auth residence, under one exclusive home-root claim held for the whole
-  lifetime of that adapter's native writers; Windows refuses that mode outright,
-  because the inheritable lock handles fencing a shared residence do not exist
-  there. By default the runtime executes as the
-  adapter's own identity on every supported platform and reports the
-  non-authoritative `shared_identity` posture. `WithProcessIsolation` opts into
-  authoritative Linux OS containment; it is Linux-only and fails closed rather
-  than degrading, and Windows refuses it because its process API cannot apply the
-  Unix UID/GID identity boundary with empty supplementary groups. Ordinary
-  Windows launch is proved by an executed Windows CI job rather than by a
-  cross-compile, which on its own establishes only that a path builds.
-  Darwin additionally offers an explicitly risky best-effort process-group mode.
+  generated `HERMES_HOME` and runs as the adapter's operating-system account.
+  Embedded hosts can supply `WithHostAuthority` to route the version probe and
+  session server through a host-owned process and filesystem boundary. The
+  adapter materializes each native tree before preparing it, then reclaims it
+  before snapshot reads or removal. The explicit shared-home mode remains an
+  ordinary standalone residence with separate processes, ports, tokens,
+  browser shims, event streams, environment, and wrapper control roots.
 - Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
   notifications.
 - Prompt streaming for messages, tool calls, diffs, usage, and session

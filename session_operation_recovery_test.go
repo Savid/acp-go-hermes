@@ -1,45 +1,21 @@
+//go:build !windows
+
+// Every test in this file drives the shared Hermes home. Windows refuses that
+// home — its inherited session-owner lock handles are unavailable — so the
+// surface these tests exercise does not exist there; the Windows expectation is
+// the refusal itself, proven once beside the code that makes it.
+
 package hermesacp
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
-	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
-
-func TestSessionOperationRecoveryOriginHelper(t *testing.T) {
-	// The helper generation is this same test selected by -test.run, and the
-	// destination for its recorded identity rides in argv behind that selector
-	// rather than in the environment, so no test-only carrier claims a name in
-	// the product's governed environment namespace.
-	args := flag.Args()
-	if len(args) != 1 {
-		return
-	}
-	identityPath := args[0]
-
-	origin, err := nativehermes.CurrentDurableProcessIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := json.Marshal(origin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(identityPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	select {}
-}
 
 //nolint:gocyclo // Recovery cases intentionally share one production-protocol fixture matrix.
 func TestRecoverPendingSharedSessionOperations(t *testing.T) {
@@ -211,39 +187,10 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("foreign live origin refuses without deleting", func(t *testing.T) {
-		home := t.TempDir()
-		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
-		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
-		origin, stop := startRecoveryOriginHelper(t)
-		defer stop()
-		if updateErr := journal.update(sessionOperationJournalPatch{Origin: &origin}); updateErr != nil {
-			t.Fatal(updateErr)
-		}
-		client := newFakeHermesClient()
-		if err := agent.recoverPendingSharedSessionOperations(t.Context(), home, client); !errors.Is(err, ErrSessionOperationAmbiguous) {
-			t.Fatalf("live-origin recovery error = %v", err)
-		}
-		if len(client.deleted) != 0 {
-			t.Fatalf("live-origin recovery deleted %#v", client.deleted)
-		}
-		if _, err := os.Stat(journal.directory); err != nil {
-			t.Fatalf("live-origin recovery removed journal: %v", err)
-		}
-	})
-
-	t.Run("dead origin still requires operation owner", func(t *testing.T) {
+	t.Run("operation owner fences recovery", func(t *testing.T) {
 		home := t.TempDir()
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
-		origin, err := nativehermes.CurrentDurableProcessIdentity()
-		if err != nil {
-			t.Fatal(err)
-		}
-		origin.KernelStartTime += "-proven-reused"
-		if updateErr := journal.update(sessionOperationJournalPatch{Origin: &origin}); updateErr != nil {
-			t.Fatal(updateErr)
-		}
 		owner, err := nativehermes.AcquireSharedNativeSessionOwner(home, "parent")
 		if err != nil {
 			t.Fatal(err)
@@ -387,48 +334,6 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 }
 
-func startRecoveryOriginHelper(t *testing.T) (nativehermes.DurableProcessIdentity, func()) {
-	t.Helper()
-	identityPath := filepath.Join(t.TempDir(), "origin.json")
-	command := exec.Command(os.Args[0], "-test.run=^TestSessionOperationRecoveryOriginHelper$", identityPath)
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stopped := false
-	stop := func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		_ = command.Process.Kill()
-		_ = command.Wait()
-	}
-	t.Cleanup(stop)
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		data, err := os.ReadFile(identityPath)
-		if err == nil {
-			var origin nativehermes.DurableProcessIdentity
-			if unmarshalErr := json.Unmarshal(data, &origin); unmarshalErr != nil {
-				stop()
-				t.Fatal(unmarshalErr)
-			}
-
-			return origin, stop
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			stop()
-			t.Fatal(err)
-		}
-		if time.Now().After(deadline) {
-			stop()
-			t.Fatal("timed out waiting for recovery-origin helper")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func newRecoveryTestJournal(
 	t *testing.T,
 	home string,
@@ -441,15 +346,11 @@ func newRecoveryTestJournal(
 	if err != nil {
 		t.Fatal(err)
 	}
-	origin, err := nativehermes.CurrentDurableProcessIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	journal, err := beginSessionOperationJournal(home, sessionOperationJournalFields{
 		OperationID: operationID, Kind: kind, Mode: sessionOperationModeShared,
 		LogicalSessionID: logicalID, ParentLogicalSessionID: "parent-logical",
 		ParentNativeSessionID: "parent", Marker: operationID, FinalTitle: "title-" + logicalID,
-		BaselineNativeSessionIDs: baseline, Origin: origin,
+		BaselineNativeSessionIDs: baseline,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -2,7 +2,7 @@
   "name": "empty-identifier",
   "purpose": "Every opaque identifier is a non-empty string. A member present carrying the empty string is not an absent member: read as absence it would make an omitted correlation handle and a stated-but-empty one indistinguishable, so it is malformed wherever it appears, optional members included.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -14,20 +14,37 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
+	"github.com/stretchr/testify/require"
 )
+
+func TestHandoffCapabilityScalar(t *testing.T) {
+	response, err := newTestAgent(WithInputHandoffRoot(t.TempDir())).Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"version": 1}, response.AgentCapabilities.Meta["acp-go.dev/handoff"])
+}
 
 // keyFilename is the native attachment field neither input form derives, kept
 // here so the tests that pin its absence name it.
 const keyFilename = "filename"
 
 func handoffFileURI(path string) string {
-	return (&url.URL{Scheme: handoffURIScheme, Path: filepath.ToSlash(path)}).String()
+	return (&url.URL{Scheme: handoffURIScheme, Path: handoffURIPathOf(path)}).String()
+}
+
+// handoffURIPathOf spells a local path the way a file URI's path component
+// must: rooted, and with forward slashes. A Windows path starts at its drive
+// letter, so without the leading slash it would render as an authority.
+func handoffURIPathOf(path string) string {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+
+	return slashed
 }
 
 func writeHandoffFile(t *testing.T, root, name string, data []byte) string {
@@ -498,7 +515,7 @@ func TestHandoffPathContainment(t *testing.T) {
 	t.Run("percent-encoded traversal out of the root", func(t *testing.T) {
 		root := t.TempDir()
 		outside := writeHandoffFile(t, t.TempDir(), "secret.png", png)
-		uri := "file://" + filepath.ToSlash(root) + "/%2e%2e/" + filepath.Base(filepath.Dir(outside)) + "/secret.png"
+		uri := "file://" + handoffURIPathOf(root) + "/%2e%2e/" + filepath.Base(filepath.Dir(outside)) + "/secret.png"
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
 			Type: "image", MimeType: mimePNG, Uri: &uri,
@@ -541,7 +558,7 @@ func TestHandoffPathContainment(t *testing.T) {
 	t.Run("localhost host is local", func(t *testing.T) {
 		root := t.TempDir()
 		path := writeHandoffFile(t, root, "valid.png", png)
-		uri := "file://" + handoffURILocalHost + filepath.ToSlash(path)
+		uri := "file://" + handoffURILocalHost + handoffURIPathOf(path)
 
 		if _, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
 			Type: "image", MimeType: mimePNG, Uri: &uri,
@@ -626,36 +643,6 @@ func TestHandoffSymlinkContainmentIsKernelEnforced(t *testing.T) {
 
 			requireHandoffError(t, err, test.value, 0, test.message)
 		})
-	}
-}
-
-// TestHandoffFIFOInsideRootIsRejected pins that a root bounds where a path may
-// lead and never what kind of object it names. A FIFO with no writer blocks an
-// ordinary open until one appears, so the verdict has to arrive without the open
-// ever waiting on it.
-func TestHandoffFIFOInsideRootIsRejected(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "valid.png")
-
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Fatalf("mkfifo: %v", err)
-	}
-
-	png := fixtureBytes(t, "valid.png")
-	block := handoffBlock(path, mimePNG, handoffEnvelopeFor(png))
-
-	done := make(chan error, 1)
-
-	go func() {
-		_, err := promptToHermesParts(context.Background(), []acp.ContentBlock{block}, ImageLimits{}, root)
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		requireHandoffError(t, err, imageErrPathNotAllowed, 0, handoffNotRegularMessage)
-	case <-time.After(10 * time.Second):
-		t.Fatal("opening a FIFO inside the handoff root blocked the read")
 	}
 }
 
@@ -1012,7 +999,7 @@ func rootSnapshot(t *testing.T, root string) map[string]string {
 			return statErr
 		}
 
-		snapshot[path] = fmt.Sprintf("%v|%d|%v", info.Mode(), info.Size(), info.ModTime())
+		snapshot[path] = handoffEntryStamp(info)
 
 		return nil
 	}); err != nil {

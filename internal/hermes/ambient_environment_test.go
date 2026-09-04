@@ -42,9 +42,11 @@ func TestAmbientEnvironmentSnapshotFoldsWindowsSpellings(t *testing.T) {
 	// both spellings into a single phase, which has no order to read and is
 	// refused — so before the fold an inherited block of this shape failed
 	// every session start rather than one launch.
+	// The launch inherits only the allowlisted names out of the snapshot:
+	// KEPT and WITH are folded correctly but never handed to the harness.
 	environment, err := ordinaryEnvironment(AmbientEnvironmentSnapshot(block))
 	require.NoError(t, err)
-	require.Equal(t, []string{"KEPT=yes", "PATH=C:\\rewritten", "PathExt=.BAT", "WITH=EQUALS=SIGNS"}, environment)
+	require.Equal(t, []string{"PATH=C:\\rewritten", "PathExt=.BAT"}, environment)
 
 	_, err = ordinaryEnvironment(map[string]string{"Path": "C:\\inherited", "PATH": "C:\\rewritten"})
 	require.ErrorContains(t, err, `process environment names PATH twice, as "PATH" and "Path"`)

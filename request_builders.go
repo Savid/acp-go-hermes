@@ -38,11 +38,11 @@ func (options HermesOptions) Meta() map[string]any {
 		values[metaModelKey] = options.Model
 	}
 
-	if len(options.Env) > 0 {
+	if options.Env != nil {
 		values[metaEnvKey] = cloneStringMap(options.Env)
 	}
 
-	if len(options.ExtraPathDirs) > 0 {
+	if options.ExtraPathDirs != nil {
 		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
 	}
 

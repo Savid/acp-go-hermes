@@ -2,7 +2,7 @@
   "name": "inconsistent-foreground",
   "purpose": "requires_action is always its own state_update, and it always has a blocking action behind it. A requires_action transition for a cycle with no outstanding blocking action asserts a foreground state nothing on the stream can explain, so it is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

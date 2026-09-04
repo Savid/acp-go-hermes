@@ -142,8 +142,8 @@ func validateSharedHermesHomeOptions(options Options) error {
 		return fmt.Errorf("shared Hermes home must be a clean absolute path")
 	}
 
-	if options.ProcessIsolation != nil {
-		return fmt.Errorf("shared Hermes home requires ordinary same-identity execution; process isolation is unsupported")
+	if options.HostAuthority != nil {
+		return fmt.Errorf("shared Hermes home requires ordinary same-identity execution")
 	}
 
 	return nil

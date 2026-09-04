@@ -2,7 +2,7 @@
   "name": "unknown-event-type",
   "purpose": "The event set is closed at six types. A discriminant outside it is not an unknown member of a known event; the reducer has no state machine to run at all, so the notification is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

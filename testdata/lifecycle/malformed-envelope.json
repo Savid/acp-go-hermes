@@ -2,7 +2,7 @@
   "name": "malformed-envelope",
   "purpose": "Structural validity is checked before ordering. An envelope whose sequence is a string carries no usable identity at all, so it is refused as malformed rather than reported as a gap, a regression, or a duplicate.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

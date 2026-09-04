@@ -2,7 +2,7 @@
   "name": "background-action-outlives-turn",
   "purpose": "A background action outlives the turn that caused it. The turn reaches its terminal idle with the action still pending and its owning activity still running, which is why turn completion proves nothing about background work and why a background action does not block the foreground-prefix commit.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

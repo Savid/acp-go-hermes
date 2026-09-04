@@ -2,7 +2,7 @@
   "name": "snapshot-on-fenced-stream",
   "purpose": "A second snapshot on a live stream is a stream cycle, but the same shape on a fenced stream is stale: the fence, not the snapshot, is what the verdict is about. A fenced stream is terminal and never reopens, whatever arrives on it.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

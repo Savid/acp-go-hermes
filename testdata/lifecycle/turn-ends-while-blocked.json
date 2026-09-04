@@ -2,7 +2,7 @@
   "name": "turn-ends-while-blocked",
   "purpose": "Every blocking action terminalizes before the transition that ends the cycle it blocks. A terminal idle arriving with a blocker still pending would settle a turn while a request the host has not answered is still addressable, so it is refused: a cancelled cycle terminalizes its blockers as cancelled first.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

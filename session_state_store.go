@@ -129,6 +129,8 @@ type stateSnapshotSession struct {
 	Cwd                   string             `json:"cwd"`
 	Title                 string             `json:"title"`
 	Model                 stateSnapshotModel `json:"model"`
+	Env                   map[string]string  `json:"env"`
+	ExtraPathDirs         []string           `json:"extraPathDirs"`
 }
 
 type stateSnapshotModel struct {
@@ -203,8 +205,8 @@ func (s *session) snapshotToStore(ctx context.Context) error {
 }
 
 // snapshotToStoreLocked captures one generation and publishes it in one step.
-// The two halves are separable because a close-fenced boundary must read the
-// native state before its containment proof and make it durable after it.
+// Managed capture settles and reclaims its native residence before reading the
+// state database; ordinary capture reads its same-identity residence directly.
 func (s *session) snapshotToStoreLocked(
 	ctx context.Context,
 	requirement *terminalSnapshotRequirement,
@@ -225,6 +227,11 @@ type sessionStoreCommit struct {
 	native       *stateSnapshotTerminal
 	foreground   *stateSnapshotForeground
 	archives     map[string]archiveInfo
+	managedRoot  string
+	managed      *managedHermesServer
+	managedMain  *stateSnapshot
+	managedState SessionKey
+	managedReady []SessionStoreReplacement
 	// deadline bounds the store write, carried from the capture so a captured
 	// generation cannot be published under an unbounded context.
 	deadline time.Duration
@@ -233,6 +240,8 @@ type sessionStoreCommit struct {
 // captureSnapshotLocked builds the generation to publish. A nil commit with no
 // error means there was nothing to capture, which is the ordinary answer for a
 // session whose runtime is already gone and which owes no terminal boundary.
+//
+//nolint:gocyclo // Snapshot construction keeps one atomic generation shape visible.
 func (s *session) captureSnapshotLocked(
 	ctx context.Context,
 	requirement *terminalSnapshotRequirement,
@@ -323,6 +332,8 @@ func (s *session) captureSnapshotLocked(
 				ProviderID: snapshot.providerID,
 				ModelID:    snapshot.modelID,
 			},
+			Env:           durableSessionEnvironment(snapshot.env),
+			ExtraPathDirs: append([]string{}, snapshot.extraPathDirs...),
 		},
 		Terminal: terminal,
 		Archives: map[string]archiveInfo{},
@@ -354,9 +365,12 @@ func (s *session) captureSnapshotLocked(
 		main.Archives = cloneArchiveInfo(committed.archives)
 
 		replacements = append(replacements, SessionStoreReplacement{Key: stateDBKey, Entries: entries})
+	case managedHermesSnapshotServer(snapshot.client):
+		// The archive is completed below after the protocol-derived snapshot
+		// fields and id map have been serialized into one retryable commit.
 	default:
 		xdg := snapshot.client.XDGDirs()
-		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.options.ScratchDir, xdg.Root); archiveErr != nil {
+		if archive, sha, ok, archiveErr := encodeHermesStateDBArchive(s.agent.scratchDirectory(), xdg.Root); archiveErr != nil {
 			return nil, archiveErr
 		} else if ok {
 			main.Archives["state-db"] = archiveInfo{
@@ -374,26 +388,20 @@ func (s *session) captureSnapshotLocked(
 		}
 	}
 
-	mainEntry, err := stateJSONMarshal(main)
-	if err != nil {
-		return nil, err
-	}
-
 	idmapEntry, err := stateJSONMarshal(idmap)
 	if err != nil {
 		return nil, err
 	}
 
-	replacements = append(replacements,
-		SessionStoreReplacement{Key: mainKey, Entries: []SessionStoreEntry{mainEntry}},
-		SessionStoreReplacement{Key: SessionKey{SessionID: string(s.id), Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
-	)
+	replacements = append(replacements, SessionStoreReplacement{
+		Key: SessionKey{SessionID: string(s.id), Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry},
+	})
 
-	if err := snapshotCtx.Err(); err != nil {
-		return nil, err
+	if ctxErr := snapshotCtx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 
-	return &sessionStoreCommit{
+	commit := &sessionStoreCommit{
 		mainKey:      mainKey,
 		replacements: replacements,
 		terminal:     nextTerminal,
@@ -401,7 +409,164 @@ func (s *session) captureSnapshotLocked(
 		foreground:   foreground,
 		archives:     main.Archives,
 		deadline:     s.agent.options.storeWriteTTL,
-	}, nil
+	}
+	if managedHermesSnapshotServer(snapshot.client) && s.agent.options.SharedHermesHome == "" && !settled {
+		managed, root, reclaimErr := s.beginManagedSnapshotState(snapshotCtx, snapshot.client)
+		if reclaimErr != nil {
+			return nil, reclaimErr
+		}
+
+		commit.managed = managed
+		commit.managedRoot = root
+		commit.managedMain = &main
+		commit.managedState = stateDBKey
+
+		if completionErr := s.completeManagedSnapshotCommit(commit); completionErr != nil {
+			return commit, completionErr
+		}
+
+		if ctxErr := snapshotCtx.Err(); ctxErr != nil {
+			return commit, ctxErr
+		}
+
+		return commit, nil
+	}
+
+	mainEntry, err := stateJSONMarshal(main)
+	if err != nil {
+		return nil, err
+	}
+
+	if ctxErr := snapshotCtx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+
+	commit.replacements = append(commit.replacements, SessionStoreReplacement{
+		Key: mainKey, Entries: []SessionStoreEntry{mainEntry},
+	})
+
+	return commit, nil
+}
+
+func managedHermesSnapshotServer(client nativehermes.Server) bool {
+	managed, ok := client.(*managedHermesServer)
+
+	return ok && managed.managed
+}
+
+func (s *session) beginManagedSnapshotState(
+	ctx context.Context,
+	client nativehermes.Server,
+) (*managedHermesServer, string, error) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	return s.beginManagedSnapshotStateHeld(ctx, client)
+}
+
+func (s *session) withReclaimedManagedState(
+	ctx context.Context,
+	client nativehermes.Server,
+	use func(string) error,
+) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	managed, root, err := s.beginManagedSnapshotStateHeld(ctx, client)
+	if err != nil {
+		return err
+	}
+
+	useErr := use(root)
+	cleanupErr := managed.finishReclaimedSnapshot()
+
+	return errors.Join(useErr, cleanupErr)
+}
+
+func (s *session) beginManagedSnapshotStateHeld(
+	ctx context.Context,
+	client nativehermes.Server,
+) (*managedHermesServer, string, error) {
+	managed, ok := client.(*managedHermesServer)
+	if !ok || !managed.managed {
+		return nil, "", errors.New("managed Hermes snapshot requires an authority-owned server")
+	}
+
+	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	root, err := managed.reclaimForSnapshot(settleCtx)
+
+	settleCancel()
+
+	if err != nil {
+		return nil, "", err
+	}
+
+	s.mu.Lock()
+	if s.client == client {
+		s.runtimeNeedsResume = !s.closed
+		s.pending = map[string]nativehermes.PermissionRequest{}
+		s.questions = map[string]nativehermes.QuestionRequest{}
+		s.processedPermission = map[string]struct{}{}
+		s.processedQuestion = map[string]struct{}{}
+		s.activeMessageIDs = map[string]struct{}{}
+		s.toolStates = map[string]hermesToolState{}
+		s.mcpReloadComplete = false
+	}
+	s.mu.Unlock()
+
+	return managed, root, nil
+}
+
+func (s *session) completeManagedSnapshotCommit(commit *sessionStoreCommit) error {
+	if commit == nil || commit.managed == nil {
+		return nil
+	}
+
+	if commit.managedReady == nil {
+		archive, sha, present, err := encodeHermesStateDBArchive(s.agent.scratchDirectory(), commit.managedRoot)
+		if err != nil {
+			return err
+		}
+
+		if present {
+			entries, encodeErr := encodeArchiveEntries(archive, sha)
+			if encodeErr != nil {
+				return encodeErr
+			}
+
+			commit.managedReady = append(commit.managedReady, SessionStoreReplacement{
+				Key: commit.managedState, Entries: entries,
+			})
+			commit.managedMain.Archives["state-db"] = archiveInfo{
+				Subpath: stateDBSubpath,
+				SHA256:  sha,
+				Bytes:   len(archive),
+			}
+		}
+
+		mainEntry, marshalErr := stateJSONMarshal(*commit.managedMain)
+		if marshalErr != nil {
+			commit.managedReady = nil
+
+			return marshalErr
+		}
+
+		commit.managedReady = append(commit.managedReady, SessionStoreReplacement{
+			Key: commit.mainKey, Entries: []SessionStoreEntry{mainEntry},
+		})
+	}
+
+	if err := commit.managed.finishReclaimedSnapshot(); err != nil {
+		return err
+	}
+
+	commit.replacements = append(commit.replacements, commit.managedReady...)
+	commit.managed = nil
+	commit.managedRoot = ""
+	commit.managedMain = nil
+	commit.managedReady = nil
+
+	return nil
 }
 
 // publishSnapshotLocked makes one captured generation durable. It is the
@@ -623,12 +788,12 @@ func hydrateStateFromStoreMode(ctx context.Context, store SessionStore, sessionI
 	}
 
 	var idmap idmapRecord
-	if err := json.Unmarshal(idEntries[len(idEntries)-1], &idmap); err != nil {
+	if err := decodeStrictStoreJSON(idEntries[len(idEntries)-1], &idmap, idmapJSONShape); err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
 	}
 
 	var snapshot stateSnapshot
-	if err := json.Unmarshal(mainEntries[len(mainEntries)-1], &snapshot); err != nil {
+	if err := decodeStrictStoreJSON(mainEntries[len(mainEntries)-1], &snapshot, stateSnapshotJSONShape); err != nil {
 		return idmapRecord{}, stateSnapshot{}, false, err
 	}
 
@@ -945,7 +1110,7 @@ func decodeXDGArchive(data []byte, target string) error {
 			return err
 		}
 
-		if header.Name == "" || filepath.IsAbs(header.Name) || strings.Contains(header.Name, "..") {
+		if header.Name == "" || absolutePathSpelling(header.Name) || strings.Contains(header.Name, "..") {
 			return fmt.Errorf("archive path rejected: %s", header.Name)
 		}
 
@@ -1025,6 +1190,15 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 	}
 
 	return nil
+}
+
+func durableSessionEnvironment(environment map[string]string) map[string]string {
+	cloned := make(map[string]string, len(environment))
+	for key, value := range environment {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 func sqliteArchiveContent(scratchDir string, path string) ([]byte, bool, error) {

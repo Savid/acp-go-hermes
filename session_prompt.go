@@ -1027,7 +1027,7 @@ func (s *session) handlePermission(ctx context.Context, req nativehermes.Permiss
 		// sessionId and toolCallId. The lifecycle correlation adds a stable action
 		// name for the same held request without replacing either.
 		Meta: actionMeta(map[string]any{
-			hermesMetaKey: map[string]any{routeFieldReq: req.ID, "nativeSessionId": req.SessionID},
+			hermesMetaKey: map[string]any{routeFieldReq: req.ID, hermesNativeIDMetaKey: req.SessionID},
 		}, action),
 	}
 

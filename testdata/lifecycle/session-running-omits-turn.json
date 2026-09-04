@@ -2,7 +2,7 @@
   "name": "session-running-omits-turn",
   "purpose": "A running foreground is a turn running, so no update may assert one with no turn to own it. A session-caused transition may omit its turn on an idle or a requires_action, never on a running: the omission is a structural defect in the event, judged before any name is resolved, so it is malformed_envelope rather than unknown_entity — a token that reports a name the stream cannot resolve has nothing to report when the event carries no name at all. The refusal is structural, so it touches nothing: the standing certification is still standing at the moment of refusal.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

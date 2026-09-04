@@ -2,7 +2,7 @@
   "name": "unknown-field",
   "purpose": "Every value in this extension rejects an unknown member. An event carrying a field this contract does not fix is refused rather than reduced with the field ignored, because six reducers ignoring six different fields is how a closed shape stops being closed.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -2,7 +2,7 @@
   "name": "prompt-contained-incarnation-per-prompt",
   "purpose": "A configuration that answers updatesOutsidePrompt false has no channel between prompts, so it opens one incarnation per prompt. Each incarnation is a distinct streamId with its own snapshot, its own sequence space, and its own entities: the second stream's snapshot at sequence 1 is not a stream cycle, and the second projection inherits nothing from the first.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": false,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

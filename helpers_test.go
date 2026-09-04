@@ -7,9 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
@@ -17,97 +18,33 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// testIsolationIdentity is the identity every adapter-level fixture isolates
-// to. The effective identity is unusable as-is: the policy forbids UID or GID
-// zero, so a root test runner would be rejected before reaching anything under
-// test. Zero is replaced rather than the whole identity so an unprivileged
-// runner keeps isolating to itself.
-func testIsolationIdentity() (uint32, uint32) {
-	uid, gid := os.Geteuid(), os.Getegid()
-	if uid == 0 {
-		uid = 1
-	}
-	if gid == 0 {
-		gid = 1
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute working directory" rather than a spelling only one
+// platform accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
 	}
 
-	return uint32(uid), uint32(gid)
+	return filepath.Join(append([]string{root}, segments...)...)
 }
 
-// newTestAgent builds an agent in the ordinary default configuration: no
-// WithProcessIsolation, so native work runs as the identity the test process
-// already holds. This is what a host that configures nothing gets, so it is
-// what most tests should exercise.
+// awaitTestSignal waits for a rendezvous the rest of a test cannot proceed
+// without, so a step that never runs fails the test where it stalled instead of
+// hanging the whole package until its timeout.
+func awaitTestSignal(t *testing.T, signal <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-signal:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
 func newTestAgent(opts ...Option) *Agent {
 	return NewAgent(opts...)
-}
-
-// newIsolatedTestAgent builds an agent with an explicit hardened policy, for
-// the tests whose subject is that policy. An unprivileged test runner names its
-// own identity; a root runner substitutes a nonzero target. The test-only
-// no-credential seam lets adapter tests exercise strict-policy threading without
-// pretending that this fixture satisfies the production trusted-root launch
-// preconditions.
-func newIsolatedTestAgent(opts ...Option) *Agent {
-	uid, gid := testIsolationIdentity()
-	base := make([]Option, 0, 2+len(opts))
-	base = append(base,
-		WithProcessIsolation(ProcessIsolation{
-			UID: uid, GID: gid,
-			BaseEnvironment:     map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
-			StandaloneOwnerID:   "acp-go-hermes-tests",
-			StandaloneStateRoot: filepath.Clean(os.TempDir()),
-		}),
-		func(options *Options) {
-			options.testOnlyNoCredential = true
-			options.testOnlyIdentityLockRoot = testIdentityLockRoot()
-		},
-	)
-
-	return NewAgent(append(base, opts...)...)
-}
-
-// testNativeOwnedDir materializes a directory the native-owned predicate
-// admits: mode exactly 0700, owned by the isolated identity, under an ancestry
-// that identity can traverse. t.TempDir cannot stand in for it — its leaf is
-// created 0777&^umask and its parent is 0700, so under umask 022 the mode is
-// wrong and the ancestry is closed to any identity but the runner's.
-func testNativeOwnedDir(t *testing.T, name string) string {
-	t.Helper()
-	parent, err := os.MkdirTemp("", "acp-go-hermes-native-owned-")
-	if err != nil {
-		t.Fatalf("create native-owned parent: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(parent) })
-	if err = os.Chmod(parent, 0o711); err != nil {
-		t.Fatalf("make native-owned parent traversable: %v", err)
-	}
-
-	home := filepath.Join(parent, name)
-	if err = os.Mkdir(home, 0o700); err != nil {
-		t.Fatalf("create native-owned directory: %v", err)
-	}
-	if err = os.Chmod(home, 0o700); err != nil {
-		t.Fatalf("protect native-owned directory: %v", err)
-	}
-
-	uid, gid := testIsolationIdentity()
-	if uid != uint32(os.Geteuid()) || gid != uint32(os.Getegid()) {
-		if err = os.Chown(home, int(uid), int(gid)); err != nil {
-			t.Fatalf("hand native-owned directory to the isolated identity: %v", err)
-		}
-	}
-
-	return home
-}
-
-func testIdentityLockRoot() string {
-	root := filepath.Join(os.TempDir(), "acp-go-hermes-agent-identities-"+strconv.Itoa(os.Getpid()))
-	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
-		panic(err)
-	}
-
-	return root
 }
 
 // sessionMetaFromLifecycle decodes lifecycle meta through an agent with no
@@ -553,16 +490,6 @@ func (c *fakeHermesClient) XDGDirs() nativehermes.XDGDirs {
 	return c.xdg
 }
 
-func (c *fakeHermesClient) SharedSessionOwnerProcessIdentity() (int, string, error) {
-	pid := os.Getpid()
-	identity, err := nativehermes.InspectProcess(pid)
-	if err != nil {
-		return 0, "", err
-	}
-
-	return pid, identity.StartTime, nil
-}
-
 func (c *fakeHermesClient) abortCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -843,7 +770,7 @@ func testSession(agent *Agent, client *fakeHermesClient) *session {
 		}
 	}
 
-	return newSession(agent, "session-1", "/tmp/project", nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
+	return newSession(agent, "session-1", absTestPath("tmp", "project"), nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
 		SessionID:       "session-1",
 		NativeSessionID: "native-1",
 		Format:          SessionStoreFormat,
@@ -999,16 +926,6 @@ func (c *lifecycleFailingAgentClient) SessionUpdate(ctx context.Context, notific
 	return c.recordingAgentClient.SessionUpdate(ctx, notification)
 }
 
-// treeInventoryServer reports a configurable provider-tree vacancy verdict so
-// quiescence certification can be tested against both proved and unproved
-// vacancy.
-type treeInventoryServer struct {
-	*fakeHermesClient
-	vacant bool
-}
-
-func (s treeInventoryServer) ProviderTreeVacant() (bool, bool) { return s.vacant, true }
-
 // newLifecycleActionSession opens a negotiated lifecycle stream inside an
 // in-flight turn, accepting the submission only when accepted is true.
 func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordingAgentClient, context.Context) {
@@ -1016,7 +933,7 @@ func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordin
 
 	agent := newTestAgent()
 	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
-		Versions: []int{lifecycle.Version}, ActivityKinds: []lifecycle.ActivityKind{},
+		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	})
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()

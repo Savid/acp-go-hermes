@@ -7,20 +7,144 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
-const liveTokenHermesConfig = `model:
-  provider: openrouter
-  default: openrouter/free
-  max_tokens: 1024
-`
+// envLiveKeyEnv names the environment variable the selected provider reads its
+// key from. Hermes resolves a provider by finding that variable in its own
+// environment, so the tier forwards exactly that one name and nothing else.
+const envLiveKeyEnv = "ACP_GO_HERMES_LIVE_KEY_ENV"
+
+const (
+	defaultLiveProvider = "openrouter"
+	defaultLiveModel    = "openrouter/free"
+	defaultLiveKeyEnv   = "OPENROUTER_API_KEY"
+)
+
+// liveTokenModelSelection reports the provider and native model id the
+// token-spending tier seeds Hermes with. ACP_GO_HERMES_MODEL is the same
+// provider-qualified selection the -model flag takes, so the seeded config and
+// the flag can never name different routing. The provider is the first segment
+// because a native model id may itself carry slashes.
+func liveTokenModelSelection() (string, string) {
+	provider, model := defaultLiveProvider, defaultLiveModel
+	if selection := os.Getenv("ACP_GO_HERMES_MODEL"); selection != "" {
+		if named, native, ok := strings.Cut(selection, "/"); ok && named != "" && native != "" {
+			provider, model = named, native
+		}
+	}
+
+	return provider, model
+}
+
+// liveTokenHermesConfig caps only token-spending integration sessions through
+// Hermes' native isolated config and routes them at the selected provider.
+func liveTokenHermesConfig() string {
+	return liveHermesConfig(1024, "")
+}
+
+// liveToolTokenHermesConfig is the same routing with the room a tool-driven
+// turn needs and manual approvals. Manual mode is what keeps a
+// dangerous-classified terminal command routed to the host approval callback
+// rather than auto-classified by Hermes' default risk classifier; nothing here
+// auto-grants an approval.
+func liveToolTokenHermesConfig() string {
+	return liveHermesConfig(4096, "approvals:\n  mode: manual\n")
+}
+
+func liveHermesConfig(maxTokens int, extra string) string {
+	provider, model := liveTokenModelSelection()
+
+	return "model:\n" +
+		"  provider: " + provider + "\n" +
+		"  default: " + model + "\n" +
+		"  max_tokens: " + strconv.Itoa(maxTokens) + "\n" +
+		extra
+}
+
+// liveTokenEnv adds the selected provider's credential to a launch environment.
+// The key travels as an explicit env entry, which is the only door an ordinary
+// launch leaves open for one, and never into a seeded file. A tier running
+// without the variable set gets the caller's entries unchanged, so the native
+// gateway reports the missing provider rather than the test inventing one.
+func liveTokenEnv(extra map[string]string) map[string]string {
+	env := make(map[string]string, len(extra)+1)
+	for key, value := range extra {
+		env[key] = value
+	}
+
+	name := envOrDefault(envLiveKeyEnv, defaultLiveKeyEnv)
+	if value := os.Getenv(name); value != "" {
+		env[name] = value
+	}
+
+	return env
+}
+
+// liveTokenSessionOptions carries the provider credential into a session driven
+// through the wrapper CLI, which advertises no agent-wide environment flag.
+func liveTokenSessionOptions() []hermesacp.SessionRequestOption {
+	return []hermesacp.SessionRequestOption{
+		hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{Env: liveTokenEnv(nil)}),
+	}
+}
+
+// inProcessAgent runs Serve over in-process pipes. It is how a test drives the
+// public ACP surface while still holding the options it passed — a session
+// store above all. A directly constructed Agent has no client connection to
+// stream a turn's updates to, so a prompt through one cannot complete; Serve
+// owns that connection.
+type inProcessAgent struct {
+	conn   *acp.ClientSideConnection
+	client *recordingClient
+	stop   func() error
+}
+
+func startInProcessAgent(t *testing.T, ctx context.Context, opts ...hermesacp.Option) *inProcessAgent {
+	t.Helper()
+
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+
+	client := newRecordingClient()
+	agent := &inProcessAgent{
+		conn:   acp.NewClientSideConnection(client, clientWriter, clientReader),
+		client: client,
+	}
+
+	served := make(chan error, 1)
+
+	go func() { served <- hermesacp.Serve(ctx, agentReader, agentWriter, opts...) }()
+
+	stopped := false
+	agent.stop = func() error {
+		if stopped {
+			return nil
+		}
+
+		stopped = true
+
+		_ = clientWriter.Close()
+		err := <-served
+		_ = agentWriter.Close()
+
+		return err
+	}
+	t.Cleanup(func() { _ = agent.stop() })
+
+	if _, err := agent.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
+		t.Fatalf("initialize in-process agent: %v", err)
+	}
+
+	return agent
+}
 
 // liveAgent holds a launched acp-go-hermes subprocess and its stdio pipes.
 //
@@ -47,28 +171,6 @@ func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) [
 	return append(args, extraArgs...)
 }
 
-// integrationContainmentOption accepts the same Darwin containment boundary for
-// an in-process Agent. On every other platform the option is rejected, so the
-// tier configures nothing there.
-func integrationContainmentOption() hermesacp.Option {
-	if runtime.GOOS == "darwin" {
-		return hermesacp.WithDarwinBestEffortContainment()
-	}
-
-	return func(*hermesacp.Options) {}
-}
-
-func integrationProcessIsolationOption() hermesacp.Option {
-	return hermesacp.WithProcessIsolation(hermesacp.ProcessIsolation{
-		UID: uint32(os.Geteuid()),
-		GID: uint32(os.Getegid()),
-		BaseEnvironment: map[string]string{
-			"PATH": os.Getenv("PATH"),
-			"HOME": os.Getenv("HOME"),
-		},
-	})
-}
-
 func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
 	t.Helper()
 	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
@@ -80,15 +182,33 @@ func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ..
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := &liveAgent{stdin: stdin, stdout: stdout, wait: cmd.Wait}
+	agent := &liveAgent{stdin: stdin, stdout: stdout}
 	cmd.Stderr = &agent.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	waitDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(waitDone)
+	}()
+	agent.wait = func() error {
+		<-waitDone
+
+		return waitErr
+	}
 	agent.close = func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-waitDone:
+			return
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			<-waitDone
+		}
 	}
 	return agent
 }
@@ -99,7 +219,7 @@ func startLiveTokenAgent(t *testing.T, ctx context.Context, home string, extraAr
 	t.Helper()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte(liveTokenHermesConfig), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(liveTokenHermesConfig()), 0o600); err != nil {
 		t.Fatalf("write live-test Hermes config: %v", err)
 	}
 
@@ -110,7 +230,7 @@ func startLiveTokenAgent(t *testing.T, ctx context.Context, home string, extraAr
 }
 
 func liveTokenSeedFiles() map[string]string {
-	return map[string]string{"config.yaml": liveTokenHermesConfig}
+	return map[string]string{"config.yaml": liveTokenHermesConfig()}
 }
 
 func (a *liveAgent) stderrString() string {
@@ -262,3 +382,8 @@ func envOrDefault(name string, fallback string) string {
 	}
 	return fallback
 }
+
+// smokePlaceholderProviderKey satisfies the native gateway's
+// "some inference provider is configured" precondition for tiers that make no
+// provider request. It is a fixed non-credential string, never a real key.
+const smokePlaceholderProviderKey = "acp-go-hermes-smoke-placeholder-not-a-credential"

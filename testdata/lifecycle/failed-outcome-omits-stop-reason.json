@@ -2,7 +2,7 @@
   "name": "failed-outcome-omits-stop-reason",
   "purpose": "An ending idle whose outcome is failed carries that outcome and no stop reason. No ACP v1 stop reason names a failure — the matching v1 error carries it — so the omission is the required shape rather than a missing member, and the turn settles with the failed outcome recorded.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

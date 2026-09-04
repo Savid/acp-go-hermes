@@ -152,7 +152,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize with handoff root: %v", err)
 	}
-	if !reflect.DeepEqual(withRoot.AgentCapabilities.Meta[handoffMetaKey], map[string]any{keyVersions: []int{handoffVersion}}) {
+	if !reflect.DeepEqual(withRoot.AgentCapabilities.Meta[handoffMetaKey], map[string]any{keyVersion: handoffVersion}) {
 		t.Fatalf("handoff advertisement = %#v", withRoot.AgentCapabilities.Meta[handoffMetaKey])
 	}
 	if _, ok := withRoot.AgentCapabilities.Meta[mediaEnvelopeMetaKey]; !ok {

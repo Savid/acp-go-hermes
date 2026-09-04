@@ -2,7 +2,7 @@
   "name": "unknown-origin-turn",
   "purpose": "A first-sight activity naming an origin turn the stream never opened is refused. The origin turn is what attributes owned work to a foreground epoch, so an unresolvable one would leave ownership and the causal fence unenforceable.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

@@ -37,30 +37,3 @@ func TestPromptDispatchHookRunsAtGatewayAcceptance(t *testing.T) {
 	require.ErrorIs(t, NotifyPromptDispatch(t.Context(), info), ErrPromptDispatchIdentity)
 	require.ErrorIs(t, NotifyPromptDispatch(infoCtx, PromptDispatchInfo{}), ErrPromptDispatchIdentity)
 }
-
-func TestProviderTreeVacancyRequiresAuthoritativeInventory(t *testing.T) {
-	var process *Process
-	vacant, proved := process.ProviderTreeVacant()
-	require.False(t, vacant)
-	require.False(t, proved)
-
-	process = &Process{tree: &processContainment{}}
-	vacant, proved = process.ProviderTreeVacant()
-	require.False(t, vacant)
-	require.False(t, proved)
-
-	process.tree.treeVacantFn = func() (bool, bool) { return true, true }
-	vacant, proved = process.ProviderTreeVacant()
-	require.True(t, vacant)
-	require.True(t, proved)
-
-	var server *hermesServer
-	vacant, proved = server.ProviderTreeVacant()
-	require.False(t, vacant)
-	require.False(t, proved)
-
-	server = &hermesServer{process: process}
-	vacant, proved = server.ProviderTreeVacant()
-	require.True(t, vacant)
-	require.True(t, proved)
-}

@@ -2,7 +2,7 @@
   "name": "snapshot-introduces-entities",
   "purpose": "A resumed stream's snapshot introduces exactly what it names: the turn its foreground reports, the turns its activities name as origin, and its own nonterminal activities and actions. Later patches resolve against those introductions, which is why a consumer must be installed before the stream opens rather than at prompt time.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

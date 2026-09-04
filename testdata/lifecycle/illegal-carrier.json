@@ -2,7 +2,7 @@
   "name": "illegal-carrier",
   "purpose": "The identity-only session_info_update is the only legal carrier. Every other sessionUpdate variant is ineligible, and a tool-call entity patch is the sharpest case: its metadata is per-entity state a conformant client may legally collapse to the last value it saw, so an envelope placed there is unrecoverable and the notification is refused.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

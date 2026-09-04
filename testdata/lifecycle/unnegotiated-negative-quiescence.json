@@ -2,7 +2,7 @@
   "name": "unnegotiated-negative-quiescence",
   "purpose": "The answer is the contract for the connection, not a hint about it. A configuration that proved no quiescence class emits no quiescence_update at all: even a negative one asserts a class it never had, and admitting it would let a host read authoritative absence of background work from a source that cannot observe it.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": false,
     "activityKinds": ["task"]

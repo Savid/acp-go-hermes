@@ -2,7 +2,7 @@
   "name": "sequence-gap",
   "purpose": "Sequences are contiguous and are claimed before delivery is attempted, so a dropped event leaves a visible hole. The reducer refuses the out-of-order arrival instead of accepting a stream it cannot prove complete.",
   "negotiated": {
-    "versions": [1],
+    "version": 1,
     "updatesOutsidePrompt": true,
     "authoritativeQuiescence": true,
     "quiescenceSource": "process-containment",

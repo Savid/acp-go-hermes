@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -9,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func lifecycleOffer(versions ...any) map[string]any {
-	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": versions}}
+func lifecycleOffer(version any) map[string]any {
+	return map[string]any{lifecycle.MetaKey: map[string]any{"version": version}}
 }
 
 // requireLifecycleKeyRefusal asserts the surface refused with invalid params
@@ -74,21 +75,19 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.False(t, weak.negotiatedLifecycle().Present())
 
 	response, err = weak.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(2)})
-	require.NoError(t, err)
-	require.Nil(t, response.Meta)
+	require.Error(t, err)
 	require.False(t, weak.negotiatedLifecycle().Present())
 
 	response, err = weak.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
 	require.NoError(t, err)
 	advertisement, ok := response.Meta[lifecycle.MetaKey].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, []int{1}, advertisement["versions"])
+	require.Equal(t, 1, advertisement["version"])
 	require.Equal(t, true, advertisement["updatesOutsidePrompt"])
 	require.Equal(t, false, advertisement["authoritativeQuiescence"])
 	require.Equal(t, []string{}, advertisement["activityKinds"])
 
-	authoritative := newTestAgent()
-	authoritative.containmentMode = RuntimeContainmentAuthoritative
+	authoritative := NewAgent(WithHostAuthority(newTestHostAuthority()))
 	response, err = authoritative.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
 	require.NoError(t, err)
 	advertisement, ok = response.Meta[lifecycle.MetaKey].(map[string]any)
@@ -137,4 +136,21 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.Error(t, err)
 	_, err = weak.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{Meta: reserved})
 	require.Error(t, err)
+}
+
+func TestApplyAdmittedActiveLifecycleRequest(t *testing.T) {
+	session := testSession(newTestAgent(), newFakeHermesClient())
+	meta := sessionMeta{}
+	if rebind, err := applyAdmittedActiveLifecycleRequest(
+		t.Context(), session, session.cwd, nil, nil, &meta,
+	); err != nil || rebind {
+		t.Fatalf("live reuse application = rebind:%v err:%v", rebind, err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := applyAdmittedActiveLifecycleRequest(
+		canceled, session, session.cwd, nil, nil, &meta,
+	); err == nil {
+		t.Fatalf("cancelled reuse rejection = %v", err)
+	}
 }
