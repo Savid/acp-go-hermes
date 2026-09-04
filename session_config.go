@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
@@ -136,8 +137,22 @@ func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {
 	return s.configOptionsFrom(providers)
 }
 
-// configProviders performs one native model.options read. A session with no
-// live gateway, and a gateway that refused the read, both report no
+// configProvidersTimeout bounds one native model.options read. The gateway
+// answers that call by listing models at every authenticated provider, so a
+// provider endpoint that accepts a connection and then never answers holds the
+// read open for as long as the caller allows. Establishing a session is such a
+// caller, and its context carries whatever deadline the host chose, which may
+// be none: unbounded here means a session that never establishes.
+//
+// The bound is generous rather than tuned. A cold gateway reaches this read in
+// a few seconds on a healthy link and slower on a poor one, and losing the
+// enumeration costs the host its model list, so the deadline exists to convert
+// a hang into a degraded session rather than to keep establishment brisk.
+const configProvidersTimeout = 30 * time.Second
+
+// configProviders performs one native model.options read, bounded by
+// configProvidersTimeout. A session with no live gateway, a gateway that
+// refused the read, and a read that outlived its bound all report no
 // enumeration: the config surface publishes what the harness answered or
 // nothing.
 func (s *session) configProviders(ctx context.Context) (nativehermes.ProvidersResponse, bool) {
@@ -145,6 +160,9 @@ func (s *session) configProviders(ctx context.Context) (nativehermes.ProvidersRe
 	if client == nil {
 		return nativehermes.ProvidersResponse{}, false
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, configProvidersTimeout)
+	defer cancel()
 
 	providers, err := client.ConfigProviders(ctx)
 	if err != nil {
