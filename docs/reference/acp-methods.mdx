@@ -17,7 +17,7 @@ description: The ACP methods the adapter implements and the one native extension
 | `session/prompt` | Run one native turn and stream updates. |
 | `session/cancel` | Cancel the in-flight turn. |
 | `session/close` | Close the session and stop its process. |
-| `session/delete` | Tombstone the store, cancel and settle any active turn, then best-effort native delete. |
+| `session/delete` | Tombstone the store, cancel and settle any active turn, then delete the native session and destroy its generation. |
 | `session/set_config_option` | Apply a config option such as `model`. |
 
 ## Provider-auth extension methods
@@ -44,6 +44,47 @@ at most 128 bytes drawn from `A-Z`, `a-z`, `0-9`, `-`, and `_`. A value outside
 that shape is `-32602` on `connectionId`. Every leg failure is
 `hermes_auth_failed` (`-32000`) with a closed `cause`, and no native message
 text ever crosses. See [Authentication](/docs/features/authentication).
+
+## Error shapes
+
+Caller errors are invalid params (`-32602`) carrying `{"error", "field"}`. The
+shapes below are uniform across every method that can produce them:
+
+| Cause | `data` |
+|---|---|
+| A required reserved key the caller omitted | `{"error":"missing","field":"<path>"}` |
+| An unknown, misplaced, or malformed value | `{"error":"unsupported","field":"<path>"}` |
+| A `cwd` that is not an absolute path — relative or empty — on `session/new`, `session/load`, `session/resume`, or `_hermes/session/fork` | `{"error":"unsupported","field":"cwd"}` |
+| An `additionalDirectories[N]` entry that is not an absolute path | `{"error":"unsupported","field":"additionalDirectories[N]"}` |
+| Params that cannot be decoded, or that fail validation as a whole | `{"error":"unsupported","field":"params"}` |
+
+An *empty* `cwd` is not an absolute path and takes the `cwd` verdict, but on the
+JSON-RPC transport the pinned ACP SDK's own request validation rejects it first
+for `session/new`, `session/load`, `session/resume`, and the fork route, so a
+wire caller sees the `params` refusal above. The `cwd` verdict is what an
+embedding host calling the `Agent` methods directly receives.
+| A session-scoped method addressed to an unknown, closed, or deleted session | `{"error":"unknown session","field":"sessionId"}` |
+| An SSE or ACP-transport MCP server | `{"error":"unsupported","field":"mcpServers[N]","server":"<name>"}` |
+| An MCP server declaring no transport | `{"error":"no_transport","field":"mcpServers[N]"}` |
+
+A failed prompt turn is `hermes_turn_failed` (`-32603`) carrying a `cause` of
+`process_exit`, `transport`, `provider`, or `timeout` and the real native cause
+in `message` — see [Prompt and streaming](/docs/core/prompt-streaming). A
+provider-auth leg failure is `hermes_auth_failed` (`-32000`).
+
+Every other internal error the adapter can produce is `-32603` with the
+JSON-RPC constant `Internal error` as its message and exactly one token from
+this closed vocabulary in `data.error`. The payload never carries a `message`
+member, Go error text, or native Hermes text; a more specific fact is a closed
+`class` or `cause` token instead.
+
+| Token | Condition | Additional members |
+|---|---|---|
+| `hermes_invalid_options` | The agent was built from an option set it will not serve under. `NewAgent` returns no error, so the verdict is delivered on the wire at `initialize` and every session-establishing method. The validation prose stays on the agent's own error value, which the embedding host reads. | none |
+| `hermes_restore_failed` | `session/load` or `session/resume` found a store entry for the session that could not be restored — an unreplayable snapshot or an unsupported store format. The entry is neither deleted nor tombstoned. | none |
+| `hermes_runtime_unavailable` | A native incarnation this session needs is gone and its process tree is still alive and un-containable, so no replacement can start. A runtime that merely died is never this token: the next explicit operation starts one replacement. | none |
+| `hermes_session_poisoned` | The session latched on an unrecoverable native fact and refuses every operation but `session/close` and `session/delete`. | `cause`, one of `runtime_resume_failed`, `native_session_id_drift`, `mcp_reload_failed`, `runtime_fence_failed`, `missing_live_session_mapping`, `terminal_snapshot_failed` |
+| `hermes_internal_failure` | Every failure the adapter cannot classify above. | optional `class`, one of `lifecycle_overlap`, `lifecycle_violation`, `route_correlation`; `lifecycle_violation` adds a `cause` from the lifecycle reducer's closed violation vocabulary |
 
 ## Extensions and unsupported methods
 

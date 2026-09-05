@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -20,7 +21,7 @@ func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 		ActivityKinds:           []lifecycle.ActivityKind{},
 	}
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(negotiated)
+	require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	session := testSession(agent, newFakeHermesClient())
@@ -112,9 +113,9 @@ func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {
 	require.NoError(t, session.openLifecycleStream())
 	require.Nil(t, session.lifecycleStream())
 
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	oldReader := sessionIDRandReader
 	t.Cleanup(func() { sessionIDRandReader = oldReader })
 	sessionIDRandReader = errorReader{err: errors.New("id failed")}
@@ -138,9 +139,9 @@ func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {
 
 func TestLifecycleEmitterViolationFencesStream(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	agent.setAgentClient(newRecordingAgentClient())
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
@@ -158,7 +159,7 @@ func TestLifecycleStreamDeliveryFailuresStopAtFailedEvent(t *testing.T) {
 	newStream := func(t *testing.T) (*sessionStream, *recordingAgentClient) {
 		t.Helper()
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(negotiated)
+		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
 		session := testSession(agent, newFakeHermesClient())
@@ -210,4 +211,21 @@ func TestLifecycleStreamDeliveryFailuresStopAtFailedEvent(t *testing.T) {
 			stopReason: string(acp.StopReasonEndTurn), outcome: lifecycle.OutcomeSuccess,
 		}))
 	})
+}
+
+// TestLifecycleViolationKindReducesToItsClosedToken pins what reaches the wire
+// when a lifecycle emit fails closed: the violation's kind, from the closed
+// vocabulary, and nothing about the offending stream identity. An error that is
+// not a violation at all names no kind rather than inventing one.
+func TestLifecycleViolationKindReducesToItsClosedToken(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, lifecycle.ViolationStreamCycle, lifecycleViolationKind(
+		fmt.Errorf("wrapped: %w", &lifecycle.ViolationError{
+			Kind:     lifecycle.ViolationStreamCycle,
+			StreamID: "stream-1",
+			Sequence: 4,
+			Detail:   "second snapshot",
+		})))
+	require.Equal(t, lifecycle.ViolationKind(""), lifecycleViolationKind(errors.New("not a violation")))
 }

@@ -29,28 +29,38 @@ type turnRouteContextKey struct{}
 
 var routeRandRead = rand.Read
 
+// parseInboundTurnRoute reads the reserved route envelope a prompt or an active
+// cancel must carry.
+//
+// The refusal splits into exactly two verdicts on one field path, because a host
+// acts on them differently: an absent key is `missing` on the bare key path — the
+// host forgot the envelope — and a present but unacceptable value is
+// `unsupported` naming the member at fault, or the bare key path when the value
+// is not an object at all.
 func parseInboundTurnRoute(meta map[string]any) (inboundTurnRoute, error) {
 	value, ok := meta[routeMetaKey]
 	if !ok {
-		return inboundTurnRoute{}, routeInvalid("missing reserved route metadata")
+		return inboundTurnRoute{}, routeMissing()
 	}
 
 	object, ok := value.(map[string]any)
-	if !ok || len(object) != 2 {
-		return inboundTurnRoute{}, routeInvalid("route metadata must contain exactly version and turnNonce")
+	if !ok {
+		return inboundTurnRoute{}, routeUnsupported()
+	}
+
+	for key := range object {
+		if key != routeFieldVer && key != routeFieldTurn {
+			return inboundTurnRoute{}, routeUnsupported(key)
+		}
 	}
 
 	if !routeVersionIsOne(object[routeFieldVer]) {
-		return inboundTurnRoute{}, routeInvalid("unsupported route metadata version")
+		return inboundTurnRoute{}, routeUnsupported(routeFieldVer)
 	}
 
 	nonce, ok := object[routeFieldTurn].(string)
-	if !ok || strings.TrimSpace(nonce) == "" {
-		return inboundTurnRoute{}, routeInvalid("route turnNonce is required")
-	}
-
-	if len(nonce) > routeTurnNonceMaxBytes {
-		return inboundTurnRoute{}, routeInvalid("route turnNonce exceeds the maximum size")
+	if !ok || strings.TrimSpace(nonce) == "" || len(nonce) > routeTurnNonceMaxBytes {
+		return inboundTurnRoute{}, routeUnsupported(routeFieldTurn)
 	}
 
 	return inboundTurnRoute{turnNonce: nonce}, nil
@@ -67,10 +77,48 @@ func routeVersionIsOne(value any) bool {
 	}
 }
 
-func routeInvalid(message string) error {
+// routeMetaPath is the request path a route refusal names, spelled the way the
+// host wrote the key.
+const routeMetaPath = `_meta["` + routeMetaKey + `"]`
+
+func routeMissing() error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: message,
-		keyField:       routeMetaKey,
+		jsonFieldError: valMissing,
+		keyField:       routeMetaPath,
+	})
+}
+
+// routeCorrelationError is one adapter-internal turn-correlation invariant
+// failing closed: a stale nonce, a cycle that owns no route, a callback that crossed its
+// owning cycle. None of them is a defect in a well-formed request the caller
+// could restate, so none is invalid params; each is an unclassified internal
+// failure whose reason stays on the Go error and off the wire.
+type routeCorrelationError struct {
+	reason string
+}
+
+func (e *routeCorrelationError) Error() string { return e.reason }
+
+func (e *routeCorrelationError) requestError() *acp.RequestError {
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError: valHermesInternalFailure,
+		keyClass:       classRouteCorrelation,
+	})
+}
+
+func routeInvalid(reason string) error {
+	return &routeCorrelationError{reason: reason}
+}
+
+func routeUnsupported(members ...string) error {
+	field := routeMetaPath
+	for _, member := range members {
+		field += "." + member
+	}
+
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: valUnsupported,
+		keyField:       field,
 	})
 }
 

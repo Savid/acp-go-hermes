@@ -171,7 +171,7 @@ func (s *session) reloadMCPForAuthorizedTurn(ctx context.Context) error {
 		return err
 	}
 
-	return s.poisonWithError(ctx, "hermes_mcp_reload_failed", err.Error())
+	return s.poisonWithCause(ctx, poisonMCPReloadFailed, err)
 }
 
 // committedState is the last durable generation this session published. A
@@ -700,7 +700,7 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 	s.cancelTurnLocked(client, markCancelled)
 
 	if client == nil {
-		err := s.poisonWithError(ctx, "hermes_runtime_fence_failed", "Hermes runtime is unavailable")
+		err := s.poisonWithCause(ctx, poisonRuntimeFenceFailed, errors.New("hermes runtime is unavailable"))
 
 		s.mu.Lock()
 		s.turnFenceErr = err
@@ -726,12 +726,12 @@ func (s *session) fenceTurnLocked(ctx context.Context, epoch uint64, markCancell
 
 	closeErr = errors.Join(closeErr, pumpErr)
 	if closeErr != nil {
-		name := "hermes_runtime_fence_failed"
+		cause := poisonRuntimeFenceFailed
 		if errors.Is(closeErr, ErrContainmentIncomplete) {
-			name = "hermes_process_containment_incomplete"
+			cause = poisonContainmentIncomplete
 		}
 
-		err := errors.Join(s.poisonWithError(ctx, name, closeErr.Error()), closeErr)
+		err := errors.Join(s.poisonWithCause(ctx, cause, closeErr), closeErr)
 
 		s.mu.Lock()
 		s.turnFenceErr = err
@@ -776,46 +776,76 @@ func (s *session) ensureNotPoisoned() error {
 	return s.poisonedErrorLocked()
 }
 
+// The poison-cause vocabulary is closed. A poisoned session reports exactly one
+// of these tokens as `data.cause`; the prose that produced it rides the returned
+// Go error, where the embedding host and the adapter's own diagnostics read it,
+// and never reaches the wire.
+const (
+	poisonRuntimeResumeFailed       = "runtime_resume_failed"
+	poisonNativeSessionIDDrift      = "native_session_id_drift"
+	poisonMCPReloadFailed           = "mcp_reload_failed"
+	poisonRuntimeFenceFailed        = "runtime_fence_failed"
+	poisonMissingLiveSessionMapping = "missing_live_session_mapping"
+	poisonTerminalSnapshotFailed    = "terminal_snapshot_failed"
+	// poisonContainmentIncomplete is the one cause that is not reported as a
+	// poisoned session: an incarnation whose process tree is still alive and
+	// un-containable is a runtime this adapter cannot replace, which is its own
+	// wire token.
+	poisonContainmentIncomplete = "containment_incomplete"
+)
+
+// poisonWireError renders a poison cause as the error a peer receives. Every
+// poison is -32603 -- a poisoned session is the agent's own state, not a defect
+// in the caller's request -- and carries a closed token and nothing else.
+func poisonWireError(cause string) *acp.RequestError {
+	if cause == poisonContainmentIncomplete {
+		return acp.NewInternalError(map[string]any{jsonFieldError: valHermesRuntimeUnavailable})
+	}
+
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError: valHermesSessionPoisoned,
+		jsonFieldCause: cause,
+	})
+}
+
 func (s *session) poisonedErrorLocked() error {
 	if s.poisonCause == "" {
 		return nil
 	}
 
-	return acp.NewInvalidRequest(map[string]any{
-		jsonFieldError: "session_poisoned",
-		"cause":        s.poisonCause,
-	})
+	return poisonWireError(s.poisonCause)
 }
 
 func (s *session) poisonNativeSessionDrift(ctx context.Context, field string, actual string) error {
 	expected := s.idmap.NativeSessionID
-	cause := fmt.Sprintf("%s native session id drift: expected %q, got %q", field, expected, actual)
 
-	return s.poison(ctx, cause)
+	return s.poisonWithCause(ctx, poisonNativeSessionIDDrift, fmt.Errorf(
+		"%s native session id drift: expected %q, got %q", field, expected, actual))
 }
 
-func (s *session) poison(ctx context.Context, cause string) error {
-	return s.poisonWithError(ctx, "hermes_native_session_id_drift", cause)
+func (s *session) poison(ctx context.Context, detail error) error {
+	return s.poisonWithCause(ctx, poisonNativeSessionIDDrift, detail)
 }
 
-func (s *session) poisonWithError(ctx context.Context, errorName string, cause string) error {
-	err := acp.NewInternalError(map[string]any{
-		jsonFieldError: errorName,
-		"cause":        cause,
-	})
+// poisonWithCause latches the session on a closed cause token and reports it.
+// The detail is joined onto the returned error rather than folded into the wire
+// payload, so the fact survives for a host that holds the Go error while the
+// peer reads only the token.
+func (s *session) poisonWithCause(ctx context.Context, cause string, detail error) error {
+	_ = ctx
 
 	s.mu.Lock()
 	if s.poisonCause != "" {
 		existing := s.poisonedErrorLocked()
 		s.mu.Unlock()
 
-		return existing
+		return errors.Join(existing, detail)
 	}
 
 	s.poisonCause = cause
 	s.mu.Unlock()
 
-	return err
+	return errors.Join(poisonWireError(cause), detail)
 }
 
 func (s *session) poisonMissingLiveSessionMapping(ctx context.Context, err error) error {
@@ -825,7 +855,7 @@ func (s *session) poisonMissingLiveSessionMapping(ctx context.Context, err error
 
 	var missing nativehermes.MissingLiveSessionMappingError
 	if errors.As(err, &missing) {
-		return s.poisonWithError(ctx, "hermes_missing_live_session_mapping", missing.Error())
+		return s.poisonWithCause(ctx, poisonMissingLiveSessionMapping, missing)
 	}
 
 	return err

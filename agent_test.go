@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -305,9 +306,9 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	bounded := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{
 		MaxActiveSessions: 1, MaxConcurrentClientCalls: 1,
 	}))
-	bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	first := testSession(bounded, newFakeHermesClient())
 	require.NoError(t, first.openLifecycleStream())
 	require.NoError(t, bounded.storeStartedSession(first))
@@ -320,9 +321,9 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	require.Empty(t, bounded.streamOpens, "failed started-session install retained its opening")
 
 	deferredBounded := newTestAgent()
-	deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	deferred := testSession(deferredBounded, newFakeHermesClient())
 	require.NoError(t, deferred.openLifecycleStream())
 	for index := 0; index < maxDeferredStreamOpens; index++ {
@@ -349,4 +350,52 @@ func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {
 	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+}
+
+// TestExtensionRouteRefusalsCarryClosedTokens pins the extension routes'
+// refusal vocabulary. The fork route reports the same two tokens the stable
+// routes' decoder reports, and neither carries decoder prose: a JSON syntax
+// error quotes the offending byte of the request, which is host input this
+// surface never echoes back.
+func TestExtensionRouteRefusalsCarryClosedTokens(t *testing.T) {
+	t.Parallel()
+
+	agent := newTestAgent()
+	ctx := context.Background()
+
+	for _, test := range []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{"undecodable", `{"cwd":`, valUnsupported},
+		{"decoded but invalid", `{}`, valUnsupported},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, json.RawMessage(test.params))
+
+			var reqErr *acp.RequestError
+			require.ErrorAs(t, err, &reqErr)
+			require.Equal(t, -32602, reqErr.Code)
+			require.Equal(t, map[string]any{jsonFieldError: test.want, keyField: keyParams}, reqErr.Data)
+		})
+	}
+}
+
+// TestUnknownExtensionMethodNamesTheMethod pins the -32601 data an unrouted
+// extension carries. It names the method the peer asked for, matching what the
+// SDK dispatcher emits for a core method it cannot route, so one connection
+// answers the code one way.
+func TestUnknownExtensionMethodNamesTheMethod(t *testing.T) {
+	t.Parallel()
+
+	_, err := newTestAgent().HandleExtensionMethod(context.Background(),
+		"_hermes/does/not/exist", json.RawMessage(`{}`))
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32601, reqErr.Code)
+	require.Equal(t, acp.NewMethodNotFound("_hermes/does/not/exist").Data, reqErr.Data)
 }

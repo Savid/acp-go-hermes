@@ -1036,6 +1036,12 @@ func (p *Process) probeGatewayMethods(ctx context.Context) (returnErr error) {
 		return err
 	}
 
+	// The cold-resume build barrier rides this method, so its absence would turn
+	// every session/load into an unbarriered resume rather than a loud failure.
+	if err := methodPresent("process.list", p.Client.AwaitSessionBuild(ctx, missingProbeSessionID)); err != nil {
+		return err
+	}
+
 	return nil
 }
 

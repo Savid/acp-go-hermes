@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,7 +42,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 	if err := nilClient.fenceTurnLocked(t.Context(), 1, true); err == nil || !strings.Contains(err.Error(), "stale turn epoch") {
 		t.Fatalf("stale epoch fence error = %v", err)
 	}
-	if err := nilClient.fenceTurnLocked(t.Context(), 2, true); err == nil || !strings.Contains(err.Error(), "Hermes runtime is unavailable") {
+	if err := nilClient.fenceTurnLocked(t.Context(), 2, true); err == nil || !strings.Contains(err.Error(), "hermes runtime is unavailable") {
 		t.Fatalf("nil runtime fence error = %v", err)
 	}
 
@@ -110,16 +111,16 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 	agent.sessions[s.id] = s
 	agent.mu.Unlock()
 
-	if err := s.poison(ctx, "native drift without advertisement"); err == nil ||
-		!strings.Contains(err.Error(), "hermes_native_session_id_drift") {
+	if err := s.poison(ctx, errors.New("native drift without advertisement")); err == nil ||
+		!strings.Contains(err.Error(), "native_session_id_drift") {
 		t.Fatalf("poison error = %v", err)
 	}
 	if conn.updateCount() != 0 {
 		t.Fatalf("poison emitted updates: %#v", conn.updates)
 	}
-	if err := s.poison(ctx, "second poison"); err == nil ||
-		!strings.Contains(err.Error(), "session_poisoned") ||
-		!strings.Contains(err.Error(), "native drift without advertisement") {
+	if err := s.poison(ctx, errors.New("second poison")); err == nil ||
+		!strings.Contains(err.Error(), "hermes_session_poisoned") ||
+		!strings.Contains(err.Error(), "second poison") {
 		t.Fatalf("second poison error = %v", err)
 	}
 	if _, _, err := s.acquireTurn(ctx); err == nil || !strings.Contains(err.Error(), "session_poisoned") {

@@ -113,7 +113,8 @@ blob still forwards as its URI.
 
 The adapter decodes and structurally validates every image before the native
 turn starts. MIME mismatches, invalid dimensions, animated GIF/WebP/APNG,
-per-image overflow, and aggregate prompt overflow fail as `invalid_params`.
+per-image overflow, and aggregate prompt overflow fail as invalid params
+(`-32602`).
 The error data carries `field: "prompt.image"`, the zero-based image `index`,
 and one of `missing_data`, `invalid_base64`, `invalid_media_type`,
 `media_type_mismatch`, `animated_not_supported`, `invalid_dimensions`,
@@ -142,7 +143,7 @@ forward to Hermes.
 
 Hermes image transport is input-only. Native image artifacts are not emitted
 as typed ACP image output. A prompt with no usable parts is rejected with
-`invalid_params`.
+`-32602` `{"error":"unsupported","field":"prompt"}`.
 
 ### Local handoff image input
 
@@ -210,7 +211,10 @@ native request a handoff block builds is identical to the one the same bytes
 build embedded — and the host may delete the file as soon as the prompt call
 returns.
 
-Hermes' authoritative `message.complete` text is reconciled with the text
+`agent_message_chunk` and `agent_thought_chunk` are append-only deltas: a client
+renders the turn's assistant text as the in-order concatenation of every chunk
+it received, and no chunk ever repeats, snapshots, or corrects text already
+sent. Hermes' authoritative `message.complete` text is reconciled with the text
 already emitted by `message.delta`. Hermes narrates a tool turn through the same
 delta stream its answer arrives on while `message.complete` carries the final
 response alone, so the completion is not required to extend the concatenated

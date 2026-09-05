@@ -25,12 +25,30 @@ const (
 	closeTimeout                    = 5 * time.Second
 	mcpReloadTimeout                = 2 * time.Minute
 
-	valElicitation     = "elicitation"
-	valBackpressure    = "backpressure"
-	valUnknownSession  = "unknown session"
-	valSessionActive   = "session already active"
-	agentClosedMessage = "agent closed"
-	keyLimit           = "limit"
+	valElicitation    = "elicitation"
+	valBackpressure   = "backpressure"
+	valUnknownSession = "unknown session"
+	// The closed off-prompt -32603 vocabulary. Every internal error this
+	// package reports outside a prompt turn carries exactly one of these
+	// vendor-prefixed tokens in `data.error`, with `message` left at the
+	// JSON-RPC constant and no Go or native prose anywhere in `data`. A more
+	// specific fact is carried as a documented closed `class` or `cause`.
+	valHermesInvalidOptions     = "hermes_invalid_options"
+	valHermesRestoreFailed      = "hermes_restore_failed"
+	valHermesRuntimeUnavailable = "hermes_runtime_unavailable"
+	valHermesSessionPoisoned    = "hermes_session_poisoned"
+	valHermesInternalFailure    = "hermes_internal_failure"
+	// The closed `class` vocabulary hermes_internal_failure may carry.
+	classLifecycleOverlap   = "lifecycle_overlap"
+	classLifecycleViolation = "lifecycle_violation"
+	classRouteCorrelation   = "route_correlation"
+	keyClass                = "class"
+	// valRequestCancelled is the token a withdrawn request answers with.
+	valRequestCancelled = "request_cancelled"
+	valSessionActive    = "session already active"
+	agentClosedMessage  = "agent closed"
+	keyLimit            = "limit"
+	keyParams           = "params"
 )
 
 var (
@@ -78,6 +96,10 @@ type Agent struct {
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
 	lifecycleAnswer    lifecycle.Negotiated
+	// lifecycleAnswered records that this connection's one answer has been
+	// given. The answer binds the whole connection, so it is written once and
+	// never rewritten by a later initialize.
+	lifecycleAnswered bool
 
 	streamOpenMu   sync.Mutex
 	streamOpens    []*deferredStreamOpen
@@ -146,6 +168,13 @@ func NewAgent(opts ...Option) *Agent {
 		agent.providerAuth = newProviderAuth(agent)
 	}
 
+	// An embedding host's client is installed at construction, so the very
+	// first session it opens already has somewhere to stream to. Serve installs
+	// its own connection instead and refuses this option.
+	if options.Client != nil {
+		agent.setAgentClient(newEmbeddedAgentClient(agent, options.Client))
+	}
+
 	return agent
 }
 
@@ -155,6 +184,10 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	}
 
 	agent := newAgentForServe(opts...)
+	if agent.options.Client != nil {
+		return errors.Join(errServeClientSupplied, agent.Close())
+	}
+
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
 			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
@@ -384,15 +417,20 @@ func (a *Agent) beginSessionConstruction(ctx context.Context) (context.Context, 
 // optionsError reports a construction-time option failure as the uniform
 // internal error, or nil when every option validated. The code is -32603
 // because the caller's params are blameless: the embedding host built an agent
-// this adapter refuses, so no request it can phrase would be served. The data
-// carries only the joined validation prose, since no wire field is at fault to
-// name.
+// this adapter refuses, so no request it can phrase would be served.
+//
+// The data is the closed token alone. Option-validation prose names the host's
+// own configuration, including filesystem paths it supplied, and a peer that
+// cannot phrase a request to fix it has no use for those details; the joined
+// prose stays on the embedding host's own error value, which NewAgent returns
+// to the code that built the options. The cmd entrypoint refuses the same
+// combinations at flag-parse time and names them on stderr.
 func (a *Agent) optionsError() error {
 	if a.optionsErr == nil {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: a.optionsErr.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: valHermesInvalidOptions})
 }
 
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -525,13 +563,18 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 
 	switch method {
 	case ForkSessionMethod:
+		// An extension params object that cannot be decoded, or that fails its
+		// own validation as a whole, is refused as the whole params member:
+		// the same uniform {error, field} refusal every other inbound shape
+		// takes. Decoder prose is withheld because a syntax error quotes the
+		// offending byte of the request back at the peer.
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
 		}
 
 		if err := req.Validate(); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
 		}
 
 		return a.forkSession(ctx, req)

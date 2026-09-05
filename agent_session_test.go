@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -659,7 +660,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 	t.Run("retained unproven root", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
 		agent.retainIncompleteHermesRoot(session.id, session.client.XDGDirs().Root)
-		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_containment_incomplete") {
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), valHermesRuntimeUnavailable) {
 			t.Fatalf("unproven-root resume error = %v", err)
 		}
 	})
@@ -733,7 +734,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 		agent.options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return nil, ErrContainmentIncomplete
 		}
-		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), "hermes_process_containment_incomplete") {
+		if err := session.resumeRuntimeForTurnLocked(t.Context()); err == nil || !strings.Contains(err.Error(), valHermesRuntimeUnavailable) {
 			t.Fatalf("unproven startup error = %v", err)
 		}
 		if err := agent.rejectIncompleteHermesSession(session.id); !errors.Is(err, ErrContainmentIncomplete) {
@@ -824,7 +825,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 
 	t.Run("replacement lifecycle identity failure is returned", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		client := newFakeHermesClient()
 		client.getSession = testNativeSession("native-1")
 		installResumeRuntimeFactory(agent, client)
@@ -840,7 +841,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 
 	t.Run("replacement lifecycle snapshot failure is returned", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		connection := newRecordingAgentClient()
 		connection.updateErr = errors.New("snapshot unavailable")
 		agent.setAgentClient(connection)
@@ -856,7 +857,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 
 	t.Run("predecessor pump must join before successor publication", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		connection := newRecordingAgentClient()
@@ -893,7 +894,7 @@ func TestResumeRuntimeForTurnFailureAndSuccessBranches(t *testing.T) { //nolint:
 
 	t.Run("successor snapshot follows predecessor join", func(t *testing.T) {
 		session, agent, _ := newResumeRuntimeTestSession(t)
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		connection := newRecordingAgentClient()
 		agent.setAgentClient(connection)
 		replacement := newFakeHermesClient()
@@ -1706,9 +1707,9 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 			return replayErrClient, nil
 		}
 	})
-	replayErrAgent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, replayErrAgent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	replayConn := newRecordingAgentClient()
 	replayErrAgent.setAgentClient(replayConn)
 	replayErrClient.messagesFunc = func(context.Context, string) ([]nativehermes.NativeMessage, error) {
@@ -2991,9 +2992,15 @@ func TestAgentRejectsUnvalidatedOptionsWithoutInitialize(t *testing.T) {
 	} {
 		var reqErr *acp.RequestError
 		if !errors.As(err, &reqErr) || reqErr.Code != -32603 ||
-			!strings.Contains(fmt.Sprint(reqErr.Data), "image limits must be non-negative") {
+			!reflect.DeepEqual(reqErr.Data, map[string]any{jsonFieldError: valHermesInvalidOptions}) {
 			t.Fatalf("%s error = %#v", name, err)
 		}
+	}
+
+	// The prose the wire withholds is still on the agent's own option error,
+	// which is where the embedding host that supplied the bad option reads it.
+	if agent.optionsErr == nil || !strings.Contains(agent.optionsErr.Error(), "image limits must be non-negative") {
+		t.Fatalf("option validation prose lost: %v", agent.optionsErr)
 	}
 }
 
@@ -3127,7 +3134,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 				return client, nil
 			}
 		})
-		agent.retainNegotiatedLifecycle(negotiated)
+		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		installFailingLifecycleIDReader(t, 2)
 
 		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
@@ -3148,7 +3155,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		})
 		seed := testSession(agent, newFakeHermesClient())
 		require.NoError(t, seed.snapshotToStore(t.Context()))
-		agent.retainNegotiatedLifecycle(negotiated)
+		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		installFailingLifecycleIDReader(t, 1)
 
 		_, err := agent.loadOrResumeSession(t.Context(), seed.id, seed.cwd, nil, nil, nil, false)
@@ -3171,7 +3178,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 		})
 		parent := testSession(agent, parentClient)
 		agent.sessions[parent.id] = parent
-		agent.retainNegotiatedLifecycle(negotiated)
+		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		installFailingLifecycleIDReader(t, 2)
 
 		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{
@@ -3413,4 +3420,36 @@ func TestForkEarlyResidualBranches(t *testing.T) {
 			t.Fatalf("fork child lookup containment = %v", err)
 		}
 	})
+}
+
+// TestRuntimeLossIsAnEpochFenceNotALatch pins the recovery contract for a
+// native runtime that merely died. The loss fences the dead epoch and marks the
+// binding as needing resume; it is never a permanent verdict on the agent. The
+// next explicit operation admits one replacement generation and rebinds through
+// it, and the two operations that need no runtime at all — listing and deleting
+// — keep working while the runtime is down.
+func TestRuntimeLossIsAnEpochFenceNotALatch(t *testing.T) {
+	session, agent, _ := newResumeRuntimeTestSession(t)
+
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	require.True(t, session.needsRuntimeResume(), "a lost runtime fences the epoch")
+	require.NoError(t, session.ensureNotPoisoned(), "a runtime that merely died never latches the session")
+
+	listed, err := agent.ListSessions(t.Context(), acp.ListSessionsRequest{})
+	require.NoError(t, err, "session/list needs no runtime")
+	require.NotEmpty(t, listed.Sessions)
+
+	replacement := newFakeHermesClient()
+	replacement.getSession = testNativeSession("native-1")
+	installResumeRuntimeFactory(agent, replacement)
+
+	require.NoError(t, session.resumeRuntimeForTurnLocked(t.Context()),
+		"the next explicit operation starts one replacement")
+	require.False(t, session.needsRuntimeResume())
+
+	_, err = agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: session.id})
+	require.NoError(t, err, "session/delete needs no runtime")
 }

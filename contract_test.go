@@ -172,8 +172,14 @@ func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	data, _ := requestErr.Data.(map[string]any)
 	message, _ := data[jsonFieldError].(string)
 
-	if !strings.Contains(message, "input handoff root must be an absolute path") {
+	// The wire carries the closed token; the path the operator misconfigured
+	// stays out of it and on the agent's own option error instead.
+	if message != valHermesInvalidOptions {
 		t.Fatalf("error data = %#v", requestErr.Data)
+	}
+
+	if agent.optionsErr == nil || !strings.Contains(agent.optionsErr.Error(), "input handoff root must be an absolute path") {
+		t.Fatalf("option validation prose lost: %v", agent.optionsErr)
 	}
 }
 

@@ -602,10 +602,10 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 		return nil
 	}
 	if resumeErr != nil {
-		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", resumeErr.Error())
+		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, resumeErr)
 	}
 	if err := s.agent.rejectIncompleteHermesSession(id); err != nil {
-		return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
+		return s.poisonWithCause(ctx, poisonContainmentIncomplete, err)
 	}
 	if managed, ok := previousClient.(*managedHermesServer); ok && managed.managed {
 		if err := managed.finishReclaimedSnapshot(); err != nil {
@@ -648,11 +648,11 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 
 	if !ok {
-		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", "last committed Hermes session state is missing")
+		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, errors.New("last committed Hermes session state is missing"))
 	}
 
 	if idmap.SessionID != wantIDMap.SessionID || idmap.NativeSessionID != wantIDMap.NativeSessionID {
-		return s.poisonWithError(ctx, "hermes_native_session_id_drift", fmt.Sprintf(
+		return s.poisonWithCause(ctx, poisonNativeSessionIDDrift, fmt.Errorf(
 			"stored session identity drift: expected %q/%q, got %q/%q",
 			wantIDMap.SessionID,
 			wantIDMap.NativeSessionID,
@@ -662,7 +662,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 	}
 
 	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
-		return s.poisonWithError(ctx, "hermes_runtime_resume_failed", fmt.Sprintf(
+		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, fmt.Errorf(
 			"stored cwd drift: expected %q, got %q",
 			cwd,
 			snapshot.Session.Cwd,
@@ -683,7 +683,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 			keepScratch = true
 		}
 		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
-			return s.poisonWithError(ctx, "hermes_process_containment_incomplete", err.Error())
+			return s.poisonWithCause(ctx, poisonContainmentIncomplete, err)
 		}
 
 		return err

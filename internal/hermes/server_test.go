@@ -81,6 +81,9 @@ type fakeGatewayServer struct {
 	expectedPromptModel string
 	liveModels          map[string]string
 	lazyResumeBuilds    map[string]bool
+	buildBarrierStalls  int
+	buildBarrierFails   bool
+	startingLives       map[string]bool
 	reloadStatus        string
 	activeNoID          bool
 	activeNoKey         bool
@@ -102,6 +105,7 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 		malformedResponses: map[string]string{},
 		liveModels:         map[string]string{},
 		lazyResumeBuilds:   map[string]bool{},
+		startingLives:      map[string]bool{},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.server.Close)
@@ -341,11 +345,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		liveID := "live-" + resumeKey
 		s.mu.Lock()
 		if s.resumeBuildDefault != "" {
-			if eager, _ := params[keyEagerBuild].(bool); eager {
-				s.liveModels[liveID] = s.resumeBuildDefault
-			} else {
-				s.lazyResumeBuilds[liveID] = true
-			}
+			s.lazyResumeBuilds[liveID] = true
 		}
 		s.mu.Unlock()
 		result := map[string]any{
@@ -374,7 +374,12 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		activeNoKey := s.activeNoKey
 		activeEmpty := s.activeEmpty
 		activeNil := s.activeNil
+		starting := make([]string, 0, len(s.startingLives))
+		for live := range s.startingLives {
+			starting = append(starting, live)
+		}
 		s.mu.Unlock()
+		slices.Sort(starting)
 		if activeNil {
 			s.writeResult(ctx, conn, id, map[string]any{"sessions": nil})
 
@@ -398,7 +403,17 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			"session_key": sessionKey,
 			"title":       "Listed",
 			"cwd":         "/repo",
+			"status":      "idle",
 		}}
+		for _, live := range starting {
+			sessions = append(sessions, map[string]any{
+				"id":          live,
+				"session_key": live,
+				"title":       "starting",
+				"cwd":         "/repo",
+				"status":      ActiveSessionStarting,
+			})
+		}
 		if branchCreated && !branchNoActive {
 			sessionKey := "stored-branch"
 			if branchNoKey {
@@ -409,6 +424,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 				"session_key": sessionKey,
 				"title":       "branch",
 				"cwd":         "/repo",
+				"status":      "idle",
 			})
 		}
 		s.writeResult(ctx, conn, id, map[string]any{"sessions": sessions})
@@ -541,6 +557,29 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 
 			s.writeEvent(ctx, conn, event)
 		}
+	case "process.list":
+		live, _ := params["session_id"].(string)
+		s.mu.Lock()
+		stall := s.buildBarrierStalls
+		if stall > 0 {
+			s.buildBarrierStalls--
+			s.startingLives[live] = true
+		}
+		fails := s.buildBarrierFails
+		if stall == 0 && !fails {
+			delete(s.startingLives, live)
+			if s.lazyResumeBuilds[live] {
+				s.liveModels[live] = s.resumeBuildDefault
+				delete(s.lazyResumeBuilds, live)
+			}
+		}
+		s.mu.Unlock()
+		if stall > 0 || fails {
+			s.writeError(ctx, conn, id, 5032, "agent initialization timed out")
+
+			return
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"processes": []map[string]any{}})
 	case "approval.respond", "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond", "session.interrupt", "session.close":
 		s.writeResult(ctx, conn, id, map[string]any{})
 	case "config.set":
@@ -2805,7 +2844,7 @@ func TestHermesGatewayServerMappingAndAccessorBranches(t *testing.T) {
 	})
 }
 
-func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {
+func TestHermesGatewayBarrieredResumePreventsForkModelMutationLoss(t *testing.T) {
 	fake := newFakeGatewayServer(t)
 	fake.activeEmpty = true
 	fake.resumeBuildDefault = "z-ai/glm-4.7"
@@ -2824,18 +2863,24 @@ func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {
 	}
 
 	resumeCalls := fake.callsFor("session.resume")
-	if len(resumeCalls) != 1 || resumeCalls[0].Params[keyEagerBuild] != true {
+	if len(resumeCalls) != 1 {
 		t.Fatalf("fork child resume calls = %#v", resumeCalls)
+	}
+	// The resume must not ask the gateway to build eagerly: that flag is what
+	// makes the gateway hand its shared state.db handle to the resumed agent.
+	if _, present := resumeCalls[0].Params["eager_build"]; present {
+		t.Fatalf("fork child resume params = %#v", resumeCalls[0].Params)
 	}
 	calls := fake.callMethods()
 	resumeIndex := slices.Index(calls, "session.resume")
+	barrierIndex := slices.Index(calls, "process.list")
 	modelIndex := slices.Index(calls, "config.set")
 	promptIndex := slices.Index(calls, "prompt.submit")
-	if resumeIndex < 0 || modelIndex <= resumeIndex || promptIndex <= modelIndex {
-		t.Fatalf("fork resume/model/prompt order = %#v", calls)
+	if resumeIndex < 0 || barrierIndex <= resumeIndex || modelIndex <= barrierIndex || promptIndex <= modelIndex {
+		t.Fatalf("fork resume/barrier/model/prompt order = %#v", calls)
 	}
 
-	// Operations that obtain a live id without GetSession use the same eager
+	// Operations that obtain a live id without GetSession use the same barriered
 	// rebind helper, so a model selection cannot enter the lazy-build window.
 	ensureFake := newFakeGatewayServer(t)
 	ensureServer := newGatewayBackedHermesServer(t, ensureFake, "")
@@ -2843,8 +2888,67 @@ func TestHermesGatewayEagerResumePreventsForkModelMutationLoss(t *testing.T) {
 		t.Fatalf("ensure-live model bind: %v", err)
 	}
 	ensureResumeCalls := ensureFake.callsFor("session.resume")
-	if len(ensureResumeCalls) != 1 || ensureResumeCalls[0].Params[keyEagerBuild] != true {
+	if len(ensureResumeCalls) != 1 {
 		t.Fatalf("ensure-live resume calls = %#v", ensureResumeCalls)
+	}
+	if _, present := ensureResumeCalls[0].Params["eager_build"]; present {
+		t.Fatalf("ensure-live resume params = %#v", ensureResumeCalls[0].Params)
+	}
+	if len(ensureFake.callsFor("process.list")) != 1 {
+		t.Fatalf("ensure-live barrier calls = %#v", ensureFake.callsFor("process.list"))
+	}
+}
+
+// TestHermesGatewayResumeBarrierFailureBranches covers the two ways the barrier
+// stops waiting on something other than the build's own verdict: the caller
+// withdrew, and the gateway can no longer say whether the build is running.
+func TestHermesGatewayResumeBarrierFailureBranches(t *testing.T) {
+	withdrawn := newFakeGatewayServer(t)
+	withdrawnServer := newGatewayBackedHermesServer(t, withdrawn, "")
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := withdrawnServer.awaitGatewayAgentBuild(cancelled, withdrawnServer.gatewayTransport(), "live-1"); err == nil {
+		t.Fatal("barrier ignored a withdrawn context")
+	}
+
+	unreadable := newFakeGatewayServer(t)
+	unreadable.buildBarrierFails = true
+	unreadableServer := newGatewayBackedHermesServer(t, unreadable, "")
+	unreadable.setFail("session.active_list")
+
+	if err := unreadableServer.awaitGatewayAgentBuild(t.Context(), unreadableServer.gatewayTransport(), "live-1"); err == nil {
+		t.Fatal("barrier ignored an unreadable liveness list")
+	}
+}
+
+// TestHermesGatewayResumeBarrierWaitsOutTheBuildCap proves the barrier treats
+// the gateway's own wait cap as "still building" and retries, and reports a
+// genuine build failure once the session is no longer starting.
+func TestHermesGatewayResumeBarrierWaitsOutTheBuildCap(t *testing.T) {
+	stalling := newFakeGatewayServer(t)
+	stalling.buildBarrierStalls = 2
+	stalling.resumeBuildDefault = "z-ai/glm-4.7"
+	stallServer := newGatewayBackedHermesServer(t, stalling, "z-ai/glm-4.7")
+
+	if _, err := stallServer.GetSession(t.Context(), "stored-1"); err != nil {
+		t.Fatalf("resume through a stalled build barrier: %v", err)
+	}
+	if got := len(stalling.callsFor("process.list")); got != 3 {
+		t.Fatalf("barrier attempts = %d", got)
+	}
+	if got := len(stalling.callsFor("session.active_list")); got != 2 {
+		t.Fatalf("barrier liveness polls = %d", got)
+	}
+
+	failing := newFakeGatewayServer(t)
+	failing.buildBarrierFails = true
+	failServer := newGatewayBackedHermesServer(t, failing, "")
+	if _, err := failServer.GetSession(t.Context(), "stored-1"); err == nil {
+		t.Fatal("resume accepted a failed agent build")
+	}
+	if got := len(failing.callsFor("process.list")); got != 1 {
+		t.Fatalf("failed-build barrier attempts = %d", got)
 	}
 }
 

@@ -9,7 +9,7 @@ Go ACP agent that exposes the local Hermes CLI as an [Agent Client Protocol](htt
 Use it as either:
 
 - a standalone ACP subprocess: `acp-go-hermes`
-- an embedded Go adapter through `hermesacp.Serve`
+- an embedded Go adapter through `hermesacp.Serve`, or in-process through `hermesacp.NewAgent` with `hermesacp.WithClient`
 
 ## Install
 
@@ -102,6 +102,12 @@ and the shared Hermes home are configured; naming the ledger root without a
 shared home fails `initialize` instead. Configuring both also canonicalizes the
 shared home — the adapter resolves its symlinks and uses the resolved path as
 `HERMES_HOME`.
+
+A host that embeds the `Agent` and calls its ACP methods in-process builds it
+with `NewAgent` and supplies the ACP client itself through `WithClient`; that
+client is what the agent streams session updates, permission requests, and
+elicitations to. `Serve` installs the connection it builds as that client and
+refuses an option set carrying one.
 
 An embedded host can pass `WithHostAuthority` to supply the complete native
 environment, prepare and reclaim native trees, and launch every managed Hermes

@@ -11,14 +11,26 @@ import (
 )
 
 func TestValidationMetaAndHelperBranches(t *testing.T) {
-	if err := validateSessionStartPaths("relative", nil); err == nil {
-		t.Fatal("relative cwd accepted")
+	// A cwd that is not an absolute path is one condition with one verdict.
+	// An empty value is not an absolute path either, so it answers exactly what
+	// a relative one answers rather than a second shape a host would have to
+	// branch on.
+	wantCwdRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: jsonFieldCwd})
+	for name, value := range map[string]string{"relative": "relative", "empty": ""} {
+		var reqErr *acp.RequestError
+		if err := validateSessionStartPaths(value, nil); !errors.As(err, &reqErr) ||
+			!reflect.DeepEqual(reqErr, wantCwdRefusal) {
+			t.Fatalf("%s cwd refusal = %v, want %v", name, err, wantCwdRefusal)
+		}
 	}
-	if err := validateRequiredAbsolutePath("cwd", ""); err == nil {
-		t.Fatal("empty required absolute path accepted")
-	}
-	if err := validateSessionStartPaths(absTestPath("tmp", "project"), []string{"relative"}); err == nil {
-		t.Fatal("relative additional directory accepted")
+
+	wantDirRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "additionalDirectories[0]"})
+	for name, value := range map[string]string{"relative": "relative", "empty": ""} {
+		var reqErr *acp.RequestError
+		if err := validateSessionStartPaths(absTestPath("tmp", "project"), []string{value}); !errors.As(err, &reqErr) ||
+			!reflect.DeepEqual(reqErr, wantDirRefusal) {
+			t.Fatalf("%s additional directory refusal = %v, want %v", name, err, wantDirRefusal)
+		}
 	}
 	value := absTestPath("tmp", "project")
 	if err := validateOptionalAbsolutePath("cwd", &value); err != nil {

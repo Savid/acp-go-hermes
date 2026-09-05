@@ -56,7 +56,6 @@ const (
 	keyField            = "field"
 	keySource           = "source"
 	keyQuestion         = "question"
-	keyEagerBuild       = "eager_build"
 	jsonFieldError      = "error"
 	jsonFieldCwd        = "cwd"
 	jsonFieldStatus     = "status"
@@ -1598,6 +1597,17 @@ func (s *hermesServer) ensureLiveGatewaySessionOn(
 // agent before publishing its live id. Hermes 0.20 otherwise returns from a
 // cold resume while a background build is still pending; a config.set sent in
 // that window can report success and then be overwritten by the stale build.
+//
+// The barrier is a separate call rather than the resume's own eager-build flag.
+// Hermes 0.20.4 builds an eagerly-resumed agent against the gateway's shared
+// process-wide state.db handle and then marks that agent the handle's owner, so
+// the next native session.close for the resumed session closes the shared
+// handle underneath the whole process: every later state.db-backed method in
+// that generation — session.delete and session.list included — fails with a
+// dead connection. The deferred build reaches the same finished agent through
+// the gateway's own build-aware session lookup without that ownership transfer,
+// so the barrier both preserves the ordering config.set needs and leaves the
+// generation able to serve its own teardown.
 func (s *hermesServer) resumeGatewaySessionOn(
 	ctx context.Context,
 	transport *gatewayTransport,
@@ -1619,13 +1629,17 @@ func (s *hermesServer) resumeGatewaySessionOn(
 		}
 	}()
 
-	result, sequence, err := transport.client.ResumeSessionWatermark(ctx, stored, map[string]any{keyEagerBuild: true})
+	result, sequence, err := transport.client.ResumeSessionWatermark(ctx, stored, map[string]any{})
 	if err != nil {
 		return SessionResumeResult{}, err
 	}
 
 	resolvedStored, err := s.storedSessionIDFromResume(result)
 	if err != nil {
+		return SessionResumeResult{}, err
+	}
+
+	if err := s.awaitGatewayAgentBuild(ctx, transport, result.SessionID); err != nil {
 		return SessionResumeResult{}, err
 	}
 
@@ -1644,6 +1658,62 @@ func (s *hermesServer) resumeGatewaySessionOn(
 	bound = true
 
 	return result, nil
+}
+
+// awaitGatewayAgentBuild holds a cold resume until the gateway has finished
+// building the resumed session's agent.
+//
+// The gateway caps one barrier wait well below the time a cold build can take,
+// and answers a still-running build and a failed one with the same code, so the
+// verdict comes from the session's own liveness word instead: a session the
+// gateway still reports as starting has a build in flight and the barrier waits
+// again, and any other state means the build is over and the refusal it just
+// reported is the build's real failure. The caller's context bounds the wait.
+func (s *hermesServer) awaitGatewayAgentBuild(
+	ctx context.Context,
+	transport *gatewayTransport,
+	live string,
+) error {
+	for {
+		err := transport.client.AwaitSessionBuild(ctx, live)
+		if err == nil {
+			return nil
+		}
+
+		if ctx.Err() != nil {
+			return err
+		}
+
+		building, buildingErr := s.gatewayAgentStillBuilding(ctx, transport, live)
+		if buildingErr != nil {
+			return errors.Join(err, buildingErr)
+		}
+
+		if !building {
+			return err
+		}
+	}
+}
+
+// gatewayAgentStillBuilding reports whether the gateway still lists the live
+// session as starting, which is its own word for an agent build in flight.
+func (s *hermesServer) gatewayAgentStillBuilding(
+	ctx context.Context,
+	transport *gatewayTransport,
+	live string,
+) (bool, error) {
+	active, err := transport.client.ActiveList(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	for _, item := range active.Sessions {
+		if item.SessionID == live {
+			return item.Status == ActiveSessionStarting, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (s *hermesServer) storedSessionIDFromResume(result SessionResumeResult) (string, error) {

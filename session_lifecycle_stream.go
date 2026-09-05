@@ -59,6 +59,16 @@ type sessionStream struct {
 
 // lifecycleStreamID mints one incarnation identity. It names the native
 // generation, so it is minted exactly where a generation is.
+// lifecycleViolationKind reduces an emit refusal to its closed vocabulary token.
+func lifecycleViolationKind(err error) lifecycle.ViolationKind {
+	var violation *lifecycle.ViolationError
+	if errors.As(err, &violation) {
+		return violation.Kind
+	}
+
+	return ""
+}
+
 func lifecycleStreamID() (string, error) {
 	return newSessionID()
 }
@@ -450,10 +460,14 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 	if err != nil {
 		p.stream.Fence()
 
-		return acp.NewInternalError(map[string]any{
-			jsonFieldError: "hermes_lifecycle_violation",
-			jsonFieldCause: err.Error(),
-		})
+		// The violation kind is a closed token; the offending stream identity
+		// and detail the refusal also carries are diagnostics, not wire data,
+		// so they ride the joined Go error instead.
+		return errors.Join(acp.NewInternalError(map[string]any{
+			jsonFieldError: valHermesInternalFailure,
+			keyClass:       classLifecycleViolation,
+			jsonFieldCause: string(lifecycleViolationKind(err)),
+		}), err)
 	}
 
 	// The envelope rides the notification's own `_meta`, beside sessionId and

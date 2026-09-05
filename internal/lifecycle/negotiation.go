@@ -10,6 +10,19 @@ import (
 // because they are read before any stream exists.
 const MetaPath = `_meta["` + MetaKey + `"]`
 
+// Verdict names why a value was refused. The two are distinct facts a host acts
+// on differently and are never collapsed: VerdictMissing says a required key was
+// left out, VerdictUnsupported says a key or member that is present is refused.
+type Verdict string
+
+const (
+	// VerdictUnsupported refuses a value that is present — the key on a surface
+	// that does not carry it, or a malformed member of one that does.
+	VerdictUnsupported Verdict = "unsupported"
+	// VerdictMissing refuses the absence of a value the contract requires.
+	VerdictMissing Verdict = "missing"
+)
+
 // ParamError refuses a negotiation or correlation value. It names the exact
 // member path so a host can tell which value it got wrong, and it is the one
 // family literal this adapter validates on `initialize` itself.
@@ -17,10 +30,13 @@ type ParamError struct {
 	// Field is the full request path, from MetaPath down to the offending
 	// member.
 	Field string
+	// Verdict distinguishes a required key the host omitted from a present
+	// value that is refused.
+	Verdict Verdict
 }
 
 // Error implements error.
-func (e *ParamError) Error() string { return "unsupported " + e.Field }
+func (e *ParamError) Error() string { return string(e.Verdict) + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
 	field := MetaPath
@@ -28,7 +44,13 @@ func paramError(members ...string) *ParamError {
 		field += "." + member
 	}
 
-	return &ParamError{Field: field}
+	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+}
+
+// missingParamError refuses the absence of the key on a surface that requires
+// it. The path is always the bare key: there is no member to name.
+func missingParamError() *ParamError {
+	return &ParamError{Field: MetaPath, Verdict: VerdictMissing}
 }
 
 // DecodeCapability reads the capability from `InitializeRequest._meta`. An absent value is
@@ -82,7 +104,7 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 	case !negotiated.Present():
 		return Submission{}, nil
 	case !present:
-		return Submission{}, paramError()
+		return Submission{}, missingParamError()
 	}
 
 	fields, ok := raw.(map[string]any)

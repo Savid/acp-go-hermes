@@ -32,7 +32,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	hermesPath := flags.String("path", "", "path to hermes CLI")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	hermesHome := flags.String("home", "", "unsupported: use -scratch-dir for isolated ephemeral state or -shared-hermes-home for the official-Hermes shared durable mode")
-	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; without it no provider-auth method is advertised")
+	providerAuthRoot := flags.String("provider-auth-root", "", "durable directory for the provider-auth ledger; requires -shared-hermes-home, because the ledger binds that durable native residence; without it no provider-auth method is advertised")
 	sharedHermesHome := flags.String("shared-hermes-home", "", "opt in to one durable HERMES_HOME shared by official Hermes session processes; disables native-home isolation while preserving per-session process and control isolation")
 	model := flags.String("model", "", "default Hermes model as provider/model")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
@@ -49,6 +49,17 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		_, _ = fmt.Fprintln(stdout, agentVersion())
 
 		return 0
+	}
+
+	// The provider-auth ledger binds the durable native residence that
+	// -shared-hermes-home names, so the pair is refused here rather than left
+	// to NewAgent. Without this check the agent starts, answers initialize with
+	// an internal error, and serves nothing: the operator sees a dead agent and
+	// no mention of the flag that is missing.
+	if *providerAuthRoot != "" && *sharedHermesHome == "" {
+		_, _ = fmt.Fprintln(stderr, "acp-go-hermes: -provider-auth-root requires -shared-hermes-home: the provider-auth ledger binds the durable native residence that -shared-hermes-home names")
+
+		return 2
 	}
 
 	seeded, err := seedFiles.contents()

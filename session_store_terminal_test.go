@@ -258,7 +258,7 @@ func TestPromptCommitsReplayStableTerminalIdentityAcrossTailCloseAndHydrate(t *t
 		if err != nil {
 			t.Fatalf("Prompt turn %d: %v", turn+1, err)
 		}
-		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: wantID}); !reflect.DeepEqual(response.Meta, want) {
+		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: wantID, Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(response.Meta, want) {
 			t.Fatalf("Prompt turn %d meta = %#v, want %#v", turn+1, response.Meta, want)
 		}
 	}
@@ -319,7 +319,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first Prompt: %v", err)
 		}
-		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-2"}); !reflect.DeepEqual(first.Meta, want) {
+		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-2", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(first.Meta, want) {
 			t.Fatalf("first Prompt meta = %#v, want %#v", first.Meta, want)
 		}
 		if store.replaceCount() != 1 {
@@ -353,7 +353,7 @@ func TestPromptRequiresDurableTerminalBeforeStoreOrResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first Prompt: %v", err)
 		}
-		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-2"}); !reflect.DeepEqual(first.Meta, want) {
+		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-2", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(first.Meta, want) {
 			t.Fatalf("first Prompt meta = %#v, want %#v", first.Meta, want)
 		}
 
@@ -436,7 +436,7 @@ func TestLoadedTerminalBaselineAllowsStrictAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loaded advancing Prompt: %v", err)
 	}
-	if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4"}); !reflect.DeepEqual(response.Meta, want) {
+	if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(response.Meta, want) {
 		t.Fatalf("loaded advancing Prompt meta = %#v, want %#v", response.Meta, want)
 	}
 	assertStoredTerminal(t, store, string(loaded.id), "history-4")
@@ -637,7 +637,7 @@ func TestCancelAndTerminalReplaceHaveOneSettlementBoundary(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("commit-winning Prompt: %v", result.err)
 		}
-		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4"}); !reflect.DeepEqual(result.response.Meta, want) {
+		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(result.response.Meta, want) {
 			t.Fatalf("commit-winning Prompt meta = %#v, want %#v", result.response.Meta, want)
 		}
 		if store.replaceCount() != 2 || session.needsRuntimeResume() {
@@ -766,7 +766,7 @@ func TestFinalEmitFailureCannotBeAdoptedByCloseOrRetry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("safe retry Prompt: %v", err)
 		}
-		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4"}); !reflect.DeepEqual(response.Meta, want) {
+		if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(response.Meta, want) {
 			t.Fatalf("safe retry meta = %#v, want %#v", response.Meta, want)
 		}
 		if store.replaceCount() != 3 {
@@ -933,7 +933,7 @@ func TestCloseSessionWaitsForTerminalSnapshotCommit(t *testing.T) {
 	if promptResult.err != nil {
 		t.Fatalf("racing Prompt: %v", promptResult.err)
 	}
-	if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4"}); !reflect.DeepEqual(promptResult.response.Meta, want) {
+	if want := terminalResponseMeta(SessionStoreTerminalState{MessageID: "history-4", Outcome: string(lifecycle.OutcomeSuccess), StopReason: string(acp.StopReasonEndTurn)}); !reflect.DeepEqual(promptResult.response.Meta, want) {
 		t.Fatalf("racing Prompt meta = %#v, want %#v", promptResult.response.Meta, want)
 	}
 	if err := <-closeDone; err != nil {
@@ -1432,4 +1432,35 @@ func TestStoredLifecycleBoundaryValidation(t *testing.T) {
 	}
 
 	require.NoError(t, validateStateSnapshotRequiredSections(valid()))
+}
+
+// TestTerminalResponseMetaCarriesTheCommittedOutcome pins the `_meta.hermes`
+// shape a completed prompt answers with. The outcome is the one the commit
+// recorded for that turn — derived from the harness's own finish reason — and
+// the stop reason is emitted only when a v1 reason names that outcome, never as
+// an empty string.
+func TestTerminalResponseMetaCarriesTheCommittedOutcome(t *testing.T) {
+	t.Parallel()
+
+	named := terminalResponseMeta(SessionStoreTerminalState{
+		MessageID:  "history-2",
+		Outcome:    string(lifecycle.OutcomeSuccess),
+		StopReason: string(acp.StopReasonEndTurn),
+	})
+	require.Equal(t, map[string]any{hermesMetaKey: map[string]any{
+		keyMessageID:  "history-2",
+		keyOutcome:    lifecycle.OutcomeSuccess,
+		keyStopReason: string(acp.StopReasonEndTurn),
+	}}, named)
+
+	// A recorded outcome no v1 stop reason names keeps the outcome and omits the
+	// reason rather than publishing an empty one.
+	unnamed := terminalResponseMeta(SessionStoreTerminalState{
+		MessageID: "history-2",
+		Outcome:   string(lifecycle.OutcomeFailed),
+	})
+	require.Equal(t, map[string]any{hermesMetaKey: map[string]any{
+		keyMessageID: "history-2",
+		keyOutcome:   lifecycle.OutcomeFailed,
+	}}, unnamed)
 }

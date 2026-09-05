@@ -1140,7 +1140,8 @@ func TestPromptIdleGatewayDisconnectRequiresResumeBeforeNextTurn(t *testing.T) {
 	require.ErrorAs(t, err, &reqErr)
 	data, ok := reqErr.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "hermes_runtime_resume_failed", data[jsonFieldError])
+	require.Equal(t, valHermesSessionPoisoned, data[jsonFieldError])
+	require.Equal(t, poisonRuntimeResumeFailed, data[jsonFieldCause])
 	require.Zero(t, client.abortCount())
 }
 
@@ -1335,7 +1336,7 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 		t.Fatalf("missing live mapping error type = %T", err)
 	}
 	data, _ := reqErr.Data.(map[string]any)
-	if data["error"] != "hermes_missing_live_session_mapping" {
+	if data["error"] != valHermesSessionPoisoned || data["cause"] != poisonMissingLiveSessionMapping {
 		t.Fatalf("missing live mapping error data = %#v", data)
 	}
 	if err := session.ensureNotPoisoned(); err == nil {
@@ -1959,7 +1960,7 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
 
 		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-fail", "reply"))
-		if err == nil || !strings.Contains(err.Error(), "hermes_mcp_reload_failed") || !strings.Contains(err.Error(), "reload unavailable") {
+		if err == nil || !strings.Contains(err.Error(), poisonMCPReloadFailed) || !strings.Contains(err.Error(), "reload unavailable") {
 			t.Fatalf("reload failure = %v", err)
 		}
 		_, nextErr := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-after-fail", "reply"))
@@ -2174,7 +2175,7 @@ func assertNativeSessionDriftPoison(
 	gotNativeID string,
 ) {
 	t.Helper()
-	if err == nil || !strings.Contains(err.Error(), "hermes_native_session_id_drift") || !strings.Contains(err.Error(), gotNativeID) {
+	if err == nil || !strings.Contains(err.Error(), poisonNativeSessionIDDrift) || !strings.Contains(err.Error(), gotNativeID) {
 		t.Fatalf("drift error = %v", err)
 	}
 	if conn.updateCount() != 0 {
@@ -2184,8 +2185,13 @@ func assertNativeSessionDriftPoison(
 		t.Fatalf("store writes after poison = %d, want 0", store.replaceCount())
 	}
 	_, nextErr := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("again")}})
-	if nextErr == nil || !strings.Contains(nextErr.Error(), "session_poisoned") || !strings.Contains(nextErr.Error(), gotNativeID) {
+	if nextErr == nil || !strings.Contains(nextErr.Error(), valHermesSessionPoisoned) {
 		t.Fatalf("subsequent poison error = %v", nextErr)
+	}
+	// The latched refusal names the closed cause and nothing else: the native
+	// identity that produced it stays off every later answer.
+	if strings.Contains(nextErr.Error(), gotNativeID) {
+		t.Fatalf("subsequent poison error leaked the native id: %v", nextErr)
 	}
 }
 
@@ -3097,10 +3103,13 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 	if promptErr := <-promptDone; !errors.Is(promptErr, ErrContainmentIncomplete) {
 		t.Fatalf("Prompt error = %v, want process-tree proof failure", promptErr)
 	}
-	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+	// An incarnation whose process tree is still alive and un-containable is a
+	// runtime this adapter cannot replace, which is its own token rather than an
+	// ordinary poisoned session.
+	if err := session.ensureNotPoisoned(); err == nil || !strings.Contains(err.Error(), valHermesRuntimeUnavailable) {
 		t.Fatalf("poisoned session error = %v", err)
 	}
-	if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "after-unproven", "reply")); err == nil || !strings.Contains(err.Error(), "session_poisoned") {
+	if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "after-unproven", "reply")); err == nil || !strings.Contains(err.Error(), valHermesRuntimeUnavailable) {
 		t.Fatalf("Prompt after proof failure = %v", err)
 	}
 	if got := client.closeCount(); got != 1 {
@@ -3720,9 +3729,9 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 
 func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -4078,9 +4087,9 @@ func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 	require.Error(t, session.cancelRouted(activeMeta))
 
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	negotiatedSession := testSession(agent, newFakeHermesClient())
 	_, err := negotiatedSession.Prompt(t.Context(), acp.PromptRequest{
 		SessionId: negotiatedSession.id,
@@ -4465,9 +4474,9 @@ func newOrderedControlSession(t *testing.T) (*session, *fakeHermesClient, *order
 	host := newOrderedControlACPClient()
 	_ = acp.NewClientSideConnection(host, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	connection := newLocalAgentConnection(agent, orderedControlWireWriter{target: a2cW, events: host.wireEvents}, c2aR)
 	agent.setAgentClient(connection)
@@ -4698,7 +4707,7 @@ func TestPromptSynchronizationFailureAbortsBeforeDispatch(t *testing.T) {
 
 func TestPromptLifecycleAcceptanceFailureResolvesProjection(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	base := newRecordingAgentClient()
 	agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 2})
 	client := newFakeHermesClient()
@@ -4815,4 +4824,97 @@ func TestPromptSynchronizeCancellationIsUnaccepted(t *testing.T) {
 	s.pumpMu.Unlock()
 	run := runProjectionPrompt(t, s)
 	require.Equal(t, acp.StopReasonCancelled, run.response.StopReason)
+}
+
+// TestAssistantTextIsAppendOnlyAcrossNativeFixtures is the append-only
+// conformance battery. Each case replays one native fixture through the mapper
+// and asserts what a client rendering the turn as the in-order concatenation of
+// its chunks actually sees: a terminal frame that repeats the streamed text
+// contributes only its unstreamed suffix, a harness that streams no deltas
+// yields exactly one chunk, and a turn carrying several native messages yields
+// each message's text once under its own native identity.
+func TestAssistantTextIsAppendOnlyAcrossNativeFixtures(t *testing.T) {
+	textPart := func(messageID string, text string, streamed string) nativehermes.Part {
+		return nativehermes.Part{
+			SessionID: "native-1", MessageID: messageID, Type: valText,
+			Text: text, StreamedText: streamed,
+		}
+	}
+
+	for _, test := range []struct {
+		name     string
+		fixture  []nativehermes.Part
+		want     string
+		chunks   int
+		messages []string
+	}{
+		{
+			name: "terminal frame repeats the streamed text",
+			fixture: []nativehermes.Part{
+				textPart("message-1", "The answer ", ""),
+				textPart("message-1", "The answer is 42.", "The answer "),
+				// The harness's terminal full-message frame restates the whole
+				// assembled text; the deltas already carried all of it.
+				textPart("message-1", "The answer is 42.", "The answer is 42."),
+			},
+			want: "The answer is 42.", chunks: 2,
+			messages: []string{"message-1", "message-1"},
+		},
+		{
+			name:    "deltas-free harness",
+			fixture: []nativehermes.Part{textPart("message-1", "The answer is 42.", "")},
+			want:    "The answer is 42.", chunks: 1,
+			messages: []string{"message-1"},
+		},
+		{
+			name: "several native messages in one turn",
+			fixture: []nativehermes.Part{
+				textPart("message-1", "first", ""),
+				textPart("message-2", "second", ""),
+				// A restated native identity carrying text already streamed for
+				// that identity adds nothing.
+				textPart("message-2", "second", "second"),
+			},
+			want: "firstsecond", chunks: 2,
+			messages: []string{"message-1", "message-2"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conn := newRecordingAgentClient()
+			agent := newTestAgent()
+			agent.setAgentClient(conn)
+			session := testSession(agent, newFakeHermesClient())
+			t.Cleanup(session.stopPump)
+
+			for _, part := range test.fixture {
+				require.NoError(t, session.emitPartUpdates(t.Context(), valAssistant, part))
+			}
+
+			conn.mu.Lock()
+			updates := append([]acp.SessionNotification(nil), conn.updates...)
+			conn.mu.Unlock()
+
+			var (
+				rendered string
+				chunks   int
+				messages []string
+			)
+
+			for _, update := range updates {
+				chunk := update.Update.AgentMessageChunk
+				if chunk == nil || chunk.Content.Text == nil {
+					continue
+				}
+
+				chunks++
+				rendered += chunk.Content.Text.Text
+
+				messages = append(messages, *chunk.MessageId)
+			}
+
+			require.Equal(t, test.want, rendered, "a client concatenating the chunks renders the final text exactly once")
+			require.Equal(t, test.chunks, chunks)
+			require.Equal(t, test.messages, messages)
+		})
+	}
 }

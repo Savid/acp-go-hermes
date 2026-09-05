@@ -579,7 +579,15 @@ type ActiveSession struct {
 	SessionKey string `json:"session_key"`
 	Title      string `json:"title"`
 	Cwd        string `json:"cwd"`
+	// Status is the gateway's own liveness word for the session. "starting"
+	// means its agent build has begun and has not finished; every other value
+	// means the build is no longer pending.
+	Status string `json:"status"`
 }
+
+// ActiveSessionStarting is the session.active_list status a session carries
+// while its deferred agent build is still running.
+const ActiveSessionStarting = "starting"
 
 // PersistedSession is one durable state.db row returned by session.list.
 type PersistedSession struct {
@@ -720,6 +728,17 @@ func (c *Client) History(ctx context.Context, liveSessionID string) (SessionHist
 	err := c.Call(ctx, "session.history", map[string]any{fieldSessionID: liveSessionID}, &out)
 
 	return out, err
+}
+
+// AwaitSessionBuild blocks until the gateway has finished building the agent
+// for a live session, and reports the build's own failure when it has one.
+//
+// process.list resolves its session through the gateway's build-aware lookup,
+// so the gateway starts the deferred build if it has not started, waits for it,
+// and answers only once the agent exists. The adapter needs exactly that
+// barrier after a cold resume and needs nothing the call returns.
+func (c *Client) AwaitSessionBuild(ctx context.Context, liveSessionID string) error {
+	return c.Call(ctx, "process.list", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
 func (c *Client) ActiveList(ctx context.Context) (ActiveListResult, error) {

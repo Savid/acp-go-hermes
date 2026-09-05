@@ -16,6 +16,7 @@ import (
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
 )
 
 // absTestPath builds a host-absolute path from POSIX-looking segments, so a
@@ -374,6 +375,14 @@ func (c *fakeHermesClient) SendMessage(ctx context.Context, id string, req nativ
 	}
 
 	return message, nil
+}
+
+// promptDispatchCount reports how many prompts actually reached the harness.
+func (c *fakeHermesClient) promptDispatchCount() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.promptCycles
 }
 
 func (c *fakeHermesClient) Messages(ctx context.Context, id string) ([]nativehermes.NativeMessage, error) {
@@ -932,9 +941,9 @@ func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordin
 	t.Helper()
 
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)

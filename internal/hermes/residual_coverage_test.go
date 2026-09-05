@@ -1141,6 +1141,7 @@ func TestResidualGatewayMethodProbeFailures(t *testing.T) {
 		{"image failure", func(fake *fakeGatewayServer) { fake.setFail("image.attach_bytes") }},
 		{"approval failure", func(fake *fakeGatewayServer) { fake.setFail("approval.respond") }},
 		{"clarify failure", func(fake *fakeGatewayServer) { fake.setFail("clarify.respond") }},
+		{"build barrier failure", func(fake *fakeGatewayServer) { fake.setFail("process.list") }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := run(t, test.configure); err == nil {

@@ -475,8 +475,31 @@ func TestHydrateStateFromStoreErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replace bad format: %v", err)
 	}
-	if _, _, _, err := hydrateStateFromStore(ctx, store, "s", xdg); err == nil {
+	badFormatErr := func() error {
+		_, _, _, err := hydrateStateFromStore(ctx, store, "s", xdg)
+
+		return err
+	}()
+	if badFormatErr == nil {
 		t.Fatal("hydrate accepted bad format")
+	}
+	// A store entry that exists and cannot be replayed is its own wire verdict,
+	// and it carries no decoder prose.
+	var restoreErr *restoreFailedError
+	if !errors.As(badFormatErr, &restoreErr) {
+		t.Fatalf("bad-format hydrate error = %v, want a restore failure", badFormatErr)
+	}
+	if !strings.Contains(restoreErr.Error(), "unsupported hermes store format") ||
+		restoreErr.Unwrap() == nil {
+		t.Fatalf("restore failure lost its cause: %v", restoreErr)
+	}
+	if data := restoreErr.requestError().Data; !reflect.DeepEqual(data, map[string]any{
+		jsonFieldError: valHermesRestoreFailed,
+	}) {
+		t.Fatalf("restore failure wire data = %#v", data)
+	}
+	if code := restoreErr.requestError().Code; code != -32603 {
+		t.Fatalf("restore failure code = %d", code)
 	}
 
 	store = NewInMemorySessionStore()

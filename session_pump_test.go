@@ -105,7 +105,7 @@ func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
 func TestSessionPumpRetainsPreSnapshotAutonomousOutput(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -170,7 +170,7 @@ func TestSessionPumpRetainsPreSnapshotAutonomousOutput(t *testing.T) {
 func TestSessionPumpHoldsPostPromptActivityUntilForegroundSettlement(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -264,7 +264,7 @@ func TestSessionPumpHoldsPostPromptActivityUntilForegroundSettlement(t *testing.
 func TestSessionPumpDrainsCompletedAutonomousBeforePromptDispatch(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	client := newFakeHermesClient()
@@ -337,7 +337,7 @@ func TestSessionPumpDrainsCompletedAutonomousBeforePromptDispatch(t *testing.T) 
 
 func TestSessionPumpBackgroundControlsResolveExactlyOnce(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -410,7 +410,7 @@ func TestSessionPumpStoreFailureNeverPublishesIdleSuccess(t *testing.T) {
 	wantErr := errors.New("durable store unavailable")
 	store := replaceFailStore{SessionStore: NewInMemorySessionStore(), err: wantErr}
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -442,7 +442,7 @@ func TestSessionPumpStoreFailureNeverPublishesIdleSuccess(t *testing.T) {
 
 func TestSessionPumpContinuesAfterProviderFailureThroughActivityAndPrompt(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -504,7 +504,7 @@ func TestSessionPumpContinuesAfterProviderFailureThroughActivityAndPrompt(t *tes
 
 func TestImmediatePromptWaitsForPumpContainmentAndLazilyResumesOnce(t *testing.T) {
 	session, agent, _ := newResumeRuntimeTestSession(t)
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	require.NoError(t, session.openLifecycleStream())
@@ -590,7 +590,7 @@ func TestImmediatePromptWaitsForPumpContainmentAndLazilyResumesOnce(t *testing.T
 
 func TestSessionPumpPreSnapshotOverflowFencesIncarnation(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	client := newFakeHermesClient()
 	client.deliveries = make(chan nativehermes.TurnDelivery, sessionPumpBacklogCapacity+2)
 	session := testSession(agent, client)
@@ -663,7 +663,7 @@ func TestSessionCloseJoinsPumpAndEmitsNothingAfterward(t *testing.T) {
 
 func TestSessionCloseTerminalizesOpenAutonomousCycleBeforeReturning(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -726,7 +726,7 @@ func TestSessionCloseCancelsAutonomousPermissionAndElicitationBeforeTerminal(t *
 	for _, kind := range []string{"permission", "elicitation"} {
 		t.Run(kind, func(t *testing.T) {
 			agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-			agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+			require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 			agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 			conn := newRecordingAgentClient()
 			conn.permissionStarted = make(chan struct{}, 1)
@@ -1123,7 +1123,7 @@ func TestAutonomousCycleFailureAndValidation(t *testing.T) {
 
 	t.Run("opening failure removes route", func(t *testing.T) {
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		s := testSession(agent, newFakeHermesClient())
 		defer s.stopPump()
 		require.NoError(t, s.openLifecycleStream())
@@ -1166,7 +1166,7 @@ func TestAutonomousCycleFailureAndValidation(t *testing.T) {
 
 	t.Run("failed lifecycle", func(t *testing.T) {
 		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		agent.setAgentClient(newRecordingAgentClient())
 		s := testSession(agent, newFakeHermesClient())
 		defer s.stopPump()
@@ -1182,7 +1182,7 @@ func TestAutonomousCycleFailureAndValidation(t *testing.T) {
 	t.Run("nil failure and store failure", func(t *testing.T) {
 		storeErr := errors.New("store failed")
 		agent := newTestAgent(WithSessionStore(replaceFailStore{SessionStore: NewInMemorySessionStore(), err: storeErr}))
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		agent.setAgentClient(newRecordingAgentClient())
 		s := testSession(agent, newFakeHermesClient())
 		defer s.stopPump()
@@ -1222,7 +1222,7 @@ func TestAutonomousCycleFailureAndValidation(t *testing.T) {
 
 	t.Run("failed idle delivery", func(t *testing.T) {
 		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		base := newRecordingAgentClient()
 		conn := &lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 3}
 		agent.setAgentClient(conn)
@@ -1326,7 +1326,7 @@ func TestSessionPumpDoneWaitsForOwnedFenceClose(t *testing.T) {
 func TestPumpFenceRecordsAutonomousSettlementFailure(t *testing.T) {
 	want := errors.New("terminal snapshot unavailable")
 	agent := newTestAgent(WithSessionStore(replaceFailStore{SessionStore: NewInMemorySessionStore(), err: want}))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	agent.setAgentClient(newRecordingAgentClient())
 	s := testSession(agent, newFakeHermesClient())
 	defer s.stopPump()
@@ -1345,7 +1345,7 @@ func TestSessionForegroundAuthorityOrdersAutonomousPromptAndReuse(t *testing.T) 
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	s := testSession(agent, client)
@@ -1428,7 +1428,7 @@ func TestSessionPumpPromptReservationDoesNotBlockOlderAutonomousProjection(t *te
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	s := testSession(agent, base)
@@ -1517,7 +1517,7 @@ func TestSessionPumpPromptReservationDoesNotBlockOlderAutonomousProjection(t *te
 func TestSessionPumpDeferredDistinctCyclesPreserveSourceOrder(t *testing.T) {
 	base := newFakeHermesClient()
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	s := testSession(agent, base)
@@ -1603,7 +1603,7 @@ func TestSessionPumpDeferredDistinctCyclesPreserveSourceOrder(t *testing.T) {
 
 func TestSessionPumpRawDeliveryWaitsBehindDeferredCycle(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	agent.setAgentClient(newRecordingAgentClient())
 	client := newFakeHermesClient()
 	s := testSession(agent, client)
@@ -1690,7 +1690,7 @@ func TestSessionPumpTerminalSourceItemsWaitBehindDeferredCycle(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-			agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+			require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newFakeHermesClient()
 			s := testSession(agent, client)
@@ -1761,7 +1761,7 @@ func TestSessionPumpCloseResolvesDeferredAutonomousProjectionOnce(t *testing.T) 
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	base := newFakeHermesClient()
@@ -1839,7 +1839,7 @@ func TestSessionPumpDeferredQueueOverflowsOnlyAtCapacity(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			agent := newTestAgent()
-			agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+			require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newFakeHermesClient()
 			client.deliveries = make(chan nativehermes.TurnDelivery, sessionPumpBacklogCapacity+2)
@@ -1901,7 +1901,7 @@ func TestSessionPumpDeferredQueueOverflowsOnlyAtCapacity(t *testing.T) {
 
 func TestSessionPumpDeferredGenerationLossFailsClosed(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	agent.setAgentClient(newRecordingAgentClient())
 	client := newFakeHermesClient()
 	s := testSession(agent, client)
@@ -1989,7 +1989,7 @@ func TestSessionPumpDeferredGenerationLossFailsClosed(t *testing.T) {
 
 func TestPumpContainmentCertifiesVacancyBeforeFencingStream(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	base := newFakeHermesClient()
@@ -2058,7 +2058,7 @@ func TestSessionPumpStopsOnClosedStreams(t *testing.T) {
 
 func TestSessionPumpHandlesAutonomousFailureItem(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	agent.setAgentClient(newRecordingAgentClient())
 	s := testSession(agent, newFakeHermesClient())
 	defer s.stopPump()
