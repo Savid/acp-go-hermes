@@ -113,6 +113,10 @@ func (residualValueAuthority) NativeEnvironment() map[string]string {
 
 func (residualValueAuthority) PrepareNativeTree(context.Context, string) error { return nil }
 
+func (residualValueAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (residualValueAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return nil, nil
 }
@@ -168,6 +172,10 @@ func (a *residualAuthority) PrepareNativeTree(ctx context.Context, root string) 
 	}
 
 	return nil
+}
+
+func (*residualAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
 }
 
 func (*residualAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {

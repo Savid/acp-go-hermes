@@ -82,6 +82,9 @@ reclaims fully materialized trees, and starts a logical executable request with
 host-created stdio. `Wait` proves process-tree terminality. `Revoke` initiates
 whole-tree teardown and is followed by `Wait`. The adapter borrows the
 authority; it never closes it.
+Its interface also includes `ReadNativeAppendLog(context.Context, string,
+uint64) ([][]byte, error)` and `WriteNativeAppendLog(context.Context, string,
+[][]byte) error`. This adapter does not invoke either for provider state.
 
 ## Provider auth
 
