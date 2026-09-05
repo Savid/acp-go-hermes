@@ -138,12 +138,20 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		return fmt.Errorf("main subpath must be %q", SessionStoreMainSubpath)
 	}
 
+	// Every replacement is checked before anything is written, so a refused
+	// generation leaves the store exactly as it found it: the caller sees one
+	// error and no partial write to reason about.
 	mainCount := 0
 	listed := make(map[SessionKey]struct{}, len(replacements))
 
 	for _, replacement := range replacements {
+		// One Replace is one session's. A key naming another session would put
+		// a second session's content inside this session's atomic generation and
+		// under this session's tombstone sweep, so it is refused rather than
+		// written to the session it names.
 		if replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement key does not match main session")
+			return fmt.Errorf("replacement key %s names another session: this Replace states %s",
+				storeKeyName(replacement.Key), storeKeyName(main))
 		}
 
 		// One Replace states each key's whole content exactly once. A key listed
@@ -152,7 +160,7 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 		// position: silently keeping the last one would commit a generation the
 		// caller never asked for.
 		if _, duplicate := listed[replacement.Key]; duplicate {
-			return fmt.Errorf("replacement key %q is listed more than once", replacement.Key.Subpath)
+			return fmt.Errorf("replacement key %s is listed more than once", storeKeyName(replacement.Key))
 		}
 
 		listed[replacement.Key] = struct{}{}
@@ -194,6 +202,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	}
 
 	return nil
+}
+
+// storeKeyName spells one key for a refusal. A store error names the offending
+// key in full — both members — because a caller building a generation for one
+// session needs to see which replacement to fix, and a subpath alone does not
+// identify a key that was refused for naming the wrong session.
+func storeKeyName(key SessionKey) string {
+	return fmt.Sprintf("{sessionId:%q, subpath:%q}", key.SessionID, key.Subpath)
 }
 
 func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error {

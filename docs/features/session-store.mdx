@@ -28,11 +28,26 @@ the atomic `Replace` — and `session/delete` tombstones run under a separate
 fixed 60-second bound, so they do not inherit the store-read budget. A commit
 that would land on an already-tombstoned session id publishes nothing, so a
 turn settling behind a `session/delete` never issues a `Replace` that clears a
-tombstone it did not create. One `Replace` states each key's whole content
-exactly once: a replacement list naming the same key twice is refused with an
-error naming that key, never settled by list position. The `SessionStore`
-interface (`Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
-`ListSubkeys`) is indexed in the [Go API](/docs/reference/go-api).
+tombstone it did not create.
+
+**One `Replace` is one session's whole generation.** It sweeps that session's
+keys and writes exactly the listed ones, atomically, so two shapes are refused
+before anything is written and a host store must refuse them the same way:
+
+- a replacement whose `SessionID` differs from the `main` key's — it would ride
+  this session's sweep into a session the call does not state;
+- a duplicate `{SessionID, Subpath}` — it states two contents for one key and
+  the call carries no rule for choosing between them, so it is refused rather
+  than settled by list position.
+
+Each refusal is an error naming the offending key in full — both `sessionId`
+and `subpath` — so the caller can fix that exact replacement. Neither refusal
+writes, sweeps, or tombstones anything: a rejected generation leaves the store
+exactly as it found it.
+
+The `SessionStore` interface (`Append`, `Load`, `Replace`, `Delete`,
+`ListSessions`, `ListSubkeys`) is indexed in the
+[Go API](/docs/reference/go-api).
 
 ## Snapshot shape
 

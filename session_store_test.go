@@ -354,52 +354,106 @@ func TestInMemoryStoreReplaceValidation(t *testing.T) {
 	}
 }
 
-// TestInMemoryStoreReplaceRefusesDuplicateKeys pins the store's answer to a
-// generation that states one key twice. The two entry lists are two different
-// contents for the same key and the call carries no rule for choosing between
-// them, so the whole write is refused and the refusal names the key. Keeping the
-// last one would commit a generation the caller never asked for, and the caller
-// would never learn its write was ambiguous.
-func TestInMemoryStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+// TestInMemoryStoreReplaceIsOneSessionsGeneration is the store-contract
+// conformance test for the two shapes a single Replace may not carry.
+//
+// Every Replace is one session's whole generation: it sweeps that session's
+// keys and writes exactly the listed ones, atomically. A replacement naming a
+// different session would ride that sweep into a session the call does not
+// state, and a key listed twice states two contents for one key with no rule
+// for choosing between them. Both are refused before anything is written, and
+// each refusal names the offending key in full so the caller can fix the exact
+// replacement rather than re-deriving which one was wrong.
+func TestInMemoryStoreReplaceIsOneSessionsGeneration(t *testing.T) {
 	ctx := context.Background()
-	store := NewInMemorySessionStore()
 	main := SessionKey{SessionID: "s1", Subpath: SessionStoreMainSubpath}
 	idmap := SessionKey{SessionID: "s1", Subpath: "idmap"}
+	foreign := SessionKey{SessionID: "s2", Subpath: "idmap"}
 
-	if err := store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":1}`)}},
-		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":1}`)}},
-	}); err != nil {
-		t.Fatalf("seed replace: %v", err)
+	seed := func(t *testing.T) *InMemorySessionStore {
+		t.Helper()
+
+		store := NewInMemorySessionStore()
+		if err := store.Replace(ctx, main, []SessionStoreReplacement{
+			{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":1}`)}},
+			{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":1}`)}},
+		}); err != nil {
+			t.Fatalf("seed replace: %v", err)
+		}
+		if err := store.Replace(ctx, SessionKey{SessionID: "s2", Subpath: SessionStoreMainSubpath}, []SessionStoreReplacement{
+			{Key: SessionKey{SessionID: "s2", Subpath: SessionStoreMainSubpath}, Entries: []SessionStoreEntry{json.RawMessage(`{"peer":1}`)}},
+			{Key: foreign, Entries: []SessionStoreEntry{json.RawMessage(`{"peer-idmap":1}`)}},
+		}); err != nil {
+			t.Fatalf("seed peer replace: %v", err)
+		}
+
+		return store
 	}
 
-	err := store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":2}`)}},
-		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":2}`)}},
-		{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":3}`)}},
-	})
-	if err == nil {
-		t.Fatal("replace accepted a key listed more than once")
-	}
-	if !strings.Contains(err.Error(), `"idmap"`) {
-		t.Fatalf("duplicate-key refusal = %v, want the duplicated key named", err)
-	}
+	// The offending replacement is last in both cases, so a store that wrote as
+	// it walked would already have committed the two valid ones before refusing.
+	for _, test := range []struct {
+		name         string
+		replacements []SessionStoreReplacement
+		wantNamed    string
+	}{
+		{
+			name: "foreign session",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":2}`)}},
+				{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":2}`)}},
+				{Key: foreign, Entries: []SessionStoreEntry{json.RawMessage(`{"peer-idmap":2}`)}},
+			},
+			wantNamed: storeKeyName(foreign),
+		},
+		{
+			name: "duplicate key",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{json.RawMessage(`{"generation":2}`)}},
+				{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":2}`)}},
+				{Key: idmap, Entries: []SessionStoreEntry{json.RawMessage(`{"idmap":3}`)}},
+			},
+			wantNamed: storeKeyName(idmap),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := seed(t)
 
-	// The refusal is the whole write's: no part of the ambiguous generation
-	// reached the store.
-	entries, loadErr := store.Load(ctx, idmap)
-	if loadErr != nil {
-		t.Fatalf("load subkey: %v", loadErr)
-	}
-	if len(entries) != 1 || string(entries[0]) != `{"idmap":1}` {
-		t.Fatalf("subkey entries = %s, want the seeded generation", entries)
-	}
-	mainEntries, loadErr := store.Load(ctx, main)
-	if loadErr != nil {
-		t.Fatalf("load main: %v", loadErr)
-	}
-	if len(mainEntries) != 1 || string(mainEntries[0]) != `{"generation":1}` {
-		t.Fatalf("main entries = %s, want the seeded generation", mainEntries)
+			err := store.Replace(ctx, main, test.replacements)
+			if err == nil {
+				t.Fatal("replace accepted a generation that is not one session's")
+			}
+			if !strings.Contains(err.Error(), test.wantNamed) {
+				t.Fatalf("refusal = %v, want it to name %s", err, test.wantNamed)
+			}
+
+			// Nothing was written: every key both sessions held still carries the
+			// content the seed committed, and no key gained a generation.
+			for key, want := range map[SessionKey]string{
+				main:    `{"generation":1}`,
+				idmap:   `{"idmap":1}`,
+				foreign: `{"peer-idmap":1}`,
+				{SessionID: "s2", Subpath: SessionStoreMainSubpath}: `{"peer":1}`,
+			} {
+				entries, loadErr := store.Load(ctx, key)
+				if loadErr != nil {
+					t.Fatalf("load %s: %v", storeKeyName(key), loadErr)
+				}
+				if len(entries) != 1 || string(entries[0]) != want {
+					t.Fatalf("%s entries = %s, want the seeded %s", storeKeyName(key), entries, want)
+				}
+			}
+
+			// The refused session's key set is untouched too, so the sweep the
+			// generation would have run never started.
+			subkeys, subErr := store.ListSubkeys(ctx, main)
+			if subErr != nil {
+				t.Fatalf("list subkeys: %v", subErr)
+			}
+			if len(subkeys) != 1 || subkeys[0] != idmap.Subpath {
+				t.Fatalf("subkeys after refusal = %v, want only %q", subkeys, idmap.Subpath)
+			}
+		})
 	}
 }
 
