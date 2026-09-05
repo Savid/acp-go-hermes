@@ -236,3 +236,84 @@ func (s fakeSignal) String() string {
 }
 
 func (s fakeSignal) Signal() {}
+
+// TestRunRejectsProviderAuthRootWithoutSharedHome pins the flag pairing. The
+// ledger binds the durable native residence -shared-hermes-home names, so the
+// combination is refused before the agent is built: without this the process
+// starts, answers initialize with an internal error, and serves nothing while
+// naming neither flag.
+func TestRunRejectsProviderAuthRootWithoutSharedHome(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+
+	served := false
+	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
+		served = true
+
+		return nil
+	}
+
+	var stderr bytes.Buffer
+
+	code := run(context.Background(), []string{"-provider-auth-root", t.TempDir()},
+		strings.NewReader(""), io.Discard, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2", code)
+	}
+
+	if served {
+		t.Fatal("agent was served despite refused flag combination")
+	}
+
+	message := stderr.String()
+	for _, flagName := range []string{"-provider-auth-root", "-shared-hermes-home"} {
+		if !strings.Contains(message, flagName) {
+			t.Fatalf("stderr %q does not name %s", message, flagName)
+		}
+	}
+}
+
+// TestRunAcceptsProviderAuthRootWithSharedHome keeps the refusal narrow: the
+// supported pairing still reaches serve.
+func TestRunAcceptsProviderAuthRootWithSharedHome(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+
+	served := false
+	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
+		served = true
+
+		return nil
+	}
+
+	code := run(context.Background(),
+		[]string{"-provider-auth-root", t.TempDir(), "-shared-hermes-home", t.TempDir()},
+		strings.NewReader(""), io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, want 0", code)
+	}
+
+	if !served {
+		t.Fatal("supported flag pairing did not reach serve")
+	}
+}
+
+// TestProviderAuthRootUsageNamesSharedHome keeps -help honest about the
+// dependency the validation enforces.
+func TestProviderAuthRootUsageNamesSharedHome(t *testing.T) {
+	restore := replaceGlobals(t)
+	defer restore()
+
+	var stderr bytes.Buffer
+
+	_ = run(context.Background(), []string{"-help"}, strings.NewReader(""), io.Discard, &stderr)
+
+	usage := stderr.String()
+	if !strings.Contains(usage, "-provider-auth-root") {
+		t.Fatalf("usage does not list -provider-auth-root: %q", usage)
+	}
+
+	if !strings.Contains(usage, "requires -shared-hermes-home") {
+		t.Fatalf("usage does not state the -shared-hermes-home dependency: %q", usage)
+	}
+}

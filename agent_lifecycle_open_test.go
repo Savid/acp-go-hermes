@@ -21,9 +21,9 @@ import (
 
 func TestLifecycleOpeningIsOrderedAfterResponse(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -233,9 +233,9 @@ func (w *gatedLifecycleWriter) Write(value []byte) (int, error) {
 
 func TestLifecycleOpeningWaitsForItsCompleteExactResponse(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -266,9 +266,9 @@ func TestLifecycleOpeningWaitsForItsCompleteExactResponse(t *testing.T) {
 
 func TestActiveLoadReplayStartsAfterItsExactResponse(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -302,9 +302,9 @@ func TestActiveLoadReplayStartsAfterItsExactResponse(t *testing.T) {
 
 func TestAgentCloseJoinsBlockedLifecycleResponseWrite(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
 	require.NoError(t, session.openLifecycleStream())
@@ -338,9 +338,9 @@ func TestAgentCloseJoinsBlockedLifecycleResponseWrite(t *testing.T) {
 
 func TestAgentClosePreservesAdmittedFullLifecycleResponse(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	client := newFakeHermesClient()
 	session := testSession(agent, client)
 	require.NoError(t, session.openLifecycleStream())
@@ -495,9 +495,9 @@ func TestResponseOrderedWriterConcurrentCloseJoinsOneExactAttempt(t *testing.T) 
 
 func TestLifecycleResponseWriteFailureDischargesOpening(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	requireStreamOpenDeferred(t, agent, lifecycleRequestContext(t.Context(), 29), session)
@@ -514,9 +514,9 @@ func TestLifecycleResponseWriteFailureDischargesOpening(t *testing.T) {
 
 func TestAgentCloseCancelsUnwrittenLifecycleOpening(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	session := testSession(agent, newFakeHermesClient())
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
@@ -540,9 +540,9 @@ func TestAgentCloseCancelsUnwrittenLifecycleOpening(t *testing.T) {
 
 func TestLifecycleResponsesCorrelateByExactRequestIdentity(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
@@ -616,9 +616,9 @@ func (c *lifecycleOpenBarrierClient) SessionUpdate(
 
 func TestDuplicateLifecycleResponseIDsKeepExactOpaqueOwnership(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := &lifecycleOpenBarrierClient{
 		recordingAgentClient: newRecordingAgentClient(),
 		delivered:            make(chan acp.SessionNotification, 2),
@@ -707,9 +707,9 @@ func TestLifecycleResponseFailureFencesOnlyItsExactRequestIdentity(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			agent := newTestAgent()
-			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-			})
+			}))
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
 
@@ -750,9 +750,9 @@ func TestLifecycleResponseFailureFencesOnlyItsExactRequestIdentity(t *testing.T)
 
 func TestLifecycleOpeningObligationsAreBoundedAndRetired(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 
@@ -791,9 +791,9 @@ func TestActiveReuseRefusalsRemainExactAndReleaseAdmission(t *testing.T) {
 
 	t.Run("lifecycle response backpressure", func(t *testing.T) {
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-		})
+		}))
 		session := testSession(agent, newFakeHermesClient())
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, agent.storeStartedSession(session))
@@ -817,9 +817,9 @@ func TestActiveReuseRefusalsRemainExactAndReleaseAdmission(t *testing.T) {
 
 func TestLifecycleOpeningRemainingHardCutBranches(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	session := testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, agent.Close())
@@ -828,9 +828,9 @@ func TestLifecycleOpeningRemainingHardCutBranches(t *testing.T) {
 	}
 
 	agent = newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	session = testSession(agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	owed, _, err := agent.deferStreamOpen(lifecycleRequestContext(t.Context(), 2), session)
@@ -886,9 +886,9 @@ func TestActiveLifecycleReuseAdmissionCannotCrossAgentClose(t *testing.T) {
 	for _, method := range []string{"load", "resume"} {
 		t.Run(method, func(t *testing.T) {
 			agent := newTestAgent()
-			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-			})
+			}))
 			client := newFakeHermesClient()
 			session := testSession(agent, client)
 			require.NoError(t, session.openLifecycleStream())
@@ -935,9 +935,9 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			store := NewInMemorySessionStore()
 			agent := newTestAgent(WithSessionStore(store))
-			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-			})
+			}))
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
 			client := newFakeHermesClient()
@@ -1001,9 +1001,9 @@ func TestActiveLifecycleReuseCannotCrossSuccessfulSessionClose(t *testing.T) {
 
 func TestSessionCloseCancelsAndJoinsActiveReplay(t *testing.T) {
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -1057,9 +1057,9 @@ func TestSuccessfulSessionCloseCannotPrecedeActiveReuseResponse(t *testing.T) {
 	for index, method := range []string{"load", "resume"} {
 		t.Run(method, func(t *testing.T) {
 			agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-			})
+			}))
 			conn := newRecordingAgentClient()
 			agent.setAgentClient(conn)
 			client := newFakeHermesClient()
@@ -1117,9 +1117,9 @@ func TestSuccessfulSessionCloseCannotPrecedeActiveReuseResponse(t *testing.T) {
 
 func TestLifecycleOpenFailureFencesStream(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New("opening failed")
 	agent.setAgentClient(conn)
@@ -1134,9 +1134,9 @@ func TestLifecycleOpenFailureLogOmitsArbitraryErrorText(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	agent := newTestAgent(WithLogger(logger))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New(secret)
 	agent.setAgentClient(conn)

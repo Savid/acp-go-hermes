@@ -7,6 +7,7 @@ import (
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 
+	"github.com/coder/acp-go-sdk"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -102,6 +103,13 @@ type Options struct {
 	MeterProvider     metric.MeterProvider
 	TextMapPropagator propagation.TextMapPropagator
 
+	// Client is the ACP client an embedded agent streams to. It is set by
+	// WithClient and is the embedding host's counterpart to the JSON-RPC
+	// transport Serve builds: without it a directly constructed Agent has
+	// nowhere to publish session updates, permission requests, or
+	// elicitations. Serve refuses an Options carrying one, because Serve
+	// installs the connection it owns.
+	Client                  acp.Client
 	SessionStore            SessionStore
 	SessionStoreLoadTimeout time.Duration
 	ConcurrencyLimits       ConcurrencyLimits
@@ -283,6 +291,27 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 func WithTextMapPropagator(propagator propagation.TextMapPropagator) Option {
 	return func(options *Options) {
 		options.TextMapPropagator = propagator
+	}
+}
+
+// WithClient supplies the ACP client a directly constructed Agent streams to.
+//
+// Serve builds a JSON-RPC connection and installs it as the agent's client, so
+// a host that runs the agent over stdio never sets this. A host that embeds the
+// Agent and calls its ACP methods in-process gets the same outbound surface
+// only through this option: session updates, permission requests, and
+// elicitations are agent-to-client traffic, and an Agent with no client cannot
+// deliver them. The supplied client is called from the agent's own goroutines
+// and must be safe for concurrent use.
+//
+// Elicitation is delivered only when the client also implements
+// UnstableCreateElicitation (the SDK's ClientExperimental surface); a client
+// without it refuses elicitations instead of dropping them. Extension
+// notifications, including RawEventMethod, are delivered only when the client
+// implements ExtensionNotificationHandler.
+func WithClient(client acp.Client) Option {
+	return func(options *Options) {
+		options.Client = client
 	}
 }
 

@@ -318,10 +318,11 @@ func (s *session) settlePrompt(
 	}
 
 	if !run.cancelled {
-		terminal := s.committedTerminalState()
-		terminal.Outcome = ""
-		terminal.StopReason = ""
-		response.Meta = terminalResponseMeta(terminal)
+		// The committed boundary is reported as it was committed. The commit
+		// above recorded the outcome this turn actually reached — derived from
+		// the native finish reason, not from anything this wrapper decided — so
+		// blanking it here would publish a field that could only ever be empty.
+		response.Meta = terminalResponseMeta(s.committedTerminalState())
 	}
 
 	return response, true, nil
@@ -446,7 +447,7 @@ func (s *session) commitForegroundPrefix(
 	// store no longer holds what the host was shown, so the session is poisoned
 	// and its runtime fenced rather than left addressable over durable state
 	// nobody can trust.
-	poisonErr := s.poisonWithError(ctx, "hermes_terminal_snapshot_failed", commitErr.Error())
+	poisonErr := s.poisonWithCause(ctx, poisonTerminalSnapshotFailed, commitErr)
 	fenceErr := s.fenceTurn(ctx, turnEpoch, false)
 
 	stream.fence()

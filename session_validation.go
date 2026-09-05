@@ -11,8 +11,13 @@ import (
 // Uniform validation-error vocabulary shared across request validation.
 const (
 	valUnsupported = "unsupported"
-	valServer      = "server"
-	keyField       = "field"
+	// valMissing names a required reserved key the caller left out. It is a
+	// distinct verdict from valUnsupported and the two are never collapsed: a
+	// host that reads "missing" adds the key, a host that reads "unsupported"
+	// on the bare key path stops sending it on that surface.
+	valMissing = "missing"
+	valServer  = "server"
+	keyField   = "field"
 
 	// optionFieldHome names the unsupported Home option in the uniform
 	// unsupported-option error. Each session runtime root is isolated.
@@ -33,13 +38,13 @@ func validateSessionStartPaths(cwd string, additionalDirectories []string) error
 	return nil
 }
 
+// validateRequiredAbsolutePath refuses a path member that is not an absolute
+// path. An empty value is not an absolute path either, so it takes the same
+// verdict rather than a second one: one condition, one refusal a host can act
+// on without first deciding which kind of non-absolute it sent.
 func validateRequiredAbsolutePath(field string, value string) error {
-	if value == "" {
-		return acp.NewInvalidParams(map[string]any{field: validationRequired})
-	}
-
 	if !filepath.IsAbs(value) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: "absolute_path_required", keyField: field})
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: field})
 	}
 
 	return nil

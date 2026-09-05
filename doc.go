@@ -13,7 +13,10 @@
 // session or other agent methods.
 //
 // Hosts should use [Serve] for the JSON-RPC transport; hosts that embed the
-// agent directly construct one with [NewAgent] and the same [Option] values.
+// agent directly construct one with [NewAgent] and the same [Option] values,
+// plus [WithClient] to supply the ACP client the agent streams session
+// updates, permission requests, and elicitations to. Serve installs the
+// connection it builds as that client and refuses an option set carrying one.
 // A direct prompt error caused by gateway loss matches [ErrGatewayDisconnected]
 // and retains its exact native cause; Serve converts that chain to bounded,
 // secret-safe ACP error data at the wire boundary.

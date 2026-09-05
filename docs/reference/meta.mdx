@@ -15,12 +15,28 @@ Initialize advertises the reserved route capability as
 
 `session/prompt` and `session/cancel` require exactly
 `{"version":1,"turnNonce":"..."}` under the reserved route key. The nonce is
-fresh and unguessable per turn and is at most 4096 bytes; missing, oversized,
-extra, unsupported, or stale route data fails with invalid params. A cancel is
-authorized only by the nonce of the addressed session's current turn, so a
-cancel that names another turn — or arrives when no turn is in flight — fails
-closed and reaches nothing native. Being a notification, that refusal carries no
-response frame.
+fresh and unguessable per turn and is at most 4096 bytes.
+
+A `session/prompt` refusal on this key is invalid params (`-32602`) and splits
+into two verdicts a host acts on differently:
+
+| Cause | `data` |
+|---|---|
+| The key is absent | `{"error":"missing","field":"_meta[\"acp-go.dev/route\"]"}` |
+| The value is not an object | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"]"}` |
+| `version` is not `1` | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].version"}` |
+| `turnNonce` is empty, non-string, or over 4096 bytes | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].turnNonce"}` |
+| Any other member is present | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].<member>"}` |
+
+`missing` names a required key the caller left out, and `unsupported` names a
+value that is present and refused; the two are never collapsed. Route validation
+runs before the lifecycle prompt correlation is read, so a prompt that gets both
+wrong reports the route refusal alone.
+
+A cancel is authorized only by the nonce of the addressed session's current
+turn, so a cancel that names another turn — or arrives when no turn is in flight
+— fails closed and reaches nothing native. Being a notification, that refusal
+carries no response frame.
 
 Every live-turn `session/update` and `_hermes/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
@@ -108,7 +124,25 @@ Authoritative quiescence is advertised only with a host authority whose process
 handle proves whole-tree terminality; its source is `process-containment`.
 
 Prompt requests carry a version-1 submission correlation value under the
-lifecycle key. Permission and elicitation requests carry the action identity
+lifecycle key:
+
+```json
+{"version":1,"submission":{"submissionId":"opaque","clientNonce":"opaque"}}
+```
+
+`version` and `submission` are the only members, and `submission` carries
+exactly `submissionId`, `clientNonce`, and an optional `runId`. The refusal
+splits the same way the route key's does, on the same two verdicts:
+
+| Cause | `data` |
+|---|---|
+| The key is absent while version 1 is negotiated | `{"error":"missing","field":"_meta[\"acp-go.dev/lifecycle\"]"}` |
+| The key is present where it has no meaning — every surface but `initialize` and `session/prompt`, or a prompt on a connection that negotiated nothing | `{"error":"unsupported","field":"_meta[\"acp-go.dev/lifecycle\"]"}` |
+| The value is malformed | `{"error":"unsupported","field":"_meta[\"acp-go.dev/lifecycle\"].<member path>"}` |
+
+Both fire before the prompt is dispatched, so no frame reaches Hermes.
+
+Permission and elicitation requests carry the action identity
 and owner established in the ordered stream. The lifecycle key is rejected on
 every other inbound method. The events themselves ride `session/update`
 notifications — see [Updates](/docs/reference/updates#lifecycle-envelopes).
@@ -177,12 +211,30 @@ completion Hermes returns, not from this catalogue.
 
 A successful `session/prompt` response carries `_meta.hermes.messageId` and
 `_meta.hermes.outcome` under the Hermes namespace, plus `_meta.hermes.stopReason`
-where a v1 stop reason names that outcome. `messageId` is the replay-stable
-`history-N` identity of the latest finished assistant and is emitted only after
-the snapshot containing the same terminal identity commits; `outcome` is the
-outcome the store recorded for that turn, and is the empty string on a turn whose
-commit recorded none. `stopReason` is omitted rather than emitted empty. Usage
-updates carry none of these.
+where a v1 stop reason names that outcome:
+
+```json
+{
+  "_meta": {
+    "hermes": {
+      "messageId": "history-2",
+      "outcome": "success",
+      "stopReason": "end_turn"
+    }
+  },
+  "stopReason": "end_turn",
+  "usage": { "inputTokens": 22476, "outputTokens": 20, "totalTokens": 22496 }
+}
+```
+
+`messageId` is the replay-stable `history-N` identity of the latest finished
+assistant and is emitted only after the snapshot containing the same terminal
+identity commits. `outcome` is the outcome the commit recorded for that turn,
+derived from the finish reason Hermes reported: `success`, `limit`, `refused`,
+`cancelled`, or `failed`. `stopReason` is omitted rather than emitted empty,
+which is what happens on an outcome no v1 stop reason names. A cancelled turn
+answers `stopReason: "cancelled"` with no `_meta` at all. Usage updates carry
+none of these.
 
 Every session lifecycle response — `session/new`, `session/load`,
 `session/resume`, and the fork extension — carries the session's own

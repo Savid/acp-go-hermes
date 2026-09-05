@@ -787,18 +787,22 @@ func hydrateStateFromStoreMode(ctx context.Context, store SessionStore, sessionI
 		return idmapRecord{}, stateSnapshot{}, false, nil
 	}
 
+	// Past this point the store holds an entry for this session: every failure
+	// below is an entry that cannot be replayed, which is its own wire verdict.
+	// The entry is left exactly where it is -- a restore failure never deletes
+	// or tombstones what it could not read.
 	var idmap idmapRecord
 	if err := decodeStrictStoreJSON(idEntries[len(idEntries)-1], &idmap, idmapJSONShape); err != nil {
-		return idmapRecord{}, stateSnapshot{}, false, err
+		return idmapRecord{}, stateSnapshot{}, false, restoreFailed(err)
 	}
 
 	var snapshot stateSnapshot
 	if err := decodeStrictStoreJSON(mainEntries[len(mainEntries)-1], &snapshot, stateSnapshotJSONShape); err != nil {
-		return idmapRecord{}, stateSnapshot{}, false, err
+		return idmapRecord{}, stateSnapshot{}, false, restoreFailed(err)
 	}
 
 	if idmap.Format != SessionStoreFormat || snapshot.Format != SessionStoreFormat {
-		return idmapRecord{}, stateSnapshot{}, false, fmt.Errorf("unsupported hermes store format")
+		return idmapRecord{}, stateSnapshot{}, false, restoreFailed(fmt.Errorf("unsupported hermes store format"))
 	}
 
 	if err := validateHydratedStateAgreement(sessionID, idmap, snapshot); err != nil {

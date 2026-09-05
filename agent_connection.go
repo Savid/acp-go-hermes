@@ -484,14 +484,19 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 	}
 }
 
+// decodeLocalAgentParams refuses a params object this connection cannot decode
+// or that fails its own validation as a whole. Both are one verdict about one
+// member -- the request's `params` -- so both take the uniform {error, field}
+// refusal every other inbound shape takes, and neither carries decoder prose: a
+// syntax error quotes the offending byte of the request back at the peer.
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
 	if err := json.Unmarshal(params, &value); err != nil {
-		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: "malformed_params"})
+		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
 	}
 
 	if err := ReqPtr(&value).Validate(); err != nil {
-		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: "invalid_params"})
+		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
 	}
 
 	return value, nil
@@ -724,7 +729,7 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 	}
 
 	if context.Cause(ctx) == context.Canceled {
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: "request_cancelled"})
+		return acp.NewRequestCancelled(map[string]any{jsonFieldError: valRequestCancelled})
 	}
 
 	var mapped interface{ requestError() *acp.RequestError }
@@ -732,35 +737,24 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 		return mapped.requestError()
 	}
 
+	// A typed RequestError reaches the peer exactly as its construction site
+	// phrased it. Every such site in this package builds a closed, values-free
+	// payload -- a token from this package's own vocabulary plus, where one
+	// applies, the dotted path of the offending field -- so the host can act on
+	// the refusal without any native prose, tool input, or credential material
+	// ever reaching the wire. The guarantee is held at construction rather than
+	// by rewriting the payload here: flattening every code to a single token
+	// also erased the field path, leaving a host unable to tell a malformed
+	// option from a session that no longer exists.
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
-		return sanitizeRequestError(reqErr)
+		return reqErr
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: "internal_error"})
-}
-
-func sanitizeRequestError(err *acp.RequestError) *acp.RequestError {
-	if err == nil {
-		return nil
-	}
-
-	switch err.Code {
-	case -32700:
-		return acp.NewParseError(map[string]any{jsonFieldError: "parse_error"})
-	case -32600:
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: "invalid_request"})
-	case -32601:
-		return acp.NewMethodNotFound("unsupported")
-	case -32602:
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: "invalid_params"})
-	case -32800:
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: "request_cancelled"})
-	case -32000:
-		return acp.NewAuthRequired(map[string]any{jsonFieldError: "authentication_required"})
-	default:
-		return acp.NewInternalError(map[string]any{jsonFieldError: "internal_error"})
-	}
+	// An error carrying no wire classification is the only one whose prose is
+	// unknown to this package, so it is the only one reduced to the
+	// unclassified token.
+	return acp.NewInternalError(map[string]any{jsonFieldError: valHermesInternalFailure})
 }
 
 func scopedElicitationParams(

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 const jsonFieldFormat = "format"
@@ -174,4 +176,26 @@ func walkStrictJSONValue(decoder *json.Decoder, shape *strictJSONShape, path str
 	_, err = decoder.Token()
 
 	return err
+}
+
+// restoreFailedError marks a store entry that exists for the addressed session
+// and cannot be replayed. It is the one durable-state failure a host can act on
+// without adapter internals: the entry is neither deleted nor tombstoned, so a
+// host can repair or drop it deliberately.
+type restoreFailedError struct {
+	cause error
+}
+
+func (e *restoreFailedError) Error() string {
+	return "restore Hermes session state: " + e.cause.Error()
+}
+
+func (e *restoreFailedError) Unwrap() error { return e.cause }
+
+func (e *restoreFailedError) requestError() *acp.RequestError {
+	return acp.NewInternalError(map[string]any{jsonFieldError: valHermesRestoreFailed})
+}
+
+func restoreFailed(cause error) error {
+	return &restoreFailedError{cause: cause}
 }

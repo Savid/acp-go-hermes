@@ -52,8 +52,8 @@ func TestCancelReportsTheRouteVerdictWhenBothKeysFailClosed(t *testing.T) {
 
 	require.ErrorAs(t, session.cancelRouted(both), &reqErr)
 	require.Equal(t, acp.NewInvalidParams(map[string]any{
-		jsonFieldError: "unsupported route metadata version",
-		keyField:       routeMetaKey,
+		jsonFieldError: valUnsupported,
+		keyField:       routeMetaPath + "." + routeFieldVer,
 	}), reqErr, "route validation runs before the reserved-key refusal")
 
 	// The same cancel with a route that authenticates the turn reports the
@@ -68,6 +68,10 @@ func TestCancelReportsTheRouteVerdictWhenBothKeysFailClosed(t *testing.T) {
 }
 
 func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
+	// A refused offer never binds, so the no-offer answer and the two decode
+	// refusals below all belong to one connection. The accepted version-1
+	// negotiation needs its own: the first answer binds the connection, so a
+	// connection that answered "absent" may not later answer version 1.
 	weak := newTestAgent()
 	response, err := weak.Initialize(t.Context(), acp.InitializeRequest{})
 	require.NoError(t, err)
@@ -78,7 +82,15 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 	require.Error(t, err)
 	require.False(t, weak.negotiatedLifecycle().Present())
 
-	response, err = weak.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	// A connection that answered "absent" stays absent: a repeat of the same
+	// no-offer negotiation asserts the same contract and is admitted.
+	response, err = weak.Initialize(t.Context(), acp.InitializeRequest{})
+	require.NoError(t, err)
+	require.Nil(t, response.Meta)
+	require.False(t, weak.negotiatedLifecycle().Present())
+
+	enabled := newTestAgent()
+	response, err = enabled.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
 	require.NoError(t, err)
 	advertisement, ok := response.Meta[lifecycle.MetaKey].(map[string]any)
 	require.True(t, ok)
@@ -153,4 +165,100 @@ func TestApplyAdmittedActiveLifecycleRequest(t *testing.T) {
 	); err == nil {
 		t.Fatalf("cancelled reuse rejection = %v", err)
 	}
+}
+
+// TestLifecycleAnswerBindsTheWholeConnection pins that the answer a connection
+// gave is not rewritten by a later initialize. Enabling version 1 obligates the
+// foreground stream for every session on the connection, so a second
+// negotiation that would withdraw or alter the answer is refused on the
+// lifecycle key while the sessions it was published for are still live.
+func TestLifecycleAnswerBindsTheWholeConnection(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		first  map[string]any
+		second map[string]any
+	}{
+		{"withdrawn", lifecycleOffer(1), nil},
+		{"introduced", nil, lifecycleOffer(1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			agent := newTestAgent()
+
+			first, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: test.first})
+			require.NoError(t, err)
+
+			bound := agent.negotiatedLifecycle()
+
+			_, err = agent.Initialize(t.Context(), acp.InitializeRequest{Meta: test.second})
+			requireLifecycleKeyRefusal(t, err)
+
+			// The refused second negotiation changed nothing: the connection is
+			// still bound by exactly the answer it gave.
+			require.Equal(t, first.Meta[lifecycle.MetaKey] != nil, agent.negotiatedLifecycle().Present())
+			require.Equal(t, bound, agent.negotiatedLifecycle())
+		})
+	}
+}
+
+// TestLifecycleRepeatedIdenticalNegotiationIsAdmitted pins the other half: a
+// second initialize asserting the same answer states the same contract, so it
+// changes nothing and is not an error.
+func TestLifecycleRepeatedIdenticalNegotiationIsAdmitted(t *testing.T) {
+	agent := newTestAgent()
+
+	first, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	require.NoError(t, err)
+
+	second, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	require.NoError(t, err)
+	require.Equal(t, first.Meta[lifecycle.MetaKey], second.Meta[lifecycle.MetaKey])
+	require.True(t, agent.negotiatedLifecycle().Present())
+}
+
+// TestLifecycleAnswerBindsAcrossAProvenFactChange pins that the comparison is
+// against the answer the connection actually gave, not against the offer the
+// host repeated. An agent whose proven facts differ answers differently, and
+// that difference is what a re-negotiation may not introduce.
+func TestLifecycleAnswerBindsAcrossAProvenFactChange(t *testing.T) {
+	authoritative := NewAgent(WithHostAuthority(newTestHostAuthority()))
+
+	_, err := authoritative.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	require.NoError(t, err)
+	require.True(t, authoritative.negotiatedLifecycle().AuthoritativeQuiescence)
+
+	// The same offer against the same agent proves the same facts, so it is the
+	// identical answer and is admitted.
+	_, err = authoritative.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	require.NoError(t, err)
+	require.Equal(t, lifecycle.ProofClassProcessContainment, authoritative.negotiatedLifecycle().QuiescenceSource)
+}
+
+// TestLifecycleRefusedRenegotiationKeepsLiveSessionStreams pins the reason the
+// rule exists. A session opened under a present answer holds an obligated
+// foreground stream; a withdrawing re-negotiation is refused, so that stream
+// keeps its identity and the host reducing it never sees the obligation
+// cancelled underneath a live session.
+func TestLifecycleRefusedRenegotiationKeepsLiveSessionStreams(t *testing.T) {
+	agent := newTestAgent()
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
+	require.NoError(t, err)
+
+	session := testSession(agent, newFakeHermesClient())
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	streamBefore := session.lifecycleStream()
+
+	_, err = agent.Initialize(t.Context(), acp.InitializeRequest{})
+	requireLifecycleKeyRefusal(t, err)
+
+	require.True(t, agent.negotiatedLifecycle().Present())
+	require.Same(t, streamBefore, session.lifecycleStream())
+
+	agent.mu.Lock()
+	_, stillOpen := agent.sessions[session.id]
+	agent.mu.Unlock()
+	require.True(t, stillOpen)
 }

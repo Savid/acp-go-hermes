@@ -49,12 +49,12 @@ func TestTurnSettlementNotifiesAfterCompletionLatch(t *testing.T) {
 // close boundary must not try to certify again on the fenced stream.
 func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -90,12 +90,12 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 
 func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -121,12 +121,12 @@ func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *tes
 // must not carry a spurious stale_stream violation.
 func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -169,12 +169,12 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 // which on an unopened stream would be a delta before the snapshot.
 func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -195,12 +195,12 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 // gone. The fence makes the late open a local stale_stream refusal instead.
 func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 	agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version:                 lifecycle.Version,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 		ActivityKinds:           []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -239,7 +239,7 @@ func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
 			negotiated.AuthoritativeQuiescence = true
 			negotiated.QuiescenceSource = lifecycle.ProofClassProcessContainment
 		}
-		agent.retainNegotiatedLifecycle(negotiated)
+		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
@@ -327,12 +327,12 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 
 	t.Run("quiescence", func(t *testing.T) {
 		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
-		})
+		}))
 
 		recorder := newRecordingAgentClient()
 		agent.setAgentClient(&cancelHonoringAgentClient{recordingAgentClient: recorder})
@@ -353,9 +353,9 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 // rewritten to the close's own cancelled verdict.
 func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -440,9 +440,9 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 		}
 
 		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-		})
+		}))
 		agent.setAgentClient(newRecordingAgentClient())
 		session := testSession(agent, client)
 		require.NoError(t, session.openLifecycleStream())
@@ -488,9 +488,9 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 				err:                  errors.New("durable commit refused"),
 			}
 			agent := newTestAgent(WithSessionStore(store))
-			agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+			require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 				Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-			})
+			}))
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newFakeHermesClient()
 			session := testSession(agent, client)
@@ -596,9 +596,9 @@ func lifecycleUpdateCount(conn *recordingAgentClient) int {
 // cancelled shape and published, not poison the session.
 func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
@@ -707,9 +707,9 @@ func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
 	require.Equal(t, lifecycle.ActionDeclined, permissionActionState(acp.RequestPermissionResponse{}, valReject))
 	require.Equal(t, lifecycle.ActionAccepted, permissionActionState(acp.RequestPermissionResponse{}, valOnce))
 
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	require.NoError(t, session.openLifecycleStream())
 	_, _, owned = session.reserveBlockingAction(lifecycle.ActionPermission, "unowned", permissionTurnRoute{})
 	require.False(t, owned)
@@ -782,12 +782,12 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 
 	t.Run("quiescence", func(t *testing.T) {
 		agent := newTestAgent(WithHostAuthority(newTestHostAuthority()))
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
-		})
+		}))
 		base := newRecordingAgentClient()
 		conn := &lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 6}
 		agent.setAgentClient(conn)
@@ -884,7 +884,7 @@ func TestPredispatchRefusalHasNoTurnSettlementBoundary(t *testing.T) {
 	store := newCountingSessionStore()
 	base := newFakeHermesClient()
 	agent := newTestAgent(WithSessionStore(store))
-	agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
 	session := testSession(agent, base)
@@ -939,7 +939,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 
 	t.Run("cancelled idle delivery", func(t *testing.T) {
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation())
+		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		connection := newRecordingAgentClient()
 		agent.setAgentClient(connection)
 		session := testSession(agent, newFakeHermesClient())
@@ -963,12 +963,12 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 
 	t.Run("proved vacancy", func(t *testing.T) {
 		agent := newTestAgent()
-		agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+		require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 			Version:                 lifecycle.Version,
 			AuthoritativeQuiescence: true,
 			QuiescenceSource:        lifecycle.ProofClassProcessContainment,
 			ActivityKinds:           []lifecycle.ActivityKind{},
-		})
+		}))
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
 		session := testSession(agent, newFakeHermesClient())
@@ -990,9 +990,9 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 // stream the close never needed went terminal underneath it.
 func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	conn.updateErr = errors.New("opening failed")
 	agent.setAgentClient(conn)
@@ -1059,9 +1059,9 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 // not answer success from the prior failure.
 func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
@@ -1111,9 +1111,9 @@ func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 // generation captured from a runtime the fence already ended.
 func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
@@ -1154,9 +1154,9 @@ func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T
 // with the wrapper.
 func TestAgentCloseMakesTheDurableCommitAWireCloseWould(t *testing.T) {
 	agent := newTestAgent()
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 

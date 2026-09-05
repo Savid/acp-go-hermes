@@ -580,14 +580,86 @@ func TestPrivateLifecycleConnectionBranchCoverage(t *testing.T) {
 	}
 	local.finishOutboundWrite("duplicate", first)
 
-	for _, code := range []int{-32700, -32600, -32601, -32602, -32800, -32000, 123} {
-		if sanitizeRequestError(&acp.RequestError{Code: code}) == nil {
-			t.Fatalf("request error code %d sanitized to nil", code)
-		}
+	if requestError(ctx, nil) != nil {
+		t.Fatal("nil handler error produced a wire error")
 	}
-	if sanitizeRequestError(nil) != nil {
-		t.Fatal("nil request error was not preserved")
+}
+
+// TestRequestErrorPreservesTypedPayload pins the wire contract every
+// structured refusal depends on: a typed RequestError reaches the peer with its
+// own code and its own data map, so the field path a construction site named
+// survives to the host. The previous behaviour rewrote every code to a single
+// token and is exactly what this asserts is gone.
+func TestRequestErrorPreservesTypedPayload(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		err  *acp.RequestError
+	}{
+		{"unsupported field", acp.NewInvalidParams(map[string]any{
+			jsonFieldError: valUnsupported,
+			keyField:       hermesModelOptionPath,
+		})},
+		{"unknown session", acp.NewInvalidParams(map[string]any{
+			jsonFieldError: valUnknownSession,
+			keyField:       jsonFieldSessionID,
+		})},
+		{"session closed", acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})},
+		{"parse error", acp.NewParseError(map[string]any{jsonFieldError: "parse_error"})},
+		{"auth required", acp.NewAuthRequired(map[string]any{jsonFieldError: "authentication_required"})},
+		{"cancelled", acp.NewRequestCancelled(map[string]any{jsonFieldError: valRequestCancelled})},
+		{"unclassified code", &acp.RequestError{Code: 123, Message: "custom", Data: map[string]any{jsonFieldError: "custom_token"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			mapped := requestError(context.Background(), test.err)
+			require.NotNil(t, mapped)
+			require.Equal(t, test.err.Code, mapped.Code)
+			require.Equal(t, test.err.Data, mapped.Data)
+		})
 	}
+}
+
+// TestRequestErrorMethodNotFoundNamesTheMethod pins the -32601 shape: the
+// adapter's own method-not-found carries the method the peer asked for, the
+// same data the SDK dispatcher emits for a method it cannot route, so one
+// connection never answers the same code with two different conventions.
+func TestRequestErrorMethodNotFoundNamesTheMethod(t *testing.T) {
+	t.Parallel()
+
+	mapped := requestError(context.Background(), acp.NewMethodNotFound("_hermes/does/not/exist"))
+	require.NotNil(t, mapped)
+	require.Equal(t, -32601, mapped.Code)
+	require.Equal(t, acp.NewMethodNotFound("_hermes/does/not/exist").Data, mapped.Data)
+}
+
+// TestRequestErrorReducesUnclassifiedProse pins the one case that is still
+// reduced to a bare token: an error carrying no wire classification has prose
+// this package cannot vouch for, so none of it reaches the peer.
+func TestRequestErrorReducesUnclassifiedProse(t *testing.T) {
+	t.Parallel()
+
+	mapped := requestError(context.Background(), errors.New("native prose: /home/someone/secret path"))
+	require.NotNil(t, mapped)
+	require.Equal(t, -32603, mapped.Code)
+	require.Equal(t, map[string]any{jsonFieldError: valHermesInternalFailure}, mapped.Data)
+}
+
+// TestRequestErrorCancelWinsOverTypedPayload keeps the cancel precedence the
+// pass-through must not disturb: a withdrawn request answers -32800 even when
+// the handler was carrying a typed refusal when the cancel landed.
+func TestRequestErrorCancelWinsOverTypedPayload(t *testing.T) {
+	t.Parallel()
+
+	cancelledCtx, cancel := context.WithCancelCause(context.Background())
+	cancel(context.Canceled)
+
+	mapped := requestError(cancelledCtx, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported}))
+	require.NotNil(t, mapped)
+	require.Equal(t, -32800, mapped.Code)
+	require.Equal(t, map[string]any{jsonFieldError: valRequestCancelled}, mapped.Data)
 }
 
 func TestExtensionForkResponseCarriesPrivateLifecycleToken(t *testing.T) {
@@ -941,9 +1013,9 @@ func TestPermissionOperationUsesOneClientCallLeaseOverPipes(t *testing.T) {
 	}
 	_ = acp.NewClientSideConnection(client, c2aW, a2cR)
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
-	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
-	})
+	}))
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setAgentClient(conn)
 
@@ -1130,5 +1202,73 @@ func (c *pipeACPClient) signalChanged() {
 	select {
 	case c.changed <- struct{}{}:
 	default:
+	}
+}
+
+// TestOffPromptInternalErrorVocabularyIsClosed drives every -32603 this adapter
+// can produce outside a prompt turn and pins the family shape: one closed
+// vendor-prefixed token in data.error, the JSON-RPC constant in message, an
+// optional documented class or cause, and no Go or native prose anywhere in the
+// payload.
+func TestOffPromptInternalErrorVocabularyIsClosed(t *testing.T) {
+	t.Parallel()
+
+	refusedOptions := newTestAgent(WithInputHandoffRoot("relative/handoff"))
+	require.Error(t, refusedOptions.optionsErr, "the prose stays on the agent's own error")
+
+	poisonedFence := poisonWireError(poisonRuntimeFenceFailed)
+	unavailable := poisonWireError(poisonContainmentIncomplete)
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want map[string]any
+	}{
+		{
+			"construction verdict",
+			refusedOptions.optionsError(),
+			map[string]any{jsonFieldError: valHermesInvalidOptions},
+		},
+		{
+			"unreplayable store entry",
+			restoreFailed(errors.New("unsupported hermes store format")),
+			map[string]any{jsonFieldError: valHermesRestoreFailed},
+		},
+		{
+			"un-containable runtime",
+			unavailable,
+			map[string]any{jsonFieldError: valHermesRuntimeUnavailable},
+		},
+		{
+			"poisoned session",
+			poisonedFence,
+			map[string]any{jsonFieldError: valHermesSessionPoisoned, jsonFieldCause: poisonRuntimeFenceFailed},
+		},
+		{
+			"turn-correlation invariant",
+			routeInvalid("stale route turnNonce"),
+			map[string]any{jsonFieldError: valHermesInternalFailure, keyClass: classRouteCorrelation},
+		},
+		{
+			"unclassified handler failure",
+			errors.New("native prose: /home/someone/secret path"),
+			map[string]any{jsonFieldError: valHermesInternalFailure},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			mapped := requestError(context.Background(), test.err)
+			require.NotNil(t, mapped)
+			require.Equal(t, -32603, mapped.Code)
+			require.Equal(t, "Internal error", mapped.Message)
+			require.Equal(t, test.want, mapped.Data)
+
+			encoded, err := json.Marshal(mapped.Data)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), `"message"`)
+			require.NotContains(t, string(encoded), "prose")
+			require.NotContains(t, string(encoded), "/home/someone")
+		})
 	}
 }

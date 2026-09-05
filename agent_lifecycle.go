@@ -3,6 +3,7 @@ package hermesacp
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-hermes/internal/lifecycle"
@@ -20,7 +21,9 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	}
 
 	if !offered {
-		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
+		if retainErr := a.retainNegotiatedLifecycle(lifecycle.Negotiated{}); retainErr != nil {
+			return nil, retainErr
+		}
 
 		//nolint:nilnil // An omitted capability produces no advertisement and no refusal.
 		return nil, nil
@@ -29,7 +32,9 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	answer := a.provenLifecycleFacts()
 	answer.Version = lifecycle.Version
 
-	a.retainNegotiatedLifecycle(answer)
+	if retainErr := a.retainNegotiatedLifecycle(answer); retainErr != nil {
+		return nil, retainErr
+	}
 
 	return map[string]any{lifecycle.MetaKey: answer.Advertisement()}, nil
 }
@@ -57,11 +62,48 @@ func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	return proven
 }
 
-func (a *Agent) retainNegotiatedLifecycle(answer lifecycle.Negotiated) {
+// retainNegotiatedLifecycle records this connection's one answer. The answer is
+// the contract for the whole connection, not a value the latest `initialize`
+// happens to hold: a second negotiation that would change it is refused on the
+// lifecycle key rather than admitted. Withdrawing a present answer is the case
+// that matters — enabling version 1 obligates the foreground stream for every
+// session on the connection, and a later key-less `initialize` would cancel
+// that obligation while the sessions it was published for are still live, so a
+// host reducing the stream would see it stop mid-turn with no terminal event.
+// Introducing an answer the connection never gave is refused for the mirror
+// reason: the sessions already open on it published no opening snapshot, so
+// their streams could never be completed. Repeating the identical negotiation
+// asserts the same contract and changes nothing, so it is admitted.
+//
+// The refusal is reached before `Initialize` records any client capability, so
+// a refused re-negotiation leaves the connection — and every live session's
+// obligated stream — exactly as the first answer left it.
+func (a *Agent) retainNegotiatedLifecycle(answer lifecycle.Negotiated) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.lifecycleAnswered && !sameNegotiatedLifecycle(a.lifecycleAnswer, answer) {
+		return acp.NewInvalidParams(map[string]any{
+			jsonFieldError: valUnsupported,
+			keyField:       lifecycle.MetaPath,
+		})
+	}
+
 	a.lifecycleAnswer = answer
+	a.lifecycleAnswered = true
+
+	return nil
+}
+
+// sameNegotiatedLifecycle compares two answers member by member. Negotiated
+// carries a slice, so it is not comparable with ==, and every member is part of
+// the connection's exact answer.
+func sameNegotiatedLifecycle(current, next lifecycle.Negotiated) bool {
+	return current.Version == next.Version &&
+		current.UpdatesOutsidePrompt == next.UpdatesOutsidePrompt &&
+		current.AuthoritativeQuiescence == next.AuthoritativeQuiescence &&
+		current.QuiescenceSource == next.QuiescenceSource &&
+		slices.Equal(current.ActivityKinds, next.ActivityKinds)
 }
 
 // negotiatedLifecycle reports the answer this connection is bound by.
@@ -77,7 +119,7 @@ func (a *Agent) negotiatedLifecycle() lifecycle.Negotiated {
 // itself, so the rejection names the exact member path that failed.
 func lifecycleParamError(refusal *lifecycle.ParamError) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valUnsupported,
+		jsonFieldError: string(refusal.Verdict),
 		keyField:       refusal.Field,
 	})
 }

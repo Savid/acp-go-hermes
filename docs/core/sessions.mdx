@@ -36,6 +36,21 @@ replays `session.history` to the ACP client so the host rebuilds the
 conversation. `session/resume` hydrates and resumes the same way but skips the
 replay, for hosts that only need to continue the turn stream.
 
+A cold native resume returns before Hermes has finished building the session's
+agent, so the adapter holds the resume behind an explicit build barrier and
+publishes the live id only once the agent exists. The barrier is a separate
+gateway call rather than the resume's own eager-build flag: an eagerly built
+agent is handed the gateway's process-wide session-database handle and made its
+owner, so closing that session later closes the database underneath the whole
+gateway process and every later database-backed call in that generation fails.
+The deferred build reaches the same finished agent without that ownership
+transfer, which is what lets the generation serve its own teardown.
+
+A store entry that exists for the session and cannot be restored fails the load
+or resume with `-32603` `{"error":"hermes_restore_failed"}`. The entry is left
+exactly where it is: a restore failure never deletes or tombstones what it could
+not read.
+
 When the logical id is already active, load and resume reuse that exact runtime
 only while its foreground is idle. A foreground prompt or another reuse request
 holds the session-scoped admission and the overlapping request is rejected with
@@ -48,9 +63,10 @@ pump is joined, and its client and generation are contained before the failure
 returns; the durable stored session remains available for a later clean load.
 
 `session/delete` tombstones the ACP store first and hides the session id with
-that write, then cancels and settles any turn still in flight, then best-effort
-deletes native state; a native missing-session response counts as success, so
-delete is idempotent. An active prompt is something delete cancels, never a
+that write, then cancels and settles any turn still in flight, then deletes
+native state and destroys the generation; a native missing-session response
+counts as success, so delete is idempotent. Deleting a session that was loaded
+or resumed is the ordinary case and succeeds on the first call. An active prompt is something delete cancels, never a
 reason to refuse: the cancelled turn settles as `cancelled`, and the terminal
 commit it owes lands on a tombstoned id, so it publishes nothing and cannot
 recreate the deleted row. A teardown that fails is reported to the caller with

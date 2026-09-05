@@ -877,7 +877,7 @@ func (s *session) settleAutonomousCycle(
 	}
 
 	if err != nil {
-		poisonErr := s.poisonWithError(ctx, "hermes_terminal_snapshot_failed", err.Error())
+		poisonErr := s.poisonWithCause(ctx, poisonTerminalSnapshotFailed, err)
 
 		stream.fence()
 

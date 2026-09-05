@@ -57,9 +57,10 @@ At the first launch of a given `hermes` executable, once the gateway reports
 ready, the adapter probes the gateway's method surface without spending
 provider tokens (`probeGatewayMethods` in `internal/hermes/process.go`). The
 probe creates and resumes a throwaway session, lists active sessions, reads
-model options, and verifies that the prompt, image-attach, approval, and
-clarify methods exist — each checked against a deliberately missing session id
-so no prompt ever reaches a model — then closes and deletes the probe session.
+model options, and verifies that the prompt, image-attach, approval, clarify,
+and cold-resume build-barrier methods exist — each checked against a
+deliberately missing session id so no prompt ever reaches a model — then closes
+and deletes the probe session.
 
 A startup failure whose error mentions `hermes startup probe` means the
 gateway surface is wrong or unreachable: a broken install or an unexpected
