@@ -382,7 +382,7 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()

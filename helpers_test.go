@@ -771,12 +771,10 @@ func testNativeSession(id string) nativehermes.Session {
 	return native
 }
 
-func testSession(agent *Agent, client *fakeHermesClient) *session {
+func testSession(t *testing.T, agent *Agent, client *fakeHermesClient) *session {
+	t.Helper()
 	if client.xdg.Root == "" {
-		root, err := os.MkdirTemp("", "acp-go-hermes-test-*")
-		if err == nil {
-			client.xdg, _ = testGenerationXDG(root)
-		}
+		client.xdg, _ = testGenerationXDG(t.TempDir())
 	}
 
 	return newSession(agent, "session-1", absTestPath("tmp", "project"), nil, nil, testNativeSession("native-1"), client, sessionMeta{}, idmapRecord{
@@ -947,7 +945,7 @@ func newLifecycleActionSession(t *testing.T, accepted bool) (*session, *recordin
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatalf("open lifecycle stream: %v", err)
 	}

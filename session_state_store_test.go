@@ -41,7 +41,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	client := newFakeHermesClient()
 	client.xdg = xdg
 	agent := newTestAgent(WithSessionStore(store))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	if err2 := session.snapshotToStore(ctx); err2 != nil {
 		t.Fatalf("snapshotToStore: %v", err2)
 	}
@@ -91,7 +91,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 	seedSQLiteStore(t, filepath.Join(isolatedXDG.Root, "state.db"))
 	isolatedClient := newFakeHermesClient()
 	isolatedClient.xdg = isolatedXDG
-	isolatedSession := testSession(newTestAgent(WithSessionStore(store)), isolatedClient)
+	isolatedSession := testSession(t, newTestAgent(WithSessionStore(store)), isolatedClient)
 	if err := isolatedSession.snapshotToStore(ctx); err != nil {
 		t.Fatalf("write per-session-home snapshot: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 	sharedClient := newFakeHermesClient()
 	sharedClient.xdg = wrapperXDG
 	sharedAgent := newTestAgent(WithSessionStore(store), WithSharedHermesHome(sharedHome))
-	sharedSession := testSession(sharedAgent, sharedClient)
+	sharedSession := testSession(t, sharedAgent, sharedClient)
 	if err := sharedSession.snapshotToStore(ctx); err != nil {
 		t.Fatalf("write shared snapshot: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	store := NewInMemorySessionStore()
 	client := newFakeHermesClient()
 	client.xdg = xdg
-	session := testSession(newTestAgent(WithSessionStore(store)), client)
+	session := testSession(t, newTestAgent(WithSessionStore(store)), client)
 	if err5 := session.snapshotToStore(ctx); err5 != nil {
 		t.Fatalf("snapshotToStore: %v", err5)
 	}
@@ -443,7 +443,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			session := testSession(newTestAgent(WithSessionStore(NewInMemorySessionStore())), newFakeHermesClient())
+			session := testSession(t, newTestAgent(WithSessionStore(NewInMemorySessionStore())), newFakeHermesClient())
 			cleanup := tt.set(session)
 			defer cleanup()
 			if err := session.snapshotToStore(ctx); err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -1508,7 +1508,7 @@ func snapshotFaultSession(t *testing.T) *session {
 	client.xdg = xdg
 	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
 
-	return testSession(agent, client)
+	return testSession(t, agent, client)
 }
 
 func validHydrateStore(t *testing.T, ctx context.Context) *InMemorySessionStore {
@@ -1991,7 +1991,7 @@ func testTarZstd(t *testing.T, headers []tar.Header, bodies map[string]string) [
 
 func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 	t.Run("closed turn", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		session.closed = true
 		_, err := session.captureSnapshotLocked(t.Context(), &terminalSnapshotRequirement{})
 		require.ErrorContains(t, err, "closed")
@@ -2000,7 +2000,7 @@ func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 	t.Run("settled archive read", func(t *testing.T) {
 		storeErr := errors.New("archive unavailable")
 		agent := newTestAgent(WithSessionStore(&errorSessionStore{err: storeErr}))
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		requirement := &terminalSnapshotRequirement{
 			nativeUnavailable: true,
 			settlementCapture: true,
@@ -2014,7 +2014,7 @@ func TestLifecycleSnapshotCaptureFailureBoundaries(t *testing.T) {
 	})
 
 	t.Run("cancel after serialization", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		ctx, cancel := context.WithCancel(t.Context())
 		originalMarshal := stateJSONMarshal
 		t.Cleanup(func() { stateJSONMarshal = originalMarshal })

@@ -17,7 +17,7 @@ import (
 func TestSnapshotJournalAndStoreReconciliationEdges(t *testing.T) {
 	t.Run("journal preparation", func(t *testing.T) {
 		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		journal := newTestSessionOperationJournalWithLogical(t, durableTempDir(t), sessionOperationKindNew, string(session.id))
 		identifyTestNewSessionOperationJournal(t, journal)
 		session.operationJournal = journal
@@ -31,7 +31,7 @@ func TestSnapshotJournalAndStoreReconciliationEdges(t *testing.T) {
 
 	t.Run("commit marker retained", func(t *testing.T) {
 		agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()))
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		journal := newTestSessionOperationJournalWithLogical(t, durableTempDir(t), sessionOperationKindNew, string(session.id))
 		identifyTestNewSessionOperationJournal(t, journal)
 		session.operationJournal = journal

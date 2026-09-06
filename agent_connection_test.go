@@ -174,7 +174,7 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 		t.Fatal("cancel notification error was not surfaced")
 	}
 	fakeClient := newFakeHermesClient()
-	fakeSession := testSession(agent, fakeClient)
+	fakeSession := testSession(t, agent, fakeClient)
 	agent.mu.Lock()
 	agent.sessions[fakeSession.id] = fakeSession
 	agent.mu.Unlock()
@@ -673,7 +673,7 @@ func TestExtensionForkResponseCarriesPrivateLifecycleToken(t *testing.T) {
 
 		return childClient, nil
 	}
-	parent := testSession(agent, parentClient)
+	parent := testSession(t, agent, parentClient)
 	parent.id = "parent"
 	parent.idmap.SessionID = "parent"
 	parent.idmap.NativeSessionID = "native-parent"
@@ -1020,7 +1020,7 @@ func TestPermissionOperationUsesOneClientCallLeaseOverPipes(t *testing.T) {
 	agent.setAgentClient(conn)
 
 	native := newFakeHermesClient()
-	session := testSession(agent, native)
+	session := testSession(t, agent, native)
 	require.NoError(t, session.openLifecycleStream())
 	turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 	defer session.finishTurn()

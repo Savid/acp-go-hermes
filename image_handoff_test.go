@@ -163,7 +163,7 @@ func TestHandoffPathNeverReachesNativeRequest(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent(WithInputHandoffRoot(root))
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	var sent nativehermes.MessageRequest
 

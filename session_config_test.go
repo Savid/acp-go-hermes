@@ -86,7 +86,7 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 	agent := newTestAgent()
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	sess := testSession(agent, client)
+	sess := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[sess.id] = sess
 	agent.mu.Unlock()
@@ -166,7 +166,7 @@ func TestSetSessionConfigOptionReadsModelOptionsOnce(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 
-	sess := testSession(agent, client)
+	sess := testSession(t, agent, client)
 	sess.providerID, sess.modelID = "p", "one"
 	agent.mu.Lock()
 	agent.sessions[sess.id] = sess
@@ -268,7 +268,7 @@ func TestUnknownModelValueTraversesActiveResume(t *testing.T) {
 		}}, nil
 	}
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	value := "provider/unlisted-at-active-resume"
@@ -312,7 +312,7 @@ func TestMalformedModelValueRefusedByBothDoors(t *testing.T) {
 		}}, nil
 	}
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.providerID, session.modelID = "provider", "bound-model"
 	agent.sessions[session.id] = session
 
@@ -354,7 +354,7 @@ func TestUnknownModelNativeRefusalIsSanitized(t *testing.T) {
 	}
 	client.setModelErr = wantErr
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	value := "missing-provider/missing-model"
@@ -391,7 +391,7 @@ func TestModelSelectionSurvivesCatalogueReadFailure(t *testing.T) {
 	client := newFakeHermesClient()
 	client.providersErr = errors.New("model.options unavailable")
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	value := "provider/unlisted-without-menu"

@@ -17,7 +17,7 @@ import (
 )
 
 func TestTurnFenceHelperBranches(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	if session.claimPermissionRequest("") || session.claimQuestionRequest("") {
 		t.Fatal("empty request ids were admitted without exact ownership")
 	}
@@ -32,7 +32,7 @@ func TestTurnFenceHelperBranches(t *testing.T) {
 }
 
 func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
-	nilClient := testSession(newTestAgent(), newFakeHermesClient())
+	nilClient := testSession(t, newTestAgent(), newFakeHermesClient())
 	nilClient.client = nil
 	nilClient.cancelTurn()
 	if err := nilClient.fenceTurnLocked(t.Context(), 0, true); err != nil {
@@ -46,7 +46,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 		t.Fatalf("nil runtime fence error = %v", err)
 	}
 
-	closed := testSession(newTestAgent(), newFakeHermesClient())
+	closed := testSession(t, newTestAgent(), newFakeHermesClient())
 	closed.client = nil
 	if err := closed.Close(t.Context()); err != nil {
 		t.Fatalf("close nil runtime: %v", err)
@@ -56,7 +56,7 @@ func TestTurnFenceLifecycleFailureBranches(t *testing.T) {
 func TestSessionMarkPartAcceptsFirstEmptyRawPayload(t *testing.T) {
 	t.Parallel()
 
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	part := nativehermes.Part{ID: "completion-only", Type: "text", Text: "final answer"}
 	if !session.markPart(part) {
 		t.Fatal("first completion-only part was suppressed")
@@ -106,7 +106,7 @@ func TestPoisonedSessionRejectsFollowUpOperations(t *testing.T) {
 	store := newCountingSessionStore()
 	agent := newTestAgent(WithSessionStore(store))
 	agent.setAgentClient(conn)
-	s := testSession(agent, client)
+	s := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[s.id] = s
 	agent.mu.Unlock()
@@ -160,14 +160,14 @@ func TestCommittedStateAndForegroundPrefixBoundaries(t *testing.T) {
 	require.Empty(t, (committedState{}).nativeTerminal().MessageID)
 	require.Equal(t, "message", (committedState{native: native}).nativeTerminal().MessageID)
 
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	session.recordForegroundPrefix("")
 	session.recordForegroundPrefix("prefix")
 	session.recordForegroundPrefix(string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes)))
 	session.recordForegroundPrefix("ignored")
 	require.Len(t, session.foregroundPrefix(), lifecycleForegroundPrefixBytes)
 
-	boundary := testSession(newTestAgent(), newFakeHermesClient())
+	boundary := testSession(t, newTestAgent(), newFakeHermesClient())
 	prefix := string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes-1))
 	boundary.recordForegroundPrefix(prefix + "é")
 	boundary.recordForegroundPrefix("must-not-follow-truncation")
@@ -186,7 +186,7 @@ func TestCommittedStateAndForegroundPrefixBoundaries(t *testing.T) {
 }
 
 func TestExactForegroundCapacityAndAdmissionExclusion(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	session.recordForegroundPrefix(string(bytes.Repeat([]byte("x"), lifecycleForegroundPrefixBytes)))
 	session.recordForegroundPrefix("not retained")
 	require.Equal(t, lifecycleForegroundPrefixBytes, len(session.foregroundPrefix()))
@@ -195,7 +195,7 @@ func TestExactForegroundCapacityAndAdmissionExclusion(t *testing.T) {
 	session.mu.Unlock()
 	require.True(t, truncated)
 
-	other := testSession(newTestAgent(), newFakeHermesClient())
+	other := testSession(t, newTestAgent(), newFakeHermesClient())
 	_, releaseReuse, err := other.beginReuse(t.Context())
 	require.NoError(t, err)
 	if _, _, acquireErr := other.acquireTurn(t.Context()); acquireErr == nil {

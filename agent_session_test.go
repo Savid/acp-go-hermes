@@ -25,7 +25,7 @@ import (
 func TestFailedPostResponseReplayRetractsAndContainsItsSession(t *testing.T) {
 	agent := newTestAgent()
 	client := newFakeHermesClient()
-	s := testSession(agent, client)
+	s := testSession(t, agent, client)
 	agent.sessions[s.id] = s
 
 	s.failReuseAfterResponse(errors.New("replay failed"))
@@ -59,7 +59,7 @@ func TestActiveLoadReplayFailureReturnsExactCause(t *testing.T) {
 	client := newFakeHermesClient()
 	client.messagesErr = want
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, agent.storeStartedSession(session))
 
 	_, err := agent.LoadSession(t.Context(), LoadSessionRequest(session.id, session.cwd))
@@ -91,7 +91,7 @@ func TestActiveLoadCannotReplayAcrossForegroundPrompt(t *testing.T) {
 	})
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, agent.storeStartedSession(session))
 
 	promptDone := make(chan error, 1)
@@ -167,7 +167,7 @@ func TestForkBindsResolvedModelBeforePublishingChild(t *testing.T) {
 			})
 			t.Cleanup(func() { _ = agent.Close() })
 
-			parent := testSession(agent, parentClient)
+			parent := testSession(t, agent, parentClient)
 			parent.providerID, parent.modelID = splitModelValue(test.parentModel, "", "")
 			agent.sessions[parent.id] = parent
 			if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
@@ -221,7 +221,7 @@ func TestForkModelBindFailureCleansChildBeforePublication(t *testing.T) {
 			return childClient, nil
 		}
 	})
-	parent := testSession(agent, parentClient)
+	parent := testSession(t, agent, parentClient)
 	agent.sessions[parent.id] = parent
 	if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestForkModelBindFailureRetainsChildWithUnprovenContainment(t *testing.T) {
 			return childClient, nil
 		}
 	})
-	parent := testSession(agent, parentClient)
+	parent := testSession(t, agent, parentClient)
 	agent.sessions[parent.id] = parent
 	if err := os.WriteFile(filepath.Join(parentClient.xdg.Root, "state.db"), []byte("parent-state"), 0o600); err != nil {
 		t.Fatal(err)
@@ -557,7 +557,7 @@ func TestLoadSessionHydratesStoredSnapshot(t *testing.T) {
 	}
 	sourceClient.xdg = sourceXDG
 	agent := newTestAgent(WithScratchDir(root), WithSessionStore(store))
-	session := testSession(agent, sourceClient)
+	session := testSession(t, agent, sourceClient)
 	session.cwd = root
 	storedPathDir := durableTempDir(t)
 	session.env = map[string]string{"WAGIE_API_TOKEN": "stored-bearer"}
@@ -976,7 +976,7 @@ func newResumeRuntimeTestSession(t *testing.T, options ...Option) (*session, *Ag
 	base = append(base, WithScratchDir(durableTempDir(t)), WithSessionStore(store))
 	base = append(base, options...)
 	agent := newTestAgent(base...)
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	session.runtimeNeedsResume = true
 	replaceResumeRuntimeRecords(t, store, session.idmap, resumeRuntimeSnapshot(session))
 
@@ -1035,7 +1035,7 @@ func TestCloseSessionWaitsForPendingTurnSettlement(t *testing.T) {
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 	agent := newTestAgent(WithSessionStore(store))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -1082,7 +1082,7 @@ func TestCloseSessionSnapshotsBeforeNativeRootRemoval(t *testing.T) {
 	client.xdg = xdg
 	client.closeFunc = func(context.Context) error { return os.RemoveAll(xdg.Root) }
 	agent := newTestAgent(WithSessionStore(store))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -1104,7 +1104,7 @@ func TestCloseWaitsForAdmittedTurnBeforeSnapshot(t *testing.T) {
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	agent := newTestAgent(WithSessionStore(store))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -1443,7 +1443,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	}
 	sourceClient.xdg = sourceXDG
 	seedAgent := newTestAgent(WithScratchDir(root), WithSessionStore(store))
-	seed := testSession(seedAgent, sourceClient)
+	seed := testSession(t, seedAgent, sourceClient)
 	seed.cwd = cwd
 	if err15 := seed.snapshotToStore(ctx); err15 != nil {
 		t.Fatalf("snapshotToStore: %v", err15)
@@ -1544,7 +1544,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 
 	parentClient := newFakeHermesClient()
 	parentClient.forkErr = errors.New("fork failed")
-	parent := testSession(newTestAgent(), parentClient)
+	parent := testSession(t, newTestAgent(), parentClient)
 	parentAgent := parent.agent
 	parentAgent.mu.Lock()
 	parentAgent.sessions[parent.id] = parent
@@ -1601,11 +1601,11 @@ func TestAgentHelperAndLifecycleBranchCoverage(t *testing.T) {
 	}
 
 	limitAgent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
-	first := testSession(limitAgent, newFakeHermesClient())
+	first := testSession(t, limitAgent, newFakeHermesClient())
 	if err := limitAgent.storeStartedSession(first); err != nil {
 		t.Fatalf("store first session: %v", err)
 	}
-	second := testSession(limitAgent, newFakeHermesClient())
+	second := testSession(t, limitAgent, newFakeHermesClient())
 	second.id = "second"
 	if err := limitAgent.storeStartedSession(second); err == nil {
 		t.Fatal("active-session backpressure was not enforced")
@@ -1691,7 +1691,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 	}
 	sourceClient.xdg = sourceXDG
 	seedAgent := newTestAgent(WithSessionStore(store))
-	seed := testSession(seedAgent, sourceClient)
+	seed := testSession(t, seedAgent, sourceClient)
 	seed.cwd = cwd
 	if err24 := seed.snapshotToStore(ctx); err24 != nil {
 		t.Fatalf("seed snapshot: %v", err24)
@@ -1748,7 +1748,7 @@ func testAgentSnapshotAndForkFailureBranches(ctx context.Context, t *testing.T, 
 
 	parentClient := newFakeHermesClient()
 	parentClient.forkSession = testNativeSession("native-child")
-	parent := testSession(newTestAgent(WithScratchDir(string([]byte{0}))), parentClient)
+	parent := testSession(t, newTestAgent(WithScratchDir(string([]byte{0}))), parentClient)
 	parentAgent := parent.agent
 	parentAgent.sessions[parent.id] = parent
 	if _, err29 := parentAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, cwd))); err29 == nil {
@@ -1837,7 +1837,7 @@ func TestAgentNewSessionIDAndStoreErrors(t *testing.T) {
 				return client, nil
 			}
 		})
-		agent.sessions["existing"] = testSession(agent, newFakeHermesClient())
+		agent.sessions["existing"] = testSession(t, agent, newFakeHermesClient())
 		if _, err := agent.NewSession(ctx, NewSessionRequest(cwd)); err == nil {
 			t.Fatal("NewSession ignored storeStartedSession error")
 		}
@@ -1882,7 +1882,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 				return loadedClient, nil
 			}
 		})
-		limitAgent.sessions["existing"] = testSession(limitAgent, newFakeHermesClient())
+		limitAgent.sessions["existing"] = testSession(t, limitAgent, newFakeHermesClient())
 		if _, err := limitAgent.LoadSession(ctx, LoadSessionRequest("s", cwd)); err == nil {
 			t.Fatal("LoadSession ignored storeStartedSession error")
 		}
@@ -1920,11 +1920,11 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 			}
 		}
 		agent := newTestAgent(WithSessionStore(store))
-		active := testSession(agent, newFakeHermesClient())
+		active := testSession(t, agent, newFakeHermesClient())
 		active.id = "active"
 		active.cwd = cwd
 		agent.sessions[active.id] = active
-		otherActive := testSession(agent, newFakeHermesClient())
+		otherActive := testSession(t, agent, newFakeHermesClient())
 		otherActive.id = "other-active"
 		otherActive.cwd = durableTempDir(t)
 		agent.sessions[otherActive.id] = otherActive
@@ -1942,7 +1942,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		client.closeErr = errors.New("close failed")
 		agent := newTestAgent()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		agent.sessions[session.id] = session
 		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); err == nil {
 			t.Fatal("delete ignored active close error")
@@ -1953,7 +1953,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSessionStore(store))
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		session.cancel = func() {}
 		session.turnEpoch = 1
 		agent.sessions[session.id] = session
@@ -1979,7 +1979,7 @@ func TestAgentRemainingLifecycleBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		client.deleteErr = errors.New("native delete failed")
 		agent := newTestAgent()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		agent.sessions[session.id] = session
 		if _, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(session.id)); !errors.Is(err, client.deleteErr) {
 			t.Fatalf("delete error = %v, want native delete error", err)
@@ -2042,7 +2042,7 @@ func TestDeleteCancelsAnActivePromptAndNoLaterWriteRecreatesTheRow(t *testing.T)
 
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -2107,7 +2107,7 @@ func TestInstallRefusesATombstoneItDidNotCreate(t *testing.T) {
 	client := newFakeHermesClient()
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
@@ -2126,7 +2126,7 @@ func TestInstallRefusesATombstoneItDidNotCreate(t *testing.T) {
 
 	// Exactly what a load, resume, or fork that started before the delete does
 	// when it finally reaches its install step.
-	late := testSession(agent, newFakeHermesClient())
+	late := testSession(t, agent, newFakeHermesClient())
 	late.id = session.id
 
 	installErr := agent.storeStartedSession(late)
@@ -2298,7 +2298,7 @@ func TestDeleteClosesASessionInstalledInsideItsTombstoneWindow(t *testing.T) {
 	}
 
 	agent = newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)))
-	late = testSession(agent, client)
+	late = testSession(t, agent, client)
 
 	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(late.id))
 	require.NoError(t, err)
@@ -2320,7 +2320,7 @@ func TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden(t *testing.T) {
 	client.closeErr = errors.New("runtime close failed")
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -2427,7 +2427,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 		parentClient.forkSession = testNativeSession("native-child")
 		parentClient.xdg, _ = testGenerationXDG(durableTempDir(t))
 		parentAgent := newTestAgent()
-		parent := testSession(parentAgent, parentClient)
+		parent := testSession(t, parentAgent, parentClient)
 		parentAgent.sessions[parent.id] = parent
 
 		sessionIDRandReader = errorReader{err: errors.New("id failed")}
@@ -2455,7 +2455,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 				return nil, errors.New("child factory failed")
 			}
 		})
-		factoryParent := testSession(factoryErrAgent, parentClient)
+		factoryParent := testSession(t, factoryErrAgent, parentClient)
 		factoryErrAgent.sessions[factoryParent.id] = factoryParent
 		if _, err := factoryErrAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(factoryParent.id, cwd))); err == nil {
 			t.Fatal("fork ignored child factory error")
@@ -2473,7 +2473,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 				return getErrClient, nil
 			}
 		})
-		getParent := testSession(getErrAgent, parentClient)
+		getParent := testSession(t, getErrAgent, parentClient)
 		getErrAgent.sessions[getParent.id] = getParent
 		if _, err := getErrAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(getParent.id, cwd))); err == nil {
 			t.Fatal("fork ignored child get error")
@@ -2494,7 +2494,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 				return driftChild, nil
 			}
 		})
-		driftParent := testSession(driftAgent, parentClient)
+		driftParent := testSession(t, driftAgent, parentClient)
 		driftAgent.sessions[driftParent.id] = driftParent
 		if _, err := driftAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(driftParent.id, cwd))); err == nil || !strings.Contains(err.Error(), "native session drift") {
 			t.Fatalf("fork native drift error = %v", err)
@@ -2503,7 +2503,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 			t.Fatalf("fork drift cleanup childClosed=%v parentDeleted=%#v", driftChild.closed, parentClient.deleted)
 		}
 
-		busyParent := testSession(parentAgent, parentClient)
+		busyParent := testSession(t, parentAgent, parentClient)
 		busyParent.mu.Lock()
 		busyParent.turnInFlight = true
 		busyParent.mu.Unlock()
@@ -2525,7 +2525,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 				return limitChild, nil
 			}
 		})
-		limitParent := testSession(limitAgent, parentClient)
+		limitParent := testSession(t, limitAgent, parentClient)
 		limitAgent.sessions[limitParent.id] = limitParent
 		if _, err := limitAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(limitParent.id, cwd))); err == nil {
 			t.Fatal("fork ignored active-session limit")
@@ -2540,7 +2540,7 @@ func TestAgentForkErrorBranches(t *testing.T) {
 				return snapshotErrChild, nil
 			}
 		})
-		snapshotParent := testSession(snapshotErrAgent, parentClient)
+		snapshotParent := testSession(t, snapshotErrAgent, parentClient)
 		snapshotErrAgent.sessions[snapshotParent.id] = snapshotParent
 		if _, err := snapshotErrAgent.HandleExtensionMethod(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(snapshotParent.id, cwd))); err == nil {
 			t.Fatal("fork ignored snapshot error")
@@ -3055,7 +3055,7 @@ func TestDeleteActiveSessionStoreFailureUnlocksLifecycle(t *testing.T) {
 	wantErr := errors.New("delete")
 	store := sessionOperationFaultStore{base: NewInMemorySessionStore(), deleteErr: wantErr}
 	agent := newTestAgent(WithSessionStore(store))
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	agent.sessions[session.id] = session
 	if _, err := agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{SessionId: session.id}); !errors.Is(err, wantErr) {
 		t.Fatalf("delete error=%v", err)
@@ -3153,7 +3153,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 				return client, nil
 			}
 		})
-		seed := testSession(agent, newFakeHermesClient())
+		seed := testSession(t, agent, newFakeHermesClient())
 		require.NoError(t, seed.snapshotToStore(t.Context()))
 		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		installFailingLifecycleIDReader(t, 1)
@@ -3176,7 +3176,7 @@ func TestSessionConstructionCleansUpWhenLifecycleStreamIDFails(t *testing.T) {
 				return childClient, nil
 			}
 		})
-		parent := testSession(agent, parentClient)
+		parent := testSession(t, agent, parentClient)
 		agent.sessions[parent.id] = parent
 		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		installFailingLifecycleIDReader(t, 2)
@@ -3210,7 +3210,7 @@ func TestRuntimeResumeEarlyResidualBranches(t *testing.T) {
 	t.Run("managed finish", func(t *testing.T) {
 		want := errors.New("managed finish refused")
 		managed := &managedHermesServer{managed: true, closed: true, closeErr: want}
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		session.client = managed
 		session.runtimeNeedsResume = true
 		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
@@ -3225,7 +3225,7 @@ func TestRuntimeResumeEarlyResidualBranches(t *testing.T) {
 		createHermesGeneration = func(string) (nativehermes.XDGDirs, error) {
 			return nativehermes.XDGDirs{}, want
 		}
-		session := testSession(newTestAgent(WithScratchDir(durableTempDir(t))), newFakeHermesClient())
+		session := testSession(t, newTestAgent(WithScratchDir(durableTempDir(t))), newFakeHermesClient())
 		session.runtimeNeedsResume = true
 		if err := session.resumeRuntimeForTurnLocked(t.Context()); !errors.Is(err, want) {
 			t.Fatalf("resume generation creation = %v", err)
@@ -3238,12 +3238,12 @@ func TestActiveRebindAndComparisonResidualBranches(t *testing.T) {
 	agent := newTestAgent()
 	failingClient := newFakeHermesClient()
 	failingClient.closeErr = want
-	failing := testSession(agent, failingClient)
+	failing := testSession(t, agent, failingClient)
 	if err := agent.closeActiveSessionForRebind(t.Context(), failing.id, failing, func() {}); !errors.Is(err, want) {
 		t.Fatalf("failed active rebind close = %v", err)
 	}
 
-	missing := testSession(agent, newFakeHermesClient())
+	missing := testSession(t, agent, newFakeHermesClient())
 	if err := agent.closeActiveSessionForRebind(t.Context(), missing.id, missing, func() {}); err == nil {
 		t.Fatal("missing active rebind close succeeded")
 	}
@@ -3341,7 +3341,7 @@ func TestLoadSessionResidualBranches(t *testing.T) {
 		client := newFakeHermesClient()
 		client.closeErr = want
 		agent := newTestAgent()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		if err := agent.storeStartedSession(session); err != nil {
 			t.Fatal(err)
 		}
@@ -3358,7 +3358,7 @@ func TestForkEarlyResidualBranches(t *testing.T) {
 	newForkAgent := func(t *testing.T) (*Agent, *session) {
 		t.Helper()
 		agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
-		parent := testSession(agent, newFakeHermesClient())
+		parent := testSession(t, agent, newFakeHermesClient())
 		parent.id = "parent"
 		parent.idmap.SessionID = "parent"
 		agent.sessions[parent.id] = parent

@@ -238,7 +238,7 @@ func negotiatedPromptSession(t *testing.T) (*session, *fakeHermesClient) {
 	agent.setAgentClient(newRecordingAgentClient())
 	client := newFakeHermesClient()
 
-	return testSession(agent, client), client
+	return testSession(t, agent, client), client
 }
 
 // TestRouteCorrelationFailureIsAnInternalFailure pins the wire shape of an

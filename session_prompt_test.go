@@ -192,7 +192,7 @@ func TestPermissionPublishesExactNativeToolPendingBeforeCallback(t *testing.T) {
 	conn := newStrictHermesPermissionClient(turnNonce)
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 	defer session.finishTurn()
 
@@ -227,7 +227,7 @@ func TestPermissionAndNativeStartShareOneToolLifecycle(t *testing.T) {
 		conn := newStrictHermesPermissionClient(turnNonce)
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 		defer session.finishTurn()
 
@@ -260,7 +260,7 @@ func TestPermissionAndNativeStartShareOneToolLifecycle(t *testing.T) {
 		conn := newStrictHermesPermissionClient(turnNonce)
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 		defer session.finishTurn()
 
@@ -354,7 +354,7 @@ func TestPermissionRejectsMissingStaleAndTerminalToolRoutes(t *testing.T) {
 			conn := newStrictHermesPermissionClient(turnNonce)
 			agent := newTestAgent()
 			agent.setAgentClient(conn)
-			session := testSession(agent, client)
+			session := testSession(t, agent, client)
 			turnCtx := beginTestControlTurn(t, session, t.Context(), turnNonce)
 			defer session.finishTurn()
 
@@ -416,7 +416,7 @@ func TestPermissionToolStateRemainingBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := session.beginTurn(t.Context(), "tool-turn")
 		defer session.finishTurn()
 
@@ -448,7 +448,7 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 		route, active := session.permissionTurnRoute(turnCtx)
 		if !active {
@@ -476,7 +476,7 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 	t.Run("route changes after pending publication", func(t *testing.T) {
 		client := newFakeHermesClient()
 		agent := newTestAgent()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		base := newRecordingAgentClient()
 		conn := &sessionUpdateHookClient{recordingAgentClient: base}
 		conn.afterUpdate = func() {
@@ -500,7 +500,7 @@ func TestPermissionAdmissionRemainingBranches(t *testing.T) {
 	t.Run("connection disappears after pending publication", func(t *testing.T) {
 		client := newFakeHermesClient()
 		agent := newTestAgent()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 		defer session.finishTurn()
 		conn := &sessionUpdateHookClient{recordingAgentClient: newRecordingAgentClient()}
@@ -538,7 +538,7 @@ func TestPermissionCallbackRouteChangeBranches(t *testing.T) {
 			conn.permissionIgnoreContext = true
 			agent := newTestAgent()
 			agent.setAgentClient(conn)
-			session := testSession(agent, client)
+			session := testSession(t, agent, client)
 			turnCtx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 			defer session.finishTurn()
 			done := make(chan error, 1)
@@ -565,7 +565,7 @@ func TestPermissionCallbackRouteChangeBranches(t *testing.T) {
 	}
 
 	t.Run("empty native permission identity is ignored", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		require.ErrorContains(t, session.handlePermission(t.Context(), nativehermes.PermissionRequest{}), "missing exact ownership")
 	})
 }
@@ -589,7 +589,7 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 		}}); err != nil {
 			t.Fatalf("Initialize: %v", err)
 		}
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, ctx, "turn-question-1")
 		defer session.finishTurn()
 
@@ -655,7 +655,7 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 		}}); err != nil {
 			t.Fatalf("Initialize: %v", err)
 		}
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, ctx, "decline-question")
 		defer session.finishTurn()
 		require.NoError(t, session.handleQuestion(turnCtx, testHermesQuestionRequest("q")))
@@ -669,7 +669,7 @@ func TestQuestionToolElicitationAcceptDeclineAndNoCapability(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, ctx, "unsupported-question")
 		defer session.finishTurn()
 		require.NoError(t, session.handleQuestion(turnCtx, testHermesQuestionRequest("q")))
@@ -686,7 +686,7 @@ func TestQuestionToolCancelRejectsPending(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeHermesClient()
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	turnCtx := session.beginTurn(ctx, "test-turn")
 	session.mu.Lock()
@@ -712,7 +712,7 @@ func TestPermissionV2AskReplyAndCancelled(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	ctx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 	defer session.finishTurn()
 
@@ -744,7 +744,7 @@ func TestPermissionQuestionRawMetadataIsRefused(t *testing.T) {
 	agent := newTestAgent()
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	ctx := beginTestControlTurn(t, session, t.Context(), "permission-turn")
 	defer session.finishTurn()
 
@@ -768,7 +768,7 @@ func TestEventMappingMessagePartToolUsageAndRaw(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.rawMessages = rawMessageConfig{enabled: true}
 
 	textProps := json.RawMessage(`{"id":"part-1","sessionID":"native-1","messageID":"message-1","type":"text","text":"hello"}`)
@@ -826,7 +826,7 @@ func TestGatewayToolPartsEmitACPStartAndResult(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	startProperties := json.RawMessage(`{"id":"hermes-live-tool-native-1","sessionID":"native-1","messageID":"hermes-live","type":"tool","callID":"native-1","tool":"terminal","state":{"status":"running","rawInput":{"tool_id":"native-1","name":"terminal","context":"mcp__wagie__execute"}}}`)
 	completeProperties := json.RawMessage(`{"id":"hermes-live-tool-native-1","sessionID":"native-1","messageID":"hermes-live","type":"tool","callID":"native-1","tool":"terminal","state":{"status":"completed","rawInput":{"tool_id":"native-1","name":"terminal","context":"mcp__wagie__execute"},"rawOutput":{"probe":"authorized","status":"ok"}}}`)
@@ -950,7 +950,7 @@ func TestDeliveredCompletionSuffixIsTheRecordedForegroundPrefix(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	t.Cleanup(session.stopPump)
 
 	parts := []nativehermes.Part{
@@ -997,7 +997,7 @@ func TestReplayStopsBeforePublishingTheNextMessageAfterCancellation(t *testing.T
 			Parts: []nativehermes.Part{{MessageID: "message-2", SessionID: "native-1", Type: valText, Text: "second"}},
 		},
 	}
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.ErrorIs(t, session.replayMessages(ctx), context.Canceled)
 	require.Equal(t, 1, base.updateCount())
 }
@@ -1013,7 +1013,7 @@ func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
 			Info: nativehermes.NativeMessageInfo{
@@ -1039,7 +1039,7 @@ func TestUsageUpdateSizeIsContextWindow(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
 			Info: nativehermes.NativeMessageInfo{ID: "message-1", SessionID: "native-1", Role: "assistant", Tokens: nativehermes.Tokens{Total: 1000}},
@@ -1066,7 +1066,7 @@ func TestPromptSSEDisconnectAbortsNativeTurn(t *testing.T) {
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()
@@ -1108,7 +1108,7 @@ func TestPromptGatewayDisconnectSentinelFences(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	_, err := session.Prompt(context.Background(), acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
 	requireTurnFailure(t, err, nativehermes.CauseTransport, "connection reset by peer")
@@ -1129,7 +1129,7 @@ func TestPromptIdleGatewayDisconnectRequiresResumeBeforeNextTurn(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.pumpMu.Lock()
 	pumpDone := session.pumpDone
 	session.pumpMu.Unlock()
@@ -1148,7 +1148,7 @@ func TestPromptIdleGatewayDisconnectRequiresResumeBeforeNextTurn(t *testing.T) {
 func TestPromptCleanEOFSentinelDisconnectAbortsTurn(t *testing.T) {
 	client := newFakeHermesClient()
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	started := make(chan struct{})
 	client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		close(started)
@@ -1254,7 +1254,7 @@ func TestPromptCancelDuringInFlightPermissionAndQuestion(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup(agent)
 			}
-			session := testSession(agent, client)
+			session := testSession(t, agent, client)
 			agent.mu.Lock()
 			agent.sessions[session.id] = session
 			agent.mu.Unlock()
@@ -1316,7 +1316,7 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	ctx := beginTestControlTurn(t, session, t.Context(), "missing-live-turn")
 	defer session.finishTurn()
 
@@ -1347,7 +1347,7 @@ func TestMissingLiveSessionMappingPoisonsSession(t *testing.T) {
 func TestPermissionCancelledReplyBranches(t *testing.T) {
 	t.Run("permission without connection rejects native request", func(t *testing.T) {
 		client := newFakeHermesClient()
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
 		if err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm")); err == nil {
 			t.Fatal("permission emission without a connection did not fail closed")
@@ -1364,7 +1364,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn.permErr = context.Canceled
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1386,7 +1386,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1409,7 +1409,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1425,7 +1425,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn.permErr = errors.New("permission failed")
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
 		defer session.finishTurn()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
@@ -1445,7 +1445,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn.permErr = errors.New("permission failed")
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "test-turn")
 		defer session.finishTurn()
 		err := session.handlePermission(turnCtx, testHermesPermissionRequest(t, "perm", "tool-perm"))
@@ -1462,7 +1462,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn.permissionIgnoreContext = true
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
@@ -1490,7 +1490,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 		conn.permissionIgnoreContext = true
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
@@ -1513,7 +1513,7 @@ func TestPermissionCancelledReplyBranches(t *testing.T) {
 func TestQuestionCancelledReplyBranches(t *testing.T) {
 	t.Run("question without form support uses background when context cancelled", func(t *testing.T) {
 		client := newFakeHermesClient()
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1533,7 +1533,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1553,7 +1553,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "decline-reply-error")
 		defer session.finishTurn()
 		require.ErrorContains(t,
@@ -1568,7 +1568,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1587,7 +1587,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
@@ -1613,7 +1613,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "elicitation-error")
 		defer session.finishTurn()
 		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
@@ -1631,7 +1631,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "elicitation-and-reject-error")
 		defer session.finishTurn()
 		err := session.handleQuestion(turnCtx, testHermesQuestionRequest("question"))
@@ -1645,7 +1645,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1664,7 +1664,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		ctx, cancel := context.WithCancel(context.Background())
 		turnCtx := beginTestControlTurn(t, session, ctx, "test-turn")
 		cancel()
@@ -1683,7 +1683,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
@@ -1712,7 +1712,7 @@ func TestQuestionCancelledReplyBranches(t *testing.T) {
 		agent := newTestAgent()
 		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := beginTestControlTurn(t, session, context.Background(), "test-turn")
 		done := make(chan error, 1)
 		go func() {
@@ -1832,7 +1832,7 @@ func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	messageID := "msg-user"
 	client.sendMessage = func(_ context.Context, id string, req nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		if id != "native-1" {
@@ -1865,7 +1865,7 @@ func TestSlashPromptIsPlainTextAndCommandSilent(t *testing.T) {
 
 func TestPromptReloadsMCPOnceInsideFirstAuthorizedTurn(t *testing.T) {
 	client := newFakeHermesClient()
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
 
 	client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
@@ -1907,7 +1907,7 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 			return ctx.Err()
 		}
 		agent := newTestAgent(WithScratchDir(durableTempDir(t)))
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
 		if err := session.snapshotToStore(t.Context()); err != nil {
 			t.Fatalf("snapshot checkpoint: %v", err)
@@ -1956,7 +1956,7 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 	t.Run("indeterminate reload failure poisons the session", func(t *testing.T) {
 		client := newFakeHermesClient()
 		client.reloadErr = errors.New("reload unavailable")
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
 
 		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "reload-fail", "reply"))
@@ -1977,7 +1977,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		agent.mu.Lock()
 		agent.sessions[session.id] = session
 		agent.mu.Unlock()
@@ -2016,7 +2016,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 		client.sendMessage = func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{}, errors.New("send failed")
 		}
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("send error prompt succeeded")
 		}
@@ -2025,7 +2025,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 	t.Run("snapshot error after final message", func(t *testing.T) {
 		client := newFakeHermesClient()
 		agent := newTestAgent(WithSessionStore(&errorSessionStore{err: errors.New("snapshot failed")}))
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"}}, nil
 		}
@@ -2036,7 +2036,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 	})
 
 	t.Run("prompt validation and turn backpressure", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		session.turnQueue() <- struct{}{}
 		if _, err := session.Prompt(ctx, acp.PromptRequest{Meta: turnRouteMeta("test-turn"), SessionId: session.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}); err == nil {
 			t.Fatal("prompt backpressure was ignored")
@@ -2059,7 +2059,7 @@ func TestPromptSuccessCancelAndErrors(t *testing.T) {
 
 			return nativehermes.NativeMessage{}, ctx.Err()
 		}
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		ctx2, cancel := context.WithCancel(context.Background())
 		done := make(chan acp.PromptResponse, 1)
 		go func() {
@@ -2114,7 +2114,7 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 		store := newCountingSessionStore()
 		agent := newTestAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.sendMessage = func(_ context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{
 				Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: "native-other", Role: "assistant", Finish: "stop"},
@@ -2132,7 +2132,7 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 		store := newCountingSessionStore()
 		agent := newTestAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.sendMessage = func(_ context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{
 				Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: "native-1", Role: "assistant", Finish: "stop"},
@@ -2150,7 +2150,7 @@ func TestNativeSessionIDDriftPoisonsSession(t *testing.T) {
 		store := newCountingSessionStore()
 		agent := newTestAgent(WithSessionStore(store))
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.messages = []nativehermes.NativeMessage{{
 			Info: nativehermes.NativeMessageInfo{ID: "user", SessionID: "native-other", Role: "user"},
 			Parts: []nativehermes.Part{{
@@ -2228,7 +2228,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		started := make(chan struct{})
 		release := make(chan struct{})
 		client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
@@ -2271,7 +2271,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		conn.updateErr = errors.New("update failed")
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		started := make(chan struct{})
 		client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			close(started)
@@ -2303,7 +2303,7 @@ func TestPromptEventLoopAndEmitErrorBranches(t *testing.T) {
 		conn.updateErr = errors.New("final update failed")
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.sendMessage = func(_ context.Context, id string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			return nativehermes.NativeMessage{
 				Info:  nativehermes.NativeMessageInfo{ID: "assistant", SessionID: id, Role: "assistant", Finish: "stop"},
@@ -2323,7 +2323,7 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	client.messages = []nativehermes.NativeMessage{{
 		Info: nativehermes.NativeMessageInfo{ID: "user-1", SessionID: "native-1", Role: "user"},
@@ -2356,13 +2356,13 @@ func TestReplayAndEventEdgeBranches(t *testing.T) {
 	if err := session.emitUpdate(ctx, acp.UpdatePlan(acp.PlanEntry{Content: "no client"})); err != nil {
 		t.Fatalf("emitUpdate with conn: %v", err)
 	}
-	nilConnSession := testSession(newTestAgent(), newFakeHermesClient())
+	nilConnSession := testSession(t, newTestAgent(), newFakeHermesClient())
 	if err := nilConnSession.emitUpdate(ctx, acp.UpdatePlan(acp.PlanEntry{Content: "no client"})); err == nil {
 		t.Fatal("emitUpdate without conn claimed success")
 	}
 
 	noConnClient := newFakeHermesClient()
-	noConnSession := testSession(newTestAgent(), noConnClient)
+	noConnSession := testSession(t, newTestAgent(), noConnClient)
 	require.ErrorContains(t, noConnSession.handlePermission(ctx, nativehermes.PermissionRequest{}), "missing exact ownership")
 	noConnSession.pending = nil
 	noConnTurnCtx := beginTestControlTurn(t, noConnSession, t.Context(), "no-connection-turn")
@@ -2399,7 +2399,7 @@ func TestForeignNativeSessionEventsAreRefused(t *testing.T) {
 	agent.setAgentClient(conn)
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	ctx := session.beginTurn(t.Context(), "foreign-session-turn")
 
 	defer session.finishTurn()
@@ -2518,7 +2518,7 @@ func testEmptyAndMalformedEventMapperBranches(t *testing.T, ctx context.Context,
 	if _, ok := eventPart(json.RawMessage(`{`)); ok {
 		t.Fatal("malformed eventPart succeeded")
 	}
-	rawSession := testSession(newTestAgent(), newFakeHermesClient())
+	rawSession := testSession(t, newTestAgent(), newFakeHermesClient())
 	rawSession.rawMessages = rawMessageConfig{enabled: true}
 	if err := rawSession.emitRawHermesEvent(ctx, nativehermes.TurnEvent{Raw: json.RawMessage(`{"type":"x"}`)}); err == nil {
 		t.Fatal("raw event without conn claimed success")
@@ -2546,7 +2546,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 
 	t.Run("send error after cancelled state", func(t *testing.T) {
 		client := newFakeHermesClient()
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		client.sendMessage = func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			session.mu.Lock()
 			session.cancelled = true
@@ -2562,7 +2562,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 
 	t.Run("successful result marked cancelled", func(t *testing.T) {
 		client := newFakeHermesClient()
-		session := testSession(newTestAgent(), client)
+		session := testSession(t, newTestAgent(), client)
 		client.sendMessage = func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 			session.mu.Lock()
 			session.cancelled = true
@@ -2582,7 +2582,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		conn.updateErr = errors.New("update failed")
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		client.messages = []nativehermes.NativeMessage{{
 			Info: nativehermes.NativeMessageInfo{ID: "user", SessionID: "native-1", Role: "user"},
 			Parts: []nativehermes.Part{{
@@ -2602,7 +2602,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		conn.updateErr = errors.New("step update failed")
 		agent = newTestAgent()
 		agent.setAgentClient(conn)
-		session = testSession(agent, client)
+		session = testSession(t, agent, client)
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{
 			Info: nativehermes.NativeMessageInfo{ID: "assistant", SessionID: "native-1", Role: "assistant"},
 			Parts: []nativehermes.Part{{
@@ -2623,7 +2623,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		part := nativehermes.Part{ID: "dup", SessionID: "native-1", MessageID: "assistant", Type: "text", Text: "hello"}
 		if err := session.emitMessage(ctx, nativehermes.NativeMessage{Info: nativehermes.NativeMessageInfo{ID: "assistant", Role: "assistant"}, Parts: []nativehermes.Part{part, part}}, false); err != nil {
 			t.Fatalf("duplicate emitMessage: %v", err)
@@ -2642,7 +2642,7 @@ func TestPromptRemainingErrorBranches(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent := newTestAgent()
 		agent.setAgentClient(conn)
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		turnCtx := session.beginTurn(t.Context(), "same-session-turn")
 		defer session.finishTurn()
 		if err := session.handleEvent(turnCtx, nativehermes.TurnEvent{
@@ -2732,7 +2732,7 @@ func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	resp, err := promptOnce(context.Background(), session, "hello")
 	if resp.StopReason != "" {
@@ -2776,7 +2776,7 @@ func TestTurnFailureStreamErrorWhileCancelledStaysCancelled(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -2833,7 +2833,7 @@ func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 	store := NewInMemorySessionStore()
 	agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSessionStore(store))
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.cwd = durableTempDir(t)
 	if err := session.snapshotToStore(t.Context()); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
@@ -2880,7 +2880,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -2937,7 +2937,7 @@ func TestTurnCancelWaitsForOneProvedRuntimeClose(t *testing.T) {
 		return nil
 	}
 
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	promptDone := make(chan struct {
 		resp acp.PromptResponse
 		err  error
@@ -2997,7 +2997,7 @@ func TestTurnTimeoutWaitsForOneProvedRuntimeClose(t *testing.T) {
 	agent.options.newPromptTimer = func(time.Duration) promptTimer {
 		return promptTimer{C: timeout, Stop: func() bool { return true }}
 	}
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	promptDone := make(chan struct {
 		resp acp.PromptResponse
 		err  error
@@ -3048,7 +3048,7 @@ func TestTurnCancelCoincidentWithTimeoutClosesOnceAndWins(t *testing.T) {
 	agent.options.newPromptTimer = func(time.Duration) promptTimer {
 		return promptTimer{C: timeout, Stop: func() bool { return true }}
 	}
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	promptDone := make(chan struct {
 		resp acp.PromptResponse
 		err  error
@@ -3088,7 +3088,7 @@ func TestTurnFenceProofFailurePoisonsSession(t *testing.T) {
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 	client.closeErr = ErrContainmentIncomplete
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	promptDone := make(chan error, 1)
 	go func() {
 		_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "unproven-fence", "hang"))
@@ -3138,7 +3138,7 @@ func TestCancelWithoutValidatedNonceHasNoNativeSideEffect(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			client := newFakeHermesClient()
-			session := testSession(newTestAgent(), client)
+			session := testSession(t, newTestAgent(), client)
 			session.mu.Lock()
 			session.turnNonce = "turn"
 			session.turnEpoch = 1
@@ -3169,7 +3169,7 @@ func TestPromptFenceRemainingFailureBranches(t *testing.T) {
 	t.Run("default timer fallback", func(t *testing.T) {
 		agent := newTestAgent(WithTurnTimeout(time.Hour))
 		agent.options.newPromptTimer = nil
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "default-timer", "reply"))
 		if err != nil || response.StopReason != acp.StopReasonEndTurn {
 			t.Fatalf("Prompt with default timer = %#v err=%v", response, err)
@@ -3190,7 +3190,7 @@ func TestPromptFenceRemainingFailureBranches(t *testing.T) {
 		agent.options.newPromptTimer = func(time.Duration) promptTimer {
 			return promptTimer{C: timeout, Stop: func() bool { return true }}
 		}
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		if _, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "timeout-fence-error", "hang")); err == nil || !strings.Contains(err.Error(), "close failed") {
 			t.Fatalf("timeout fence error = %v", err)
 		}
@@ -3209,7 +3209,7 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 
 	scratch := durableTempDir(t)
 	agent := newTestAgent(WithScratchDir(scratch))
-	session := testSession(agent, oldClient)
+	session := testSession(t, agent, oldClient)
 	session.env = map[string]string{"HERMES_REBIND_TEST": "preserved"}
 	rebindPathDir := durableTempDir(t)
 	session.extraPathDirs = []string{rebindPathDir}
@@ -3337,7 +3337,7 @@ func TestTurnLazyResumeSerializesWithSessionClose(t *testing.T) {
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 	agent := newTestAgent(WithScratchDir(durableTempDir(t)))
-	session := testSession(agent, oldClient)
+	session := testSession(t, agent, oldClient)
 	if err := session.snapshotToStore(t.Context()); err != nil {
 		t.Fatalf("snapshot checkpoint: %v", err)
 	}
@@ -3434,7 +3434,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent(WithTurnTimeout(40 * time.Millisecond))
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -3467,7 +3467,7 @@ func TestTurnTimeoutCoincidesWithCancelYieldsCancelled(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent(WithTurnTimeout(40 * time.Millisecond))
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -3529,7 +3529,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -3556,7 +3556,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 
 func TestFailedTurnResultGatewayDisconnectFencesRuntime(t *testing.T) {
 	client := newFakeHermesClient()
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	turnCtx := session.beginTurn(t.Context(), "gateway-disconnect")
 	turnEpoch := session.currentTurnEpoch()
 	defer session.finishTurn()
@@ -3577,7 +3577,7 @@ func TestFailedTurnResultReturnsFenceFailure(t *testing.T) {
 	wantErr := errors.New("close proof failed")
 	client := newFakeHermesClient()
 	client.closeErr = wantErr
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	turnCtx := session.beginTurn(t.Context(), "failed-fence")
 	turnEpoch := session.currentTurnEpoch()
 	defer session.finishTurn()
@@ -3602,7 +3602,7 @@ func TestAdmittedUpdateFailureReturnsFenceFailure(t *testing.T) {
 	conn.updateErr = errors.New("update failed")
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 
 	_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "update-fence-failure", "reply"))
 	if !errors.Is(err, wantErr) {
@@ -3735,7 +3735,7 @@ func TestPermissionAndQuestionCarryLifecycleActions(t *testing.T) {
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 	require.NoError(t, session.lifecycleStream().accept(turnCtx, lifecycle.Submission{
@@ -4074,7 +4074,7 @@ func TestLifecycleControlHardCutFailureBranches(t *testing.T) {
 
 func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 	reserved := map[string]any{lifecycle.MetaKey: map[string]any{}}
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	require.Error(t, session.cancelRouted(reserved))
 
 	turnCtx := session.beginTurn(t.Context(), "turn")
@@ -4090,7 +4090,7 @@ func TestLifecycleCorrelationAndCancelAreValidatedBeforeDispatch(t *testing.T) {
 	require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}))
-	negotiatedSession := testSession(agent, newFakeHermesClient())
+	negotiatedSession := testSession(t, agent, newFakeHermesClient())
 	_, err := negotiatedSession.Prompt(t.Context(), acp.PromptRequest{
 		SessionId: negotiatedSession.id,
 		Meta:      turnRouteMeta("turn"),
@@ -4128,7 +4128,7 @@ func TestPromptFailsOnUnmappedNativeFinish(t *testing.T) {
 		}}, nil
 	}
 
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	resp, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "unknown-finish", "reply"))
 	require.Error(t, err)
 	require.Empty(t, resp.StopReason, "unmapped finish named an ACP v1 stop reason")
@@ -4144,7 +4144,7 @@ func TestPromptFailsOnUnmappedNativeFinish(t *testing.T) {
 	require.ErrorContains(t, errors.Unwrap(err), "tool_calls")
 }
 func TestActionOwnershipEdges(t *testing.T) {
-	s := testSession(newTestAgent(), newFakeHermesClient())
+	s := testSession(t, newTestAgent(), newFakeHermesClient())
 	defer s.stopPump()
 
 	require.NoError(t, s.resolveBlockingAction(t.Context(), announcedAction{}, lifecycle.ActionCancelled))
@@ -4209,7 +4209,7 @@ func activeQuestionSession(
 	agent := newTestAgent()
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
 	agent.setAgentClient(conn)
-	s := testSession(agent, client)
+	s := testSession(t, agent, client)
 	t.Cleanup(s.stopPump)
 	ctx, cancel := context.WithCancel(t.Context())
 	client.emitEvent(nativehermes.TurnEvent{
@@ -4235,7 +4235,7 @@ func questionRequest(id string) nativehermes.QuestionRequest {
 func TestQuestionActiveRouteBranches(t *testing.T) {
 	t.Run("no connection", func(t *testing.T) {
 		client := newFakeHermesClient()
-		s := testSession(newTestAgent(), client)
+		s := testSession(t, newTestAgent(), client)
 		defer s.stopPump()
 		turnCtx := beginTestControlTurn(t, s, t.Context(), "turn")
 		req := questionRequest("no-connection")
@@ -4346,7 +4346,7 @@ func TestQuestionLateContextCancellationBranches(t *testing.T) {
 }
 
 func TestPermissionStaleIdentityIsRejected(t *testing.T) {
-	s := testSession(newTestAgent(), newFakeHermesClient())
+	s := testSession(t, newTestAgent(), newFakeHermesClient())
 	defer s.stopPump()
 	route := &pumpCycleRoute{
 		incarnation: s.pumpIncarnation, generation: 1, cycleID: "permission-cycle",
@@ -4481,7 +4481,7 @@ func newOrderedControlSession(t *testing.T) (*session, *fakeHermesClient, *order
 	connection := newLocalAgentConnection(agent, orderedControlWireWriter{target: a2cW, events: host.wireEvents}, c2aR)
 	agent.setAgentClient(connection)
 	native := newFakeHermesClient()
-	s := testSession(agent, native)
+	s := testSession(t, agent, native)
 	t.Cleanup(s.stopPump)
 	require.NoError(t, s.openLifecycleStream())
 	turnCtx := beginTestControlTurn(t, s, t.Context(), "wire-control")
@@ -4629,7 +4629,7 @@ func runProjectionPrompt(t *testing.T, s *session) promptRun {
 
 func TestPromptProjectionRegistrationFailure(t *testing.T) {
 	client := newFakeHermesClient()
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	want := errors.New("projection registry failed")
 	client.beforePromptDispatch = func() {
@@ -4675,7 +4675,7 @@ func TestPromptDispatchPromotionRefusals(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := newFakeHermesClient()
-			s := testSession(newTestAgent(), client)
+			s := testSession(t, newTestAgent(), client)
 			defer s.stopPump()
 			var blocker *turnSettlement
 			client.beforePromptDispatch = func() {
@@ -4693,7 +4693,7 @@ func TestPromptDispatchPromotionRefusals(t *testing.T) {
 
 func TestPromptSynchronizationFailureAbortsBeforeDispatch(t *testing.T) {
 	client := newFakeHermesClient()
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	want := errors.New("pump synchronization failed")
 	s.pumpMu.Lock()
@@ -4711,7 +4711,7 @@ func TestPromptLifecycleAcceptanceFailureResolvesProjection(t *testing.T) {
 	base := newRecordingAgentClient()
 	agent.setAgentClient(&lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 2})
 	client := newFakeHermesClient()
-	s := testSession(agent, client)
+	s := testSession(t, agent, client)
 	defer s.stopPump()
 	require.NoError(t, s.openLifecycleStream())
 	require.NoError(t, s.lifecycleStream().ensureLifecycleOpened(t.Context()))
@@ -4721,7 +4721,7 @@ func TestPromptLifecycleAcceptanceFailureResolvesProjection(t *testing.T) {
 
 func TestPromptProjectionArrivesBeforeNativeResult(t *testing.T) {
 	client := newFakeHermesClient()
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	projectionAcknowledged := make(chan struct{})
 	s.afterProjectionAck = func() { close(projectionAcknowledged) }
@@ -4738,7 +4738,7 @@ func TestPromptProjectionFailureAfterNativeResult(t *testing.T) {
 	client.omitPromptTerminal = true
 	returned := make(chan struct{})
 	client.afterPromptTerminal = func() { close(returned) }
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	release, settlement, err := s.acquireTurn(t.Context())
 	require.NoError(t, err)
@@ -4769,7 +4769,7 @@ func TestPromptCancellationWhileAwaitingProjection(t *testing.T) {
 	client.omitPromptTerminal = true
 	returned := make(chan struct{})
 	client.afterPromptTerminal = func() { close(returned) }
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	release, settlement, err := s.acquireTurn(t.Context())
 	require.NoError(t, err)
@@ -4799,7 +4799,7 @@ func TestNativeResultConsumesItsAlreadySentDispatchBeforeSettlement(t *testing.T
 }
 
 func TestAwaitPromptProjectionReturnsCancellation(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	success := make(chan error, 1)
 	success <- nil
 	require.Nil(t, session.awaitPromptProjection(t.Context(), success))
@@ -4817,7 +4817,7 @@ func TestAwaitPromptProjectionReturnsCancellation(t *testing.T) {
 
 func TestPromptSynchronizeCancellationIsUnaccepted(t *testing.T) {
 	client := newFakeHermesClient()
-	s := testSession(newTestAgent(), client)
+	s := testSession(t, newTestAgent(), client)
 	defer s.stopPump()
 	s.pumpMu.Lock()
 	s.pumpErr = errPromptCancelled
@@ -4883,7 +4883,7 @@ func TestAssistantTextIsAppendOnlyAcrossNativeFixtures(t *testing.T) {
 			conn := newRecordingAgentClient()
 			agent := newTestAgent()
 			agent.setAgentClient(conn)
-			session := testSession(agent, newFakeHermesClient())
+			session := testSession(t, agent, newFakeHermesClient())
 			t.Cleanup(session.stopPump)
 
 			for _, part := range test.fixture {

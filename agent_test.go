@@ -35,7 +35,7 @@ func TestServeCloseErrorAndAgentCloneFallbacks(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = errors.Join(errors.New("close failed"), ErrContainmentIncomplete)
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	started := make(chan struct{})
@@ -95,7 +95,7 @@ func TestAgentCloseSingleflightPreservesContainmentEvidence(t *testing.T) {
 		return ErrContainmentIncomplete
 	}
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	results := make(chan error, 2)
@@ -223,7 +223,7 @@ func TestFailedContainmentEvidenceRemainsTerminal(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
@@ -236,7 +236,7 @@ func TestServePreservesContainmentEvidenceAfterFailedClose(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrContainmentIncomplete
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
@@ -266,7 +266,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	agent := newTestAgent(WithConcurrencyLimits(ConcurrencyLimits{
 		MaxActiveSessions: 2, MaxConcurrentClientCalls: 1,
 	}))
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	agent.sessions[session.id] = session
 	_, _, firstRelease, err := agent.beginActiveReuse(t.Context(), session.id)
 	require.NoError(t, err)
@@ -309,10 +309,10 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	require.NoError(t, bounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}))
-	first := testSession(bounded, newFakeHermesClient())
+	first := testSession(t, bounded, newFakeHermesClient())
 	require.NoError(t, first.openLifecycleStream())
 	require.NoError(t, bounded.storeStartedSession(first))
-	second := testSession(bounded, newFakeHermesClient())
+	second := testSession(t, bounded, newFakeHermesClient())
 	require.NoError(t, second.openLifecycleStream())
 	owed, storeErr := bounded.storeStartedSessionWithOpening(lifecycleRequestContext(t.Context(), 91), second)
 	if storeErr == nil || owed != nil {
@@ -324,7 +324,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	require.NoError(t, deferredBounded.retainNegotiatedLifecycle(lifecycle.Negotiated{
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}))
-	deferred := testSession(deferredBounded, newFakeHermesClient())
+	deferred := testSession(t, deferredBounded, newFakeHermesClient())
 	require.NoError(t, deferred.openLifecycleStream())
 	for index := 0; index < maxDeferredStreamOpens; index++ {
 		deferredBounded.streamOpens = append(deferredBounded.streamOpens, &deferredStreamOpen{

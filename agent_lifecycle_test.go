@@ -37,7 +37,7 @@ func requireLifecycleKeyRefusal(t *testing.T, err error) {
 // nothing native runs on either refusal.
 func TestCancelReportsTheRouteVerdictWhenBothKeysFailClosed(t *testing.T) {
 	client := newFakeHermesClient()
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	session.beginTurn(t.Context(), "turn")
 	session.mu.Lock()
 	session.turnInFlight = true
@@ -151,7 +151,7 @@ func TestLifecycleNegotiationAndReservedMetadata(t *testing.T) {
 }
 
 func TestApplyAdmittedActiveLifecycleRequest(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	meta := sessionMeta{}
 	if rebind, err := applyAdmittedActiveLifecycleRequest(
 		t.Context(), session, session.cwd, nil, nil, &meta,
@@ -244,7 +244,7 @@ func TestLifecycleRefusedRenegotiationKeepsLiveSessionStreams(t *testing.T) {
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOffer(1)})
 	require.NoError(t, err)
 
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	agent.mu.Lock()
 	agent.sessions[session.id] = session
 	agent.mu.Unlock()

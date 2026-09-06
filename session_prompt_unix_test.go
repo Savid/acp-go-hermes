@@ -19,7 +19,7 @@ func TestSharedHomePromptSessionSetLock(t *testing.T) {
 	home := durableTempDir(t)
 	agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "shared-lock", "reply"))
 	if err != nil || response.StopReason == "" {
 		t.Fatalf("shared-home prompt=%+v err=%v", response, err)

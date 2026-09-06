@@ -837,10 +837,10 @@ func TestHostAuthorityRevokeLossFencesEveryActiveSession(t *testing.T) {
 	authority := newTestHostAuthority()
 	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	firstClient := newFakeHermesClient()
-	first := testSession(agent, firstClient)
+	first := testSession(t, agent, firstClient)
 	first.id = "authority-first"
 	secondClient := newFakeHermesClient()
-	second := testSession(agent, secondClient)
+	second := testSession(t, agent, secondClient)
 	second.id = "authority-second"
 	require.NoError(t, first.openLifecycleStream())
 	require.NoError(t, second.openLifecycleStream())

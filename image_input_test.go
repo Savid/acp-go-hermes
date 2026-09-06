@@ -276,7 +276,7 @@ func TestPromptImageValidationPrecedesNativeTurnAndUnknownModelForwards(t *testi
 			"text-looking": {ID: "text-looking"},
 		},
 	}}}
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	session.providerID = "provider"
 	session.modelID = "text-looking"
 

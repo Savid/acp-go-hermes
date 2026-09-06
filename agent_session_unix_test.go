@@ -52,7 +52,7 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 
 		return childClient, nil
 	}
-	parent := testSession(agent, parentClient)
+	parent := testSession(t, agent, parentClient)
 	parent.id = "parent-for-ack-loss"
 	parent.idmap.SessionID = string(parent.id)
 	parent.idmap.NativeSessionID = "native-parent"
@@ -101,7 +101,7 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 
 			return childClient, nil
 		}
-		parent := testSession(agent, parentClient)
+		parent := testSession(t, agent, parentClient)
 		parent.id = "parent"
 		parent.idmap.SessionID = "parent"
 		parent.idmap.NativeSessionID = "native-parent"
@@ -124,7 +124,7 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 		client := newFakeHermesClient()
 		agent := newTestAgent(WithSharedHermesHome(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
 		agent.setAgentClient(newRecordingAgentClient())
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 
 		response, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "release-ack", "hello"))
 		if err != nil || response.StopReason != acp.StopReasonEndTurn {
@@ -435,7 +435,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		t.Helper()
 		agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
 		agent.options.clientFactory = factory
-		parent := testSession(agent, parentClient)
+		parent := testSession(t, agent, parentClient)
 		parent.id = "parent"
 		parent.idmap.SessionID = "parent"
 		parent.idmap.NativeSessionID = "native-parent"

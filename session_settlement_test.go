@@ -17,7 +17,7 @@ import (
 )
 
 func TestAwaitSettlementHonorsCancellationAcrossTurnAndReuse(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	session.mu.Lock()
@@ -58,7 +58,7 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestAgentClosePublishesAuthoritativeQuiescenceBeforeConnectionDetach(t *tes
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 	agent.sessions[session.id] = session
@@ -130,7 +130,7 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestCloseSessionOnANeverOpenedIncarnationEmitsNothing(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	agent.sessions[session.id] = session
 
@@ -204,7 +204,7 @@ func TestCloseSessionFencesANeverOpenedIncarnation(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	agent.sessions[session.id] = session
 	// The establishing response queues the owed snapshot; the release goroutine
@@ -243,7 +243,7 @@ func TestCloseSessionOnALiveIncarnationStatesWhatItProved(t *testing.T) {
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
@@ -338,7 +338,7 @@ func TestCloseRunsItsEmissionRungsOnTheDetachedContext(t *testing.T) {
 		agent.setAgentClient(&cancelHonoringAgentClient{recordingAgentClient: recorder})
 
 		client := newFakeHermesClient()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 
@@ -359,7 +359,7 @@ func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	turnCtx := session.beginTurn(t.Context(), "turn")
 	session.mu.Lock()
@@ -444,7 +444,7 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 			Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 		}))
 		agent.setAgentClient(newRecordingAgentClient())
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		require.NoError(t, session.openLifecycleStream())
 
 		session.mu.Lock()
@@ -493,7 +493,7 @@ func TestFailedCloseBoundaryKeepsTheIDCloseable(t *testing.T) {
 			}))
 			agent.setAgentClient(newRecordingAgentClient())
 			client := newFakeHermesClient()
-			session := testSession(agent, client)
+			session := testSession(t, agent, client)
 			require.NoError(t, session.openLifecycleStream())
 
 			if opened {
@@ -553,7 +553,7 @@ func TestQuarantinedContainmentStillLeavesTheIDCloseable(t *testing.T) {
 	}
 
 	agent := newTestAgent()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
@@ -607,7 +607,7 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	messagesRelease := make(chan struct{})
 	var once sync.Once
 
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	if err := session.openLifecycleStream(); err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 
 func TestLifecycleActionRegistrationAndMetadata(t *testing.T) {
 	agent := newTestAgent()
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 
 	action, update, owned := session.reserveBlockingAction(lifecycle.ActionPermission, "request", permissionTurnRoute{})
 	require.True(t, owned)
@@ -732,7 +732,7 @@ func TestPromptContainsPanickingNativeSend(t *testing.T) {
 	client.sendMessage = func(context.Context, string, nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
 		panic("native send panic")
 	}
-	session := testSession(newTestAgent(), client)
+	session := testSession(t, newTestAgent(), client)
 	defer session.stopPump()
 	_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "panic-send", "reply"))
 	require.Error(t, err)
@@ -792,7 +792,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 		conn := &lifecycleFailingAgentClient{recordingAgentClient: base, failAt: 6}
 		agent.setAgentClient(conn)
 		client := newFakeHermesClient()
-		session := testSession(agent, client)
+		session := testSession(t, agent, client)
 		require.NoError(t, session.openLifecycleStream())
 		turnCtx := beginTestControlTurn(t, session, t.Context(), "turn")
 		session.mu.Lock()
@@ -814,7 +814,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 }
 
 func TestLifecycleRunFailureClassification(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	acceptErr := errors.New("acceptance failed")
 	for _, test := range []struct {
 		name            string
@@ -865,7 +865,7 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 
 	client := newFakeHermesClient()
 	client.closeErr = errors.New("containment failed")
-	session = testSession(newTestAgent(), client)
+	session = testSession(t, newTestAgent(), client)
 	session.beginTurn(t.Context(), "turn")
 	run := session.unacceptedCancel(sessionTurnEpoch(session), nil)
 	require.ErrorContains(t, run.err, "containment failed")
@@ -887,7 +887,7 @@ func TestPredispatchRefusalHasNoTurnSettlementBoundary(t *testing.T) {
 	require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 	connection := newRecordingAgentClient()
 	agent.setAgentClient(connection)
-	session := testSession(agent, base)
+	session := testSession(t, agent, base)
 	defer session.stopPump()
 	session.client = predispatchRefusingServer{fakeHermesClient: base, err: nativehermes.ErrGatewayAmbiguousTurn}
 	require.NoError(t, session.openLifecycleStream())
@@ -924,7 +924,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 
 	t.Run("publication", func(t *testing.T) {
 		storeErr := errors.New("publication failed")
-		session := testSession(newTestAgent(WithSessionStore(&errorSessionStore{err: storeErr})), newFakeHermesClient())
+		session := testSession(t, newTestAgent(WithSessionStore(&errorSessionStore{err: storeErr})), newFakeHermesClient())
 		commit := &sessionStoreCommit{
 			mainKey: SessionKey{SessionID: string(session.id), Subpath: SessionStoreMainSubpath},
 			replacements: []SessionStoreReplacement{{
@@ -942,7 +942,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		require.NoError(t, agent.retainNegotiatedLifecycle(autonomousLifecycleNegotiation()))
 		connection := newRecordingAgentClient()
 		agent.setAgentClient(connection)
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		defer session.stopPump()
 		require.NoError(t, session.openLifecycleStream())
 		stream := session.lifecycleStream()
@@ -955,7 +955,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 	})
 
 	t.Run("unproved vacancy", func(t *testing.T) {
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		published, err := session.publishClosedBoundary(t.Context(), nil, nil, containmentProof{})
 		require.NoError(t, err)
 		require.True(t, published, "a boundary with no commit to make still owes none")
@@ -971,7 +971,7 @@ func TestClosedBoundaryStopsAtFirstFailedRung(t *testing.T) {
 		}))
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		require.NoError(t, session.openLifecycleStream())
 		require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 		published, err := session.publishClosedBoundary(t.Context(), session.lifecycleStream(), nil, containmentProof{
@@ -1007,7 +1007,7 @@ func TestCloseSessionPublishesCapturedGenerationWhenDeferredOpenFences(t *testin
 		return nil
 	}
 
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	// A first durable generation, so the assertion reads a store that changed
 	// rather than one that was never written.
@@ -1067,7 +1067,7 @@ func TestCloseCaptureFailureLeavesExactCloseOnlySessionRetryable(t *testing.T) {
 
 	client := newFakeHermesClient()
 	client.messagesErr = errors.New("native history read failed")
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
 	session.mu.Lock()
@@ -1118,7 +1118,7 @@ func TestCloseOnAFencedIncarnationRetainsTheLastCommittedGeneration(t *testing.T
 	agent.setAgentClient(conn)
 
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, session.snapshotToStore(t.Context()))
 
@@ -1161,7 +1161,7 @@ func TestAgentCloseMakesTheDurableCommitAWireCloseWould(t *testing.T) {
 	agent.setAgentClient(conn)
 
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	require.NoError(t, session.openLifecycleStream())
 	require.NoError(t, session.snapshotToStore(t.Context()))
 
@@ -1197,7 +1197,7 @@ func TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary(t *testing.T) {
 	}
 
 	agent := newTestAgent(WithScratchDir(durableTempDir(t)))
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	agent.sessions[session.id] = session
 
 	type promptOutcome struct {
@@ -1224,7 +1224,7 @@ func TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary(t *testing.T) {
 func TestSettlementManagedCompletionResidualBranch(t *testing.T) {
 	want := errors.New("managed completion refused")
 	managed := &managedHermesServer{closed: true, closeErr: want}
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	session.owedCloseCommit = &sessionStoreCommit{
 		managed: managed, managedReady: []SessionStoreReplacement{{Key: SessionKey{SessionID: "session"}}},
 	}

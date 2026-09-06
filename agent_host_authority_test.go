@@ -237,7 +237,7 @@ func TestNativeProcessBridgeResidualBranches(t *testing.T) {
 }
 
 func TestManagedSnapshotStateResidualBranches(t *testing.T) {
-	session := testSession(newTestAgent(), newFakeHermesClient())
+	session := testSession(t, newTestAgent(), newFakeHermesClient())
 	if err := session.withReclaimedManagedState(t.Context(), session.client, func(string) error { return nil }); err == nil {
 		t.Fatal("ordinary client state reclaim succeeded")
 	}
@@ -268,7 +268,7 @@ func TestCompleteManagedSnapshotCommitResidualBranches(t *testing.T) {
 		managed := &managedHermesServer{
 			Server: newFakeHermesClient(), managed: true, settled: true, root: root,
 		}
-		session := testSession(newTestAgent(), newFakeHermesClient())
+		session := testSession(t, newTestAgent(), newFakeHermesClient())
 		commit := &sessionStoreCommit{
 			managed: managed, managedRoot: root,
 			managedMain:  &stateSnapshot{Archives: map[string]archiveInfo{}},
@@ -342,7 +342,7 @@ func TestSnapshotCaptureCancellationResidualBranches(t *testing.T) {
 		}
 		fake.xdg = xdg
 		managed := &managedHermesServer{Server: fake, managed: true, root: root}
-		session := testSession(newTestAgent(), fake)
+		session := testSession(t, newTestAgent(), fake)
 		session.client = managed
 		ctx, cancel := context.WithCancel(t.Context())
 		calls := 0

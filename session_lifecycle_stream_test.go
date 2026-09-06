@@ -24,7 +24,7 @@ func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 	require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 	conn := newRecordingAgentClient()
 	agent.setAgentClient(conn)
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	stream := session.lifecycleStream()
 	require.NotEmpty(t, stream.streamID())
@@ -109,7 +109,7 @@ func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {
 	require.False(t, absent.fenced())
 
 	agent := newTestAgent()
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	require.Nil(t, session.lifecycleStream())
 
@@ -143,7 +143,7 @@ func TestLifecycleEmitterViolationFencesStream(t *testing.T) {
 		Version: lifecycle.Version, ActivityKinds: []lifecycle.ActivityKind{},
 	}))
 	agent.setAgentClient(newRecordingAgentClient())
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	require.NoError(t, session.openLifecycleStream())
 	stream := session.lifecycleStream()
 	require.NoError(t, stream.ensureLifecycleOpened(context.Background()))
@@ -162,7 +162,7 @@ func TestLifecycleStreamDeliveryFailuresStopAtFailedEvent(t *testing.T) {
 		require.NoError(t, agent.retainNegotiatedLifecycle(negotiated))
 		conn := newRecordingAgentClient()
 		agent.setAgentClient(conn)
-		session := testSession(agent, newFakeHermesClient())
+		session := testSession(t, agent, newFakeHermesClient())
 		require.NoError(t, session.openLifecycleStream())
 
 		return session.lifecycleStream(), conn

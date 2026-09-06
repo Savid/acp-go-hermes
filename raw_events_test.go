@@ -32,7 +32,7 @@ func enabledRawSession(t *testing.T, agent *Agent, conn *recordingAgentClient, i
 	t.Helper()
 
 	client := newFakeHermesClient()
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.id = id
 	session.rawMessages = rawMessageConfig{enabled: true}
 	agent.setAgentClient(conn)
@@ -379,7 +379,7 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 	conn.notifyErr = errors.New("client notify boom")
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
-	session := testSession(agent, client)
+	session := testSession(t, agent, client)
 	session.rawMessages = rawMessageConfig{enabled: true}
 
 	release := make(chan struct{})
@@ -438,7 +438,7 @@ func TestRawEventDefaultOffEmitsNothing(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	client := newFakeHermesClient()
-	session := testSession(agent, client) // rawMessages disabled by default
+	session := testSession(t, agent, client) // rawMessages disabled by default
 
 	for i := 0; i < 5; i++ {
 		emitRaw(t, session, `{"n":1}`)

@@ -137,7 +137,7 @@ func TestEmbeddedClientStreamsWithoutServe(t *testing.T) {
 			Parts: []nativehermes.Part{{SessionID: id, MessageID: "assistant-1", Type: "text", Text: "embedded reply"}},
 		}, nil
 	}
-	session := testSession(agent, native)
+	session := testSession(t, agent, native)
 
 	agent.mu.Lock()
 	agent.sessions[session.id] = session

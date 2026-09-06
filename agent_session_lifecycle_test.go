@@ -312,11 +312,11 @@ func TestAgentCloseCancelsAndAwaitsSessionLifecycleLease(t *testing.T) {
 func TestDuplicateSessionPublicationFailsClosed(t *testing.T) {
 	agent := newTestAgent()
 	installedClient := newFakeHermesClient()
-	installed := testSession(agent, installedClient)
+	installed := testSession(t, agent, installedClient)
 	require.NoError(t, agent.storeStartedSession(installed))
 
 	refusedClient := newFakeHermesClient()
-	refused := testSession(agent, refusedClient)
+	refused := testSession(t, agent, refusedClient)
 	refused.id = installed.id
 	_, err := agent.storeStartedSessionWithOpening(t.Context(), refused)
 	require.Error(t, err)
@@ -381,7 +381,7 @@ func TestAgentAndSessionLifecycleAdmissionResidualBranches(t *testing.T) {
 	}
 
 	agent := newTestAgent()
-	session := testSession(agent, newFakeHermesClient())
+	session := testSession(t, agent, newFakeHermesClient())
 	agent.sessions[session.id] = session
 	if err := agent.cleanupFailedStartedSession(t.Context(), session); err != nil {
 		t.Fatal(err)
