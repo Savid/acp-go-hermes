@@ -130,7 +130,7 @@ func testValidationSchemaAndCloneHelpers(t *testing.T) {
 	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: "bad"}})), "_meta.hermes.options", "options non-object")
 	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaModelKey: 7}}})), "_meta.hermes.options.model", "non-string model")
 	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: "bad"}}})), "_meta.hermes.options.env", "env non-object")
-	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: map[string]any{"A": 1}}}})), "_meta.hermes.options.env", "env non-string value")
+	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{metaEnvKey: map[string]any{"A": 1}}}})), "_meta.hermes.options.env.A", "env non-string value")
 	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{rawEventKey: "bad"}})), "_meta.hermes.rawEvent", "rawEvent non-object")
 	requireUnsupportedField(t, mustErr(sessionMetaFromLifecycle(map[string]any{hermesMetaKey: map[string]any{rawEventKey: map[string]any{rawEventEnabledKey: "bad"}}})), "_meta.hermes.rawEvent.enabled", "rawEvent enabled non-bool")
 	if got := cloneAny([]any{map[string]any{"a": "b"}}); !reflect.DeepEqual(got, []any{map[string]any{"a": "b"}}) {

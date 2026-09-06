@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -15,10 +14,6 @@ const (
 	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
 	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
 	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
-	sessionPathEnvironmentKey     = "PATH"
-	sessionBashEnvironmentKey     = "BASH_ENV"
-	sessionShellEnvironmentKey    = "ENV"
-	sessionManagedPathEnvPrefix   = "ACP_GO_HERMES_PATH_DIR_"
 	runtimePlatformWindows        = "windows"
 )
 
@@ -163,108 +158,36 @@ func unsupportedField(path string) error {
 }
 
 func stringMapFromMeta(value any) (map[string]string, error) {
+	var env map[string]string
+
 	switch typed := value.(type) {
 	case map[string]string:
-		for key := range typed {
-			if sessionEnvironmentOwnsPath(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsBashEnv(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsShellEnv(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsManagedPath(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
-			}
-		}
-
-		return cloneStringMap(typed), nil
+		env = cloneStringMap(typed)
 	case map[string]any:
-		out := make(map[string]string, len(typed))
+		env = make(map[string]string, len(typed))
 		for key, raw := range typed {
-			if sessionEnvironmentOwnsPath(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionPathEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsBashEnv(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionBashEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsShellEnv(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + sessionShellEnvironmentKey)
-			}
-
-			if sessionEnvironmentOwnsManagedPath(key) {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
-			}
-
 			str, ok := raw.(string)
 			if !ok {
-				return nil, unsupportedField(hermesEnvOptionPath)
+				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
 			}
 
-			out[key] = str
+			env[key] = str
 		}
-
-		return out, nil
 	default:
 		return nil, unsupportedField(hermesEnvOptionPath)
 	}
-}
 
-func sessionEnvironmentOwnsPath(key string) bool {
-	return sessionEnvironmentOwnsPathForPlatform(key, runtime.GOOS)
-}
-
-func sessionEnvironmentOwnsPathForPlatform(key string, platform string) bool {
-	if platform == runtimePlatformWindows {
-		return strings.EqualFold(key, sessionPathEnvironmentKey)
+	if err := validateSessionEnv(env, hermesEnvOptionPath); err != nil {
+		return nil, err
 	}
 
-	return key == sessionPathEnvironmentKey
-}
-
-func sessionEnvironmentOwnsBashEnv(key string) bool {
-	return sessionEnvironmentOwnsBashEnvForPlatform(key, runtime.GOOS)
-}
-
-func sessionEnvironmentOwnsBashEnvForPlatform(key string, platform string) bool {
-	if platform == runtimePlatformWindows {
-		return strings.EqualFold(key, sessionBashEnvironmentKey)
-	}
-
-	return key == sessionBashEnvironmentKey
-}
-
-func sessionEnvironmentOwnsShellEnv(key string) bool {
-	return sessionEnvironmentOwnsShellEnvForPlatform(key, runtime.GOOS)
-}
-
-func sessionEnvironmentOwnsShellEnvForPlatform(key string, platform string) bool {
-	if platform == runtimePlatformWindows {
-		return strings.EqualFold(key, sessionShellEnvironmentKey)
-	}
-
-	return key == sessionShellEnvironmentKey
-}
-
-func sessionEnvironmentOwnsManagedPath(key string) bool {
-	return strings.HasPrefix(strings.ToUpper(key), sessionManagedPathEnvPrefix)
+	return env, nil
 }
 
 func validatePathCarrierOptions(options Options) error {
-	environments := []map[string]string{options.Env}
-
-	for _, environment := range environments {
-		for key := range environment {
-			if sessionEnvironmentOwnsBashEnv(key) || sessionEnvironmentOwnsShellEnv(key) || sessionEnvironmentOwnsManagedPath(key) {
-				return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
-			}
+	for key := range options.Env {
+		if carrierOwnedEnvKey(key) {
+			return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
 		}
 	}
 

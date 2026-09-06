@@ -173,12 +173,26 @@ Lifecycle requests accept:
 | Field | Meaning |
 |---|---|
 | `options.model` | Selects the `provider/model` pair for the session. On a load or resume that reuses a live session it replaces the next prompt's selection, and a value that is not provider-qualified fails naming `_meta.hermes.options.model` — see [Models And Config](/docs/features/models-config). |
-| `options.env` | Per-session environment variables injected into only that session's Hermes process. Raw `PATH`, `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are rejected. |
+| `options.env` | Per-session environment variables injected into only that session's Hermes process. Blocked names are listed below. |
 | `options.extraPathDirs` | Ordered absolute native directories placed first for that process and restored first in actual local terminal commands after login/profile startup. |
 | `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
 
 No other option keys are accepted; any unsupported field fails with an
 invalid-params `{"error":"unsupported"}` response.
+
+Session `env` names are checked in sorted key order on every establishing
+request, so the first refusal is the same each time. A key is accepted when
+it is non-empty and free of `=` and NUL and its value is free of NUL; case is
+not a rule, so `https_proxy` and `HTTPS_PROXY` are two ordinary variables.
+Blocked names fail as `{"error":"unsupported","field":"_meta.hermes.options.env.<key>"}`
+naming the key exactly as sent: `PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`, `HERMES_DASHBOARD_SESSION_TOKEN`, and `ACP_GO_HERMES_PATH_DIR_*`. All but the adapter's own
+namespace compare through the platform identity, exact on Unix and
+case-insensitive on Windows; the adapter namespace is refused under every
+spelling. Two keys that resolve to one variable under that identity fail as
+`{"error":"ambiguous","field":"_meta.hermes.options.env.<later key in sorted order>"}`.
+An empty value is delivered as `KEY=`. `ValidateHermesSessionMeta` runs this
+parsing on a `_meta` map without an agent, so a host can check a request
+before sending it.
 
 `options.extraPathDirs` accepts both the direct Go `[]string` form and the
 `[]any` form produced by JSON decoding. It preserves order and duplicates and

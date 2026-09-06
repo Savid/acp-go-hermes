@@ -69,7 +69,7 @@ var (
 		"cwd":                   strictJSONScalar,
 		"title":                 strictJSONScalar,
 		configModel:             stateSnapshotModelJSONShape,
-		"env":                   {dynamic: strictJSONScalar},
+		metaEnvKey:              {dynamic: strictJSONScalar},
 		"extraPathDirs":         {element: strictJSONScalar},
 	}}
 	stateSnapshotJSONShape = &strictJSONShape{fields: map[string]*strictJSONShape{

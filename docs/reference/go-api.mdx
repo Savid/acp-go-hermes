@@ -213,11 +213,16 @@ fields. `NewHermesOptions` builds one from `WithHermesModel`, `WithHermesEnv`,
 ahead of the base `PATH` for both that session's `hermes serve` process and its
 actual local terminal commands. Order and duplicates are semantic. Empty,
 relative, or path-list-separator-bearing entries are rejected with the exact
-indexed metadata field. Session `Env` cannot contain `PATH`, `BASH_ENV`, `ENV`,
-or an `ACP_GO_HERMES_PATH_DIR_*` key. `WithEnv` and the host authority
-environment also reserve the latter three namespaces, and ambient shell hooks
-are scrubbed at ordinary launch. The dedicated ordered field is the sole
-session-scoped PATH authority.
+indexed metadata field. Session `Env` refuses `PATH`, `NODE_OPTIONS`,
+`BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`,
+`HERMES_DASHBOARD_SESSION_TOKEN`, and `ACP_GO_HERMES_PATH_DIR_*` keys, and
+accepts every other structurally valid name in either case; see
+[Metadata](/docs/reference/meta). `WithEnv` and the host authority environment
+also reserve `BASH_ENV`, `ENV`, and the `ACP_GO_HERMES_PATH_DIR_*` namespace,
+and ambient shell hooks are scrubbed at ordinary launch. The dedicated ordered
+field is the sole session-scoped PATH authority.
+`ValidateHermesSessionMeta(meta)` returns the refusal a session-establishing
+request carrying that `_meta` map would receive, or nil, without an agent.
 
 Hermes executable resolution and version probing see only the static base
 environment. The launched process sees operation directories first, the
