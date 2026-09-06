@@ -9,7 +9,7 @@ import "testing"
 // provider auth everywhere else advertises nothing here, because the shared
 // Hermes home the ledger binds is refused. The agent itself keeps working.
 func TestProviderAuthStaysUnadvertisedOnWindows(t *testing.T) {
-	agent := newTestAgent(WithProviderAuthRoot(t.TempDir()), WithSharedHermesHome(t.TempDir()))
+	agent := newTestAgent(WithProviderAuthRoot(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)))
 	if agent.providerAuth != nil {
 		t.Fatal("windows advertised the provider auth surface")
 	}

@@ -165,13 +165,13 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 		previous := sessionOperationCreateTemp
 		sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return nil, errors.New("create") }
 		t.Cleanup(func() { sessionOperationCreateTemp = previous })
-		if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), 0o600); err == nil {
+		if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), 0o600); err == nil {
 			t.Fatal("create failure ignored")
 		}
 	})
 
 	t.Run("chmod and deferred close", func(t *testing.T) {
-		file, err := os.CreateTemp(t.TempDir(), "closed")
+		file, err := os.CreateTemp(durableTempDir(t), "closed")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,13 +181,13 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 		previous := sessionOperationCreateTemp
 		sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return file, nil }
 		t.Cleanup(func() { sessionOperationCreateTemp = previous })
-		if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), 0o600); err == nil {
+		if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), 0o600); err == nil {
 			t.Fatal("chmod failure ignored")
 		}
 	})
 
 	t.Run("write", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "readonly")
+		path := filepath.Join(durableTempDir(t), "readonly")
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +198,7 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 		previous := sessionOperationCreateTemp
 		sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return file, nil }
 		t.Cleanup(func() { sessionOperationCreateTemp = previous })
-		if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), 0o600); err == nil {
+		if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), 0o600); err == nil {
 			t.Fatal("write failure ignored")
 		}
 	})
@@ -211,7 +211,7 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 			sessionOperationRename = previousRename
 			sessionOperationRemove = previousRemove
 		})
-		if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), 0o600); err == nil {
+		if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), 0o600); err == nil {
 			t.Fatal("rename/remove failures ignored")
 		}
 	})
@@ -238,7 +238,7 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 				sessionOperationLstat = previousLstat
 				sessionOperationChmod = previousChmod
 			})
-			path := filepath.Join(t.TempDir(), "operations")
+			path := filepath.Join(durableTempDir(t), "operations")
 			setup(path)
 			if err := ensureSessionOperationDirectory(path); err == nil {
 				t.Fatalf("%s failure ignored", name)
@@ -247,17 +247,17 @@ func TestSessionOperationAtomicAndDirectoryFaults(t *testing.T) {
 	}
 
 	t.Run("bounded open", func(t *testing.T) {
-		if _, err := readBoundedSessionOperationFile(filepath.Join(t.TempDir(), "missing"), 1); err == nil {
+		if _, err := readBoundedSessionOperationFile(filepath.Join(durableTempDir(t), "missing"), 1); err == nil {
 			t.Fatal("missing bounded file accepted")
 		}
 	})
 	t.Run("bounded read", func(t *testing.T) {
-		if _, err := readBoundedSessionOperationFile(t.TempDir(), 1); err == nil {
+		if _, err := readBoundedSessionOperationFile(durableTempDir(t), 1); err == nil {
 			t.Fatal("directory read accepted")
 		}
 	})
 	t.Run("bounded size", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "large")
+		path := filepath.Join(durableTempDir(t), "large")
 		if err := os.WriteFile(path, []byte("xx"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -279,13 +279,13 @@ func TestSessionOperationFileFaults(t *testing.T) {
 		"close": func(file *faultSessionOperationFile) { file.closeErr = errors.New("close") },
 	} {
 		t.Run(name, func(t *testing.T) {
-			file := &faultSessionOperationFile{name: filepath.Join(t.TempDir(), "temporary")}
+			file := &faultSessionOperationFile{name: filepath.Join(durableTempDir(t), "temporary")}
 			configure(file)
 			previous := sessionOperationCreateTemp
 			sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return file, nil }
 			t.Cleanup(func() { sessionOperationCreateTemp = previous })
 
-			if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), 0o600); err == nil {
+			if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), 0o600); err == nil {
 				t.Fatalf("%s failure ignored", name)
 			}
 		})

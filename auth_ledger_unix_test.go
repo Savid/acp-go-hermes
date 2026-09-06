@@ -39,7 +39,7 @@ func TestInventoryKeepsOfficialHermesLineageInconclusiveWithoutReadingNativeStat
 func TestAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	root := filepath.Join(t.TempDir(), "provider-auth")
+	root := filepath.Join(durableTempDir(t), "provider-auth")
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatalf("create root: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestAuthLedgerRestrictsTheConfiguredRoot(t *testing.T) {
 		t.Fatalf("relax root: %v", err)
 	}
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()}); err != nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: durableTempDir(t)}); err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
 
@@ -339,9 +339,9 @@ func TestAuthLedgerPathIsDeterministicAndScopedToTheRoot(t *testing.T) {
 func TestAuthLedgerIsScopedByCanonicalSharedHermesHome(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	homeA := t.TempDir()
-	homeB := t.TempDir()
+	root := durableTempDir(t)
+	homeA := durableTempDir(t)
+	homeB := durableTempDir(t)
 
 	ledgerA, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: homeA})
 	if err != nil {
@@ -380,8 +380,8 @@ func TestAuthLedgerIsScopedByCanonicalSharedHermesHome(t *testing.T) {
 func TestInventorySurvivesAgentRestartWithoutReadingCredentialFiles(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	home := t.TempDir()
+	root := durableTempDir(t)
+	home := durableTempDir(t)
 
 	first := newTestAgent(WithProviderAuthRoot(root), WithSharedHermesHome(home))
 	if first.providerAuth == nil {

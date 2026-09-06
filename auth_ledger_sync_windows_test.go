@@ -16,7 +16,7 @@ import (
 func TestAuthLedgerCommitNeverOpensTheLedgerRoot(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	ledger := &authLedger{dir: t.TempDir()}
+	ledger := &authLedger{dir: durableTempDir(t)}
 
 	ledgerOpen = func(string) (*os.File, error) { return nil, errors.New("open") }
 	if err := ledger.write(authLedgerRecord{ProviderID: testProviderID}); err != nil {

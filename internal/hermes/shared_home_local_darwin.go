@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func ensureLocalSharedHermesHome(path string) error {
+func EnsureLocalSharedHermesHome(path string) error {
 	var stat unix.Statfs_t
 	if err := unix.Statfs(path, &stat); err != nil {
 		return fmt.Errorf("inspect shared Hermes home filesystem: %w", err)

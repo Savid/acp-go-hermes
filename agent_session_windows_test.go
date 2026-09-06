@@ -14,7 +14,7 @@ import (
 // shared-home turn can claim one and proceed unfenced.
 func TestSharedSessionSetLockRefusesOnWindows(t *testing.T) {
 	lock, err := nativehermes.AcquireSharedSessionSetLock(
-		t.Context(), t.TempDir(), nativehermes.SharedSessionSetLockExclusive)
+		t.Context(), durableTempDir(t), nativehermes.SharedSessionSetLockExclusive)
 	if err == nil {
 		t.Fatal("windows acquired a shared session-set lock")
 	}

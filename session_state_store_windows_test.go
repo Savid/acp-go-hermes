@@ -15,7 +15,7 @@ import (
 func TestArchivePathRefusalCoversEveryWindowsRootedSpelling(t *testing.T) {
 	for _, name := range []string{`\abs`, `C:\abs`, `C:abs`, `//server/share/abs`} {
 		header := tar.Header{Name: name, Typeflag: tar.TypeReg, Size: 0}
-		if err := decodeXDGArchive(testTarZstd(t, []tar.Header{header}, nil), t.TempDir()); err == nil {
+		if err := decodeXDGArchive(testTarZstd(t, []tar.Header{header}, nil), durableTempDir(t)); err == nil {
 			t.Fatalf("archive accepted rooted member %q", name)
 		}
 	}

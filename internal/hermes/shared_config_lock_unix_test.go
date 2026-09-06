@@ -13,7 +13,7 @@ import (
 // POSIX side because the shared Hermes home, and with it the adapter control
 // root this lock is taken in, is refused on Windows.
 func TestSharedHermesConfigLockHonorsCancellation(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan error, 1)

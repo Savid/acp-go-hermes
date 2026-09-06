@@ -492,11 +492,11 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
 	if err := json.Unmarshal(params, &value); err != nil {
-		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
+		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 	}
 
 	if err := ReqPtr(&value).Validate(); err != nil {
-		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
+		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 	}
 
 	return value, nil

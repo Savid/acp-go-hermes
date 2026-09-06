@@ -1196,7 +1196,7 @@ func TestAgentCloseCancelsTheTurnInFlightBeforeItsBoundary(t *testing.T) {
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 
-	agent := newTestAgent(WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)))
 	session := testSession(agent, client)
 	agent.sessions[session.id] = session
 

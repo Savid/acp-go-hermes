@@ -55,7 +55,7 @@ func TestMediaEnvelopeAdvertisesTheEnforcedPerImageGate(t *testing.T) {
 				acpFieldPromptImage, 0, paddedPNG(t, png, advertised+1), advertised+1, mimePNG,
 			)
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: imageErrTooLarge,
 				keyIndex:       0,
 				keySizeBytes:   advertised + 1,
@@ -86,7 +86,7 @@ func TestMediaEnvelopeAdvertisesTheEnforcedPromptGate(t *testing.T) {
 
 	_, err := budget.admitImage(acpFieldPromptImage, 1, payload, 3000, mimePNG)
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       1,
 		keySizeBytes:   int64(6000),

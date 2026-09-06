@@ -19,14 +19,14 @@ func TestAuthProviderLeaseEdges(t *testing.T) {
 	}
 
 	t.Run("open lock", func(t *testing.T) {
-		ledger := &authLedger{dir: t.TempDir(), providerLockDir: filepath.Join(t.TempDir(), "missing")}
+		ledger := &authLedger{dir: durableTempDir(t), providerLockDir: filepath.Join(durableTempDir(t), "missing")}
 		if _, err := ledger.acquireProviderLease(t.Context(), "provider"); err == nil {
 			t.Fatal("missing lock directory accepted")
 		}
 	})
 
 	t.Run("contention timeout", func(t *testing.T) {
-		ledger := &authLedger{dir: t.TempDir(), providerLockDir: t.TempDir()}
+		ledger := &authLedger{dir: durableTempDir(t), providerLockDir: durableTempDir(t)}
 		first, err := ledger.acquireProviderLease(t.Context(), "provider")
 		if err != nil {
 			t.Fatal(err)
@@ -40,7 +40,7 @@ func TestAuthProviderLeaseEdges(t *testing.T) {
 	})
 
 	t.Run("unlock and close errors join", func(t *testing.T) {
-		file, err := os.CreateTemp(t.TempDir(), "lease")
+		file, err := os.CreateTemp(durableTempDir(t), "lease")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,7 +83,7 @@ func TestAuthLedgerProviderLockRootFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			restoreLedgerHooks(t)
 			apply()
-			if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()}); err == nil {
+			if _, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: durableTempDir(t)}); err == nil {
 				t.Fatalf("provider lock root %s failure ignored", name)
 			}
 		})
@@ -91,7 +91,7 @@ func TestAuthLedgerProviderLockRootFailures(t *testing.T) {
 
 	t.Run("control root", func(t *testing.T) {
 		if _, err := newAuthLedger(Options{
-			ProviderAuthRoot: t.TempDir(), SharedHermesHome: filepath.Join(t.TempDir(), "missing"),
+			ProviderAuthRoot: durableTempDir(t), SharedHermesHome: filepath.Join(durableTempDir(t), "missing"),
 		}); err == nil {
 			t.Fatal("unresolvable residence control root accepted")
 		}
@@ -109,7 +109,7 @@ func TestAcquireProviderLeaseSurfacesLockSyscallFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { authTryProviderFileLock = previous })
 
-	ledger := &authLedger{dir: t.TempDir(), providerLockDir: t.TempDir()}
+	ledger := &authLedger{dir: durableTempDir(t), providerLockDir: durableTempDir(t)}
 	if _, err := ledger.acquireProviderLease(t.Context(), "provider"); !errors.Is(err, wantErr) {
 		t.Fatalf("provider lock error = %v", err)
 	}

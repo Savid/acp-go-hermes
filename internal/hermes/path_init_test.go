@@ -8,12 +8,12 @@ import (
 )
 
 func TestInstallHermesPathCarrierOwnsNamespaceBashEnvAndOrder(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	processRuntimePlatform = processPlatformLinux
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	Platform = processPlatformLinux
+	t.Cleanup(func() { Platform = originalPlatform })
 
-	first := filepath.Join(t.TempDir(), "first")
-	second := filepath.Join(t.TempDir(), "second")
+	first := filepath.Join(durableTempDir(t), "first")
+	second := filepath.Join(durableTempDir(t), "second")
 	environment := []string{
 		"A=1",
 		hermesBashEnvKey + "=/untrusted/init",
@@ -22,7 +22,7 @@ func TestInstallHermesPathCarrierOwnsNamespaceBashEnvAndOrder(t *testing.T) {
 		strings.ToLower(hermesPathInitEnvironment) + "1=untrusted",
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	// The hook is read by Bash, which names files with forward slashes whatever
 	// the host spells them with, so the carrier always publishes the slash form.
 	initScript := filepath.ToSlash(filepath.Join(home, hermesPathInitFileName))
@@ -43,7 +43,7 @@ func TestInstallHermesPathCarrierOwnsNamespaceBashEnvAndOrder(t *testing.T) {
 
 	// A Windows launch adds the one marker that tells the init script to convert
 	// native directory spellings itself rather than trust the shell to.
-	processRuntimePlatform = processPlatformWindows
+	Platform = processPlatformWindows
 	windowsWant := []string{
 		"A=1",
 		hermesBashEnvKey + "=" + initScript,
@@ -67,7 +67,7 @@ func TestValidateSessionEnvironmentRejectsManagedPathCarrierAndBashEnv(t *testin
 			t.Fatalf("reserved environment key %q was accepted", key)
 		}
 	}
-	if err := validateSessionEnvironmentNoPath(map[string]string{"path": "/bad"}); processRuntimePlatform == processPlatformWindows && err == nil {
+	if err := validateSessionEnvironmentNoPath(map[string]string{"path": "/bad"}); Platform == processPlatformWindows && err == nil {
 		t.Fatal("case-folded Windows PATH was accepted")
 	}
 }

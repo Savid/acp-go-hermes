@@ -62,7 +62,7 @@ func TestModelSelectionQualifiesProviderExactlyOnce(t *testing.T) {
 	native := testNativeSession("native-qualified")
 	native.Model.ProviderID = "xai-oauth"
 	native.Model.ModelID = "xai-oauth/grok-4.5"
-	sess := newSession(newTestAgent(), "qualified", t.TempDir(), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
+	sess := newSession(newTestAgent(), "qualified", durableTempDir(t), nil, nil, native, newFakeHermesClient(), sessionMeta{}, idmapRecord{})
 	if got := sess.currentModel(); got != "xai-oauth/grok-4.5" {
 		t.Fatalf("current model duplicated provider: %q", got)
 	}
@@ -209,7 +209,7 @@ func TestUnknownModelValueTraversesEstablishmentMutationAndPrompt(t *testing.T) 
 	}
 
 	var establishmentModel string
-	agent := newTestAgent(WithScratchDir(t.TempDir()), func(options *Options) {
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)), func(options *Options) {
 		options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
 			establishmentModel = start.DefaultModel
 			var err error
@@ -218,7 +218,7 @@ func TestUnknownModelValueTraversesEstablishmentMutationAndPrompt(t *testing.T) 
 			return client, err
 		}
 	})
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	establishmentValue := "provider/unlisted-at-establishment"
 	created, err := agent.NewSession(ctx, NewSessionRequest(cwd, WithSessionHermesOptions(HermesOptions{
 		Model: establishmentValue,
@@ -368,7 +368,7 @@ func TestUnknownModelNativeRefusalIsSanitized(t *testing.T) {
 	}
 	wantData := map[string]any{
 		jsonFieldError: valHermesModelSelectionRefused,
-		keyField:       keyValue,
+		jsonFieldField: keyValue,
 	}
 	if !reflect.DeepEqual(requestErr.Data, wantData) {
 		t.Fatalf("model refusal data = %#v, want %#v", requestErr.Data, wantData)

@@ -124,7 +124,7 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 	spawnStarted := make(chan struct{})
 	releaseSpawn := make(chan struct{})
 	agent := newTestAgent(
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(durableTempDir(t)),
 		WithLogger(slog.New(slog.DiscardHandler)),
 		func(options *Options) {
 			options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -138,7 +138,7 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 
 	newSessionErr := make(chan error, 1)
 	go func() {
-		_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+		_, err := agent.NewSession(context.Background(), NewSessionRequest(durableTempDir(t)))
 		newSessionErr <- err
 	}()
 	<-spawnStarted
@@ -197,7 +197,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 		agent := newTestAgent()
 		done := make(chan error, 1)
 		go func() {
-			_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			_, err := agent.NewSession(context.Background(), NewSessionRequest(durableTempDir(t)))
 			done <- err
 		}()
 		<-reader.entered
@@ -209,7 +209,7 @@ func TestClosedAgentRejectsConstructionsAtLateAdmissionPoints(t *testing.T) {
 	t.Run("fork", func(t *testing.T) {
 		agent := newTestAgent()
 		require.NoError(t, agent.Close())
-		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{SessionId: "parent", Cwd: t.TempDir()})
+		_, err := agent.forkSession(t.Context(), acp.UnstableForkSessionRequest{SessionId: "parent", Cwd: durableTempDir(t)})
 		require.ErrorContains(t, err, "agent closed")
 	})
 }
@@ -347,7 +347,7 @@ func TestFailedSessionStartContainmentEvidenceRemainsTerminal(t *testing.T) {
 		}
 	})
 
-	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
@@ -379,7 +379,7 @@ func TestExtensionRouteRefusalsCarryClosedTokens(t *testing.T) {
 			var reqErr *acp.RequestError
 			require.ErrorAs(t, err, &reqErr)
 			require.Equal(t, -32602, reqErr.Code)
-			require.Equal(t, map[string]any{jsonFieldError: test.want, keyField: keyParams}, reqErr.Data)
+			require.Equal(t, map[string]any{jsonFieldError: test.want, jsonFieldField: keyParams}, reqErr.Data)
 		})
 	}
 }

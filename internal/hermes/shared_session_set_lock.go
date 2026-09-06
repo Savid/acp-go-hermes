@@ -37,7 +37,7 @@ type SharedSessionSetLock struct {
 }
 
 var (
-	sharedHomeLocalValidator  = ensureLocalSharedHermesHome
+	sharedHomeLocalValidator  = EnsureLocalSharedHermesHome
 	sharedSessionSetFileChmod = (*os.File).Chmod
 	sharedSessionSetTryLock   = tryLockSharedSessionSetFile
 	sharedSessionSetLstat     = os.Lstat

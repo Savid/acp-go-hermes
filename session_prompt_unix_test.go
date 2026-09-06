@@ -16,7 +16,7 @@ import (
 // itself, proven once beside the code that makes it.
 
 func TestSharedHomePromptSessionSetLock(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 	client := newFakeHermesClient()
 	session := testSession(agent, client)

@@ -25,7 +25,7 @@ func requireLifecycleKeyRefusal(t *testing.T, err error) {
 	require.ErrorAs(t, err, &reqErr)
 	require.Equal(t, acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       lifecycle.MetaPath,
+		jsonFieldField: lifecycle.MetaPath,
 	}), reqErr)
 }
 
@@ -53,7 +53,7 @@ func TestCancelReportsTheRouteVerdictWhenBothKeysFailClosed(t *testing.T) {
 	require.ErrorAs(t, session.cancelRouted(both), &reqErr)
 	require.Equal(t, acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       routeMetaPath + "." + routeFieldVer,
+		jsonFieldField: routeMetaPath + "." + routeFieldVer,
 	}), reqErr, "route validation runs before the reserved-key refusal")
 
 	// The same cancel with a route that authenticates the turn reports the

@@ -181,7 +181,7 @@ func TestReservedEnvelopeRefusalTable(t *testing.T) {
 			require.ErrorAs(t, err, &reqErr)
 			require.Equal(t, acp.NewInvalidParams(map[string]any{
 				jsonFieldError: test.error,
-				keyField:       test.field,
+				jsonFieldField: test.field,
 			}), reqErr)
 			require.Zero(t, client.promptDispatchCount(), "a refused envelope never reaches the harness")
 		})
@@ -204,7 +204,7 @@ func TestReservedEnvelopeRefusalTable(t *testing.T) {
 		require.ErrorAs(t, err, &reqErr)
 		require.Equal(t, acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnsupported,
-			keyField:       routeMetaPath + "." + routeFieldVer,
+			jsonFieldField: routeMetaPath + "." + routeFieldVer,
 		}), reqErr, "route validation runs before the lifecycle correlation is read")
 		require.Zero(t, client.promptDispatchCount())
 	})

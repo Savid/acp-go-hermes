@@ -12,7 +12,7 @@ import (
 // until the acquisition deadline, so misreporting it would spin instead of
 // failing.
 func TestTryAuthProviderFileLockRejectsClosedHandle(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "closed")
+	file, err := os.CreateTemp(durableTempDir(t), "closed")
 	if err != nil {
 		t.Fatal(err)
 	}

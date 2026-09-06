@@ -23,7 +23,7 @@ const browserProbeURL = "https://example.invalid/"
 // name, and a probe directory ahead of the inherited PATH records every such
 // exec in a marker file.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "launched")
+	marker := filepath.Join(durableTempDir(t), "launched")
 	probe := browserProbeDirOnPath(t, marker)
 
 	for _, name := range browserLauncherNames {
@@ -51,7 +51,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 
 	proc, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: browserLaunchingHermesExecutable(t),
-		Home:           t.TempDir(),
+		Home:           durableTempDir(t),
 		Timeout:        10 * time.Second,
 		LogWriter:      io.Discard,
 	}))
@@ -78,7 +78,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 func browserProbeDirOnPath(t *testing.T, marker string) string {
 	t.Helper()
 
-	probe := t.TempDir()
+	probe := durableTempDir(t)
 	body := fmt.Appendf(nil, "#!/bin/sh\necho \"$0 $*\" >> %q\nexit 0\n", marker)
 
 	for _, name := range browserLauncherNames {
@@ -98,7 +98,7 @@ func browserLaunchingHermesExecutable(t *testing.T) string {
 	t.Helper()
 
 	serve := fakeHermesExecutable(t, fakeProcessModeOK)
-	path := filepath.Join(t.TempDir(), "hermes")
+	path := filepath.Join(durableTempDir(t), "hermes")
 
 	launches := ""
 	for _, name := range browserLauncherNames {
@@ -124,7 +124,7 @@ done
 func TestNewBrowserShimWritesExecutableNoOps(t *testing.T) {
 	t.Parallel()
 
-	shim, err := newBrowserShim(t.TempDir())
+	shim, err := newBrowserShim(durableTempDir(t))
 	if err != nil {
 		t.Fatalf("newBrowserShim: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestNewBrowserShimReportsMaterialisationFailures(t *testing.T) {
 		return "", errors.New("no scratch")
 	}
 
-	if _, err := newBrowserShim(t.TempDir()); err == nil || !strings.Contains(err.Error(), "create browser shim directory") {
+	if _, err := newBrowserShim(durableTempDir(t)); err == nil || !strings.Contains(err.Error(), "create browser shim directory") {
 		t.Fatalf("newBrowserShim with an unusable scratch parent = %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestNewBrowserShimReportsMaterialisationFailures(t *testing.T) {
 		return errors.New("no launcher")
 	}
 
-	if _, err := newBrowserShim(t.TempDir()); err == nil || !strings.Contains(err.Error(), "write browser shim open") {
+	if _, err := newBrowserShim(durableTempDir(t)); err == nil || !strings.Contains(err.Error(), "write browser shim open") {
 		t.Fatalf("newBrowserShim with an unwritable launcher = %v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestProcessStartFailsWhenTheBrowserShimCannotBeBuilt(t *testing.T) {
 
 	_, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:           t.TempDir(),
+		Home:           durableTempDir(t),
 		Timeout:        10 * time.Second,
 		LogWriter:      io.Discard,
 	}))
@@ -208,7 +208,7 @@ func TestSessionStartsWhereNoShimExistsAndOnlyTheLoginRefuses(t *testing.T) {
 
 	proc, err := Start(ctx, darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, fakeProcessModeOK),
-		Home:           t.TempDir(),
+		Home:           durableTempDir(t),
 		Timeout:        10 * time.Second,
 		LogWriter:      io.Discard,
 	}))

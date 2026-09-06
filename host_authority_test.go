@@ -200,7 +200,7 @@ func newManagedSnapshotTestAgent(
 	servers := &[]*managedSnapshotTestServer{}
 	agent := NewAgent(
 		WithHostAuthority(authority),
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(durableTempDir(t)),
 		WithSessionStore(store),
 		func(options *Options) {
 			options.clientFactory = func(ctx context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -244,7 +244,7 @@ func TestManagedInitialSnapshotReadsOnlyAfterReclaim(t *testing.T) {
 	authority.moveTrees = true
 	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	requireManagedSnapshotArchived(t, store, created.SessionId)
 	require.NoError(t, authority.violation)
@@ -257,7 +257,7 @@ func TestManagedSuccessfulTurnSnapshotReadsOnlyAfterReclaim(t *testing.T) {
 	authority.moveTrees = true
 	agent, store, servers := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	response, err := agent.Prompt(t.Context(), TextPromptRequest(created.SessionId, "managed-turn", "continue"))
 	require.NoError(t, err)
@@ -273,7 +273,7 @@ func TestManagedCloseSnapshotReadsOnlyAfterReclaim(t *testing.T) {
 	authority.moveTrees = true
 	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	require.NotNil(t, active)
@@ -296,7 +296,7 @@ func TestManagedCloseRetriesFilesystemCaptureFromReclaimedResidence(t *testing.T
 	authority.moveTrees = true
 	agent, _, _ := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	active.toolMu.Lock()
@@ -331,9 +331,9 @@ func TestManagedForkSnapshotReadsOnlyAfterReclaim(t *testing.T) {
 	authority.moveTrees = true
 	agent, store, _ := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
-	forked, err := agent.forkSession(t.Context(), ForkSessionRequest(created.SessionId, t.TempDir()))
+	forked, err := agent.forkSession(t.Context(), ForkSessionRequest(created.SessionId, durableTempDir(t)))
 	require.NoError(t, err)
 	requireManagedSnapshotArchived(t, store, forked.SessionId)
 	require.NoError(t, authority.violation)
@@ -345,7 +345,7 @@ func TestManagedForcedRevokeRetainsPriorCompleteSnapshot(t *testing.T) {
 	authority.moveTrees = true
 	agent, store, servers := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	before, err := store.Load(t.Context(), SessionKey{SessionID: string(created.SessionId), Subpath: stateDBSubpath})
 	require.NoError(t, err)
@@ -389,7 +389,7 @@ func TestManagedDeleteBusyRetainsCleanupForPublicRetry(t *testing.T) {
 	authority.moveTrees = true
 	agent, _, _ := newManagedSnapshotTestAgent(t, authority)
 
-	created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 	require.NoError(t, err)
 	active := agent.activeSession(created.SessionId)
 	active.toolMu.Lock()
@@ -423,7 +423,7 @@ func TestManagedDeleteBusyRetainsCleanupForPublicRetry(t *testing.T) {
 func TestManagedTerminalProbeBusyRetriesAfterLiveServerSettles(t *testing.T) {
 	authority := newTestHostAuthority()
 	authority.moveTrees = true
-	root := filepath.Join(t.TempDir(), "terminal-probe")
+	root := filepath.Join(durableTempDir(t), "terminal-probe")
 	require.NoError(t, os.MkdirAll(root, 0o700))
 	require.NoError(t, authority.PrepareNativeTree(t.Context(), root))
 
@@ -435,7 +435,7 @@ func TestManagedTerminalProbeBusyRetriesAfterLiveServerSettles(t *testing.T) {
 
 		return nil
 	}
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	require.True(t, agent.retainNativeTree(root, ErrNativeTreeBusy))
 	require.ErrorIs(t, agent.retryRetiredNativeRoots(t.Context()), ErrNativeTreeBusy)
 	require.Contains(t, agent.retiredNativeRoots, root)
@@ -450,10 +450,10 @@ func TestManagedTerminalProbeBusyRetriesAfterLiveServerSettles(t *testing.T) {
 
 func TestManagedNativeGenerationRefusesRetainedBusyTree(t *testing.T) {
 	authority := newTestHostAuthority()
-	root := filepath.Join(t.TempDir(), "retained")
+	root := filepath.Join(durableTempDir(t), "retained")
 	require.NoError(t, os.MkdirAll(root, 0o700))
 
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	require.True(t, agent.retainNativeTree(root, ErrNativeTreeBusy))
 	authority.reclaimHook = func(string) error { return ErrNativeTreeBusy }
 
@@ -472,8 +472,8 @@ func TestManagedNativeGenerationRefusesRetainedBusyTree(t *testing.T) {
 
 func TestRetiredCleanupOnlyTreeDoesNotReclaimAgain(t *testing.T) {
 	authority := newTestHostAuthority()
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
-	root := filepath.Join(t.TempDir(), "cleanup-only")
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
+	root := filepath.Join(durableTempDir(t), "cleanup-only")
 	require.NoError(t, os.MkdirAll(root, 0o700))
 	require.True(t, agent.retainNativeTree(root, nil))
 
@@ -493,10 +493,10 @@ func TestRetiredCleanupOnlyTreeDoesNotReclaimAgain(t *testing.T) {
 }
 
 func TestFailedGenerationCleanupPreservesOnlyExactIncompleteRoots(t *testing.T) {
-	agent := NewAgent(WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithScratchDir(durableTempDir(t)))
 	id := acp.SessionId("failed-generation")
-	probeRoot := filepath.Join(t.TempDir(), "probe")
-	sessionRoot := filepath.Join(t.TempDir(), "session")
+	probeRoot := filepath.Join(durableTempDir(t), "probe")
+	sessionRoot := filepath.Join(durableTempDir(t), "session")
 	agent.retainIncompleteHermesRoot(id, probeRoot)
 
 	require.True(t, agent.retainFailedHermesGeneration(id, probeRoot, ErrContainmentIncomplete))
@@ -506,7 +506,7 @@ func TestFailedGenerationCleanupPreservesOnlyExactIncompleteRoots(t *testing.T) 
 
 func TestSuppliedNilHostAuthorityFailsBeforeSessionMutation(t *testing.T) {
 	for _, authority := range []HostAuthority{nil, (*recordingHostAuthority)(nil)} {
-		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 		if !errors.Is(agent.optionsErr, ErrHostAuthorityUnavailable) {
 			t.Fatalf("options error = %v", agent.optionsErr)
 		}
@@ -521,7 +521,7 @@ func startWithRecordingAuthority(
 ) error {
 	t.Helper()
 
-	scratch := t.TempDir()
+	scratch := durableTempDir(t)
 	agent := NewAgent(authorityOption, WithScratchDir(scratch))
 	if agent.optionsErr != nil {
 		t.Fatalf("construct managed agent: %v", agent.optionsErr)
@@ -614,12 +614,12 @@ func (s reclaimingTestServer) XDGDirs() nativehermes.XDGDirs {
 }
 
 func TestHostAuthorityReclaimPrecedesRemoval(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "native-root")
+	root := filepath.Join(durableTempDir(t), "native-root")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	authority := newTestHostAuthority()
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	if agent.optionsErr != nil {
 		t.Fatal(agent.optionsErr)
 	}
@@ -646,7 +646,7 @@ func TestHostAuthorityReclaimPrecedesRemoval(t *testing.T) {
 }
 
 func TestHostAuthorityNoOrdinaryFallback(t *testing.T) {
-	directory := t.TempDir()
+	directory := durableTempDir(t)
 	marker := filepath.Join(directory, "direct-exec-marker")
 	executable := filepath.Join(directory, "hermes")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch \""+marker+"\"\n"), 0o700); err != nil {
@@ -697,7 +697,7 @@ func TestHostAuthorityStartErrorPreservesAuthorityVerdict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			authority := newTestHostAuthority()
 			authority.start = func(NativeRequest) (NativeProcess, error) { return nil, tt.want }
-			agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+			agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 			options := nativehermes.StartOptions{}
 			agent.configureHostAuthority(&options)
 
@@ -716,7 +716,7 @@ func TestHostAuthorityLossStopsNativeAdmission(t *testing.T) {
 	authority.start = func(NativeRequest) (NativeProcess, error) {
 		return nil, ErrHostAuthorityUnavailable
 	}
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 
@@ -743,7 +743,7 @@ func TestHostAuthorityWaitFailureMapsAndLatchesContainment(t *testing.T) {
 		stderr: io.NopCloser(strings.NewReader("")), waitErr: want,
 	}
 	authority.start = nil
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 	process, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
@@ -788,7 +788,7 @@ func TestHostAuthorityContainmentFailureStopsManagedAdmission(t *testing.T) {
 			factoryCalls := 0
 			agent := NewAgent(
 				WithHostAuthority(authority),
-				WithScratchDir(t.TempDir()),
+				WithScratchDir(durableTempDir(t)),
 				func(options *Options) {
 					options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 						factoryCalls++
@@ -811,19 +811,19 @@ func TestHostAuthorityContainmentFailureStopsManagedAdmission(t *testing.T) {
 			require.NoError(t, agent.authorityErr)
 
 			affectedID := acp.SessionId("affected-session")
-			retainedRoot := filepath.Join(t.TempDir(), "retained")
+			retainedRoot := filepath.Join(durableTempDir(t), "retained")
 			agent.recordIncompleteContainment(err, affectedID, retainedRoot)
 			eventsBeforeRefusal := append([]string(nil), authority.events...)
 
 			client, launchErr := agent.newHermesClientWithScratch(
-				t.Context(), "different-session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
+				t.Context(), "different-session", durableTempDir(t), sessionMeta{}, nativehermes.XDGDirs{}, func() {},
 			)
 			require.Nil(t, client)
 			require.ErrorIs(t, launchErr, ErrContainmentIncomplete)
 			require.NotErrorIs(t, launchErr, ErrHostAuthorityUnavailable)
 			require.Equal(t, 0, factoryCalls)
 
-			require.ErrorIs(t, start.PrepareNativeTree(t.Context(), t.TempDir()), ErrContainmentIncomplete)
+			require.ErrorIs(t, start.PrepareNativeTree(t.Context(), durableTempDir(t)), ErrContainmentIncomplete)
 			_, startErr := start.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
 			require.ErrorIs(t, startErr, ErrContainmentIncomplete)
 			require.NotErrorIs(t, startErr, ErrHostAuthorityUnavailable)
@@ -835,7 +835,7 @@ func TestHostAuthorityContainmentFailureStopsManagedAdmission(t *testing.T) {
 
 func TestHostAuthorityRevokeLossFencesEveryActiveSession(t *testing.T) {
 	authority := newTestHostAuthority()
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	firstClient := newFakeHermesClient()
 	first := testSession(agent, firstClient)
 	first.id = "authority-first"
@@ -875,7 +875,7 @@ func TestHostAuthorityWaitCancellationDetachesWithoutContainment(t *testing.T) {
 	}
 	authority.process = process
 	authority.start = nil
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 	native, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
@@ -899,7 +899,7 @@ func TestHostAuthorityRevokeCancellationDoesNotLatchContainment(t *testing.T) {
 	process := &recordingNativeProcess{revokeErr: context.Canceled}
 	authority.process = process
 	authority.start = nil
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 	native, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
@@ -920,7 +920,7 @@ func TestHostAuthorityStdioPanicFailsClosed(t *testing.T) {
 	authority := newTestHostAuthority()
 	authority.process = &panickingStdioProcess{recordingNativeProcess: &recordingNativeProcess{}}
 	authority.start = nil
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 	process, err := options.StartNative(t.Context(), nativehermes.NativeRequest{Executable: "hermes"})
@@ -953,7 +953,7 @@ func TestHostAuthorityPrepareFailureRetainsAttemptedTree(t *testing.T) {
 }
 
 func TestManagedHermesServerRetriesContainmentBeforeRemoval(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	want := errors.Join(errors.New("wait uncertain"), ErrContainmentIncomplete)
 	attempts := 0
 	client := newFakeHermesClient()
@@ -984,7 +984,7 @@ func TestManagedHermesServerRetriesContainmentBeforeRemoval(t *testing.T) {
 }
 
 func TestManagedHermesServerRetriesBusyReclaimBeforeRemoval(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	authority := newTestHostAuthority()
 	reclaims := 0
 	authority.reclaimHook = func(string) error {
@@ -995,7 +995,7 @@ func TestManagedHermesServerRetriesBusyReclaimBeforeRemoval(t *testing.T) {
 
 		return nil
 	}
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 	options := nativehermes.StartOptions{}
 	agent.configureHostAuthority(&options)
 	client := newFakeHermesClient()

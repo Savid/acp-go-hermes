@@ -24,7 +24,7 @@ func newAuthTestServer(t *testing.T, handler http.HandlerFunc) *hermesServer {
 	return &hermesServer{process: &Process{
 		APIBaseURL: stub.URL + "/api",
 		Token:      "session-token",
-		shim:       &browserShim{dir: t.TempDir()},
+		shim:       &browserShim{dir: durableTempDir(t)},
 	}}
 }
 

@@ -40,7 +40,9 @@ const (
 // credential residence most of all.
 var ordinaryManagedEnvironmentKeys = []string{envHermesHome, envHermesSessionToken}
 
-var processRuntimePlatform = runtime.GOOS
+// Platform is the operating system whose environment semantics the adapter
+// applies. Tests pin it to exercise another platform's name resolution.
+var Platform = runtime.GOOS
 
 const (
 	processPlatformLinux   = "linux"

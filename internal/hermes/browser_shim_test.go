@@ -42,7 +42,7 @@ func TestBrowserLaunchContainedFollowsTheShim(t *testing.T) {
 		t.Fatal("a process without a shim reported a contained browser launch")
 	}
 
-	if !(&Process{shim: &browserShim{dir: t.TempDir()}}).BrowserLaunchContained() {
+	if !(&Process{shim: &browserShim{dir: durableTempDir(t)}}).BrowserLaunchContained() {
 		t.Fatal("a process with a shim reported an uncontained browser launch")
 	}
 }
@@ -63,7 +63,7 @@ func TestBrowserShimEnvironKeepsEnvWithoutAShim(t *testing.T) {
 func TestBrowserShimEnvironOverridesPathAndBrowser(t *testing.T) {
 	t.Parallel()
 
-	dir := filepath.Join(t.TempDir(), "shim")
+	dir := filepath.Join(durableTempDir(t), "shim")
 	env := browserShimEnviron([]string{
 		"MALFORMED",
 		"HERMES_HOME=/home",
@@ -91,7 +91,7 @@ func TestBrowserShimEnvironOverridesPathAndBrowser(t *testing.T) {
 func TestBrowserShimEnvironAddsPathWhenAbsent(t *testing.T) {
 	t.Parallel()
 
-	dir := filepath.Join(t.TempDir(), "shim")
+	dir := filepath.Join(durableTempDir(t), "shim")
 
 	env := browserShimEnviron(nil, dir)
 	if len(env) != 2 || env[0] != "PATH="+dir {

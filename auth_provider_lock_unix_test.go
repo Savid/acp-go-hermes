@@ -14,7 +14,7 @@ import (
 // failure rather than as ordinary contention: contention is retried until the
 // acquisition deadline, so misreporting it would spin instead of failing.
 func TestTryAuthProviderFileLockRejectsClosedDescriptor(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "closed")
+	file, err := os.CreateTemp(durableTempDir(t), "closed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,12 +36,12 @@ func TestTryAuthProviderFileLockRejectsClosedDescriptor(t *testing.T) {
 // records the outcome.
 func TestAuthProviderLeaseFollowsResidence(t *testing.T) {
 	t.Run("one residence under separate ledger roots contends", func(t *testing.T) {
-		home := t.TempDir()
-		first, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: home})
+		home := durableTempDir(t)
+		first, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: home})
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: home})
+		second, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: home})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,12 +66,12 @@ func TestAuthProviderLeaseFollowsResidence(t *testing.T) {
 	})
 
 	t.Run("separate residences under one ledger root do not contend", func(t *testing.T) {
-		root := t.TempDir()
-		first, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()})
+		root := durableTempDir(t)
+		first, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: durableTempDir(t)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: t.TempDir()})
+		second, err := newAuthLedger(Options{ProviderAuthRoot: root, SharedHermesHome: durableTempDir(t)})
 		if err != nil {
 			t.Fatal(err)
 		}

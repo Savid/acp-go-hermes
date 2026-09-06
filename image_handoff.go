@@ -132,7 +132,7 @@ func handoffInvalid(message string) *handoffError {
 // message.
 func imageHandoffError(failure *handoffError, index int) error {
 	data := map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: failure.value,
 		keyIndex:       index,
 	}

@@ -5,15 +5,17 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 func simulateSessionEnvPlatform(t *testing.T, platform string) {
 	t.Helper()
 
-	previous := sessionEnvPlatform
-	t.Cleanup(func() { sessionEnvPlatform = previous })
+	previous := nativehermes.Platform
+	t.Cleanup(func() { nativehermes.Platform = previous })
 
-	sessionEnvPlatform = platform
+	nativehermes.Platform = platform
 }
 
 func envMeta(env map[string]any) map[string]any {
@@ -25,7 +27,7 @@ func requireAmbiguousField(t *testing.T, err error, field string) {
 
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, map[string]any{jsonFieldError: valAmbiguous, keyField: field}, requestErr.Data)
+	require.Equal(t, map[string]any{jsonFieldError: valAmbiguous, jsonFieldField: field}, requestErr.Data)
 }
 
 func TestSessionEnvAcceptsEveryStructurallyValidName(t *testing.T) {

@@ -516,7 +516,7 @@ func prependPathDirs(env []string, dirs []string) []string {
 }
 
 func processEnvironmentKeyMatches(left string, right string) bool {
-	return processEnvironmentKeyMatchesForPlatform(left, right, processRuntimePlatform)
+	return processEnvironmentKeyMatchesForPlatform(left, right, Platform)
 }
 
 func processEnvironmentKeyMatchesForPlatform(left string, right string, platform string) bool {
@@ -532,7 +532,18 @@ func processEnvironmentKeyMatchesForPlatform(left string, right string, platform
 // block spells the search path "Path" and a "PATH" written beside it is the
 // same variable rather than a second one.
 func processEnvironmentKeysFold() bool {
-	return processEnvironmentKeyMatchesForPlatform("path", "PATH", processRuntimePlatform)
+	return processEnvironmentKeyMatchesForPlatform("path", "PATH", Platform)
+}
+
+// EnvironmentKey is the name the target platform resolves an environment key
+// by: the exact bytes where names are case-sensitive, the upper-cased spelling
+// on Windows.
+func EnvironmentKey(key string) string {
+	if processEnvironmentKeysFold() {
+		return strings.ToUpper(key)
+	}
+
+	return key
 }
 
 // mergeProcessEnvironmentPhases folds the ordered phases a launch environment is

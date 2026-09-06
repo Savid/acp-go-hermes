@@ -1804,7 +1804,7 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 	if !errors.As(emptyErr, &emptyReqErr) || emptyReqErr.Code != -32602 {
 		t.Fatalf("empty prompt error = %#v, want invalid params", emptyErr)
 	}
-	if !reflect.DeepEqual(emptyReqErr.Data, map[string]any{jsonFieldError: valUnsupported, keyField: acpFieldPrompt}) {
+	if !reflect.DeepEqual(emptyReqErr.Data, map[string]any{jsonFieldError: valUnsupported, jsonFieldField: acpFieldPrompt}) {
 		t.Fatalf("empty prompt data = %#v, want unsupported/prompt", emptyReqErr.Data)
 	}
 	if _, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{
@@ -1906,7 +1906,7 @@ func TestPromptMCPReloadCancellationRetriesAndFailurePoisons(t *testing.T) {
 
 			return ctx.Err()
 		}
-		agent := newTestAgent(WithScratchDir(t.TempDir()))
+		agent := newTestAgent(WithScratchDir(durableTempDir(t)))
 		session := testSession(agent, client)
 		session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", nil)}
 		if err := session.snapshotToStore(t.Context()); err != nil {
@@ -2831,10 +2831,10 @@ func TestTurnFailureLeavesSessionRetriable(t *testing.T) {
 
 	conn := newRecordingAgentClient()
 	store := NewInMemorySessionStore()
-	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSessionStore(store))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	session.cwd = t.TempDir()
+	session.cwd = durableTempDir(t)
 	if err := session.snapshotToStore(t.Context()); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
@@ -3207,11 +3207,11 @@ func TestTurnFenceLazyResumePreservesIdentityAndRejectsStaleRoute(t *testing.T) 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
 
-	scratch := t.TempDir()
+	scratch := durableTempDir(t)
 	agent := newTestAgent(WithScratchDir(scratch))
 	session := testSession(agent, oldClient)
 	session.env = map[string]string{"HERMES_REBIND_TEST": "preserved"}
-	rebindPathDir := t.TempDir()
+	rebindPathDir := durableTempDir(t)
 	session.extraPathDirs = []string{rebindPathDir}
 	session.mcpServers = []acp.McpServer{HTTPMCPServer("wagie", "http://127.0.0.1/mcp", map[string]string{"Authorization": "Bearer test"})}
 	if err := session.snapshotToStore(t.Context()); err != nil {
@@ -3336,7 +3336,7 @@ func TestTurnLazyResumeSerializesWithSessionClose(t *testing.T) {
 
 		return nativehermes.NativeMessage{}, ctx.Err()
 	}
-	agent := newTestAgent(WithScratchDir(t.TempDir()))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)))
 	session := testSession(agent, oldClient)
 	if err := session.snapshotToStore(t.Context()); err != nil {
 		t.Fatalf("snapshot checkpoint: %v", err)
@@ -3641,7 +3641,7 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 			blobResourceBlock(blob, "application/pdf", "file:///tmp/report.pdf"),
 		}, limits, "")
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptResource,
+			jsonFieldField: acpFieldPromptResource,
 			jsonFieldError: imageErrTooLarge,
 			keyIndex:       0,
 			keySizeBytes:   int64(oversize),
@@ -3654,7 +3654,7 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 			blobResourceBlock("not-base64", "application/pdf", "file:///tmp/report.pdf"),
 		}, limits, "")
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptResource,
+			jsonFieldField: acpFieldPromptResource,
 			jsonFieldError: imageErrInvalidBase64,
 			keyIndex:       0,
 		})
@@ -3670,7 +3670,7 @@ func TestEmbeddedBlobResourceBytesAreGated(t *testing.T) {
 			{Image: &acp.ContentBlockImage{Type: "image", Data: base64.StdEncoding.EncodeToString(png), MimeType: mimePNG}},
 		}, ImageLimits{MaxInputBytesPerPrompt: total - 1}, "")
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptImage,
+			jsonFieldField: acpFieldPromptImage,
 			jsonFieldError: imageErrTooLarge,
 			keyIndex:       1,
 			keySizeBytes:   total,
@@ -3703,7 +3703,7 @@ func TestBlobResourceMediaTypeNormalization(t *testing.T) {
 				blobResourceBlock(png, mimeType, "file:///tmp/pixels.png"),
 			}, applyOptions(nil).ImageLimits, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptResource,
+				jsonFieldField: acpFieldPromptResource,
 				jsonFieldError: imageErrInvalidMediaType,
 				keyIndex:       0,
 			})

@@ -36,7 +36,7 @@ func restoreLedgerHooks(t *testing.T) {
 func newTestLedger(t *testing.T) *authLedger {
 	t.Helper()
 
-	ledger, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()})
+	ledger, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: durableTempDir(t)})
 	if err != nil {
 		t.Fatalf("newAuthLedger: %v", err)
 	}
@@ -66,11 +66,11 @@ func seedConfirmedLineage(t *testing.T, agent *Agent, providerID string) authLed
 func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative", SharedHermesHome: t.TempDir()}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: "relative", SharedHermesHome: durableTempDir(t)}); err == nil {
 		t.Fatal("relative root accepted")
 	}
 
-	root := t.TempDir()
+	root := durableTempDir(t)
 
 	failures := []struct {
 		name  string
@@ -120,7 +120,7 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 
 			target := root
 			if tt.name == "not a directory" {
-				file := filepath.Join(t.TempDir(), "file")
+				file := filepath.Join(durableTempDir(t), "file")
 				if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 					t.Fatalf("write file: %v", err)
 				}
@@ -128,7 +128,7 @@ func TestAuthLedgerRootValidationFailsClosed(t *testing.T) {
 				target = file
 			}
 
-			if _, err := newAuthLedger(Options{ProviderAuthRoot: target, SharedHermesHome: t.TempDir()}); err == nil {
+			if _, err := newAuthLedger(Options{ProviderAuthRoot: target, SharedHermesHome: durableTempDir(t)}); err == nil {
 				t.Fatal("unusable root accepted")
 			}
 		})
@@ -209,7 +209,7 @@ func TestAuthProofSourceIsTheTotalFunctionOfLedgerAndNativeStatus(t *testing.T) 
 func TestNewAuthLedgerRejectsARootThatIsNotADirectory(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	file := filepath.Join(t.TempDir(), "file")
+	file := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestNewAuthLedgerRejectsARootThatIsNotADirectory(t *testing.T) {
 	ledgerChmod = func(string, os.FileMode) error { return nil }
 	ledgerStat = func(string) (os.FileInfo, error) { return os.Stat(file) }
 
-	if _, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()}); err == nil {
+	if _, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: durableTempDir(t)}); err == nil {
 		t.Fatal("a root that is not a directory was accepted")
 	}
 }

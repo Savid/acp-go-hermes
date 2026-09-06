@@ -992,3 +992,32 @@ func testGenerationXDG(parent string) (nativehermes.XDGDirs, error) {
 
 	return nativehermes.CreateGenerationXDGDirs(parent)
 }
+
+// durableTempDir returns a per-test directory on a filesystem the shared
+// Hermes home accepts. t.TempDir lives on a volatile filesystem on some
+// hosts, and the shared home refuses those by design, so the fallback is a
+// directory under the user cache.
+func durableTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	if nativehermes.EnsureLocalSharedHermesHome(dir) == nil {
+		return dir
+	}
+
+	base, err := os.UserCacheDir()
+	require.NoError(t, err)
+
+	root := filepath.Join(base, "acp-go-hermes-test")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+
+	dir, err = os.MkdirTemp(root, "durable-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	if err = nativehermes.EnsureLocalSharedHermesHome(dir); err != nil {
+		t.Skipf("no durable local filesystem for a shared Hermes home: %v", err)
+	}
+
+	return dir
+}

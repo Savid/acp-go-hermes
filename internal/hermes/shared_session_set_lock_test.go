@@ -13,7 +13,7 @@ import (
 )
 
 func TestSharedHermesAdapterControlDirIsOutsideHome(t *testing.T) {
-	home := filepath.Clean(t.TempDir())
+	home := filepath.Clean(durableTempDir(t))
 	control, err := SharedHermesAdapterControlDir(home)
 	if err != nil {
 		t.Fatalf("SharedHermesAdapterControlDir: %v", err)
@@ -37,8 +37,8 @@ func TestSharedControlLocksConvergeAcrossHomeSymlinkAliases(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows shared-home mode fails closed")
 	}
-	realHome := filepath.Clean(t.TempDir())
-	alias := filepath.Join(t.TempDir(), "home-alias")
+	realHome := filepath.Clean(durableTempDir(t))
+	alias := filepath.Join(durableTempDir(t), "home-alias")
 	if err := os.Symlink(realHome, alias); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSharedSessionSetLockReaderWriterExclusion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows shared-home mode fails closed")
 	}
-	home := filepath.Clean(t.TempDir())
+	home := filepath.Clean(durableTempDir(t))
 	first, err := AcquireSharedSessionSetLock(t.Context(), home, SharedSessionSetLockShared)
 	if err != nil {
 		t.Fatalf("acquire first shared lock: %v", err)
@@ -128,7 +128,7 @@ func TestSharedSessionSetLockConcurrentReadersReleaseWriter(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows shared-home mode fails closed")
 	}
-	home := filepath.Clean(t.TempDir())
+	home := filepath.Clean(durableTempDir(t))
 	const readers = 8
 	locks := make([]*SharedSessionSetLock, readers)
 	var group sync.WaitGroup
@@ -181,10 +181,10 @@ func TestSharedSessionSetLockConcurrentReadersReleaseWriter(t *testing.T) {
 }
 
 func TestSharedSessionSetLockRefusesInvalidInputsAndSymlinkControl(t *testing.T) {
-	if _, err := AcquireSharedSessionSetLock(nil, filepath.Clean(t.TempDir()), SharedSessionSetLockShared); err == nil { //nolint:staticcheck // The nil-context rejection is the subject.
+	if _, err := AcquireSharedSessionSetLock(nil, filepath.Clean(durableTempDir(t)), SharedSessionSetLockShared); err == nil { //nolint:staticcheck // The nil-context rejection is the subject.
 		t.Fatal("nil context accepted")
 	}
-	if _, err := AcquireSharedSessionSetLock(t.Context(), filepath.Clean(t.TempDir()), 0); err == nil {
+	if _, err := AcquireSharedSessionSetLock(t.Context(), filepath.Clean(durableTempDir(t)), 0); err == nil {
 		t.Fatal("invalid mode accepted")
 	}
 	if err := (*SharedSessionSetLock)(nil).Release(); err != nil {
@@ -193,7 +193,7 @@ func TestSharedSessionSetLockRefusesInvalidInputsAndSymlinkControl(t *testing.T)
 	if runtime.GOOS == "windows" {
 		return
 	}
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestSharedSessionSetLockRefusesInvalidInputsAndSymlinkControl(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), control); err != nil {
+	if err := os.Symlink(durableTempDir(t), control); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := AcquireSharedSessionSetLock(t.Context(), home, SharedSessionSetLockExclusive); err == nil {

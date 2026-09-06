@@ -14,7 +14,6 @@ const (
 	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
 	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
 	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
-	runtimePlatformWindows        = "windows"
 )
 
 type sessionMeta struct {
@@ -153,7 +152,7 @@ func validateLifecycleMeta(meta map[string]any) error {
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       path,
+		jsonFieldField: path,
 	})
 }
 
@@ -182,16 +181,6 @@ func stringMapFromMeta(value any) (map[string]string, error) {
 	}
 
 	return env, nil
-}
-
-func validatePathCarrierOptions(options Options) error {
-	for key := range options.Env {
-		if carrierOwnedEnvKey(key) {
-			return fmt.Errorf("environment variable %q is reserved for the session PATH carrier", key)
-		}
-	}
-
-	return nil
 }
 
 // extraPathDirsFromMeta accepts both the direct Go builder slice and the
@@ -242,7 +231,7 @@ func extraPathDirsFromMeta(value any) ([]string, error) {
 func invalidExtraPathDir(field string, reason string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: "session extra path dir " + reason,
-		keyField:       field,
+		jsonFieldField: field,
 	})
 }
 

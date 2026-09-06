@@ -10,7 +10,7 @@ import "testing"
 // relative too, so filepath.IsAbs alone would let a seed escape the home the
 // adapter chose for it.
 func TestSeedPathRefusalCoversEveryWindowsRootedSpelling(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 
 	for _, relative := range []string{"/etc/passwd", `\etc\passwd`, `C:\etc\passwd`, "C:passwd", `//server/share/passwd`} {
 		if _, _, err := resolveSeedFilePath(home, relative); err == nil {

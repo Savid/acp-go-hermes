@@ -210,8 +210,8 @@ func TestProviderAuthLegsLaunchNoNativeProcessOfTheirOwn(t *testing.T) {
 }
 
 func TestCrossAgentPendingProviderFlowDoesNotBlockInventory(t *testing.T) {
-	root := t.TempDir()
-	home := t.TempDir()
+	root := durableTempDir(t)
+	home := durableTempDir(t)
 	newAgent := func(sessionID acp.SessionId) (*Agent, *fakeHermesClient) {
 		client := newFakeHermesClient()
 		client.xdg = nativehermes.XDGDirs{Root: home}

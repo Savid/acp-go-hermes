@@ -132,7 +132,7 @@ func installHermesPathCarrier(environment []string, home string, dirs []string) 
 		hermesPathInitCountEnv+"="+strconv.Itoa(len(dirs)),
 	)
 
-	if processRuntimePlatform == processPlatformWindows {
+	if Platform == processPlatformWindows {
 		managed = append(managed, hermesPathInitWindowsEnv+"=1")
 	}
 

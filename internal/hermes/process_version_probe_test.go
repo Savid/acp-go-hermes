@@ -88,7 +88,7 @@ func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 	events := make([]string, 0, 4)
 	root := ""
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			mu.Lock()
 			defer mu.Unlock()
@@ -128,7 +128,7 @@ func TestManagedVersionProbeBusyRetainsTreeAndFailsAdmission(t *testing.T) {
 	busy := errors.New("lease still has a live server")
 	var retained string
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(context.Context, string) error { return nil },
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
 			return &probeTestProcess{
@@ -158,7 +158,7 @@ func TestVersionProbeRejectsUnusableAuthorityProcess(t *testing.T) {
 	var root string
 	reclaims := 0
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -185,7 +185,7 @@ func TestVersionProbeWaitFailureRetainsPreparedTree(t *testing.T) {
 	reclaims := 0
 	waitErr := errors.New("authority cannot prove settlement")
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -217,7 +217,7 @@ func TestVersionProbePrepareFailureDoesNotTouchAttemptedTree(t *testing.T) {
 	started := false
 	reclaimed := false
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -248,7 +248,7 @@ func TestVersionProbeRevokeErrorReclaimsAfterSuccessfulWait(t *testing.T) {
 	var root string
 	reclaims := 0
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -276,7 +276,7 @@ func TestVersionProbeStartErrorReclaimsPreparedTree(t *testing.T) {
 	var root string
 	reclaims := 0
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -303,7 +303,7 @@ func TestVersionProbeStartContainmentFailureRetainsPreparedTree(t *testing.T) {
 	var root string
 	reclaims := 0
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -334,7 +334,7 @@ func TestVersionProbeWaitFailureDoesNotWaitForPipeEOF(t *testing.T) {
 		_ = stderr.Close()
 	})
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(context.Context, string) error { return nil },
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
 			return &probeTestProcess{
@@ -373,7 +373,7 @@ func TestVersionProbeUncertainSettlementClosesAndJoinsOutputWorkers(t *testing.T
 		waitErrs: []error{want, want},
 	}
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
+		ScratchParent: durableTempDir(t), NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, path string) error {
 			root = path
 
@@ -418,12 +418,12 @@ func TestVersionProbeUncertainSettlementClosesAndJoinsOutputWorkers(t *testing.T
 
 func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T) {
 	want := errors.New("managed serve start refused")
-	home := t.TempDir()
+	home := durableTempDir(t)
 	prepared := make(map[string]struct{})
 	reclaimed := make(map[string]struct{})
 	events := make([]string, 0, 8)
 	opts := ProcessOptions{
-		ExecutablePath: "logical-hermes", Home: home, ScratchParent: t.TempDir(),
+		ExecutablePath: "logical-hermes", Home: home, ScratchParent: durableTempDir(t),
 		NativeEnvironment: map[string]string{"PATH": "/native/bin"},
 		PrepareNativeTree: func(_ context.Context, root string) error {
 			prepared[root] = struct{}{}
@@ -475,11 +475,11 @@ func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T)
 
 func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
 	want := errors.New("managed serve start refused")
-	first := t.TempDir()
-	second := t.TempDir()
+	first := durableTempDir(t)
+	second := durableTempDir(t)
 	var serveRequest NativeRequest
 	opts := ProcessOptions{
-		ExecutablePath: "logical-hermes", Home: t.TempDir(), ScratchParent: t.TempDir(),
+		ExecutablePath: "logical-hermes", Home: durableTempDir(t), ScratchParent: durableTempDir(t),
 		NativeEnvironment: map[string]string{"PATH": "/native/bin", "KEPT": "yes"},
 		AmbientEnvironment: map[string]string{
 			hermesBashEnvKey: "/ambient/bash-init", hermesShellEnvKey: "/ambient/sh-init",
@@ -505,7 +505,7 @@ func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
 	_, err := Start(t.Context(), opts)
 	require.ErrorIs(t, err, want)
 	require.NotEmpty(t, serveRequest.Environment)
-	path := envValueFold(serveRequest.Environment, "PATH", processRuntimePlatform == processPlatformWindows)
+	path := envValueFold(serveRequest.Environment, "PATH", Platform == processPlatformWindows)
 	parts := strings.Split(path, string(os.PathListSeparator))
 	// The carrier directories lead, the browser shim follows on a platform that
 	// installs one, and the native PATH stays last.
@@ -556,7 +556,7 @@ func (p *retryWaitProcess) waitCount() int {
 
 func TestManagedProcessCloseRetriesUncertainWaitForTerminalProof(t *testing.T) {
 	want := errors.New("wait uncertain")
-	root := t.TempDir()
+	root := durableTempDir(t)
 	reclaims := 0
 	native := &retryWaitProcess{waitErrs: []error{want, nil}}
 	process := &Process{
@@ -579,7 +579,7 @@ func TestManagedProcessCloseRetriesUncertainWaitForTerminalProof(t *testing.T) {
 
 func TestManagedProcessCloseAcceptsTerminalWaitAfterRevokeError(t *testing.T) {
 	want := errors.New("revoke request failed")
-	root := t.TempDir()
+	root := durableTempDir(t)
 	reclaims := 0
 	process := &Process{
 		Home: root,
@@ -622,7 +622,7 @@ func (p *cachedTerminalProcess) Revoke(ctx context.Context) error {
 }
 
 func TestManagedProcessCloseRetriesCanceledRevokeWithCachedTerminalWait(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	native := &cachedTerminalProcess{
 		waitStarted: make(chan struct{}),
 		releaseWait: make(chan struct{}),

@@ -8,7 +8,7 @@ import (
 )
 
 func TestWindowsSharedHomeFailsClosedWithoutInheritedLockProof(t *testing.T) {
-	err := ensureLocalSharedHermesHome(`C:\durable-hermes`)
+	err := EnsureLocalSharedHermesHome(`C:\durable-hermes`)
 	if err == nil || !strings.Contains(err.Error(), "inherited session-owner lock handles") {
 		t.Fatalf("shared home error = %v", err)
 	}

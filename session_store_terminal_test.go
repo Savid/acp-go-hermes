@@ -277,7 +277,7 @@ func TestPromptCommitsReplayStableTerminalIdentityAcrossTailCloseAndHydrate(t *t
 	}
 	assertStoredTerminal(t, store, string(session.id), "history-4")
 
-	hydrateRoot := t.TempDir()
+	hydrateRoot := durableTempDir(t)
 	hydrateXDG, err := testGenerationXDG(hydrateRoot)
 	if err != nil {
 		t.Fatalf("create hydrate XDG generation: %v", err)
@@ -446,7 +446,7 @@ func loadSeededTerminalSession(t *testing.T, skipAssistantHistory bool) (*counti
 	t.Helper()
 
 	store := newCountingSessionStore()
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	sourceClient := newFakeHermesClient()
 	source := testSession(newTestAgent(WithSessionStore(store)), sourceClient)
 	source.cwd = cwd
@@ -462,7 +462,7 @@ func loadSeededTerminalSession(t *testing.T, skipAssistantHistory bool) (*counti
 	sourceClient.mu.Unlock()
 	loadedClient.skipAssistantHistory = skipAssistantHistory
 	loadedAgent := newTestAgent(
-		WithScratchDir(t.TempDir()),
+		WithScratchDir(durableTempDir(t)),
 		WithSessionStore(store),
 		func(options *Options) {
 			options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -827,10 +827,10 @@ func seededTerminalFailureSession(t *testing.T) (*countingSessionStore, *session
 	store := newCountingSessionStore()
 	client := newFakeHermesClient()
 	conn := newRecordingAgentClient()
-	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(store))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSessionStore(store))
 	agent.setAgentClient(conn)
 	session := testSession(agent, client)
-	session.cwd = t.TempDir()
+	session.cwd = durableTempDir(t)
 	if err := agent.storeStartedSession(session); err != nil {
 		t.Fatalf("storeStartedSession: %v", err)
 	}

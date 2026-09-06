@@ -276,7 +276,7 @@ func TestProcessWaitAuthorityErrorRemainsCachedAfterCancellation(t *testing.T) {
 }
 
 func TestManagedProcessCanceledWaitRetainsTree(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	stdout := newBlockingOutput()
 	stderr := newBlockingOutput()
 	native := &contextRespectingWaitProcess{

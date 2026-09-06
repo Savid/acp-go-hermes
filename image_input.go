@@ -91,7 +91,7 @@ var errImageStructure = errors.New("image structure invalid")
 // block arrived on.
 func promptMediaError(field string, errValue string, index int, sizeBytes, maxBytes int64) error {
 	data := map[string]any{
-		keyField:       field,
+		jsonFieldField: field,
 		jsonFieldError: errValue,
 		keyIndex:       index,
 	}

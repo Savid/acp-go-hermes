@@ -26,7 +26,7 @@ import (
 // itself, proven once beside the code that makes it.
 
 func TestSharedHermesConfigSerializesIdenticalWritersAndRejectsMismatch(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	rawServers := []acp.McpServer{stdioMCPServer("shared", "runner", []string{"serve"}, map[string]string{"TOKEN": "fixture-secret"})}
 	servers, secretEnv, err := mcpServersWithSecretEnv(rawServers, nil)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestSharedHermesConfigSerializesIdenticalWritersAndRejectsMismatch(t *testi
 }
 
 func TestSharedHermesPathInitDoesNotMutateOperatorConfig(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	config := []byte("terminal:\n  shell_init_files:\n    - /operator/init\nmodel:\n  provider: custom\n")
 	if err := os.WriteFile(filepath.Join(home, hermesConfigFileName), config, 0o600); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestSharedHermesPathInitDoesNotMutateOperatorConfig(t *testing.T) {
 }
 
 func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	type running struct {
@@ -111,7 +111,7 @@ func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *test
 	}
 	started := make([]running, 0, 2)
 	for index, secrets := range []struct{ stdio, header string }{{"stdio-one", "header-one"}, {"stdio-two", "header-two"}} {
-		capture := filepath.Join(t.TempDir(), "capture.json")
+		capture := filepath.Join(durableTempDir(t), "capture.json")
 		// Each generation gets its own launcher so its capture destination rides
 		// in that generation's argv rather than in a session environment carrier.
 		executable := fakeHermesGatewayExecutable(t, fakeGatewayModeOK, mcpEnvCapturePrefix+capture)
@@ -121,7 +121,7 @@ func TestSharedHomeMCPSecretsRemainPerProcessWithStablePlaceholderConfig(t *test
 		}
 		server, err := StartServer(t.Context(), darwinTestStartOptions(t, StartOptions{
 			ACPSessionID:     ACPSessionIDString(fmt.Sprintf("mcp-secret-%d", index)),
-			Cwd:              t.TempDir(),
+			Cwd:              durableTempDir(t),
 			ExecutablePath:   executable,
 			SharedHermesHome: home,
 			ExistingXDG:      testXDGDirs(t),
@@ -193,7 +193,7 @@ func TestSharedHermesConfigRejectsCrossProcessGlobalMutationModes(t *testing.T) 
 		"both false safe":       "dashboard:\n  turn_isolation: false\nmodel:\n  persist_switch_by_default: false\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			home := t.TempDir()
+			home := durableTempDir(t)
 			err := materializeSharedHermesConfig(t.Context(), home, nil, map[string]string{hermesConfigFileName: config})
 			if strings.Contains(name, "safe") {
 				if err != nil {
@@ -215,7 +215,7 @@ func TestSharedHermesConfigRejectsDotEnvMCPSecretOverrides(t *testing.T) {
 		"header": "export acp_go_hermes_mcp_header_1_1=host-override\n",
 	} {
 		t.Run("existing "+name, func(t *testing.T) {
-			home := t.TempDir()
+			home := durableTempDir(t)
 			if err := os.WriteFile(filepath.Join(home, ".env"), []byte(seed), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -224,7 +224,7 @@ func TestSharedHermesConfigRejectsDotEnvMCPSecretOverrides(t *testing.T) {
 			}
 		})
 		t.Run("seeded "+name, func(t *testing.T) {
-			if err := materializeSharedHermesConfig(t.Context(), t.TempDir(), nil, map[string]string{".ENV": seed}); err == nil || !strings.Contains(err.Error(), "reserved MCP") {
+			if err := materializeSharedHermesConfig(t.Context(), durableTempDir(t), nil, map[string]string{".ENV": seed}); err == nil || !strings.Contains(err.Error(), "reserved MCP") {
 				t.Fatalf("reserved seeded .env error = %v", err)
 			}
 		})
@@ -232,7 +232,7 @@ func TestSharedHermesConfigRejectsDotEnvMCPSecretOverrides(t *testing.T) {
 }
 
 func TestSharedConfigPublishesFingerprintLastAndRetries(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	previous := sharedAtomicWriteFile
 	sharedAtomicWriteFile = func(path string, data []byte, mode os.FileMode) error {
 		if filepath.Base(path) == hermesConfigFileName {
@@ -270,7 +270,7 @@ func TestSharedConfigPublishesFingerprintLastAndRetries(t *testing.T) {
 }
 
 func TestSharedSessionOwnershipIsPerHashedACPIdentity(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	first, err := acquireSharedACPSessionOwner(home, "same/acp/id")
 	if err != nil {
 		t.Fatalf("acquire first owner: %v", err)
@@ -315,7 +315,7 @@ func TestSharedSessionOwnershipIsPerHashedACPIdentity(t *testing.T) {
 }
 
 func TestSharedNativeOwnershipConflictsAcrossDifferentACPRecords(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	first, err := AcquireSharedNativeSessionOwner(home, "same-native-id")
 	if err != nil {
 		t.Fatalf("acquire native owner: %v", err)
@@ -335,7 +335,7 @@ func TestSharedNativeOwnershipConflictsAcrossDifferentACPRecords(t *testing.T) {
 }
 
 func TestSharedConfigRecoversAfterManifestCommitFailure(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	previous := sharedAtomicWriteFile
 	failManifest := true
 	sharedAtomicWriteFile = func(path string, data []byte, mode os.FileMode) error {

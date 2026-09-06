@@ -22,7 +22,7 @@ import (
 )
 
 func TestHandoffCapabilityScalar(t *testing.T) {
-	response, err := newTestAgent(WithInputHandoffRoot(t.TempDir())).Initialize(t.Context(), acp.InitializeRequest{})
+	response, err := newTestAgent(WithInputHandoffRoot(durableTempDir(t))).Initialize(t.Context(), acp.InitializeRequest{})
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{"version": 1}, response.AgentCapabilities.Meta["acp-go.dev/handoff"])
 }
@@ -91,7 +91,7 @@ func handoffBlock(path, mimeType string, envelope map[string]any) acp.ContentBlo
 func stagedHandoff(t *testing.T, fixture, mimeType string) (string, acp.ContentBlock, []byte) {
 	t.Helper()
 
-	root := t.TempDir()
+	root := durableTempDir(t)
 	data := fixtureBytes(t, fixture)
 	path := writeHandoffFile(t, root, filepath.Join("session-1", "operation-1", fixture), data)
 
@@ -206,7 +206,7 @@ func TestHandoffPathNeverReachesNativeRequest(t *testing.T) {
 }
 
 func TestHandoffFormSelection(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	path := writeHandoffFile(t, root, "valid.png", png)
 	jpeg := fixtureBytes(t, "valid.jpg")
@@ -241,7 +241,7 @@ func TestHandoffFormSelection(t *testing.T) {
 					Type: "image", MimeType: mimePNG, Uri: uri,
 				}}}, ImageLimits{}, root)
 				requireImageInputError(t, err, map[string]any{
-					keyField:       acpFieldPromptImage,
+					jsonFieldField: acpFieldPromptImage,
 					jsonFieldError: imageErrMissingData,
 					keyIndex:       0,
 				})
@@ -267,7 +267,7 @@ func TestHandoffFormSelection(t *testing.T) {
 }
 
 func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	path := writeHandoffFile(t, root, "valid.png", png)
 	digest := handoffDigest(png)
@@ -459,7 +459,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 // json.Number, because the shapes a host can produce are the decoder's, not the
 // ones a Go literal happens to build.
 func TestHandoffEnvelopeAcceptsNumbersFromADecoder(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	path := writeHandoffFile(t, root, "valid.png", png)
 
@@ -505,16 +505,16 @@ func TestHandoffPathContainment(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
 
 	t.Run("outside the root", func(t *testing.T) {
-		root := t.TempDir()
-		outside := writeHandoffFile(t, t.TempDir(), "valid.png", png)
+		root := durableTempDir(t)
+		outside := writeHandoffFile(t, durableTempDir(t), "valid.png", png)
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{handoffBlock(outside, mimePNG, handoffEnvelopeFor(png))}, ImageLimits{}, root)
 		requireHandoffError(t, err, imageErrPathNotAllowed, 0, handoffOutsideRootMessage)
 	})
 
 	t.Run("percent-encoded traversal out of the root", func(t *testing.T) {
-		root := t.TempDir()
-		outside := writeHandoffFile(t, t.TempDir(), "secret.png", png)
+		root := durableTempDir(t)
+		outside := writeHandoffFile(t, durableTempDir(t), "secret.png", png)
 		uri := "file://" + handoffURIPathOf(root) + "/%2e%2e/" + filepath.Base(filepath.Dir(outside)) + "/secret.png"
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
@@ -525,7 +525,7 @@ func TestHandoffPathContainment(t *testing.T) {
 	})
 
 	t.Run("unresolvable symlink cycle", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		first := filepath.Join(root, "first.png")
 		second := filepath.Join(root, "second.png")
 
@@ -541,7 +541,7 @@ func TestHandoffPathContainment(t *testing.T) {
 	})
 
 	t.Run("directory", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		writeHandoffFile(t, root, filepath.Join("session-1", "valid.png"), png)
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{handoffBlock(filepath.Join(root, "session-1"), mimePNG, handoffEnvelopeFor(png))}, ImageLimits{}, root)
@@ -549,14 +549,14 @@ func TestHandoffPathContainment(t *testing.T) {
 	})
 
 	t.Run("the root itself", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{handoffBlock(root, mimePNG, handoffEnvelopeFor(png))}, ImageLimits{}, root)
 		requireHandoffError(t, err, imageErrPathNotAllowed, 0, handoffNotRegularMessage)
 	})
 
 	t.Run("localhost host is local", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		path := writeHandoffFile(t, root, "valid.png", png)
 		uri := "file://" + handoffURILocalHost + handoffURIPathOf(path)
 
@@ -575,7 +575,7 @@ func TestHandoffPathContainment(t *testing.T) {
 func TestHandoffSymlinkContainmentIsKernelEnforced(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
 
-	outsideDir := t.TempDir()
+	outsideDir := durableTempDir(t)
 	if err := os.WriteFile(filepath.Join(outsideDir, "secret.png"), png, 0o600); err != nil {
 		t.Fatalf("write outside file: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestHandoffSymlinkContainmentIsKernelEnforced(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := durableTempDir(t)
 			if err := os.WriteFile(filepath.Join(root, "valid.png"), png, 0o600); err != nil {
 				t.Fatalf("write handoff file: %v", err)
 			}
@@ -650,7 +650,7 @@ func TestHandoffMissingFile(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
 
 	t.Run("path inside the root vanished", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		path := writeHandoffFile(t, root, "valid.png", png)
 		block := handoffBlock(path, mimePNG, handoffEnvelopeFor(png))
 
@@ -666,21 +666,21 @@ func TestHandoffMissingFile(t *testing.T) {
 	// cleaning a file up early, so it is path_not_allowed however the open
 	// failed — the two verdicts exist to tell those apart.
 	t.Run("root does not exist", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "absent")
+		root := filepath.Join(durableTempDir(t), "absent")
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{handoffBlock(filepath.Join(root, "valid.png"), mimePNG, handoffEnvelopeFor(png))}, ImageLimits{}, root)
 		requireHandoffError(t, err, imageErrPathNotAllowed, 0, handoffRootUnopenableMessage)
 	})
 
 	t.Run("root is a regular file", func(t *testing.T) {
-		root := writeHandoffFile(t, t.TempDir(), "root.png", png)
+		root := writeHandoffFile(t, durableTempDir(t), "root.png", png)
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{handoffBlock(filepath.Join(root, "valid.png"), mimePNG, handoffEnvelopeFor(png))}, ImageLimits{}, root)
 		requireHandoffError(t, err, imageErrPathNotAllowed, 0, handoffRootUnopenableMessage)
 	})
 
 	t.Run("file cannot be inspected", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		path := writeHandoffFile(t, root, "valid.png", png)
 
 		restore := openHandoffFile
@@ -695,7 +695,7 @@ func TestHandoffMissingFile(t *testing.T) {
 	})
 
 	t.Run("file cannot be read", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		path := writeHandoffFile(t, root, "valid.png", png)
 
 		restore := openHandoffFile
@@ -746,7 +746,7 @@ func TestHandoffDigestVerificationFailsClosed(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
 
 	t.Run("bytes tampered after the envelope was built", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		envelope := handoffEnvelopeFor(png)
 		tampered := append([]byte(nil), png...)
 		tampered[len(tampered)-1] ^= 0xFF
@@ -757,7 +757,7 @@ func TestHandoffDigestVerificationFailsClosed(t *testing.T) {
 	})
 
 	t.Run("the file is shorter than the declaration", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 		envelope := handoffEnvelopeFor(png)
 		path := writeHandoffFile(t, root, "valid.png", png[:len(png)-1])
 
@@ -787,7 +787,7 @@ func TestHandoffRunsTheEmbeddedGateChain(t *testing.T) {
 
 			_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{block}, ImageLimits{}, root)
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: test.want,
 				keyIndex:       0,
 			})
@@ -802,8 +802,8 @@ func TestHandoffRunsTheEmbeddedGateChain(t *testing.T) {
 // bad-MIME probe cannot learn whether the file it named is there.
 func TestHandoffDeclaredMediaTypeIsJudgedBeforeTheFilesystem(t *testing.T) {
 	png := fixtureBytes(t, "valid.png")
-	root := t.TempDir()
-	outside := writeHandoffFile(t, t.TempDir(), "outside.png", png)
+	root := durableTempDir(t)
+	outside := writeHandoffFile(t, durableTempDir(t), "outside.png", png)
 
 	for _, test := range []struct {
 		name string
@@ -817,7 +817,7 @@ func TestHandoffDeclaredMediaTypeIsJudgedBeforeTheFilesystem(t *testing.T) {
 				handoffBlock(test.path, "image/svg+xml", handoffEnvelopeFor(png)),
 			}, ImageLimits{}, root)
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: imageErrInvalidMediaType,
 				keyIndex:       0,
 			})
@@ -834,7 +834,7 @@ func TestHandoffByteGates(t *testing.T) {
 
 		_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{block}, ImageLimits{MaxInputBytesPerImage: size - 1}, root)
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptImage,
+			jsonFieldField: acpFieldPromptImage,
 			jsonFieldError: imageErrTooLarge,
 			keyIndex:       0,
 			keySizeBytes:   size,
@@ -852,7 +852,7 @@ func TestHandoffByteGates(t *testing.T) {
 			MaxInputBytesPerPrompt: size*2 - 1,
 		}, root)
 		requireImageInputError(t, err, map[string]any{
-			keyField:       acpFieldPromptImage,
+			jsonFieldField: acpFieldPromptImage,
 			jsonFieldError: imageErrTooLarge,
 			keyIndex:       1,
 			keySizeBytes:   size * 2,
@@ -879,8 +879,8 @@ func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
 	limits := ImageLimits{MaxInputBytesPerImage: bound}
 
 	t.Run("a declared size past the gate is rejected before anything is opened", func(t *testing.T) {
-		root := t.TempDir()
-		outside := writeHandoffFile(t, t.TempDir(), "outside.png", png)
+		root := durableTempDir(t)
+		outside := writeHandoffFile(t, durableTempDir(t), "outside.png", png)
 
 		// No file is written inside the root and the second name would be
 		// refused for its location, so the only thing that can produce too_large
@@ -893,7 +893,7 @@ func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
 				handoffBlock(path, mimePNG, envelope),
 			}, limits, root)
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: imageErrTooLarge,
 				keyIndex:       0,
 				keySizeBytes:   bound + 1,
@@ -903,7 +903,7 @@ func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
 	})
 
 	t.Run("a file larger than its declaration forwards nothing", func(t *testing.T) {
-		root := t.TempDir()
+		root := durableTempDir(t)
 
 		// The file on disk holds one byte more than the envelope describes,
 		// which is what a file appended to after the block was written looks
@@ -927,7 +927,7 @@ func TestHandoffOversizeReadIsRejectedWithoutForwardingBytes(t *testing.T) {
 // rather than on bytes: every block here is a small valid image and the byte
 // aggregate is disabled, so nothing but the count can reject any of them.
 func TestHandoffBlockCountCapRejectsWithAggregateDisabled(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	path := writeHandoffFile(t, root, "valid.png", png)
 
@@ -938,7 +938,7 @@ func TestHandoffBlockCountCapRejectsWithAggregateDisabled(t *testing.T) {
 
 	_, err := promptToHermesParts(t.Context(), blocks, ImageLimits{MaxInputBytesPerPrompt: 0}, root)
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       maxHandoffBlocksPerPrompt,
 		keySizeBytes:   int64(maxHandoffBlocksPerPrompt + 1),
@@ -955,7 +955,7 @@ func TestHandoffBlockCountCapRejectsWithAggregateDisabled(t *testing.T) {
 }
 
 func TestHandoffReadHonoursACancelledContext(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	path := writeHandoffFile(t, root, "valid.png", png)
 
@@ -1034,12 +1034,12 @@ func TestHandoffReadNeverMutatesTheRoot(t *testing.T) {
 // declared constants. A verdict travels to the caller and into telemetry, so the
 // set it can draw from is closed by construction.
 func TestHandoffMessagesCarryNoObservedValues(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	png := fixtureBytes(t, "valid.png")
 	gif := fixtureBytes(t, "valid.gif")
 
 	path := writeHandoffFile(t, root, "valid.png", png)
-	outside := writeHandoffFile(t, t.TempDir(), "outside.png", png)
+	outside := writeHandoffFile(t, durableTempDir(t), "outside.png", png)
 
 	tampered := append([]byte(nil), png...)
 	tampered[len(tampered)-1] ^= 0xFF
@@ -1113,7 +1113,7 @@ func TestTextResourceBytesCountTowardPromptAggregate(t *testing.T) {
 
 	_, err = promptToHermesParts(t.Context(), blocks, ImageLimits{MaxInputBytesPerPrompt: int64(len(text)) - 1}, "")
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptResource,
+		jsonFieldField: acpFieldPromptResource,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       0,
 		keySizeBytes:   int64(len(text)),
@@ -1172,7 +1172,7 @@ func requireHandoffError(t *testing.T, err error, want string, index int, wantMe
 
 	data, _ := requestErr.Data.(map[string]any)
 	if !reflect.DeepEqual(data, map[string]any{
-		keyField:         acpFieldPromptImage,
+		jsonFieldField:   acpFieldPromptImage,
 		jsonFieldError:   want,
 		keyIndex:         index,
 		jsonFieldMessage: wantMessage,

@@ -79,7 +79,7 @@ func ordinaryNativeHelperRequest(t *testing.T, mode string) NativeRequest {
 		Environment: append(os.Environ(),
 			ordinaryNativeHelperMode+"="+mode,
 		),
-		WorkingDirectory: t.TempDir(),
+		WorkingDirectory: durableTempDir(t),
 	}
 }
 
@@ -137,7 +137,7 @@ func TestOrdinaryNativeStartFailuresDoNotReturnAProcess(t *testing.T) {
 	process, err = startOrdinaryNative(t.Context(), NativeRequest{
 		Executable:       strings.Repeat("missing-ordinary-native-", 2),
 		Environment:      os.Environ(),
-		WorkingDirectory: t.TempDir(),
+		WorkingDirectory: durableTempDir(t),
 	})
 	require.Nil(t, process)
 	require.Error(t, err)

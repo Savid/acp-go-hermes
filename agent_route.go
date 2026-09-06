@@ -84,7 +84,7 @@ const routeMetaPath = `_meta["` + routeMetaKey + `"]`
 func routeMissing() error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valMissing,
-		keyField:       routeMetaPath,
+		jsonFieldField: routeMetaPath,
 	})
 }
 
@@ -118,7 +118,7 @@ func routeUnsupported(members ...string) error {
 
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       field,
+		jsonFieldField: field,
 	})
 }
 

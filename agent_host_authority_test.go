@@ -14,7 +14,7 @@ import (
 
 func TestSharedHomeHostAuthorityValidationResidualBranch(t *testing.T) {
 	options := Options{}
-	options.SharedHermesHome = filepath.Clean(t.TempDir())
+	options.SharedHermesHome = filepath.Clean(durableTempDir(t))
 	options.HostAuthority = newTestHostAuthority()
 	if err := validateSharedHermesHomeOptions(options); err == nil {
 		t.Fatal("shared home accepted host authority")
@@ -37,7 +37,7 @@ func TestHostAuthorityValidationAndEnvironmentResidualBranches(t *testing.T) {
 		t.Fatalf("nil authority environment result = %v", err)
 	}
 	if err := validateHostAuthority(Options{
-		hostAuthoritySupplied: true, HostAuthority: residualValueAuthority{}, SharedHermesHome: t.TempDir(),
+		hostAuthoritySupplied: true, HostAuthority: residualValueAuthority{}, SharedHermesHome: durableTempDir(t),
 	}); err == nil {
 		t.Fatal("shared residence accepted a value host authority")
 	}
@@ -47,7 +47,7 @@ func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
 	newConfigured := func(t *testing.T) (*Agent, *residualAuthority, nativehermes.StartOptions) {
 		t.Helper()
 		authority := &residualAuthority{}
-		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
+		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
 		if agent.optionsErr != nil {
 			t.Fatal(agent.optionsErr)
 		}
@@ -60,21 +60,21 @@ func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
 	t.Run("prepare admission", func(t *testing.T) {
 		agent, _, start := newConfigured(t)
 		agent.authorityErr = ErrHostAuthorityUnavailable
-		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		if err := start.PrepareNativeTree(t.Context(), durableTempDir(t)); !errors.Is(err, ErrHostAuthorityUnavailable) {
 			t.Fatalf("prepare admission = %v", err)
 		}
 	})
 	t.Run("prepare panic", func(t *testing.T) {
 		_, authority, start := newConfigured(t)
 		authority.prepare = func(context.Context, string) error { panic("prepare unavailable") }
-		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		if err := start.PrepareNativeTree(t.Context(), durableTempDir(t)); !errors.Is(err, ErrHostAuthorityUnavailable) {
 			t.Fatalf("prepare panic = %v", err)
 		}
 	})
 	t.Run("prepare busy", func(t *testing.T) {
 		_, authority, start := newConfigured(t)
 		authority.prepare = func(context.Context, string) error { return ErrNativeTreeBusy }
-		if err := start.PrepareNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrNativeTreeBusy) {
+		if err := start.PrepareNativeTree(t.Context(), durableTempDir(t)); !errors.Is(err, ErrNativeTreeBusy) {
 			t.Fatalf("prepare busy = %v", err)
 		}
 	})
@@ -104,7 +104,7 @@ func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
 	t.Run("reclaim panic", func(t *testing.T) {
 		agent, authority, _ := newConfigured(t)
 		authority.reclaim = func(context.Context, string) error { panic("reclaim unavailable") }
-		if err := agent.reclaimNativeTree(t.Context(), t.TempDir()); !errors.Is(err, ErrHostAuthorityUnavailable) {
+		if err := agent.reclaimNativeTree(t.Context(), durableTempDir(t)); !errors.Is(err, ErrHostAuthorityUnavailable) {
 			t.Fatalf("reclaim panic = %v", err)
 		}
 	})
@@ -112,7 +112,7 @@ func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
 		agent, authority, _ := newConfigured(t)
 		want := errors.New("reclaim refused")
 		authority.reclaim = func(context.Context, string) error { return want }
-		if err := agent.reclaimNativeTree(t.Context(), t.TempDir()); !errors.Is(err, want) || !errors.Is(err, ErrContainmentIncomplete) {
+		if err := agent.reclaimNativeTree(t.Context(), durableTempDir(t)); !errors.Is(err, want) || !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("reclaim failure = %v", err)
 		}
 	})
@@ -120,8 +120,8 @@ func TestConfiguredHostAuthorityResidualBranches(t *testing.T) {
 
 func TestRetiredNativeRootRetryResidualBranches(t *testing.T) {
 	authority := &residualAuthority{}
-	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()))
-	root := t.TempDir()
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(durableTempDir(t)))
+	root := durableTempDir(t)
 	agent.retiredNativeRoots[root] = true
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -247,7 +247,7 @@ func TestManagedSnapshotStateResidualBranches(t *testing.T) {
 
 	wantClose := errors.New("managed close refused")
 	failing := &managedHermesServer{
-		Server: &fakeHermesClient{closeErr: wantClose}, managed: true, root: t.TempDir(),
+		Server: &fakeHermesClient{closeErr: wantClose}, managed: true, root: durableTempDir(t),
 	}
 	if _, _, err := session.beginManagedSnapshotStateHeld(t.Context(), failing); !errors.Is(err, wantClose) {
 		t.Fatalf("managed snapshot close failure = %v", err)
@@ -264,7 +264,7 @@ func TestManagedSnapshotStateResidualBranches(t *testing.T) {
 func TestCompleteManagedSnapshotCommitResidualBranches(t *testing.T) {
 	newCommit := func(t *testing.T) (*session, *sessionStoreCommit) {
 		t.Helper()
-		root := t.TempDir()
+		root := durableTempDir(t)
 		managed := &managedHermesServer{
 			Server: newFakeHermesClient(), managed: true, settled: true, root: root,
 		}
@@ -335,7 +335,7 @@ func TestSnapshotCaptureCancellationResidualBranches(t *testing.T) {
 	t.Run("after managed completion", func(t *testing.T) {
 		restoreStateStoreSeams(t)
 		fake := newFakeHermesClient()
-		root := t.TempDir()
+		root := durableTempDir(t)
 		xdg, err := testGenerationXDG(root)
 		if err != nil {
 			t.Fatal(err)

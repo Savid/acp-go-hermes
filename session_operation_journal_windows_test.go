@@ -18,7 +18,7 @@ func TestSessionOperationEnsureDoesNotFlushTheParent(t *testing.T) {
 	previousChmod := sessionOperationChmod
 	t.Cleanup(func() { sessionOperationChmod = previousChmod })
 
-	path := filepath.Join(t.TempDir(), "operations")
+	path := filepath.Join(durableTempDir(t), "operations")
 	sessionOperationChmod = func(string, os.FileMode) error { return os.RemoveAll(filepath.Dir(path)) }
 
 	if err := ensureSessionOperationDirectory(path); err != nil {
@@ -30,7 +30,7 @@ func TestSessionOperationEnsureDoesNotFlushTheParent(t *testing.T) {
 // shared session-operation journal is refused for the same reason, so a
 // shared-home session mutation cannot begin here rather than half-beginning.
 func TestSessionOperationJournalRefusesTheSharedHomeOnWindows(t *testing.T) {
-	journal, err := beginSessionOperationJournal(t.TempDir(), sessionOperationJournalFields{
+	journal, err := beginSessionOperationJournal(durableTempDir(t), sessionOperationJournalFields{
 		OperationID: "operation", Kind: sessionOperationKindNew, Mode: sessionOperationModeShared,
 		LogicalSessionID: "session-1",
 	})

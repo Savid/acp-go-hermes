@@ -29,7 +29,7 @@ import (
 
 func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := durableTempDir(t)
 	xdg, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatalf("create session XDG generation: %v", err)
@@ -84,7 +84,7 @@ func TestSnapshotHydrateScrubsSQLiteCredentialTables(t *testing.T) {
 func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *testing.T) {
 	ctx := t.Context()
 	store := NewInMemorySessionStore()
-	isolatedXDG, err := testGenerationXDG(t.TempDir())
+	isolatedXDG, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 		t.Fatalf("per-session-home archive entries = %d, err=%v", len(isolatedEntries), err)
 	}
 
-	wrapperXDG, err := testGenerationXDG(t.TempDir())
+	wrapperXDG, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 		t.Fatalf("per-session-home native archive restored into shared wrapper: %v", err)
 	}
 
-	sharedHome := t.TempDir()
+	sharedHome := durableTempDir(t)
 	authSentinel := []byte("shared-auth-secret-sentinel")
 	stateSentinel := []byte("shared-state-secret-sentinel")
 	if err := os.WriteFile(filepath.Join(sharedHome, "auth.json"), authSentinel, 0o600); err != nil {
@@ -158,7 +158,7 @@ func TestSharedHomeHydrateSkipsAndNextSnapshotPurgesPerSessionNativeArchive(t *t
 			}
 		}
 	}
-	emptyWrapper, err := testGenerationXDG(t.TempDir())
+	emptyWrapper, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,11 +195,11 @@ func TestHydrateStateDBArchiveRejectsTraversalAndBadChecksum(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 	_, _, ok, err := hydrateStateFromStore(ctx, store, "s", nativehermes.XDGDirs{
-		Root:   filepath.Join(t.TempDir(), "root"),
-		Data:   filepath.Join(t.TempDir(), "data"),
-		Config: filepath.Join(t.TempDir(), "config"),
-		Cache:  filepath.Join(t.TempDir(), "cache"),
-		State:  filepath.Join(t.TempDir(), "state"),
+		Root:   filepath.Join(durableTempDir(t), "root"),
+		Data:   filepath.Join(durableTempDir(t), "data"),
+		Config: filepath.Join(durableTempDir(t), "config"),
+		Cache:  filepath.Join(durableTempDir(t), "cache"),
+		State:  filepath.Join(durableTempDir(t), "state"),
 	})
 	if err == nil || ok {
 		t.Fatal("bad archive checksum accepted")
@@ -217,7 +217,7 @@ func TestDecodeArchiveRoundTripAndHelpers(t *testing.T) {
 		Mode:     0o600,
 		Size:     int64(len("body")),
 	}}, map[string]string{"nested/file.txt": "body"})
-	target := t.TempDir()
+	target := durableTempDir(t)
 	if err := decodeXDGArchive(archive, target); err != nil {
 		t.Fatalf("decodeXDGArchive: %v", err)
 	}
@@ -226,13 +226,13 @@ func TestDecodeArchiveRoundTripAndHelpers(t *testing.T) {
 		t.Fatalf("decoded file = %q err=%v", data, err)
 	}
 
-	if err := decodeXDGArchive([]byte("not zstd"), t.TempDir()); err == nil {
+	if err := decodeXDGArchive([]byte("not zstd"), durableTempDir(t)); err == nil {
 		t.Fatal("decode accepted invalid zstd")
 	}
-	if err := decodeXDGArchive(testTarZstd(t, []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Size: 0}}, nil), t.TempDir()); err == nil {
+	if err := decodeXDGArchive(testTarZstd(t, []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Size: 0}}, nil), durableTempDir(t)); err == nil {
 		t.Fatal("decode accepted traversal")
 	}
-	if err := decodeXDGArchive(testTarZstd(t, []tar.Header{{Name: "/abs", Typeflag: tar.TypeReg, Size: 0}}, nil), t.TempDir()); err == nil {
+	if err := decodeXDGArchive(testTarZstd(t, []tar.Header{{Name: "/abs", Typeflag: tar.TypeReg, Size: 0}}, nil), durableTempDir(t)); err == nil {
 		t.Fatal("decode accepted absolute path")
 	}
 }
@@ -337,7 +337,7 @@ func assertArchiveEntryDecodeFailures(t *testing.T) {
 
 func TestStateDBSnapshotHydrateRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := durableTempDir(t)
 	xdg, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatalf("create session XDG generation: %v", err)
@@ -455,7 +455,7 @@ func TestSnapshotToStoreRefusesPendingState(t *testing.T) {
 
 func TestHydrateStateFromStoreErrors(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := testGenerationXDG(t.TempDir())
+	xdg, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestHydrateStateFromStoreRejectsAmbiguousIDMapAndMainJSON(t *testing.T) {
 			}))
 
 			if _, _, _, err := hydrateStateFromStore(
-				t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+				t.Context(), store, "s", nativehermes.XDGDirs{Root: durableTempDir(t)},
 			); err == nil {
 				t.Fatal("hydrate accepted ambiguous durable JSON")
 			}
@@ -602,7 +602,7 @@ func TestHydrateStateFromStoreAcceptsCaseDistinctDynamicKeys(t *testing.T) {
 	replaceHydrateRecords(t, t.Context(), store, validHydrateIDMap(), snapshot)
 
 	_, hydrated, ok, err := hydrateStateFromStore(
-		t.Context(), store, "s", nativehermes.XDGDirs{Root: t.TempDir()},
+		t.Context(), store, "s", nativehermes.XDGDirs{Root: durableTempDir(t)},
 	)
 	if err != nil || !ok || !reflect.DeepEqual(hydrated.Session.Env, snapshot.Session.Env) ||
 		!reflect.DeepEqual(hydrated.Archives, snapshot.Archives) {
@@ -612,7 +612,7 @@ func TestHydrateStateFromStoreAcceptsCaseDistinctDynamicKeys(t *testing.T) {
 
 func TestHydrateStateDBArchiveFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := testGenerationXDG(t.TempDir())
+	xdg, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestHydrateStateDBArchiveFaults(t *testing.T) {
 
 func TestHydrateStateAgreementRejectsMismatches(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := testGenerationXDG(t.TempDir())
+	xdg, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,20 +778,20 @@ func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
 	if err := (&session{agent: newTestAgent(), client: nil}).snapshotToStore(context.Background()); err != nil {
 		t.Fatalf("nil client snapshot: %v", err)
 	}
-	if _, ok, err := sqliteArchiveContent("", filepath.Join(t.TempDir(), "missing.db")); err == nil || ok {
+	if _, ok, err := sqliteArchiveContent("", filepath.Join(durableTempDir(t), "missing.db")); err == nil || ok {
 		t.Fatalf("sqliteArchiveContent missing ok=%v err=%v", ok, err)
 	}
-	short := filepath.Join(t.TempDir(), "short.db")
+	short := filepath.Join(durableTempDir(t), "short.db")
 	if err := os.WriteFile(short, []byte("short"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := isSQLiteDatabase(short); err != nil || ok {
 		t.Fatalf("short sqlite ok=%v err=%v", ok, err)
 	}
-	if err := copyFile(filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "out"), 0o600); err == nil {
+	if err := copyFile(filepath.Join(durableTempDir(t), "missing"), filepath.Join(durableTempDir(t), "out"), 0o600); err == nil {
 		t.Fatal("copyFile accepted missing source")
 	}
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(durableTempDir(t), "source")
 	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestSnapshotToStoreNilClientAndFileSQLiteErrors(t *testing.T) {
 	if err := scrubSQLiteCredentialTables(short); err == nil {
 		t.Fatal("scrubSQLiteCredentialTables accepted non-sqlite")
 	}
-	dbPath := filepath.Join(t.TempDir(), "clean.db")
+	dbPath := filepath.Join(durableTempDir(t), "clean.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -931,7 +931,7 @@ func TestSnapshotToStoreMarshalAndArchiveFaults(t *testing.T) {
 
 func TestHydrateStateFromStoreFaults(t *testing.T) {
 	ctx := context.Background()
-	xdg, err := testGenerationXDG(t.TempDir())
+	xdg, err := testGenerationXDG(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1018,11 +1018,11 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 	if _, _, ok, err := encodeHermesStateDBArchive("", ""); err != nil || ok {
 		t.Fatalf("empty root ok=%v err=%v", ok, err)
 	}
-	emptyRoot := t.TempDir()
+	emptyRoot := durableTempDir(t)
 	if _, _, ok, err := encodeHermesStateDBArchive("", emptyRoot); err != nil || ok {
 		t.Fatalf("empty state db root ok=%v err=%v", ok, err)
 	}
-	dirRoot := t.TempDir()
+	dirRoot := durableTempDir(t)
 	if err := os.Mkdir(filepath.Join(dirRoot, "state.db"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1030,7 +1030,7 @@ func TestEncodeHermesStateDBArchiveFaults(t *testing.T) {
 		t.Fatalf("directory state db ok=%v err=%v", ok, err)
 	}
 
-	root := t.TempDir()
+	root := durableTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "state.db"), []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1230,7 +1230,7 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup()
 			}
-			if err := decodeXDGArchive(tc.data, t.TempDir()); err == nil {
+			if err := decodeXDGArchive(tc.data, durableTempDir(t)); err == nil {
 				t.Fatal("decodeXDGArchive ignored injected error")
 			}
 		})
@@ -1245,8 +1245,8 @@ func TestDecodeXDGArchiveFaults(t *testing.T) {
 func TestSQLiteArchiveWaitsForConcurrentWriter(t *testing.T) {
 	restoreStateStoreSeams(t)
 
-	scratchDir := t.TempDir()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
+	scratchDir := durableTempDir(t)
+	dbPath := filepath.Join(durableTempDir(t), "state.db")
 	seedSQLiteStore(t, dbPath)
 
 	writer, err := sql.Open("sqlite", dbPath)
@@ -1286,7 +1286,7 @@ func TestSQLiteArchiveWaitsForConcurrentWriter(t *testing.T) {
 func TestSQLiteScrubWaitsForConcurrentWriter(t *testing.T) {
 	restoreStateStoreSeams(t)
 
-	dbPath := filepath.Join(t.TempDir(), "state.db")
+	dbPath := filepath.Join(durableTempDir(t), "state.db")
 	seedSQLiteStore(t, dbPath)
 
 	writer, err := sql.Open("sqlite", dbPath)
@@ -1340,7 +1340,7 @@ func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
 	for name, setup := range tests {
 		t.Run(name, func(t *testing.T) {
 			restoreStateStoreSeams(t)
-			dbPath := filepath.Join(t.TempDir(), "store.db")
+			dbPath := filepath.Join(durableTempDir(t), "store.db")
 			seedSQLiteStore(t, dbPath)
 			setup(dbPath)
 			if _, ok, err := sqliteArchiveContent("", dbPath); err == nil || ok {
@@ -1351,14 +1351,14 @@ func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
 
 	t.Run("scratch parent", func(t *testing.T) {
 		restoreStateStoreSeams(t)
-		dbPath := filepath.Join(t.TempDir(), "store.db")
+		dbPath := filepath.Join(durableTempDir(t), "store.db")
 		seedSQLiteStore(t, dbPath)
 		if _, ok, err := sqliteArchiveContent(string([]byte{0}), dbPath); err == nil || ok {
 			t.Fatal("sqliteArchiveContent ignored scratch parent error")
 		}
 	})
 
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(durableTempDir(t), "source")
 	if err := os.WriteFile(source, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1374,7 +1374,7 @@ func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
 	t.Run("copy", func(t *testing.T) {
 		restoreStateStoreSeams(t)
 		stateCopy = func(io.Writer, io.Reader) (int64, error) { return 0, errors.New("copy failed") }
-		if err := copyFile(source, filepath.Join(t.TempDir(), "target"), 0o600); err == nil {
+		if err := copyFile(source, filepath.Join(durableTempDir(t), "target"), 0o600); err == nil {
 			t.Fatal("copyFile ignored copy error")
 		}
 	})
@@ -1383,7 +1383,7 @@ func TestSQLiteArchiveAndCopyFaults(t *testing.T) {
 		stateOpenFile = func(string, int, os.FileMode) (io.WriteCloser, error) {
 			return fakeWriteCloser{closeErr: errors.New("close failed")}, nil
 		}
-		if err := copyFile(source, filepath.Join(t.TempDir(), "target"), 0o600); err == nil {
+		if err := copyFile(source, filepath.Join(durableTempDir(t), "target"), 0o600); err == nil {
 			t.Fatal("copyFile ignored close error")
 		}
 	})
@@ -1499,7 +1499,7 @@ func restoreStateStoreSeams(t *testing.T) {
 
 func snapshotFaultSession(t *testing.T) *session {
 	t.Helper()
-	root := t.TempDir()
+	root := durableTempDir(t)
 	xdg, err := testGenerationXDG(root)
 	if err != nil {
 		t.Fatal(err)
@@ -2073,7 +2073,7 @@ func TestShippedResumeExampleFixtureHydrates(t *testing.T) {
 		{Key: SessionKey{SessionID: sessionID, Subpath: idmapSubpath}, Entries: []SessionStoreEntry{idmapEntry}},
 	}))
 
-	root := t.TempDir()
+	root := durableTempDir(t)
 
 	idmap, snapshot, ok, err := hydrateStateFromStore(t.Context(), store, sessionID, nativehermes.XDGDirs{Root: root})
 	require.NoError(t, err)

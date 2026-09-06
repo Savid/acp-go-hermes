@@ -42,8 +42,8 @@ func awaitProbeCount(t *testing.T, path string, want int) {
 }
 
 func TestSharedHomeVersionProbeIsFreshAfterSamePathReplacement(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "hermes")
-	options := darwinTestProcessOptions(t, ProcessOptions{SharedHome: true, ScratchParent: t.TempDir()})
+	executable := filepath.Join(durableTempDir(t), "hermes")
+	options := darwinTestProcessOptions(t, ProcessOptions{SharedHome: true, ScratchParent: durableTempDir(t)})
 
 	writeVersionHarness(t, executable, "0.20.0", "", "")
 	require.NoError(t, ensureExecutableVersion(t.Context(), executable, options))
@@ -54,13 +54,13 @@ func TestSharedHomeVersionProbeIsFreshAfterSamePathReplacement(t *testing.T) {
 }
 
 func TestSharedHomeSkipsMutatingGatewayMethodProbe(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "unprobed-hermes")
+	executable := filepath.Join(durableTempDir(t), "unprobed-hermes")
 	require.True(t, gatewayMethodProbeNeeded(ProcessOptions{}, executable))
 	require.False(t, gatewayMethodProbeNeeded(ProcessOptions{SharedHome: true}, executable))
 
 	process, err := Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: fakeHermesExecutable(t, "probe-error:session.create"),
-		Home:           t.TempDir(),
+		Home:           durableTempDir(t),
 		SharedHome:     true,
 		Timeout:        10 * time.Second,
 	}))
@@ -69,12 +69,12 @@ func TestSharedHomeSkipsMutatingGatewayMethodProbe(t *testing.T) {
 }
 
 func TestVersionProbeIsSingleflightedAcrossConcurrentStarts(t *testing.T) {
-	directory := t.TempDir()
+	directory := durableTempDir(t)
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
 	gatePath := filepath.Join(directory, "gate")
 	writeVersionHarness(t, executable, "0.20.0", countPath, gatePath)
-	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: t.TempDir()})
+	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: durableTempDir(t)})
 
 	holder := make(chan error, 1)
 	go func() { holder <- ensureExecutableVersion(context.Background(), executable, options) }()
@@ -102,12 +102,12 @@ func TestVersionProbeIsSingleflightedAcrossConcurrentStarts(t *testing.T) {
 }
 
 func TestAbandonedVersionProbeDoesNotFailTheStartsWaitingOnIt(t *testing.T) {
-	directory := t.TempDir()
+	directory := durableTempDir(t)
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
 	gatePath := filepath.Join(directory, "gate")
 	writeVersionHarness(t, executable, "0.20.0", countPath, gatePath)
-	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: t.TempDir()})
+	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: durableTempDir(t)})
 
 	abandoningCtx, abandon := context.WithCancel(context.Background())
 	abandoned := make(chan error, 1)
@@ -124,13 +124,13 @@ func TestAbandonedVersionProbeDoesNotFailTheStartsWaitingOnIt(t *testing.T) {
 }
 
 func TestVersionProbeSurvivesAStartThatFailsAfterIt(t *testing.T) {
-	directory := t.TempDir()
+	directory := durableTempDir(t)
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
 	writeVersionHarness(t, executable, "0.20.0", countPath, "")
 	options := darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: executable,
-		ScratchParent:  t.TempDir(),
+		ScratchParent:  durableTempDir(t),
 		Timeout:        250 * time.Millisecond,
 	})
 
@@ -157,7 +157,7 @@ func TestStartRefusesUnsupportedVersionAndStartupMethods(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := Start(t.Context(), darwinTestProcessOptions(t, ProcessOptions{
 				ExecutablePath: fakeHermesExecutable(t, test.mode),
-				ScratchParent:  t.TempDir(),
+				ScratchParent:  durableTempDir(t),
 				Timeout:        10 * time.Second,
 			}))
 			require.ErrorContains(t, err, test.want)

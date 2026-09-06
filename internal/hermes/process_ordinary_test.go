@@ -48,11 +48,11 @@ func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
 
 func TestProcessPATHOrdersOperationBeforeBrowserShimAndBase(t *testing.T) {
 	separator := string(os.PathListSeparator)
-	operationOne := filepath.Join(t.TempDir(), "operation-one")
-	operationTwo := filepath.Join(t.TempDir(), "operation-two")
-	shimDir := filepath.Join(t.TempDir(), "browser-shim")
-	baseOne := filepath.Join(t.TempDir(), "base-one")
-	baseTwo := filepath.Join(t.TempDir(), "base-two")
+	operationOne := filepath.Join(durableTempDir(t), "operation-one")
+	operationTwo := filepath.Join(durableTempDir(t), "operation-two")
+	shimDir := filepath.Join(durableTempDir(t), "browser-shim")
+	baseOne := filepath.Join(durableTempDir(t), "base-one")
+	baseTwo := filepath.Join(durableTempDir(t), "base-two")
 
 	base := []string{
 		"STATIC=1",
@@ -76,13 +76,13 @@ func TestProcessPATHOrdersOperationBeforeBrowserShimAndBase(t *testing.T) {
 }
 
 func TestProcessCarrierValidation(t *testing.T) {
-	absolute := t.TempDir()
+	absolute := durableTempDir(t)
 	separator := string(os.PathListSeparator)
 
 	for name, dirs := range map[string][]string{
 		"empty":     {absolute, ""},
 		"relative":  {"relative"},
-		"separator": {absolute + separator + t.TempDir()},
+		"separator": {absolute + separator + durableTempDir(t)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := cloneAndValidateExtraPathDirs(dirs)
@@ -93,7 +93,7 @@ func TestProcessCarrierValidation(t *testing.T) {
 	input := []string{absolute, absolute}
 	cloned, err := cloneAndValidateExtraPathDirs(input)
 	require.NoError(t, err)
-	input[0] = t.TempDir()
+	input[0] = durableTempDir(t)
 	require.Equal(t, []string{absolute, absolute}, cloned)
 
 	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
@@ -130,12 +130,12 @@ func TestProcessCarrierValidation(t *testing.T) {
 }
 
 func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	processRuntimePlatform = processPlatformWindows
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	Platform = processPlatformWindows
+	t.Cleanup(func() { Platform = originalPlatform })
 
-	decoyDir := t.TempDir()
-	harnessDir := t.TempDir()
+	decoyDir := durableTempDir(t)
+	harnessDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "hermes.exe"), []byte("MZ"), 0o600))
 	harness := filepath.Join(harnessDir, "hermes.bat")
 	require.NoError(t, os.WriteFile(harness, []byte("@echo fixture\n"), 0o600))
@@ -157,7 +157,7 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	block := []string{"Path=" + decoyDir, "PATH=" + harnessDir}
 	require.Equal(t, harnessDir, envValueFold(block, "PATH", true))
 
-	operationDir := t.TempDir()
+	operationDir := durableTempDir(t)
 	rewritten := prependPathDirs(append([]string{"KEPT=yes"}, block...), []string{operationDir})
 	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + string(os.PathListSeparator) + harnessDir}, rewritten)
 
@@ -167,7 +167,7 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	)
 	require.Empty(t, processEnvironmentValue(map[string]string{"OTHER": "x"}, envHermesWebDist))
 
-	processRuntimePlatform = processPlatformLinux
+	Platform = processPlatformLinux
 	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir, "PATH": "/ambient/bin"}, map[string]string{"PATH": harnessDir})
 	require.NoError(t, err)
 	require.Equal(t, []string{"PATH=" + harnessDir}, unfolded, "off Windows an inherited Path is a different variable and not an inherited name")
@@ -176,8 +176,8 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 }
 
 func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
-	staticDir := t.TempDir()
-	operationDir := t.TempDir()
+	staticDir := durableTempDir(t)
+	operationDir := durableTempDir(t)
 	want := writeTestHarness(t, staticDir)
 	_ = writeTestHarness(t, operationDir)
 
@@ -193,7 +193,7 @@ func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, resolved)
 	require.NotContains(t, base, "WAGIE_API_TOKEN=session")
-	require.Equal(t, staticDir, envValueFold(base, "PATH", processRuntimePlatform == processPlatformWindows))
+	require.Equal(t, staticDir, envValueFold(base, "PATH", Platform == processPlatformWindows))
 }
 
 func writeTestHarness(t *testing.T, dir string) string {
@@ -211,7 +211,7 @@ func writeTestHarness(t *testing.T, dir string) string {
 }
 
 func TestOrdinaryExecutableResolutionAcceptsShellEnvironment(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	binDir := filepath.Join(root, "bin")
 	require.NoError(t, os.MkdirAll(binDir, 0o700))
 	harness := writeTestHarness(t, binDir)
@@ -272,9 +272,9 @@ func TestManagedEnvironmentStartsFromAuthorityBase(t *testing.T) {
 }
 
 func TestManagedEnvironmentFoldsWindowsNamesAndScrubsAdapterState(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	processRuntimePlatform = processPlatformWindows
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	Platform = processPlatformWindows
+	t.Cleanup(func() { Platform = originalPlatform })
 
 	environment, err := managedEnvironment(
 		map[string]string{
@@ -328,8 +328,8 @@ func TestProcessScalarHelpers(t *testing.T) {
 }
 
 func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	t.Cleanup(func() { Platform = originalPlatform })
 
 	ambient := map[string]string{
 		// Inherited: what a process needs to run, reach the network, and serve.
@@ -349,7 +349,7 @@ func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
 		envHermesHome: "/foreign/home",
 	}
 
-	processRuntimePlatform = processPlatformLinux
+	Platform = processPlatformLinux
 	environment, err := ordinaryEnvironment(ambient)
 	require.NoError(t, err)
 	require.Equal(t, []string{
@@ -377,7 +377,7 @@ func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
 	// Where the platform folds names, the allowlist folds with it: "Path" and
 	// "lc_all" are the search path and a locale there, and the leftover
 	// spellings are one variable each rather than two.
-	processRuntimePlatform = processPlatformWindows
+	Platform = processPlatformWindows
 	folded, err := ordinaryEnvironment(map[string]string{
 		"Path": `C:\bin`, "lc_all": "lower", "PathExt": ".EXE", "SystemRoot": `C:\Windows`,
 		"OPENAI_API_KEY": "sk-openai", "Openai_Api_Key": "sk-mixed", "GITHUB_TOKEN": "ghp",

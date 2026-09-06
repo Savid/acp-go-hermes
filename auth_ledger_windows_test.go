@@ -11,7 +11,7 @@ import (
 // the ledger binds a per-residence lock root inside the adapter control
 // directory, and preparing that directory is what Windows declines.
 func TestAuthLedgerRefusesTheSharedHomeOnWindows(t *testing.T) {
-	_, err := newAuthLedger(Options{ProviderAuthRoot: t.TempDir(), SharedHermesHome: t.TempDir()})
+	_, err := newAuthLedger(Options{ProviderAuthRoot: durableTempDir(t), SharedHermesHome: durableTempDir(t)})
 	if err == nil {
 		t.Fatal("windows built a provider auth ledger")
 	}

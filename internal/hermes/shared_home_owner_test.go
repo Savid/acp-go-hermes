@@ -37,7 +37,7 @@ func rawSharedHomeLock(t *testing.T, home string) (*os.File, func() error, bool)
 }
 
 func TestSharedHomeOwnerIsOneExclusiveClaimAcrossEveryNativeWriter(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	first, err := AcquireSharedHomeOwner(home)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestSharedHomeOwnerIsOneExclusiveClaimAcrossEveryNativeWriter(t *testing.T)
 }
 
 func TestSharedHomeOwnerRefusesAConcurrentWriter(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	if _, err := EnsureSharedHermesAdapterControlDir(home); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestSharedHomeOwnerRefusesAConcurrentWriter(t *testing.T) {
 }
 
 func TestStartServerRefusesAClaimedSessionAndGivesTheHomeRootBack(t *testing.T) {
-	home := t.TempDir()
+	home := durableTempDir(t)
 	claimed, err := acquireSharedACPSessionOwner(home, "claimed-session")
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestStartServerRefusesAClaimedSessionAndGivesTheHomeRootBack(t *testing.T) 
 
 	options := darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:     "claimed-session",
-		Cwd:              t.TempDir(),
+		Cwd:              durableTempDir(t),
 		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
 		SharedHermesHome: home,
 		ExistingXDG:      testXDGDirs(t),

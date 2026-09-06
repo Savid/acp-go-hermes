@@ -86,7 +86,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 					return acp.SetSessionConfigOptionResponse{}, &mappedWireError{
 						wire: acp.NewInvalidParams(map[string]any{
 							jsonFieldError: valHermesModelSelectionRefused,
-							keyField:       keyValue,
+							jsonFieldField: keyValue,
 						}),
 						cause: err,
 					}

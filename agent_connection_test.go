@@ -152,7 +152,7 @@ func TestLocalAgentConnectionHandleRoutesAndErrors(t *testing.T) {
 		method string
 		params json.RawMessage
 	}{
-		{method: acp.AgentMethodSessionNew, params: mustJSON(t, NewSessionRequest(t.TempDir()))},
+		{method: acp.AgentMethodSessionNew, params: mustJSON(t, NewSessionRequest(durableTempDir(t)))},
 		{method: acp.AgentMethodSessionPrompt, params: json.RawMessage(`{`)},
 		{method: "missing/method", params: json.RawMessage(`{}`)},
 		{method: "_missing/method", params: json.RawMessage(`{`)},
@@ -268,7 +268,7 @@ func TestLocalAgentConnectionHandleThreadsTheRequestContext(t *testing.T) {
 			method: acp.AgentMethodSessionLoad,
 			params: mustJSON(t, acp.LoadSessionRequest{
 				SessionId:  "missing",
-				Cwd:        t.TempDir(),
+				Cwd:        durableTempDir(t),
 				McpServers: []acp.McpServer{},
 			}),
 		},
@@ -599,11 +599,11 @@ func TestRequestErrorPreservesTypedPayload(t *testing.T) {
 	}{
 		{"unsupported field", acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnsupported,
-			keyField:       hermesModelOptionPath,
+			jsonFieldField: hermesModelOptionPath,
 		})},
 		{"unknown session", acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnknownSession,
-			keyField:       jsonFieldSessionID,
+			jsonFieldField: jsonFieldSessionID,
 		})},
 		{"session closed", acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})},
 		{"parse error", acp.NewParseError(map[string]any{jsonFieldError: "parse_error"})},
@@ -667,7 +667,7 @@ func TestExtensionForkResponseCarriesPrivateLifecycleToken(t *testing.T) {
 	parentClient.forkSession = testNativeSession("native-child")
 	childClient := newFakeHermesClient()
 	childClient.getSession = testNativeSession("native-child")
-	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
 	agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
 		childClient.xdg = start.ExistingXDG
 
@@ -684,7 +684,7 @@ func TestExtensionForkResponseCarriesPrivateLifecycleToken(t *testing.T) {
 	ctx := context.WithValue(t.Context(), lifecycleRequestIdentityKey{}, lifecycleRequestIdentity{
 		token: "opaque-fork-token",
 	})
-	result, reqErr := conn.handle(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, t.TempDir())))
+	result, reqErr := conn.handle(ctx, ForkSessionMethod, mustJSON(t, ForkSessionRequest(parent.id, durableTempDir(t))))
 	require.Nil(t, reqErr)
 	marked, ok := result.(map[string]json.RawMessage)
 	require.True(t, ok)
@@ -749,7 +749,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	agent := newTestAgent()
 	agent.options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 		client := newFakeHermesClient()
-		xdg, err := testGenerationXDG(t.TempDir())
+		xdg, err := testGenerationXDG(durableTempDir(t))
 		if err != nil {
 			return nil, err
 		}
@@ -790,7 +790,7 @@ func TestLifecycleDoesNotEmitAvailableCommandsUpdate(t *testing.T) {
 	if line := readLine(); !strings.Contains(line, `"id":1`) || !strings.Contains(line, `"result"`) {
 		t.Fatalf("initialize line = %s", line)
 	}
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	writeJSONRPC(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":` + strconv.Quote(cwd) + `,"mcpServers":[]}}`)
 	responseLine := readLine()
 	if !strings.Contains(responseLine, `"id":2`) || !strings.Contains(responseLine, `"result"`) {
@@ -827,7 +827,7 @@ func TestLifecycleOpeningFollowsTheEstablishingResponseOverPipes(t *testing.T) {
 	agent := newTestAgent()
 	agent.options.clientFactory = func(_ context.Context, _ nativehermes.StartOptions) (nativehermes.Server, error) {
 		client := newFakeHermesClient()
-		xdg, err := testGenerationXDG(t.TempDir())
+		xdg, err := testGenerationXDG(durableTempDir(t))
 		if err != nil {
 			return nil, err
 		}
@@ -872,7 +872,7 @@ func TestLifecycleOpeningFollowsTheEstablishingResponseOverPipes(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(readLine()), &negotiation), "decode initialize response")
 	require.Contains(t, negotiation.Result.Meta, lifecycle.MetaKey, "the offer was answered")
 
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	writeJSONRPC(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":` + strconv.Quote(cwd) + `,` +
 		`"mcpServers":[{"name":"docs","command":"/usr/bin/env","args":["mcp-docs","--stdio"],` +
 		`"env":[{"name":"DOCS_TOKEN","value":"token"}]}],` +

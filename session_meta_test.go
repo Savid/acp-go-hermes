@@ -49,8 +49,8 @@ func TestOutputSchemaUnsupported(t *testing.T) {
 }
 
 func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
-	first := filepath.Join(t.TempDir(), "first")
-	second := filepath.Join(t.TempDir(), "second")
+	first := filepath.Join(durableTempDir(t), "first")
+	second := filepath.Join(durableTempDir(t), "second")
 	want := []string{first, second, first}
 
 	for _, value := range []any{
@@ -93,7 +93,7 @@ func TestLifecycleMetaValidatesExtraPathDirs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input[0] = filepath.Join(t.TempDir(), "mutated")
+	input[0] = filepath.Join(durableTempDir(t), "mutated")
 	if parsed.ExtraPathDirs[0] != first {
 		t.Fatalf("caller mutation reached session meta: %#v", parsed.ExtraPathDirs)
 	}
@@ -121,7 +121,7 @@ func TestLifecycleMetaTracksExplicitEmptyCarriers(t *testing.T) {
 }
 
 func TestLifecycleEntryPointsApplyExtraPathDirValidation(t *testing.T) {
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	badMeta := map[string]any{
 		hermesMetaKey: map[string]any{metaOptionsKey: map[string]any{
 			metaExtraPathDirsKey: []any{cwd, 42},
@@ -166,7 +166,7 @@ func requireLifecycleMetaField(t *testing.T, err error, field string) {
 		t.Fatalf("error type = %T, want *acp.RequestError", err)
 	}
 	data, ok := requestErr.Data.(map[string]any)
-	if !ok || data[keyField] != field {
+	if !ok || data[jsonFieldField] != field {
 		t.Fatalf("error data = %#v, want field %q", requestErr.Data, field)
 	}
 }

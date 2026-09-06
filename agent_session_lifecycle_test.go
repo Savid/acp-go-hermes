@@ -16,7 +16,7 @@ import (
 )
 
 func TestConcurrentColdLoadPublishesOneNativeIncarnation(t *testing.T) {
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	store := validHydrateStore(t, t.Context())
 	first := newFakeHermesClient()
 	first.getSession = testNativeSession("n")
@@ -32,7 +32,7 @@ func TestConcurrentColdLoadPublishesOneNativeIncarnation(t *testing.T) {
 		factoryMu    sync.Mutex
 		factoryCalls int
 	)
-	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), WithMeterProvider(meterProvider), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)), WithMeterProvider(meterProvider), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryMu.Lock()
 			factoryCalls++
@@ -87,14 +87,14 @@ func TestConcurrentColdLoadPublishesOneNativeIncarnation(t *testing.T) {
 }
 
 func TestCloseSessionWaitsForColdLoadPublication(t *testing.T) {
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	store := validHydrateStore(t, t.Context())
 	client := newFakeHermesClient()
 	client.getSession = testNativeSession("n")
 	closeResult := make(chan error, 1)
 
 	var agent *Agent
-	agent = newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+	agent = newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			client.xdg = opts.ExistingXDG
 			go func() {
@@ -133,14 +133,14 @@ func (s *gatedLifecycleDeleteStore) Delete(ctx context.Context, key SessionKey) 
 }
 
 func TestDeleteTombstonesBeforeWaitingLoadCanOpen(t *testing.T) {
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	store := &gatedLifecycleDeleteStore{
 		InMemorySessionStore: validHydrateStore(t, t.Context()),
 		entered:              make(chan struct{}),
 		release:              make(chan struct{}),
 	}
 	factoryCalls := 0
-	agent := newTestAgent(WithSessionStore(store), WithScratchDir(t.TempDir()), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(store), WithScratchDir(durableTempDir(t)), func(options *Options) {
 		options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryCalls++
 
@@ -169,8 +169,8 @@ func TestDeleteTombstonesBeforeWaitingLoadCanOpen(t *testing.T) {
 }
 
 func TestActiveCarrierRebindSerializesASecondOpen(t *testing.T) {
-	cwd := t.TempDir()
-	oldDir := t.TempDir()
+	cwd := durableTempDir(t)
+	oldDir := durableTempDir(t)
 	first := newFakeHermesClient()
 	first.createSession = testNativeSession("n")
 	first.getSession = first.createSession
@@ -186,7 +186,7 @@ func TestActiveCarrierRebindSerializesASecondOpen(t *testing.T) {
 		factoryMu    sync.Mutex
 		factoryCalls int
 	)
-	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()), WithScratchDir(t.TempDir()), func(options *Options) {
+	agent := newTestAgent(WithSessionStore(NewInMemorySessionStore()), WithScratchDir(durableTempDir(t)), func(options *Options) {
 		options.clientFactory = func(_ context.Context, opts nativehermes.StartOptions) (nativehermes.Server, error) {
 			factoryMu.Lock()
 			factoryCalls++

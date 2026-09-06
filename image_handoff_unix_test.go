@@ -20,7 +20,7 @@ import (
 // ever waiting on it. Only POSIX names a FIFO in the filesystem, so the proof
 // lives here.
 func TestHandoffFIFOInsideRootIsRejected(t *testing.T) {
-	root := t.TempDir()
+	root := durableTempDir(t)
 	path := filepath.Join(root, "valid.png")
 
 	if err := syscall.Mkfifo(path, 0o600); err != nil {

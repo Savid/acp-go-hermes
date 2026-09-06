@@ -24,11 +24,11 @@ const (
 func newAuthAgent(t *testing.T) (*Agent, *fakeHermesClient) {
 	t.Helper()
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	client := newFakeHermesClient()
 	client.xdg = nativehermes.XDGDirs{Root: home}
 
-	agent := newTestAgent(WithProviderAuthRoot(t.TempDir()), WithSharedHermesHome(t.TempDir()))
+	agent := newTestAgent(WithProviderAuthRoot(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)))
 	if agent.providerAuth == nil {
 		t.Fatal("provider auth surface is unavailable with a usable root")
 	}
@@ -99,8 +99,8 @@ func requireInvalidField(t *testing.T, err error, field string) {
 		t.Fatalf("request error data is not an object: %#v", requestErr.Data)
 	}
 
-	if data[keyField] != field {
-		t.Fatalf("field = %v, want %s", data[keyField], field)
+	if data[jsonFieldField] != field {
+		t.Fatalf("field = %v, want %s", data[jsonFieldField], field)
 	}
 }
 
@@ -111,30 +111,30 @@ func TestAuthSurfaceIsUnadvertisedWithoutAUsableRoot(t *testing.T) {
 		t.Fatal("unset root advertised the provider auth surface")
 	}
 
-	if newTestAgent(WithProviderAuthRoot("relative"), WithSharedHermesHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot("relative"), WithSharedHermesHome(durableTempDir(t))).providerAuth != nil {
 		t.Fatal("relative root advertised the provider auth surface")
 	}
 
-	file := filepath.Join(t.TempDir(), "not-a-directory")
+	file := filepath.Join(durableTempDir(t), "not-a-directory")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
-	if newTestAgent(WithProviderAuthRoot(file), WithSharedHermesHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot(file), WithSharedHermesHome(durableTempDir(t))).providerAuth != nil {
 		t.Fatal("root that is not a directory advertised the provider auth surface")
 	}
 
-	if newTestAgent(WithProviderAuthRoot(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithProviderAuthRoot(durableTempDir(t))).providerAuth != nil {
 		t.Fatal("ledger without shared Hermes home advertised provider auth")
 	}
 
-	if newTestAgent(WithSharedHermesHome(t.TempDir())).providerAuth != nil {
+	if newTestAgent(WithSharedHermesHome(durableTempDir(t))).providerAuth != nil {
 		t.Fatal("shared Hermes home without ledger advertised provider auth")
 	}
 }
 
 func TestHostAuthorityWithholdsProviderAuthWithoutDisablingAgent(t *testing.T) {
-	agent := NewAgent(WithHostAuthority(newTestHostAuthority()), WithScratchDir(t.TempDir()))
+	agent := NewAgent(WithHostAuthority(newTestHostAuthority()), WithScratchDir(durableTempDir(t)))
 	response, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)

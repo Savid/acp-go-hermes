@@ -24,7 +24,7 @@ import (
 
 func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 	ctx := t.Context()
-	home := t.TempDir()
+	home := durableTempDir(t)
 	store := &ackLostReplaceStore{InMemorySessionStore: NewInMemorySessionStore()}
 	newClient := newFakeHermesClient()
 	newClient.createSession = testNativeSession("native-new")
@@ -35,7 +35,7 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 			return newClient, nil
 		}
 	})
-	created, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	created, err := agent.NewSession(ctx, NewSessionRequest(durableTempDir(t)))
 	if err != nil {
 		t.Fatalf("NewSession after committed acknowledgement loss: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestNewAndForkReconcileCommittedReplaceAcknowledgementLoss(t *testing.T) {
 	parent.idmap.SessionID = string(parent.id)
 	parent.idmap.NativeSessionID = "native-parent"
 	agent.sessions[parent.id] = parent
-	forked, err := agent.forkSession(ctx, ForkSessionRequest(parent.id, t.TempDir()))
+	forked, err := agent.forkSession(ctx, ForkSessionRequest(parent.id, durableTempDir(t)))
 	if err != nil {
 		t.Fatalf("Fork after committed acknowledgement loss: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 		client.createSession = testNativeSession("native-new")
 		agent := newSharedHomeLifecycleAgent(t, client)
 
-		response, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		response, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 		if err != nil {
 			t.Fatalf("committed new session: %v", err)
 		}
@@ -92,8 +92,8 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 		childClient := newFakeHermesClient()
 		childClient.getSession = testNativeSession("native-child")
 		agent := newTestAgent(
-			WithScratchDir(t.TempDir()),
-			WithSharedHermesHome(t.TempDir()),
+			WithScratchDir(durableTempDir(t)),
+			WithSharedHermesHome(durableTempDir(t)),
 			WithSessionStore(NewInMemorySessionStore()),
 		)
 		agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
@@ -107,7 +107,7 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 		parent.idmap.NativeSessionID = "native-parent"
 		agent.sessions[parent.id] = parent
 
-		response, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		response, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t)))
 		if err != nil {
 			t.Fatalf("committed fork: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestCommittedSharedLifecycleIgnoresLostLockReleaseAcknowledgement(t *testin
 	t.Run("prompt", func(t *testing.T) {
 		lease := installFaultSessionSetLease(t, nativehermes.SharedSessionSetLockShared)
 		client := newFakeHermesClient()
-		agent := newTestAgent(WithSharedHermesHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+		agent := newTestAgent(WithSharedHermesHome(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
 		agent.setAgentClient(newRecordingAgentClient())
 		session := testSession(agent, client)
 
@@ -148,7 +148,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 			sessionIDRandReader = previousSessionReader
 			cryptorand.Reader = previousOperationReader
 		})
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("operation-id entropy failure ignored")
 		}
 	})
@@ -164,7 +164,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 		defer func() { _ = lock.Release() }()
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
-		if _, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(ctx, NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("contended session-set lock succeeded")
 		}
 	})
@@ -184,7 +184,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(operations, "unexpected"), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("malformed pending recovery ignored")
 		}
 	})
@@ -193,7 +193,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 		client := newFakeHermesClient()
 		client.listErr = errors.New("inventory")
 		agent := newSharedHomeLifecycleAgent(t, client)
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("inventory failure ignored")
 		}
 	})
@@ -204,7 +204,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 		previous := sessionOperationMkdir
 		sessionOperationMkdir = func(string, os.FileMode) error { return errors.New("journal mkdir") }
 		t.Cleanup(func() { sessionOperationMkdir = previous })
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("journal begin failure ignored")
 		}
 	})
@@ -223,7 +223,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 			return time.Now()
 		}
 		t.Cleanup(func() { sessionOperationNow = previous })
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("journal phase failure ignored")
 		}
 	})
@@ -237,7 +237,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = owner.Release() }()
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("conflicting native claim succeeded")
 		}
 	})
@@ -257,7 +257,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 
 			return testNativeSession("native-capacity"), nil
 		}
-		if _, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir())); err == nil {
+		if _, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t))); err == nil {
 			t.Fatal("post-commit registration capacity failure ignored")
 		}
 		agent.mu.Lock()
@@ -277,7 +277,7 @@ func TestSharedNewSessionTransactionFailureEdges(t *testing.T) {
 
 			return os.RemoveAll(path)
 		}
-		response, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		response, err := agent.NewSession(t.Context(), NewSessionRequest(durableTempDir(t)))
 		sessionOperationRemoveAll = previous
 		t.Cleanup(func() { sessionOperationRemoveAll = previous })
 		if err != nil {
@@ -293,8 +293,8 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 	newLoadAgent := func(t *testing.T, factory func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)) *Agent {
 		t.Helper()
 		agent := newTestAgent(
-			WithScratchDir(t.TempDir()),
-			WithSharedHermesHome(t.TempDir()),
+			WithScratchDir(durableTempDir(t)),
+			WithSharedHermesHome(durableTempDir(t)),
 			WithSessionStore(validHydrateStore(t, t.Context())),
 		)
 		agent.options.clientFactory = factory
@@ -310,7 +310,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 
 			return client, nil
 		})
-		response, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir()))
+		response, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", durableTempDir(t)))
 		if err != nil || response.Meta == nil {
 			t.Fatalf("shared load response=%+v err=%v", response, err)
 		}
@@ -330,7 +330,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = owner.Release() }()
-		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); err == nil {
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", durableTempDir(t))); err == nil {
 			t.Fatal("conflicting load owner succeeded")
 		}
 	})
@@ -339,7 +339,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 		agent := newLoadAgent(t, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return nil, ErrContainmentIncomplete
 		})
-		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", durableTempDir(t))); !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("containment error=%v", err)
 		}
 	})
@@ -348,7 +348,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 		agent := newLoadAgent(t, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return nil, errors.New("start")
 		})
-		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); err == nil {
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", durableTempDir(t))); err == nil {
 			t.Fatal("ordinary startup failure ignored")
 		}
 	})
@@ -367,7 +367,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 
 			return client, nil
 		})
-		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", t.TempDir())); err == nil {
+		if _, err := agent.LoadSession(t.Context(), LoadSessionRequest("s", durableTempDir(t))); err == nil {
 			t.Fatal("load registration capacity failure ignored")
 		}
 		agent.mu.Lock()
@@ -433,7 +433,7 @@ func TestSharedLoadAndRuntimeResumeEdges(t *testing.T) {
 func TestSharedForkTransactionFailureEdges(t *testing.T) {
 	newForkAgent := func(t *testing.T, parentClient *fakeHermesClient, factory func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error)) (*Agent, *session) {
 		t.Helper()
-		agent := newTestAgent(WithScratchDir(t.TempDir()), WithSharedHermesHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
+		agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
 		agent.options.clientFactory = factory
 		parent := testSession(agent, parentClient)
 		parent.id = "parent"
@@ -447,10 +447,10 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 	t.Run("inventory capability", func(t *testing.T) {
 		base := newFakeHermesClient()
 		parentClient := sessionOperationServerOnly{Server: base}
-		agent := newTestAgent(WithScratchDir(t.TempDir()), WithSharedHermesHome(t.TempDir()), WithSessionStore(NewInMemorySessionStore()))
-		parent := newSession(agent, "parent", t.TempDir(), nil, nil, testNativeSession("native-parent"), parentClient, sessionMeta{}, idmapRecord{SessionID: "parent", NativeSessionID: "native-parent", Format: SessionStoreFormat})
+		agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)), WithSessionStore(NewInMemorySessionStore()))
+		parent := newSession(agent, "parent", durableTempDir(t), nil, nil, testNativeSession("native-parent"), parentClient, sessionMeta{}, idmapRecord{SessionID: "parent", NativeSessionID: "native-parent", Format: SessionStoreFormat})
 		agent.sessions[parent.id] = parent
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork without persisted inventory succeeded")
 		}
 	})
@@ -461,7 +461,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		if err := agent.admitSharedHermesConfig([]acp.McpServer{StdioMCPServer("existing", "command", nil, nil)}); err != nil {
 			t.Fatal(err)
 		}
-		request := ForkSessionRequest(parent.id, t.TempDir(), WithSessionMCPServers(StdioMCPServer("different", "command", nil, nil)))
+		request := ForkSessionRequest(parent.id, durableTempDir(t), WithSessionMCPServers(StdioMCPServer("different", "command", nil, nil)))
 		if _, err := agent.forkSession(t.Context(), request); err == nil {
 			t.Fatal("changed shared MCP config accepted")
 		}
@@ -471,7 +471,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient := newFakeHermesClient()
 		agent, parent := newForkAgent(t, parentClient, nil)
 		parent.closed = true
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("closed parent forked")
 		}
 	})
@@ -486,7 +486,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		defer func() { _ = lock.Release() }()
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
-		if _, err := agent.forkSession(ctx, ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(ctx, ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("contended fork session-set lock succeeded")
 		}
 	})
@@ -505,7 +505,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(operations, "unexpected"), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork pending recovery failure ignored")
 		}
 	})
@@ -514,7 +514,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient := newFakeHermesClient()
 		parentClient.listErr = errors.New("inventory")
 		agent, parent := newForkAgent(t, parentClient, nil)
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork inventory failure ignored")
 		}
 	})
@@ -525,7 +525,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		previous := sessionOperationMkdir
 		sessionOperationMkdir = func(string, os.FileMode) error { return errors.New("journal") }
 		t.Cleanup(func() { sessionOperationMkdir = previous })
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork journal failure ignored")
 		}
 	})
@@ -540,7 +540,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 			sessionIDRandReader = previousSessionReader
 			cryptorand.Reader = previousOperationReader
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork operation-id entropy failure ignored")
 		}
 	})
@@ -559,7 +559,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 			return time.Now()
 		}
 		t.Cleanup(func() { sessionOperationNow = previous })
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork mutating journal update failure ignored")
 		}
 	})
@@ -581,7 +581,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 			return previous(source, target)
 		}
 		t.Cleanup(func() { sessionOperationRename = previous })
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork child journal identification failure ignored")
 		}
 	})
@@ -591,7 +591,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		parentClient.persistedSessions = []nativehermes.Session{{ID: "native-parent"}}
 		parentClient.forkErr = errors.New("branch")
 		agent, parent := newForkAgent(t, parentClient, nil)
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("branch failure ignored")
 		}
 	})
@@ -605,7 +605,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = owner.Release() }()
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("conflicting fork child owner succeeded")
 		}
 	})
@@ -616,7 +616,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		agent, parent := newForkAgent(t, parentClient, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return nil, errors.New("start child")
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("child startup failure ignored")
 		}
 	})
@@ -627,7 +627,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 		agent, parent := newForkAgent(t, parentClient, func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
 			return nil, ErrContainmentIncomplete
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); !errors.Is(err, ErrContainmentIncomplete) {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); !errors.Is(err, ErrContainmentIncomplete) {
 			t.Fatalf("child containment error=%v", err)
 		}
 	})
@@ -642,7 +642,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 
 			return childClient, nil
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("child native drift accepted")
 		}
 	})
@@ -658,7 +658,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 
 			return childClient, nil
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("drift containment close accepted")
 		}
 	})
@@ -675,7 +675,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 			return childClient, nil
 		})
 		agent.options.SessionStore = &toggleReplaceStore{InMemorySessionStore: NewInMemorySessionStore(), fail: true}
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("snapshot cleanup containment ignored")
 		}
 	})
@@ -697,7 +697,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 
 			return childClient, nil
 		})
-		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir())); err == nil {
+		if _, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t))); err == nil {
 			t.Fatal("fork registration capacity failure ignored")
 		}
 		agent.mu.Lock()
@@ -723,7 +723,7 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 
 			return os.RemoveAll(path)
 		}
-		response, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, t.TempDir()))
+		response, err := agent.forkSession(t.Context(), ForkSessionRequest(parent.id, durableTempDir(t)))
 		sessionOperationRemoveAll = previous
 		t.Cleanup(func() { sessionOperationRemoveAll = previous })
 		if err != nil {
@@ -736,12 +736,12 @@ func TestSharedForkTransactionFailureEdges(t *testing.T) {
 }
 
 func TestSharedClientAdmissionAndOwnerBindingEdges(t *testing.T) {
-	agent := newTestAgent(WithScratchDir(t.TempDir()), WithSharedHermesHome(t.TempDir()))
+	agent := newTestAgent(WithScratchDir(durableTempDir(t)), WithSharedHermesHome(durableTempDir(t)))
 	if err := agent.admitSharedHermesConfig(nil); err != nil {
 		t.Fatal(err)
 	}
 	badServers := []acp.McpServer{StdioMCPServer("different", "command", nil, nil)}
-	if _, err := agent.newHermesClient(t.Context(), "session", t.TempDir(), sessionMeta{}, nativehermes.XDGDirs{}, badServers); err == nil {
+	if _, err := agent.newHermesClient(t.Context(), "session", durableTempDir(t), sessionMeta{}, nativehermes.XDGDirs{}, badServers); err == nil {
 		t.Fatal("changed shared MCP config accepted during client start")
 	}
 
@@ -763,7 +763,7 @@ func TestSharedClientAdmissionAndOwnerBindingEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := agent.newHermesClientWithScratchOwner(t.Context(), "session", t.TempDir(), sessionMeta{}, xdg, func() {}, owner)
+	client, err := agent.newHermesClientWithScratchOwner(t.Context(), "session", durableTempDir(t), sessionMeta{}, xdg, func() {}, owner)
 	if err != nil {
 		t.Fatal(err)
 	}

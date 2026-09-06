@@ -302,7 +302,7 @@ func (a *Agent) loadOrResumeSession(
 	if a.isDeleted(id) {
 		_ = a.retryDeletedSessionCleanup(ctx)
 
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
 	}
 
 	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
@@ -420,11 +420,11 @@ func (a *Agent) loadOrResumeSession(
 	}
 
 	if !ok {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
 	}
 
 	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "cwd_mismatch", keyField: jsonFieldCwd})
+		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "cwd_mismatch", jsonFieldField: jsonFieldCwd})
 	}
 
 	if !meta.EnvSet {
@@ -887,7 +887,7 @@ func applyAdmittedActiveLifecycleRequest(
 }
 
 func lifecycleMismatch(field string) error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: "mismatch", keyField: field})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: "mismatch", jsonFieldField: field})
 }
 
 func stringMapsEqual(left map[string]string, right map[string]string) bool {

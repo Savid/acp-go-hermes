@@ -25,9 +25,9 @@ func TestHermesBashEnvRestoresActualCommandPathAfterLoginAndCleansCarrier(t *tes
 		t.Skipf("bash is required: %v", err)
 	}
 
-	first := filepath.Join(t.TempDir(), "first with spaces")
-	second := filepath.Join(t.TempDir(), "second")
-	base := t.TempDir()
+	first := filepath.Join(durableTempDir(t), "first with spaces")
+	second := filepath.Join(durableTempDir(t), "second")
+	base := durableTempDir(t)
 	for _, dir := range []string{first, second} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -42,11 +42,11 @@ func TestHermesBashEnvRestoresActualCommandPathAfterLoginAndCleansCarrier(t *tes
 		t.Fatal(err)
 	}
 
-	reset := filepath.Join(t.TempDir(), "profile-reset.sh")
+	reset := filepath.Join(durableTempDir(t), "profile-reset.sh")
 	if err := os.WriteFile(reset, []byte("PATH="+shellSingleQuotePathInit(base)+"\nexport PATH\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hermesHome := t.TempDir()
+	hermesHome := durableTempDir(t)
 	initPath := filepath.Join(hermesHome, hermesPathInitFileName)
 	if err := os.WriteFile(initPath, hermesPathInitScript, 0o600); err != nil {
 		t.Fatal(err)
@@ -71,16 +71,16 @@ func TestHermesPathInitPassesCarrierThroughBashExecutableWrapper(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash is required: %v", err)
 	}
-	home := t.TempDir()
+	home := durableTempDir(t)
 	if err := os.WriteFile(filepath.Join(home, hermesPathInitFileName), hermesPathInitScript, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wrapper := filepath.Join(t.TempDir(), "hermes-wrapper")
+	wrapper := filepath.Join(durableTempDir(t), "hermes-wrapper")
 	if err := os.WriteFile(wrapper, []byte("#!/bin/bash\nprintf '%s\\n%s' \"$BASH_ENV\" \"$ACP_GO_HERMES_PATH_DIR_COUNT\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command(wrapper)
-	command.Env = installHermesPathCarrier([]string{"PATH=" + os.Getenv("PATH")}, home, []string{t.TempDir()})
+	command.Env = installHermesPathCarrier([]string{"PATH=" + os.Getenv("PATH")}, home, []string{durableTempDir(t)})
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run Bash Hermes wrapper: %v: %s", err, output)
@@ -95,21 +95,21 @@ func TestHermesPathInitKeepsCompleteRequestedPrefixIdempotent(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash is required: %v", err)
 	}
-	home := t.TempDir()
+	home := durableTempDir(t)
 	if err := os.WriteFile(filepath.Join(home, hermesPathInitFileName), hermesPathInitScript, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first := filepath.Join(t.TempDir(), "first[owned]*")
+	first := filepath.Join(durableTempDir(t), "first[owned]*")
 	if err := os.Mkdir(first, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	second := t.TempDir()
-	base := t.TempDir()
-	profile := t.TempDir()
+	second := durableTempDir(t)
+	base := durableTempDir(t)
+	profile := durableTempDir(t)
 	dirs := []string{first, second, first}
 	initialPath := strings.Join([]string{first, second, first, base}, string(os.PathListSeparator))
 	wantPath := strings.Join([]string{first, second, first, profile, base}, string(os.PathListSeparator))
-	profileInit := filepath.Join(t.TempDir(), "preserve-inherited-path.sh")
+	profileInit := filepath.Join(durableTempDir(t), "preserve-inherited-path.sh")
 	if err := os.WriteFile(profileInit, []byte("PATH="+shellSingleQuotePathInit(profile)+":$PATH\nexport PATH\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -129,17 +129,17 @@ func TestHermesPathInitConvertsWindowsNativeDirsWithoutExecutingPath(t *testing.
 		t.Skipf("bash is required: %v", err)
 	}
 
-	originalPlatform := processRuntimePlatform
-	processRuntimePlatform = processPlatformWindows
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	Platform = processPlatformWindows
+	t.Cleanup(func() { Platform = originalPlatform })
 
-	hermesHome := t.TempDir()
+	hermesHome := durableTempDir(t)
 	if err := os.WriteFile(filepath.Join(hermesHome, hermesPathInitFileName), hermesPathInitScript, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	maliciousBin := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "cygpath-ran")
+	maliciousBin := durableTempDir(t)
+	marker := filepath.Join(durableTempDir(t), "cygpath-ran")
 	if err := os.WriteFile(filepath.Join(maliciousBin, "cygpath"), []byte("#!/bin/sh\nprintf ran > "+shellSingleQuotePathInit(marker)+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -169,13 +169,13 @@ func TestHermesPathInitIsIdempotentWhenSourcedAgain(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash is required: %v", err)
 	}
-	home := t.TempDir()
+	home := durableTempDir(t)
 	initPath := filepath.Join(home, hermesPathInitFileName)
 	if err := os.WriteFile(initPath, hermesPathInitScript, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	operation := t.TempDir()
-	base := t.TempDir()
+	operation := durableTempDir(t)
+	base := durableTempDir(t)
 	command := exec.Command("bash", "-c", `. "$1"; . "$1"; printf '%s\n%s' "$PATH" "${BASH_ENV-unset}"`, "bash", initPath)
 	command.Env = installHermesPathCarrier([]string{"PATH=" + base}, home, []string{operation})
 	output, err := command.CombinedOutput()

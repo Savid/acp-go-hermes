@@ -85,7 +85,7 @@ func (a *Agent) retainNegotiatedLifecycle(answer lifecycle.Negotiated) error {
 	if a.lifecycleAnswered && !sameNegotiatedLifecycle(a.lifecycleAnswer, answer) {
 		return acp.NewInvalidParams(map[string]any{
 			jsonFieldError: valUnsupported,
-			keyField:       lifecycle.MetaPath,
+			jsonFieldField: lifecycle.MetaPath,
 		})
 	}
 
@@ -120,7 +120,7 @@ func (a *Agent) negotiatedLifecycle() lifecycle.Negotiated {
 func lifecycleParamError(refusal *lifecycle.ParamError) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: string(refusal.Verdict),
-		keyField:       refusal.Field,
+		jsonFieldField: refusal.Field,
 	})
 }
 
@@ -141,7 +141,7 @@ func rejectLifecycleMeta(meta map[string]any) error {
 
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       lifecycle.MetaPath,
+		jsonFieldField: lifecycle.MetaPath,
 	})
 }
 
@@ -163,6 +163,6 @@ func rejectLifecycleRawMeta(params json.RawMessage) error {
 
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		keyField:       lifecycle.MetaPath,
+		jsonFieldField: lifecycle.MetaPath,
 	})
 }

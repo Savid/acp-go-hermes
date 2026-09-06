@@ -20,7 +20,7 @@ import (
 //nolint:gocyclo // Recovery cases intentionally share one production-protocol fixture matrix.
 func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	t.Run("exact store commits and removes journal", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(store))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
@@ -48,7 +48,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("absent fork exact delta is deleted", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		client := newFakeHermesClient()
@@ -65,7 +65,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("absent new known native id is deleted", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		nativeID := "native-new"
@@ -85,7 +85,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("empty new journal never infers an unrelated durable row", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		client := newFakeHermesClient()
@@ -99,7 +99,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("live logical owner fences same-process recovery", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		nativeID, liveID := "native-new", "live-new"
@@ -123,7 +123,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("absent fork with no delta clears pre-effect journal", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		client := newFakeHermesClient()
@@ -137,7 +137,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("ambiguous fork delta fails closed", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		client := newFakeHermesClient()
@@ -154,7 +154,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("fork marker mismatch preserves external row", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		client := newFakeHermesClient()
@@ -171,7 +171,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("persisted inventory error retains journal", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		client := newFakeHermesClient()
@@ -188,7 +188,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("operation owner fences recovery", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindFork, "child", []string{"parent"})
 		owner, err := nativehermes.AcquireSharedNativeSessionOwner(home, "parent")
@@ -215,7 +215,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("store unavailable retains prepared journal", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(sessionOperationUnavailableStore{}))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		nativeID, liveID := "native-new", "live-new"
@@ -241,7 +241,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("exact store cleanup failures are nonblocking and retryable", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(store))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
@@ -296,7 +296,7 @@ func TestRecoverPendingSharedSessionOperations(t *testing.T) {
 	})
 
 	t.Run("recovered journal removal retries without deleting twice", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		agent := newTestAgent(WithSharedHermesHome(home), WithSessionStore(NewInMemorySessionStore()))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		nativeID, liveID := "native-new", "live-new"
@@ -393,7 +393,7 @@ func TestSessionOperationRecoveryRemainingFailures(t *testing.T) {
 	}
 
 	t.Run("pending recovery requires inventory", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		_ = newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		client := sessionOperationServerOnly{Server: newFakeHermesClient()}
 		if err := newTestAgent(WithSessionStore(NewInMemorySessionStore())).recoverPendingSharedSessionOperations(t.Context(), home, client); err == nil {
@@ -402,7 +402,7 @@ func TestSessionOperationRecoveryRemainingFailures(t *testing.T) {
 	})
 
 	t.Run("ambiguous store", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		store := NewInMemorySessionStore()
 		agent := newTestAgent(WithSessionStore(store))
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
@@ -429,7 +429,7 @@ func TestSessionOperationRecoveryRemainingFailures(t *testing.T) {
 
 	setupNative := func(t *testing.T) (string, *sessionOperationJournal) {
 		t.Helper()
-		home := t.TempDir()
+		home := durableTempDir(t)
 		journal := newRecoveryTestJournal(t, home, sessionOperationKindNew, "logical", nil)
 		nativeID, liveID := "native", "live"
 		phase := sessionOperationPhaseNativeIdentified

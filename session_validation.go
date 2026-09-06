@@ -15,9 +15,9 @@ const (
 	// distinct verdict from valUnsupported and the two are never collapsed: a
 	// host that reads "missing" adds the key, a host that reads "unsupported"
 	// on the bare key path stops sending it on that surface.
-	valMissing = "missing"
-	valServer  = "server"
-	keyField   = "field"
+	valMissing     = "missing"
+	valServer      = "server"
+	jsonFieldField = "field"
 
 	// optionFieldHome names the unsupported Home option in the uniform
 	// unsupported-option error. Each session runtime root is isolated.
@@ -44,7 +44,7 @@ func validateSessionStartPaths(cwd string, additionalDirectories []string) error
 // on without first deciding which kind of non-absolute it sent.
 func validateRequiredAbsolutePath(field string, value string) error {
 	if !filepath.IsAbs(value) {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: field})
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: field})
 	}
 
 	return nil
@@ -65,7 +65,7 @@ func validateMCPServers(servers []acp.McpServer) error {
 		if server.Sse != nil {
 			return acp.NewInvalidParams(map[string]any{
 				jsonFieldError: valUnsupported,
-				keyField:       fmt.Sprintf("mcpServers[%d]", index),
+				jsonFieldField: fmt.Sprintf("mcpServers[%d]", index),
 				valServer:      server.Sse.Name,
 			})
 		}
@@ -73,7 +73,7 @@ func validateMCPServers(servers []acp.McpServer) error {
 		if server.Acp != nil {
 			return acp.NewInvalidParams(map[string]any{
 				jsonFieldError: valUnsupported,
-				keyField:       fmt.Sprintf("mcpServers[%d]", index),
+				jsonFieldField: fmt.Sprintf("mcpServers[%d]", index),
 				valServer:      server.Acp.Name,
 			})
 		}
@@ -111,7 +111,7 @@ func mcpServerName(server acp.McpServer, index int) (string, error) {
 	default:
 		return "", acp.NewInvalidParams(map[string]any{
 			jsonFieldError: "no_transport",
-			keyField:       fmt.Sprintf("mcpServers[%d]", index),
+			jsonFieldField: fmt.Sprintf("mcpServers[%d]", index),
 		})
 	}
 

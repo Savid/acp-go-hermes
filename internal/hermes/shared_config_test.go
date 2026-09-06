@@ -8,7 +8,7 @@ import (
 )
 
 func TestAtomicSharedHermesWriteKeepsCompleteOldBytesOnRenameFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
+	path := filepath.Join(durableTempDir(t), "config.yaml")
 	if err := os.WriteFile(path, []byte("old-complete\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

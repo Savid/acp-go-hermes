@@ -77,7 +77,7 @@ func TestStartServerDefaultsLoggerOnFailure(t *testing.T) {
 	// No Logger provided: exercises the slog.Default() fallback before the
 	// missing executable makes startup fail.
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{
-		ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes"),
+		ExecutablePath: filepath.Join(durableTempDir(t), "missing-hermes"),
 	})); err == nil {
 		t.Fatal("StartServer with missing executable unexpectedly succeeded")
 	}

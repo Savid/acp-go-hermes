@@ -161,8 +161,8 @@ func TestMCPServersWithSecretEnv(t *testing.T) {
 func TestStartServerRejectsReservedMCPSecretEnvironment(t *testing.T) {
 	_, err := StartServer(t.Context(), darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:  "session-1",
-		ScratchParent: t.TempDir(),
-		Cwd:           t.TempDir(),
+		ScratchParent: durableTempDir(t),
+		Cwd:           durableTempDir(t),
 		Env:           map[string]string{"ACP_GO_HERMES_MCP_HEADER_1_1": "occupied"},
 		MCPServers: []acp.McpServer{{Http: &acp.McpServerHttpInline{
 			Name: "http", Url: "https://example.test", Headers: []acp.HttpHeader{{Name: "Authorization", Value: "secret"}},
@@ -2165,18 +2165,18 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 	if model, ok := mapped.Providers[0].Models["named"]; !ok || len(mapped.Providers[0].Models) != 1 || model.ID != "named" {
 		t.Fatalf("providersFromGateway empty model handling = %#v", mapped)
 	}
-	if err := materializeHermesConfig(t.TempDir(), nil, nil); err != nil {
+	if err := materializeHermesConfig(durableTempDir(t), nil, nil); err != nil {
 		t.Fatalf("empty config: %v", err)
 	}
 	originalMarshalIndent := hermesMarshalIndent
 	hermesMarshalIndent = func(any, string, string) ([]byte, error) {
 		return nil, errors.New("marshal failed")
 	}
-	if err := materializeHermesConfig(t.TempDir(), []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
+	if err := materializeHermesConfig(durableTempDir(t), []acp.McpServer{stdioMCPServer("s", "cmd", nil, nil)}, nil); err == nil {
 		t.Fatal("materializeHermesConfig ignored marshal error")
 	}
 	hermesMarshalIndent = originalMarshalIndent
-	homeFile := filepath.Join(t.TempDir(), "home-file")
+	homeFile := filepath.Join(durableTempDir(t), "home-file")
 	if err := os.WriteFile(homeFile, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2187,7 +2187,7 @@ func testGatewayProvidersAndConfigHelpers(t *testing.T) {
 
 func TestMaterializeHermesConfig(t *testing.T) {
 	t.Run("writes seeds verbatim and installs managed PATH init", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		files := map[string]string{
 			"config.yaml":               "model:\n  provider: custom\n",
 			"providers/litellm.yaml":    "base_url: http://localhost:4000/v1\n",
@@ -2218,7 +2218,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	})
 
 	t.Run("merges wrapper mcp_servers on top of seeded config.yaml", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		seed := "model:\n  provider: custom\n  base_url: http://localhost:4000/v1\n  key_env: LITELLM_API_KEY\n  default: gpt-4o\nmcp_servers:\n  seeded:\n    url: http://seed.example\n"
 		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		if err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": seed}); err != nil {
@@ -2249,7 +2249,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	})
 
 	t.Run("writes wrapper mcp_servers without a seed", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		if err := materializeHermesConfig(home, servers, nil); err != nil {
 			t.Fatalf("materializeHermesConfig mcp-only: %v", err)
@@ -2268,7 +2268,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	})
 
 	t.Run("rejects invalid seeded config.yaml when merging", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		servers := []acp.McpServer{httpMCPServer("wrapper", "https://wrapper.example/mcp", nil)}
 		err := materializeHermesConfig(home, servers, map[string]string{"config.yaml": "model: [unterminated"})
 		if err == nil {
@@ -2281,7 +2281,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	})
 
 	t.Run("rejects adapter-owned PATH init seed", func(t *testing.T) {
-		err := materializeHermesConfig(t.TempDir(), nil, map[string]string{hermesPathInitFileName: "untrusted"})
+		err := materializeHermesConfig(durableTempDir(t), nil, map[string]string{hermesPathInitFileName: "untrusted"})
 		if err == nil {
 			t.Fatal("adapter-owned PATH init seed was accepted")
 		}
@@ -2289,7 +2289,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 
 	t.Run("empty installs only PATH init without config mutation", func(t *testing.T) {
 		for _, files := range []map[string]string{nil, {}} {
-			home := t.TempDir()
+			home := durableTempDir(t)
 			if err := materializeHermesConfig(home, nil, files); err != nil {
 				t.Fatalf("empty seed files: %v", err)
 			}
@@ -2303,7 +2303,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 	})
 
 	t.Run("rejects confinement escapes", func(t *testing.T) {
-		absolute := filepath.Join(t.TempDir(), "abs")
+		absolute := filepath.Join(durableTempDir(t), "abs")
 		for name, relative := range map[string]string{
 			"empty":           "",
 			"whitespace-only": "   ",
@@ -2314,7 +2314,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			"parent-trailing": filepath.FromSlash("nested/.."),
 		} {
 			t.Run(name, func(t *testing.T) {
-				home := t.TempDir()
+				home := durableTempDir(t)
 				err := materializeHermesConfig(home, nil, map[string]string{relative: "x"})
 				if err == nil {
 					t.Fatalf("seed path %q accepted", relative)
@@ -2340,7 +2340,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 			"backup suffix casefold": "nested/CONFIG.YAML.SEED.BAK",
 		} {
 			t.Run(name, func(t *testing.T) {
-				err := materializeHermesConfig(t.TempDir(), nil, map[string]string{relative: "hostile"})
+				err := materializeHermesConfig(durableTempDir(t), nil, map[string]string{relative: "hostile"})
 				if err == nil {
 					t.Fatalf("reserved seed path %q accepted", relative)
 				}
@@ -2355,7 +2355,7 @@ func TestMaterializeHermesConfig(t *testing.T) {
 
 func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	t.Run("propagates mkdir errors", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("dir-block"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -2368,7 +2368,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	})
 
 	t.Run("seed into empty root records a sorted manifest", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		files := map[string]string{
 			"config.yaml":                   "model: {}\n",
 			filepath.FromSlash("a/b.json"):  "{}",
@@ -2390,7 +2390,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	})
 
 	t.Run("re-seed identical content is idempotent", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "same"}); err != nil {
 			t.Fatalf("first seed: %v", err)
 		}
@@ -2403,7 +2403,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	})
 
 	t.Run("re-seed changed content backs up prior bytes", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
 			t.Fatalf("first seed: %v", err)
 		}
@@ -2427,7 +2427,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	})
 
 	t.Run("fails closed on a pre-existing unmanaged file", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("operator"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -2460,7 +2460,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 	})
 
 	t.Run("manifest survives across passes", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := materializeHermesConfig(home, nil, map[string]string{"foo": "v1"}); err != nil {
 			t.Fatalf("first seed: %v", err)
 		}
@@ -2477,7 +2477,7 @@ func TestMaterializeHermesConfigSeedGuard(t *testing.T) {
 
 func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	t.Run("rejects a corrupt manifest", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte("{not json"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -2487,7 +2487,7 @@ func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	})
 
 	t.Run("propagates a manifest read error", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.Mkdir(filepath.Join(home, hermesSeedManifestName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -2497,7 +2497,7 @@ func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	})
 
 	t.Run("propagates a manifest write error", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		original := hermesMarshalIndent
 		hermesMarshalIndent = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("marshal failed")
@@ -2509,7 +2509,7 @@ func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	})
 
 	t.Run("propagates a backup write error", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, "foo"), []byte("old"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -2526,7 +2526,7 @@ func TestMaterializeHermesConfigSeedGuardErrors(t *testing.T) {
 	})
 
 	t.Run("propagates a read error for a managed directory target", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, hermesSeedManifestName), []byte(`["mdir"]`), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -3141,7 +3141,7 @@ func TestHermesGatewayServerFailureBranches(t *testing.T) {
 func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 	helper := fakeHermesGatewayExecutable(t, fakeGatewayModeOK)
 	root := testTraversableTempDir(t)
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3153,7 +3153,7 @@ func TestStartHermesServerGatewayFakeExecutable(t *testing.T) {
 		DefaultModel:   "openai/gpt-test",
 		Env:            map[string]string{"BASE_ENV": "base"},
 		SessionEnv:     map[string]string{"SESSION_ENV": "carrier"},
-		ExtraPathDirs:  []string{t.TempDir()},
+		ExtraPathDirs:  []string{durableTempDir(t)},
 		HealthTimeout:  5 * time.Second,
 		Logger:         slog.New(slog.DiscardHandler),
 		MCPServers: []acp.McpServer{
@@ -3198,7 +3198,7 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 	options := StartOptions{
 		ACPSessionID:   "same-session",
 		ScratchParent:  root,
-		Cwd:            t.TempDir(),
+		Cwd:            durableTempDir(t),
 		ExecutablePath: helper,
 		HealthTimeout:  5 * time.Second,
 		Logger:         slog.New(slog.DiscardHandler),
@@ -3245,7 +3245,7 @@ func TestStartHermesServerUsesFreshGenerationForSameSession(t *testing.T) {
 
 func TestStartHermesServerGatewayFaults(t *testing.T) {
 	ctx := context.Background()
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExecutablePath: filepath.Join(t.TempDir(), "missing-hermes")})); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExecutablePath: filepath.Join(durableTempDir(t), "missing-hermes")})); err == nil {
 		t.Fatal("missing executable unexpectedly started")
 	}
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ScratchParent: string([]byte{0})})); err == nil {
@@ -3266,7 +3266,7 @@ func TestStartHermesServerGatewayFaults(t *testing.T) {
 	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{Env: map[string]string{"BASH_ENV": "/bad"}})); err == nil {
 		t.Fatal("static BASH_ENV unexpectedly succeeded")
 	}
-	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(t.TempDir(), "root")}})); err == nil {
+	if _, err := StartServer(ctx, darwinTestStartOptions(t, StartOptions{ExistingXDG: XDGDirs{Root: filepath.Join(durableTempDir(t), "root")}})); err == nil {
 		t.Fatal("incomplete existing xdg unexpectedly succeeded")
 	}
 
@@ -3785,7 +3785,7 @@ func fakeHermesGatewayExecutable(t *testing.T, mode string, extraArgs ...string)
 	}
 	args := append([]string{"-test.run=TestFakeHermesGatewayProcessHelper", "--"}, extraArgs...)
 
-	return writeTestBinaryLauncher(t, t.TempDir(), "fake-hermes", testBinary,
+	return writeTestBinaryLauncher(t, durableTempDir(t), "fake-hermes", testBinary,
 		map[string]string{
 			"ACP_GO_HERMES_GATEWAY_HELPER": "1",
 			"ACP_GO_HERMES_GATEWAY_MODE":   mode,
@@ -3992,7 +3992,7 @@ func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
 	if options.ExistingXDG.Root != "" {
 		options.ScratchParent = filepath.Dir(options.ExistingXDG.Root)
 	} else if options.ScratchParent == "" {
-		options.ScratchParent = t.TempDir()
+		options.ScratchParent = durableTempDir(t)
 	}
 
 	return options

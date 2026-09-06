@@ -14,8 +14,8 @@ import (
 // one that is. Folding it there rather than carrying two live keys is what
 // keeps an inherited block from refusing every launch at the phase merge.
 func TestAmbientEnvironmentSnapshotFoldsWindowsSpellings(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
+	originalPlatform := Platform
+	t.Cleanup(func() { Platform = originalPlatform })
 
 	block := []string{
 		"Path=C:\\inherited",
@@ -30,7 +30,7 @@ func TestAmbientEnvironmentSnapshotFoldsWindowsSpellings(t *testing.T) {
 		"PathExt=.BAT",
 	}
 
-	processRuntimePlatform = processPlatformWindows
+	Platform = processPlatformWindows
 	require.Equal(t, map[string]string{
 		"KEPT":    "yes",
 		"WITH":    "EQUALS=SIGNS",
@@ -59,7 +59,7 @@ func TestAmbientEnvironmentSnapshotFoldsWindowsSpellings(t *testing.T) {
 	// Off Windows the two spellings are genuinely two variables. Nothing is
 	// folded away, and the adapter-managed keys are still the merge's business
 	// rather than the snapshot's.
-	processRuntimePlatform = processPlatformLinux
+	Platform = processPlatformLinux
 	require.Equal(t, map[string]string{
 		"Path":    "C:\\inherited",
 		"PATHEXT": ".COM",

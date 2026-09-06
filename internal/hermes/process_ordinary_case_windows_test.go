@@ -27,9 +27,9 @@ func TestWindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt(t *te
 	shell, err := resolveHarnessExecutable("cmd", os.Environ())
 	require.NoError(t, err, "ordinary resolution must find cmd on the ambient Path")
 
-	decoyDir := t.TempDir()
-	harnessDir := t.TempDir()
-	operationDir := t.TempDir()
+	decoyDir := durableTempDir(t)
+	harnessDir := durableTempDir(t)
+	operationDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "hermes.exe"), []byte("MZ"), 0o600))
 	harness := writeWindowsCaseFixture(t, harnessDir, "hermes.bat")
 	carrier := writeWindowsCaseFixture(t, operationDir, "carrier.bat")
@@ -96,8 +96,8 @@ func TestWindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins(t *testing.T)
 	shell, err := resolveHarnessExecutable("cmd", os.Environ())
 	require.NoError(t, err, "ordinary resolution must find cmd on the ambient Path")
 
-	decoyDir := t.TempDir()
-	harnessDir := t.TempDir()
+	decoyDir := durableTempDir(t)
+	harnessDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "hermes.exe"), []byte("MZ"), 0o600))
 	harness := writeWindowsCaseFixture(t, harnessDir, "hermes.bat")
 
@@ -135,7 +135,7 @@ func TestWindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins(t *testing.T)
 func windowsFixtureResolvedByChild(t *testing.T, shell string, env []string, call string) string {
 	t.Helper()
 
-	output := filepath.Join(t.TempDir(), "resolved.txt")
+	output := filepath.Join(durableTempDir(t), "resolved.txt")
 	file, err := os.Create(output)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = file.Close() })
@@ -146,7 +146,7 @@ func windowsFixtureResolvedByChild(t *testing.T, shell string, env []string, cal
 	defer cancel()
 	command := exec.CommandContext(ctx, shell, "/d", "/c", call)
 	command.Env = env
-	command.Dir = t.TempDir()
+	command.Dir = durableTempDir(t)
 	command.Stdout = file
 	require.NoError(t, command.Run())
 	require.NoError(t, context.Cause(ctx))

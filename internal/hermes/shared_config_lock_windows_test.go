@@ -15,7 +15,7 @@ import (
 func TestSharedHermesConfigLockRefusesOnWindows(t *testing.T) {
 	ran := false
 
-	err := withHermesConfigLock(context.Background(), t.TempDir(), func(string) error {
+	err := withHermesConfigLock(context.Background(), durableTempDir(t), func(string) error {
 		ran = true
 
 		return nil

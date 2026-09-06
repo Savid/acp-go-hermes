@@ -84,12 +84,19 @@ func TestImageLimitDefaults(t *testing.T) {
 	}
 }
 
-func TestPathCarrierEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
-	for _, agent := range []*Agent{
-		NewAgent(WithEnv(map[string]string{"BASH_ENV": "/untrusted/init"})),
-		NewAgent(WithEnv(map[string]string{"ENV": "/untrusted/init"})),
-		NewAgent(WithEnv(map[string]string{"acp_go_hermes_path_dir_1": "/untrusted/bin"})),
+func TestAgentEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
+	for key, reason := range map[string]string{
+		"BASH_ENV":                 "reserved for the session PATH carrier",
+		"ENV":                      "reserved for the session PATH carrier",
+		"acp_go_hermes_path_dir_1": "reserved for the session PATH carrier",
+		"NODE_OPTIONS":             "is an injection vector",
+		"LD_PRELOAD":               "is an injection vector",
+		"":                         "is not a variable name",
+		"A=B":                      "is not a variable name",
 	} {
-		require.ErrorContains(t, agent.optionsErr, "reserved for the session PATH carrier")
+		require.ErrorContains(t, NewAgent(WithEnv(map[string]string{key: "x"})).optionsErr, reason, key)
 	}
+
+	require.ErrorContains(t, NewAgent(WithEnv(map[string]string{"A": "x\x00y"})).optionsErr, "is not a variable name")
+	require.NoError(t, NewAgent(WithEnv(map[string]string{"PATH": "/usr/bin", "https_proxy": "", "ld_preload": "own"})).optionsErr)
 }

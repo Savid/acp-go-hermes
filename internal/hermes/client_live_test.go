@@ -17,14 +17,14 @@ func TestLiveServeRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	scratch := t.TempDir()
+	scratch := durableTempDir(t)
 	home, err := os.MkdirTemp(scratch, "acp-go-hermes-runtime-")
 	if err != nil {
 		t.Fatalf("create generation root: %v", err)
 	}
 	opts := ProcessOptions{
 		Home:          home,
-		Cwd:           t.TempDir(),
+		Cwd:           durableTempDir(t),
 		ScratchParent: scratch,
 		Timeout:       120 * time.Second,
 		Env: map[string]string{
@@ -47,7 +47,7 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		_ = proc.Close(closeCtx)
 	}()
 
-	created, err := proc.Client.CreateSession(ctx, map[string]any{"cwd": t.TempDir(), "title": "acp-go-hermes live probe"})
+	created, err := proc.Client.CreateSession(ctx, map[string]any{"cwd": durableTempDir(t), "title": "acp-go-hermes live probe"})
 	if err != nil {
 		t.Fatalf("session.create: %v", err)
 	}

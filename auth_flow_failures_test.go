@@ -76,7 +76,7 @@ func TestAuthGateQueuedWaiterAcquiresAfterRelease(t *testing.T) {
 
 func TestProviderAuthResidenceValidationAndPreparationFailures(t *testing.T) {
 	if err := validateProviderAuthRoots(Options{
-		ProviderAuthRoot: t.TempDir(),
+		ProviderAuthRoot: durableTempDir(t),
 		SharedHermesHome: "relative",
 	}); err == nil {
 		t.Fatal("relative provider auth residence accepted")
@@ -86,7 +86,7 @@ func TestProviderAuthResidenceValidationAndPreparationFailures(t *testing.T) {
 		t.Fatal("relative provider auth residence prepared")
 	}
 
-	file := filepath.Join(t.TempDir(), "file")
+	file := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestProviderAuthResidenceValidationAndPreparationFailures(t *testing.T) {
 	}
 
 	agent := newTestAgent(
-		WithProviderAuthRoot(t.TempDir()),
+		WithProviderAuthRoot(durableTempDir(t)),
 		WithSharedHermesHome(filepath.Join(file, "child")),
 	)
 	if agent.providerAuth != nil {
@@ -103,7 +103,7 @@ func TestProviderAuthResidenceValidationAndPreparationFailures(t *testing.T) {
 	}
 
 	if _, err := newAuthLedger(Options{
-		ProviderAuthRoot: t.TempDir(),
+		ProviderAuthRoot: durableTempDir(t),
 		SharedHermesHome: "relative",
 	}); err == nil {
 		t.Fatal("ledger accepted relative provider auth residence")
@@ -184,7 +184,7 @@ func mustSession(t *testing.T, agent *Agent) *session {
 func TestProviderAuthResidenceHookFailures(t *testing.T) {
 	restoreLedgerHooks(t)
 
-	home := filepath.Join(t.TempDir(), "auth")
+	home := filepath.Join(durableTempDir(t), "auth")
 	ledgerChmod = func(string, os.FileMode) error { return errors.New("chmod") }
 	if _, err := prepareProviderAuthResidence(home); err == nil {
 		t.Fatal("provider auth residence chmod failure accepted")

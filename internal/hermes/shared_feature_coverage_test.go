@@ -251,7 +251,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		originalMkdir := xdgMkdirAll
 		t.Cleanup(func() { xdgMkdirAll = originalMkdir })
 		xdgMkdirAll = func(string, os.FileMode) error { return errors.New("mkdir fault") }
-		if _, err := CreateGenerationXDGDirs(t.TempDir()); err == nil {
+		if _, err := CreateGenerationXDGDirs(durableTempDir(t)); err == nil {
 			t.Fatal("CreateGenerationXDGDirs ignored mkdir fault")
 		}
 		xdgMkdirAll = originalMkdir
@@ -261,7 +261,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 	})
 
 	t.Run("seed pending and managed-file faults", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := applyHermesSeedGuard(home, nil); err != nil {
 			t.Fatalf("empty seed guard: %v", err)
 		}
@@ -311,7 +311,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 	})
 
 	t.Run("seed transaction faults", func(t *testing.T) {
-		badHome := filepath.Join(t.TempDir(), "parent-file")
+		badHome := filepath.Join(durableTempDir(t), "parent-file")
 		if err := os.WriteFile(badHome, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +319,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 			t.Fatal("seed guard ignored invalid home")
 		}
 
-		home := t.TempDir()
+		home := durableTempDir(t)
 		write := seedWrite{relative: "x", target: filepath.Join(home, "x"), bytes: []byte("x")}
 		if err := os.WriteFile(filepath.Join(home, hermesSeedPendingName), []byte(`{"other":"digest"}`), 0o600); err != nil {
 			t.Fatal(err)
@@ -328,7 +328,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 			t.Fatalf("pending mismatch error = %v", err)
 		}
 
-		home = t.TempDir()
+		home = durableTempDir(t)
 		if err := applyHermesSeedGuardWithWriter(home, []seedWrite{{relative: "x", target: filepath.Join(home, "x"), bytes: []byte("x")}}, func(path string, _ []byte, _ os.FileMode) error {
 			if strings.HasSuffix(path, hermesSeedPendingName) {
 				return errors.New("pending write fault")
@@ -339,7 +339,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 			t.Fatalf("pending write error = %v", err)
 		}
 
-		home = t.TempDir()
+		home = durableTempDir(t)
 		if err := os.Mkdir(filepath.Join(home, hermesSeedPendingName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +347,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 			t.Fatal("pending journal directory was accepted")
 		}
 
-		home = t.TempDir()
+		home = durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, hermesSeedPendingName), []byte("{\"x\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -358,7 +358,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 			t.Fatal("unreadable pending target was accepted")
 		}
 
-		home = t.TempDir()
+		home = durableTempDir(t)
 		if err := os.Mkdir(filepath.Join(home, hermesSeedPendingName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -371,7 +371,7 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 	})
 
 	t.Run("seed primitive wrappers", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := saveHermesSeedManifest(home, map[string]bool{"x": true}); err != nil {
 			t.Fatal(err)
 		}
@@ -399,10 +399,10 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 		originalMarshal := hermesMarshalIndent
 		t.Cleanup(func() { hermesMarshalIndent = originalMarshal })
 		hermesMarshalIndent = func(any, string, string) ([]byte, error) { return nil, errors.New("marshal fault") }
-		if err := saveHermesSeedManifest(t.TempDir(), map[string]bool{"x": true}); err == nil {
+		if err := saveHermesSeedManifest(durableTempDir(t), map[string]bool{"x": true}); err == nil {
 			t.Fatal("seed manifest marshal fault was ignored")
 		}
-		if err := saveHermesSeedPendingWithWriter(t.TempDir(), map[string]string{"x": "digest"}, os.WriteFile); err == nil {
+		if err := saveHermesSeedPendingWithWriter(durableTempDir(t), map[string]string{"x": "digest"}, os.WriteFile); err == nil {
 			t.Fatal("seed pending marshal fault was ignored")
 		}
 		hermesMarshalIndent = originalMarshal
@@ -410,13 +410,13 @@ func TestSharedFilesystemHelperFaultCoverage(t *testing.T) { //nolint:gocyclo //
 }
 
 func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
-	badParent := filepath.Join(t.TempDir(), "file")
+	badParent := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(badParent, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	options := darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:     "shared-xdg-fault",
-		Cwd:              t.TempDir(),
+		Cwd:              durableTempDir(t),
 		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
 		SharedHermesHome: filepath.Join(badParent, "home"),
 		ExistingXDG:      testXDGDirs(t),
@@ -425,10 +425,10 @@ func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
 		t.Fatalf("invalid shared XDG = %#v, %v", server, err)
 	}
 
-	homeForLocality := t.TempDir()
+	homeForLocality := durableTempDir(t)
 	options = darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:     "shared-locality-fault",
-		Cwd:              t.TempDir(),
+		Cwd:              durableTempDir(t),
 		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
 		SharedHermesHome: homeForLocality,
 		ExistingXDG:      testXDGDirs(t),
@@ -441,10 +441,10 @@ func TestSharedStartServerEarlyFaultCoverage(t *testing.T) {
 	}
 	sharedHomeLocalValidator = originalLocalValidator
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	options = darwinTestStartOptions(t, StartOptions{
 		ACPSessionID:     "shared-release-fault",
-		Cwd:              t.TempDir(),
+		Cwd:              durableTempDir(t),
 		ExecutablePath:   fakeHermesExecutable(t, fakeProcessModeOK),
 		SharedHermesHome: home,
 		ExistingXDG:      testXDGDirs(t),
@@ -484,14 +484,14 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 	})
 
 	t.Run("input and owner directory", func(t *testing.T) {
-		if _, err := AcquireSharedNativeSessionOwner(t.TempDir(), ""); err == nil {
+		if _, err := AcquireSharedNativeSessionOwner(durableTempDir(t), ""); err == nil {
 			t.Fatal("empty native owner id was accepted")
 		}
 		if _, err := AcquireSharedNativeSessionOwner("relative", "native"); err == nil {
 			t.Fatal("relative owner home was accepted")
 		}
 
-		home := t.TempDir()
+		home := durableTempDir(t)
 		control, err := EnsureSharedHermesAdapterControlDir(home)
 		if err != nil {
 			t.Fatal(err)
@@ -505,7 +505,7 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 	})
 
 	t.Run("lock open and low-level flock faults", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		owner, acquireErr := AcquireSharedNativeSessionOwner(home, "native")
 		if acquireErr != nil {
 			t.Fatal(acquireErr)
@@ -521,7 +521,7 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 			t.Fatalf("owner lock directory error = %v", err)
 		}
 
-		file, createErr := os.CreateTemp(t.TempDir(), "closed-owner-lock")
+		file, createErr := os.CreateTemp(durableTempDir(t), "closed-owner-lock")
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
@@ -531,7 +531,7 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 		if _, _, err := tryLockHermesFile(file); err == nil {
 			t.Fatal("closed owner file acquired flock")
 		}
-		file, createErr = os.CreateTemp(t.TempDir(), "owner-unlock")
+		file, createErr = os.CreateTemp(durableTempDir(t), "owner-unlock")
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
@@ -549,13 +549,13 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 
 	t.Run("typed owner operation faults", func(t *testing.T) {
 		sharedOwnerChmod = func(string, os.FileMode) error { return errors.New("directory chmod fault") }
-		if _, err := AcquireSharedNativeSessionOwner(t.TempDir(), "native"); err == nil || !strings.Contains(err.Error(), "protect") {
+		if _, err := AcquireSharedNativeSessionOwner(durableTempDir(t), "native"); err == nil || !strings.Contains(err.Error(), "protect") {
 			t.Fatalf("owner directory chmod fault = %v", err)
 		}
 		sharedOwnerChmod = originalChmod
 
 		sharedOwnerFileChmod = func(*os.File, os.FileMode) error { return errors.New("file chmod fault") }
-		if _, err := AcquireSharedNativeSessionOwner(t.TempDir(), "native"); err == nil || !strings.Contains(err.Error(), "protect") {
+		if _, err := AcquireSharedNativeSessionOwner(durableTempDir(t), "native"); err == nil || !strings.Contains(err.Error(), "protect") {
 			t.Fatalf("owner file chmod fault = %v", err)
 		}
 		sharedOwnerFileChmod = originalFileChmod
@@ -563,7 +563,7 @@ func TestSharedOwnerFaultCoverage(t *testing.T) {
 		sharedOwnerTryLock = func(*os.File) (func() error, bool, error) {
 			return nil, false, errors.New("flock fault")
 		}
-		if _, err := AcquireSharedNativeSessionOwner(t.TempDir(), "native"); err == nil || !strings.Contains(err.Error(), "flock fault") {
+		if _, err := AcquireSharedNativeSessionOwner(durableTempDir(t), "native"); err == nil || !strings.Contains(err.Error(), "flock fault") {
 			t.Fatalf("owner lock fault = %v", err)
 		}
 		sharedOwnerTryLock = originalTryLock
@@ -586,16 +586,16 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 		sharedSessionSetSyncDir = originalSyncDir
 	})
 
-	if _, err := SharedHermesAdapterControlDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, err := SharedHermesAdapterControlDir(filepath.Join(durableTempDir(t), "missing")); err == nil {
 		t.Fatal("missing shared home resolved")
 	}
 	if _, err := EnsureSharedHermesAdapterControlDir("relative"); err == nil {
 		t.Fatal("relative control home was accepted")
 	}
-	if err := ensureLocalSharedHermesHome(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if err := EnsureLocalSharedHermesHome(filepath.Join(durableTempDir(t), "missing")); err == nil {
 		t.Fatal("missing local home passed filesystem validation")
 	}
-	badParent := filepath.Join(t.TempDir(), "file")
+	badParent := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(badParent, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 		t.Fatalf("control directory invalid-parent error = %v", err)
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	control, controlErr := EnsureSharedHermesAdapterControlDir(home)
 	if controlErr != nil {
 		t.Fatal(controlErr)
@@ -616,7 +616,7 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 		t.Fatalf("session-set lock directory error = %v", err)
 	}
 
-	file, createErr := os.CreateTemp(t.TempDir(), "closed-session-set")
+	file, createErr := os.CreateTemp(durableTempDir(t), "closed-session-set")
 	if createErr != nil {
 		t.Fatal(createErr)
 	}
@@ -626,7 +626,7 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 	if _, _, err := tryLockSharedSessionSetFile(file, SharedSessionSetLockShared); err == nil {
 		t.Fatal("closed session-set file acquired lock")
 	}
-	file, createErr = os.CreateTemp(t.TempDir(), "session-set-unlock")
+	file, createErr = os.CreateTemp(durableTempDir(t), "session-set-unlock")
 	if createErr != nil {
 		t.Fatal(createErr)
 	}
@@ -644,7 +644,7 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 	if err := (*SharedSessionSetLock)(nil).Release(); err != nil {
 		t.Fatal(err)
 	}
-	closed, closedCreateErr := os.CreateTemp(t.TempDir(), "release")
+	closed, closedCreateErr := os.CreateTemp(durableTempDir(t), "release")
 	if closedCreateErr != nil {
 		t.Fatal(closedCreateErr)
 	}
@@ -658,13 +658,13 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 
 	t.Run("typed control and lock faults", func(t *testing.T) {
 		sharedHomeLocalValidator = func(string) error { return errors.New("locality fault") }
-		if _, err := EnsureSharedHermesAdapterControlDir(t.TempDir()); err == nil || !strings.Contains(err.Error(), "locality fault") {
+		if _, err := EnsureSharedHermesAdapterControlDir(durableTempDir(t)); err == nil || !strings.Contains(err.Error(), "locality fault") {
 			t.Fatalf("control locality fault = %v", err)
 		}
 		sharedHomeLocalValidator = originalLocalValidator
 
 		sharedSessionSetFileChmod = func(*os.File, os.FileMode) error { return errors.New("file chmod fault") }
-		if _, err := AcquireSharedSessionSetLock(t.Context(), t.TempDir(), SharedSessionSetLockExclusive); err == nil || !strings.Contains(err.Error(), "protect") {
+		if _, err := AcquireSharedSessionSetLock(t.Context(), durableTempDir(t), SharedSessionSetLockExclusive); err == nil || !strings.Contains(err.Error(), "protect") {
 			t.Fatalf("session-set file chmod fault = %v", err)
 		}
 		sharedSessionSetFileChmod = originalFileChmod
@@ -672,25 +672,25 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 		sharedSessionSetTryLock = func(*os.File, SharedSessionSetLockMode) (func() error, bool, error) {
 			return nil, false, errors.New("flock fault")
 		}
-		if _, err := AcquireSharedSessionSetLock(t.Context(), t.TempDir(), SharedSessionSetLockExclusive); err == nil || !strings.Contains(err.Error(), "flock fault") {
+		if _, err := AcquireSharedSessionSetLock(t.Context(), durableTempDir(t), SharedSessionSetLockExclusive); err == nil || !strings.Contains(err.Error(), "flock fault") {
 			t.Fatalf("session-set flock fault = %v", err)
 		}
 		sharedSessionSetTryLock = originalTryLock
 
 		sharedSessionSetLstat = func(string) (os.FileInfo, error) { return nil, errors.New("lstat fault") }
-		if err := ensureSharedHermesAdapterControlDir(filepath.Join(t.TempDir(), "control")); err == nil || !strings.Contains(err.Error(), "inspect") {
+		if err := ensureSharedHermesAdapterControlDir(filepath.Join(durableTempDir(t), "control")); err == nil || !strings.Contains(err.Error(), "inspect") {
 			t.Fatalf("control lstat fault = %v", err)
 		}
 		sharedSessionSetLstat = originalLstat
 
 		sharedSessionSetChmod = func(string, os.FileMode) error { return errors.New("chmod fault") }
-		if err := ensureSharedHermesAdapterControlDir(filepath.Join(t.TempDir(), "control")); err == nil || !strings.Contains(err.Error(), "protect") {
+		if err := ensureSharedHermesAdapterControlDir(filepath.Join(durableTempDir(t), "control")); err == nil || !strings.Contains(err.Error(), "protect") {
 			t.Fatalf("control chmod fault = %v", err)
 		}
 		sharedSessionSetChmod = originalChmod
 
 		sharedSessionSetSyncDir = func(string) error { return errors.New("sync fault") }
-		if err := ensureSharedHermesAdapterControlDir(filepath.Join(t.TempDir(), "control")); err == nil || !strings.Contains(err.Error(), "sync") {
+		if err := ensureSharedHermesAdapterControlDir(filepath.Join(durableTempDir(t), "control")); err == nil || !strings.Contains(err.Error(), "sync") {
 			t.Fatalf("control sync fault = %v", err)
 		}
 		sharedSessionSetSyncDir = originalSyncDir
@@ -698,7 +698,7 @@ func TestSharedSessionSetLockFaultCoverage(t *testing.T) { //nolint:gocyclo // L
 }
 
 func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
-	badParent := filepath.Join(t.TempDir(), "file")
+	badParent := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(badParent, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -717,11 +717,11 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 		sharedAtomicFileClose = originalClose
 	})
 	sharedAtomicCreateTemp = func(string, string) (*os.File, error) { return nil, errors.New("create fault") }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), nil, 0o600); err == nil || !strings.Contains(err.Error(), "create") {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), nil, 0o600); err == nil || !strings.Contains(err.Error(), "create") {
 		t.Fatalf("atomic create fault = %v", err)
 	}
 
-	closed, closedCreateErr := os.CreateTemp(t.TempDir(), "closed-atomic")
+	closed, closedCreateErr := os.CreateTemp(durableTempDir(t), "closed-atomic")
 	if closedCreateErr != nil {
 		t.Fatal(closedCreateErr)
 	}
@@ -729,16 +729,16 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	sharedAtomicCreateTemp = func(string, string) (*os.File, error) { return closed, nil }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), nil, 0o600); err == nil {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), nil, 0o600); err == nil {
 		t.Fatal("atomic write ignored closed temporary")
 	}
 
-	directory, openErr := os.Open(t.TempDir())
+	directory, openErr := os.Open(durableTempDir(t))
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
 	sharedAtomicCreateTemp = func(string, string) (*os.File, error) { return directory, nil }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), []byte("x"), 0o600); err == nil {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), []byte("x"), 0o600); err == nil {
 		t.Fatal("atomic write ignored directory temporary")
 	}
 
@@ -751,9 +751,9 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 	if dupErr != nil {
 		t.Fatal(dupErr)
 	}
-	pipeAlias := os.NewFile(uintptr(pipeFD), filepath.Join(t.TempDir(), "pipe-temp"))
+	pipeAlias := os.NewFile(uintptr(pipeFD), filepath.Join(durableTempDir(t), "pipe-temp"))
 	sharedAtomicCreateTemp = func(string, string) (*os.File, error) { return pipeAlias, nil }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), []byte("x"), 0o600); err == nil {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), []byte("x"), 0o600); err == nil {
 		t.Fatal("atomic write ignored pipe sync fault")
 	}
 
@@ -763,12 +763,12 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 
 		return errors.New("rename fault")
 	}
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "rename") {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "rename") {
 		t.Fatalf("atomic rename fault = %v", err)
 	}
 	sharedAtomicRename = originalRename
 	sharedAtomicFileSync = func(*os.File) error { return errors.New("sync fault") }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "sync fault") {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "sync fault") {
 		t.Fatalf("atomic sync fault = %v", err)
 	}
 	sharedAtomicFileSync = originalSync
@@ -777,15 +777,15 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 
 		return errors.New("close fault")
 	}
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "close fault") {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "x"), []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "close fault") {
 		t.Fatalf("atomic close fault = %v", err)
 	}
 	sharedAtomicFileClose = originalClose
-	if err := syncSharedHermesDirectory(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if err := syncSharedHermesDirectory(filepath.Join(durableTempDir(t), "missing")); err == nil {
 		t.Fatal("directory sync ignored missing directory")
 	}
 
-	source, sourceErr := os.CreateTemp(t.TempDir(), "atomic-source")
+	source, sourceErr := os.CreateTemp(durableTempDir(t), "atomic-source")
 	if sourceErr != nil {
 		t.Fatal(sourceErr)
 	}
@@ -794,7 +794,7 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 	if duplicateErr != nil {
 		t.Fatal(duplicateErr)
 	}
-	nonEmptyDir := filepath.Join(t.TempDir(), "non-empty")
+	nonEmptyDir := filepath.Join(durableTempDir(t), "non-empty")
 	if err := os.Mkdir(nonEmptyDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -804,14 +804,14 @@ func TestSharedAtomicWriteFaultCoverage(t *testing.T) {
 	alias := os.NewFile(uintptr(duplicateFD), nonEmptyDir)
 	sharedAtomicCreateTemp = func(string, string) (*os.File, error) { return alias, nil }
 	sharedAtomicRename = func(string, string) error { return nil }
-	if err := atomicSharedHermesWriteFile(filepath.Join(t.TempDir(), "target"), []byte("x"), 0o600); err == nil {
+	if err := atomicSharedHermesWriteFile(filepath.Join(durableTempDir(t), "target"), []byte("x"), 0o600); err == nil {
 		t.Fatal("atomic write ignored temporary cleanup failure")
 	}
 }
 
 func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialized config faults share global writer seams.
 	t.Run("existing config and dotenv validation", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.WriteFile(filepath.Join(home, hermesConfigFileName), []byte("dashboard:\n  turn_isolation: true\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -834,7 +834,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 			t.Fatalf("config directory read error = %v", err)
 		}
 
-		dotEnvHome := t.TempDir()
+		dotEnvHome := durableTempDir(t)
 		if err := validateSharedHermesDotEnv(dotEnvHome, map[string]string{".env": "SAFE=value\n"}); err != nil {
 			t.Fatalf("safe dotenv: %v", err)
 		}
@@ -847,7 +847,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 	})
 
 	t.Run("fingerprint read and publication faults", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, home), sharedConfigFingerprintName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -857,7 +857,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 
 		originalWriter := sharedAtomicWriteFile
 		t.Cleanup(func() { sharedAtomicWriteFile = originalWriter })
-		home = t.TempDir()
+		home = durableTempDir(t)
 		sharedAtomicWriteFile = func(path string, data []byte, mode os.FileMode) error {
 			if filepath.Base(path) == sharedConfigFingerprintName {
 				return errors.New("fingerprint fault")
@@ -880,7 +880,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		})
 
 		sharedConfigJSONMarshal = func(any) ([]byte, error) { return nil, errors.New("JSON fault") }
-		if err := materializeSharedHermesConfig(t.Context(), t.TempDir(), nil, nil); err == nil || !strings.Contains(err.Error(), "encode") {
+		if err := materializeSharedHermesConfig(t.Context(), durableTempDir(t), nil, nil); err == nil || !strings.Contains(err.Error(), "encode") {
 			t.Fatalf("shared fingerprint encoding fault = %v", err)
 		}
 		sharedConfigJSONMarshal = originalMarshal
@@ -888,7 +888,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 		sharedConfigTryLock = func(*os.File) (func() error, bool, error) {
 			return nil, false, errors.New("lock fault")
 		}
-		if err := withHermesConfigLock(t.Context(), t.TempDir(), func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "lock fault") {
+		if err := withHermesConfigLock(t.Context(), durableTempDir(t), func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "lock fault") {
 			t.Fatalf("shared config lock fault = %v", err)
 		}
 		sharedConfigTryLock = originalTryLock
@@ -897,7 +897,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 	t.Run("post-materialization validation", func(t *testing.T) {
 		originalWriter := sharedAtomicWriteFile
 		t.Cleanup(func() { sharedAtomicWriteFile = originalWriter })
-		home := t.TempDir()
+		home := durableTempDir(t)
 		sharedAtomicWriteFile = func(path string, data []byte, mode os.FileMode) error {
 			if err := originalWriter(path, data, mode); err != nil {
 				return err
@@ -914,7 +914,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 	})
 
 	t.Run("config lock control, open and run errors", func(t *testing.T) {
-		homeFile := filepath.Join(t.TempDir(), "home-file")
+		homeFile := filepath.Join(durableTempDir(t), "home-file")
 		if err := os.WriteFile(homeFile, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -925,7 +925,7 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 			t.Fatalf("config lock control directory error = %v", err)
 		}
 
-		blocked := t.TempDir()
+		blocked := durableTempDir(t)
 		if err := os.Mkdir(filepath.Join(sharedTestControlDir(t, blocked), sharedConfigLockName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -933,12 +933,12 @@ func TestSharedConfigFaultCoverage(t *testing.T) { //nolint:gocyclo // Serialize
 			t.Fatalf("config lock open error = %v", err)
 		}
 		want := errors.New("run fault")
-		if err := withHermesConfigLock(t.Context(), t.TempDir(), func(string) error { return want }); !errors.Is(err, want) {
+		if err := withHermesConfigLock(t.Context(), durableTempDir(t), func(string) error { return want }); !errors.Is(err, want) {
 			t.Fatalf("config lock run error = %v", err)
 		}
 	})
 
-	if err := ensureLocalSharedHermesHome("/dev"); err == nil {
+	if err := EnsureLocalSharedHermesHome("/dev"); err == nil {
 		t.Fatal("devfs was accepted as a durable shared home")
 	}
 }

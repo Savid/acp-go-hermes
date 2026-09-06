@@ -17,18 +17,18 @@ import (
 // itself, proven once beside the code that makes it.
 
 func TestManagedHermesServerSnapshotOwnerResidualBranches(t *testing.T) {
-	successOwner, err := nativehermes.AcquireSharedNativeSessionOwner(t.TempDir(), "success")
+	successOwner, err := nativehermes.AcquireSharedNativeSessionOwner(durableTempDir(t), "success")
 	if err != nil {
 		t.Fatal(err)
 	}
 	success := &managedHermesServer{
-		Server: newFakeHermesClient(), managed: true, root: t.TempDir(), nativeSessionOwner: successOwner,
+		Server: newFakeHermesClient(), managed: true, root: durableTempDir(t), nativeSessionOwner: successOwner,
 	}
 	if _, reclaimErr := success.reclaimForSnapshot(t.Context()); reclaimErr != nil || !success.ownerReleased {
 		t.Fatalf("successful owner reclaim = %v, released=%v", reclaimErr, success.ownerReleased)
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	failingOwner, err := nativehermes.AcquireSharedNativeSessionOwner(home, "failure")
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestManagedHermesServerSnapshotOwnerResidualBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := &managedHermesServer{
-		Server: newFakeHermesClient(), managed: true, root: t.TempDir(), nativeSessionOwner: failingOwner,
+		Server: newFakeHermesClient(), managed: true, root: durableTempDir(t), nativeSessionOwner: failingOwner,
 	}
 	if _, err := failing.reclaimForSnapshot(t.Context()); err == nil || failing.ownerReleased {
 		t.Fatalf("failed owner reclaim = %v, released=%v", err, failing.ownerReleased)
@@ -58,7 +58,7 @@ func TestManagedHermesOwnershipAndScratchResidualBranches(t *testing.T) {
 		t.Fatalf("nil server root = %q", root)
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	shared := NewAgent(WithSharedHermesHome(home))
 	if shared.optionsErr != nil {
 		t.Fatal(shared.optionsErr)
@@ -74,7 +74,7 @@ func TestManagedHermesOwnershipAndScratchResidualBranches(t *testing.T) {
 	originalRemoveAll := managedRemoveAll
 	t.Cleanup(func() { managedRemoveAll = originalRemoveAll })
 	managedRemoveAll = func(string) error { return errors.New("remove refused") }
-	if err := deleteHermesScratchRoot(t.TempDir(), func() { released = true }); err == nil || released {
+	if err := deleteHermesScratchRoot(durableTempDir(t), func() { released = true }); err == nil || released {
 		t.Fatalf("failed scratch deletion = %v, released=%v", err, released)
 	}
 }

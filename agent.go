@@ -121,7 +121,7 @@ func NewAgent(opts ...Option) *Agent {
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
-		validateSharedHermesHomeOptions(options), validatePathCarrierOptions(options))
+		validateSharedHermesHomeOptions(options), validateAgentEnv(options.Env))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -570,11 +570,11 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		// offending byte of the request back at the peer.
 		var req acp.UnstableForkSessionRequest
 		if err := json.Unmarshal(params, &req); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 		}
 
 		if err := req.Validate(); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: keyParams})
+			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 		}
 
 		return a.forkSession(ctx, req)
@@ -668,7 +668,7 @@ func (a *Agent) session(id acp.SessionId) (*session, error) {
 // unknownSessionError is the uniform rejection every surface gives an id nobody
 // knows, so a caller cannot tell an unknown session from a deleted one.
 func unknownSessionError() error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, keyField: jsonFieldSessionID})
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
 }
 
 func (a *Agent) activeSession(id acp.SessionId) *session {

@@ -208,7 +208,7 @@ func TestStartupMethodProbeCleansDurableSessionAfterModelOptionsFailure(t *testi
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Close(websocket.StatusNormalClosure, "test") }()
-	process := &Process{Client: client, Home: t.TempDir()}
+	process := &Process{Client: client, Home: durableTempDir(t)}
 	if err := process.probeGatewayMethods(ctx); err == nil || !strings.Contains(err.Error(), "model.options") {
 		t.Fatalf("startup probe error = %v", err)
 	}

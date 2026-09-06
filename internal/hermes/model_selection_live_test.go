@@ -57,7 +57,7 @@ func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 	}
 	requireMeasuredHermesVersion(t, executable)
 
-	scratch := t.TempDir()
+	scratch := durableTempDir(t)
 	home, err := os.MkdirTemp(scratch, "acp-go-hermes-runtime-")
 	if err != nil {
 		t.Fatalf("create generation root: %v", err)
@@ -65,7 +65,7 @@ func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 	opts := ProcessOptions{
 		ExecutablePath: executable,
 		Home:           home,
-		Cwd:            t.TempDir(),
+		Cwd:            durableTempDir(t),
 		ScratchParent:  scratch,
 		Timeout:        120 * time.Second,
 		Env: map[string]string{
@@ -88,7 +88,7 @@ func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 	}()
 
 	created, err := proc.Client.CreateSession(ctx, map[string]any{
-		jsonFieldCwd: t.TempDir(), keyTitle: "acp-go-hermes model selection measurement",
+		jsonFieldCwd: durableTempDir(t), keyTitle: "acp-go-hermes model selection measurement",
 	})
 	if err != nil {
 		t.Fatalf("session.create: %v", err)

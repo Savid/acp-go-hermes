@@ -17,7 +17,7 @@ import (
 func unremovableDirPath(t *testing.T) string {
 	t.Helper()
 
-	dir := filepath.Join(t.TempDir(), "held-dir")
+	dir := filepath.Join(durableTempDir(t), "held-dir")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -54,7 +54,7 @@ func TestExecutableExtensionListFollowsPathext(t *testing.T) {
 func TestWindowsOrdinaryRulesResolveAHarnessWithoutAnExecuteBit(t *testing.T) {
 	t.Parallel()
 
-	binDir := t.TempDir()
+	binDir := durableTempDir(t)
 	harness := filepath.Join(binDir, "hermes.exe")
 	require.NoError(t, os.WriteFile(harness, []byte("MZ"), 0o600))
 
@@ -79,7 +79,7 @@ func TestWindowsOrdinaryRulesResolveAHarnessWithoutAnExecuteBit(t *testing.T) {
 func TestWindowsOrdinaryRulesHonourAConfiguredPathext(t *testing.T) {
 	t.Parallel()
 
-	binDir := t.TempDir()
+	binDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "hermes.exe"), []byte("MZ"), 0o600))
 
 	environment := []string{"Path=" + binDir, "PathExt=.CMD"}
@@ -102,7 +102,7 @@ func TestWindowsOrdinaryRulesHonourAConfiguredPathext(t *testing.T) {
 func TestWindowsOrdinaryRulesResolveQualifiedPaths(t *testing.T) {
 	t.Parallel()
 
-	binDir := t.TempDir()
+	binDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "hermes.exe"), []byte("MZ"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "probe.bat.exe"), []byte("MZ"), 0o600))
 
@@ -143,7 +143,7 @@ func TestWindowsOrdinaryRulesResolveQualifiedPaths(t *testing.T) {
 func TestWindowsOrdinaryRulesWithoutExtensionsResolveVerbatim(t *testing.T) {
 	t.Parallel()
 
-	binDir := t.TempDir()
+	binDir := durableTempDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "hermes.exe"), []byte("MZ"), 0o600))
 
 	environment := []string{"Path=" + binDir, "PATHEXT=;"}

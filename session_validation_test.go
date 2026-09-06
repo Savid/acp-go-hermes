@@ -15,7 +15,7 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 	// An empty value is not an absolute path either, so it answers exactly what
 	// a relative one answers rather than a second shape a host would have to
 	// branch on.
-	wantCwdRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: jsonFieldCwd})
+	wantCwdRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: jsonFieldCwd})
 	for name, value := range map[string]string{"relative": "relative", "empty": ""} {
 		var reqErr *acp.RequestError
 		if err := validateSessionStartPaths(value, nil); !errors.As(err, &reqErr) ||
@@ -24,7 +24,7 @@ func TestValidationMetaAndHelperBranches(t *testing.T) {
 		}
 	}
 
-	wantDirRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, keyField: "additionalDirectories[0]"})
+	wantDirRefusal := acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: "additionalDirectories[0]"})
 	for name, value := range map[string]string{"relative": "relative", "empty": ""} {
 		var reqErr *acp.RequestError
 		if err := validateSessionStartPaths(absTestPath("tmp", "project"), []string{value}); !errors.As(err, &reqErr) ||
@@ -263,7 +263,7 @@ func TestValidateSharedHermesHomeOptionsRequiresACleanAbsolutePath(t *testing.T)
 	if err := validateSharedHermesHomeOptions(Options{SharedHermesHome: "relative"}); err == nil {
 		t.Fatal("relative shared home accepted")
 	}
-	dirty := t.TempDir() + string(filepath.Separator) + "directory" + string(filepath.Separator) + ".."
+	dirty := durableTempDir(t) + string(filepath.Separator) + "directory" + string(filepath.Separator) + ".."
 	if err := validateSharedHermesHomeOptions(Options{SharedHermesHome: dirty}); err == nil {
 		t.Fatal("unclean shared home accepted")
 	}

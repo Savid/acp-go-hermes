@@ -52,7 +52,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 		t.Fatalf("test executable: %v", err)
 	}
 
-	return writeTestBinaryLauncher(t, t.TempDir(), "hermes", testBinary,
+	return writeTestBinaryLauncher(t, durableTempDir(t), "hermes", testBinary,
 		map[string]string{
 			"ACP_GO_HERMES_INTERNAL_HELPER": "1",
 			"ACP_GO_HERMES_INTERNAL_MODE":   mode,
@@ -200,7 +200,7 @@ func darwinTestProcessOptions(t *testing.T, options ProcessOptions) ProcessOptio
 	t.Helper()
 	options.AmbientEnvironment = testAmbientEnvironment()
 	if options.ScratchParent == "" {
-		options.ScratchParent = t.TempDir()
+		options.ScratchParent = durableTempDir(t)
 	}
 
 	return options

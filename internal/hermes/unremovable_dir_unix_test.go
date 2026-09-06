@@ -14,7 +14,7 @@ import (
 func unremovableDirPath(t *testing.T) string {
 	t.Helper()
 
-	parent := filepath.Join(t.TempDir(), "parent-file")
+	parent := filepath.Join(durableTempDir(t), "parent-file")
 	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}

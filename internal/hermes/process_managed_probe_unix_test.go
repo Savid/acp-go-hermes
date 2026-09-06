@@ -57,8 +57,8 @@ func managedProbeOptions(t *testing.T, starter *authorityProbeStarter) ProcessOp
 
 	return ProcessOptions{
 		ExecutablePath: "logical-hermes",
-		Home:           t.TempDir(),
-		ScratchParent:  t.TempDir(),
+		Home:           durableTempDir(t),
+		ScratchParent:  durableTempDir(t),
 		NativeEnvironment: map[string]string{
 			"PATH": os.Getenv("PATH"),
 		},

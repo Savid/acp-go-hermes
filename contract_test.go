@@ -114,7 +114,7 @@ func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
 
 	_, imageErr := promptToHermesParts(t.Context(), []acp.ContentBlock{block}, limits, "")
 	requireImageInputError(t, imageErr, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       0,
 		keySizeBytes:   int64(len(png)),
@@ -125,7 +125,7 @@ func TestMediaEnvelopeMatchesEnforcedGates(t *testing.T) {
 		MaxInputBytesPerPrompt: limits.MaxInputBytesPerPrompt,
 	}, "")
 	requireImageInputError(t, promptErr, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       3,
 		keySizeBytes:   int64(len(png)) * 4,
@@ -148,7 +148,7 @@ func TestInitializeAdvertisesHandoffOnlyWhenRootConfigured(t *testing.T) {
 		t.Fatalf("handoff advertised without a configured root: %#v", withoutRoot.AgentCapabilities.Meta)
 	}
 
-	withRoot, err := newTestAgent(WithInputHandoffRoot(t.TempDir())).Initialize(ctx, request)
+	withRoot, err := newTestAgent(WithInputHandoffRoot(durableTempDir(t))).Initialize(ctx, request)
 	if err != nil {
 		t.Fatalf("Initialize with handoff root: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestStableForkRouteMethodNotFound(t *testing.T) {
 
 func TestUnknownSessionErrorShape(t *testing.T) {
 	ctx := context.Background()
-	cwd := t.TempDir()
+	cwd := durableTempDir(t)
 
 	t.Run("load not in store", func(t *testing.T) {
 		_, err := newTestAgent().LoadSession(ctx, LoadSessionRequest("missing", cwd))

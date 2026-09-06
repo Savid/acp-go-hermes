@@ -43,7 +43,7 @@ func TestResidualAuthAndStartupObserverBranches(t *testing.T) {
 }
 
 func TestResidualServerControlLockBranches(t *testing.T) {
-	blockedParent := filepath.Join(t.TempDir(), "file")
+	blockedParent := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(blockedParent, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestResidualServerControlLockBranches(t *testing.T) {
 		t.Fatal("control lock opened below a file")
 	}
 
-	dir := t.TempDir()
+	dir := durableTempDir(t)
 	first, err := acquireServerControlLock(t.Context(), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestResidualServerControlLockOperationFailures(t *testing.T) {
 	t.Run("chmod", func(t *testing.T) {
 		openFile, captured := openCaptured(t)
 		_, err := acquireServerControlLockWithOps(
-			t.Context(), t.TempDir(), openFile,
+			t.Context(), durableTempDir(t), openFile,
 			func(*os.File, os.FileMode) error { return errors.New("chmod refused") },
 			tryLockSharedSessionSetFile,
 		)
@@ -120,7 +120,7 @@ func TestResidualServerControlLockOperationFailures(t *testing.T) {
 	t.Run("lock", func(t *testing.T) {
 		openFile, captured := openCaptured(t)
 		_, err := acquireServerControlLockWithOps(
-			t.Context(), t.TempDir(), openFile, (*os.File).Chmod,
+			t.Context(), durableTempDir(t), openFile, (*os.File).Chmod,
 			func(*os.File, SharedSessionSetLockMode) (func() error, bool, error) {
 				return nil, false, errors.New("lock refused")
 			},
@@ -170,7 +170,7 @@ func TestResidualOrdinaryPipeConstructionFailures(t *testing.T) {
 
 	// A start that fails releases both ends of every pipe.
 	var opened []*os.File
-	_, err := startOrdinaryNativeWithPipes(exec.Command(filepath.Join(t.TempDir(), "missing")), func() (*os.File, *os.File, error) {
+	_, err := startOrdinaryNativeWithPipes(exec.Command(filepath.Join(durableTempDir(t), "missing")), func() (*os.File, *os.File, error) {
 		r, w, pipeErr := os.Pipe()
 		if pipeErr == nil {
 			opened = append(opened, r, w)
@@ -193,7 +193,7 @@ func TestResidualOrdinaryPipeConstructionFailures(t *testing.T) {
 // the parent ends are owned here rather than closed by exec.Cmd.Wait.
 func TestOrdinaryNativeOutputSurvivesAnEarlyWait(t *testing.T) {
 	payload := strings.Repeat("hermes output line\n", 2000)
-	script := filepath.Join(t.TempDir(), "speak")
+	script := filepath.Join(durableTempDir(t), "speak")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$PAYLOAD\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestResidualSharedOwnerBranches(t *testing.T) {
 		sharedOwnerLstat = originalLstat
 	})
 
-	lockPath := filepath.Join(t.TempDir(), "owner.lock")
+	lockPath := filepath.Join(durableTempDir(t), "owner.lock")
 	sharedOwnerFileStat = func(*os.File) (os.FileInfo, error) { return nil, errors.New("stat refused") }
 	if _, err := tryAcquireSharedOwnerLock(lockPath, sharedSessionOwnerKind); err == nil || !strings.Contains(err.Error(), "inspect") {
 		t.Fatalf("owner file stat error = %v", err)
@@ -259,8 +259,8 @@ func TestResidualSharedOwnerBranches(t *testing.T) {
 func TestResidualProcessHelperBranches(t *testing.T) {
 	(&Process{}).retainPreparedTrees(errors.New("ignored"))
 
-	shimDir := t.TempDir()
-	home := t.TempDir()
+	shimDir := durableTempDir(t)
+	home := durableTempDir(t)
 	retained := make([]string, 0, 3)
 	process := &Process{
 		shim: &browserShim{dir: shimDir}, Home: home,
@@ -290,8 +290,8 @@ func TestResidualProcessHelperBranches(t *testing.T) {
 		t.Fatal("tree busy classification drifted")
 	}
 
-	removeShim := t.TempDir()
-	removeHome := t.TempDir()
+	removeShim := durableTempDir(t)
+	removeHome := durableTempDir(t)
 	if err := (&Process{shim: &browserShim{dir: removeShim}, Home: removeHome}).removeUnpreparedTrees(); err != nil {
 		t.Fatal(err)
 	}
@@ -299,14 +299,14 @@ func TestResidualProcessHelperBranches(t *testing.T) {
 	originalRemoveAll := removeAll
 	t.Cleanup(func() { removeAll = originalRemoveAll })
 	removeAll = func(string) error { return errors.New("remove refused") }
-	if err := (&Process{Home: t.TempDir()}).removeUnpreparedTrees(); err == nil {
+	if err := (&Process{Home: durableTempDir(t)}).removeUnpreparedTrees(); err == nil {
 		t.Fatal("home removal failure was ignored")
 	}
 	removeAll = originalRemoveAll
 
 	settled := false
 	rollback := &Process{
-		managed: true, shim: &browserShim{dir: t.TempDir()}, Home: t.TempDir(), preparedShim: true, preparedHome: true,
+		managed: true, shim: &browserShim{dir: durableTempDir(t)}, Home: durableTempDir(t), preparedShim: true, preparedHome: true,
 		reclaimNativeTree: func(context.Context, string) error { return nil },
 		nativeTreeSettled: func() { settled = true },
 	}
@@ -316,7 +316,7 @@ func TestResidualProcessHelperBranches(t *testing.T) {
 
 	wantReclaim := errors.New("reclaim refused")
 	rollback = &Process{
-		managed: true, shim: &browserShim{dir: t.TempDir()}, Home: t.TempDir(), preparedShim: true, preparedHome: true,
+		managed: true, shim: &browserShim{dir: durableTempDir(t)}, Home: durableTempDir(t), preparedShim: true, preparedHome: true,
 		reclaimNativeTree: func(context.Context, string) error { return wantReclaim },
 	}
 	if err := rollback.rollbackPreparedTrees(t.Context()); !errors.Is(err, wantReclaim) {
@@ -325,7 +325,7 @@ func TestResidualProcessHelperBranches(t *testing.T) {
 
 	settled = false
 	reclaim := &Process{
-		managed: true, shim: &browserShim{dir: t.TempDir()}, Home: t.TempDir(), preparedShim: true, preparedHome: true,
+		managed: true, shim: &browserShim{dir: durableTempDir(t)}, Home: durableTempDir(t), preparedShim: true, preparedHome: true,
 		reclaimNativeTree: func(context.Context, string) error { return nil },
 		nativeTreeSettled: func() { settled = true },
 	}
@@ -365,12 +365,12 @@ func TestResidualProcessPrimitiveFailures(t *testing.T) {
 	if defaultWebDistExists() {
 		t.Fatal("web dist exists without a home")
 	}
-	userHomeDir = func() (string, error) { return t.TempDir(), nil }
+	userHomeDir = func() (string, error) { return durableTempDir(t), nil }
 	statPath = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 	if defaultWebDistExists() {
 		t.Fatal("missing web dist exists")
 	}
-	file := filepath.Join(t.TempDir(), "file")
+	file := filepath.Join(durableTempDir(t), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestResidualProcessPrimitiveFailures(t *testing.T) {
 	if defaultWebDistExists() {
 		t.Fatal("file was accepted as web dist")
 	}
-	directoryInfo, err := os.Stat(t.TempDir())
+	directoryInfo, err := os.Stat(durableTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,8 +397,8 @@ func residualManagedStartOptions(t *testing.T, serve func(context.Context, Nativ
 
 	return ProcessOptions{
 		ExecutablePath: "logical-hermes",
-		Home:           t.TempDir(),
-		ScratchParent:  t.TempDir(),
+		Home:           durableTempDir(t),
+		ScratchParent:  durableTempDir(t),
 		NativeEnvironment: map[string]string{
 			"PATH": os.Getenv("PATH"),
 		},
@@ -421,7 +421,7 @@ func residualManagedStartOptions(t *testing.T, serve func(context.Context, Nativ
 
 func TestResidualProcessStartEarlyFailures(t *testing.T) {
 	if process, err := Start(t.Context(), ProcessOptions{
-		AmbientEnvironment: map[string]string{"PATH": t.TempDir()},
+		AmbientEnvironment: map[string]string{"PATH": durableTempDir(t)},
 	}); err == nil || process != nil {
 		t.Fatalf("default executable start = %#v, %v", process, err)
 	}
@@ -434,7 +434,7 @@ func TestResidualProcessStartEarlyFailures(t *testing.T) {
 		t.Fatalf("invalid ambient environment start = %#v, %v", process, err)
 	}
 	if process, err := Start(t.Context(), ProcessOptions{
-		ExecutablePath: "missing-hermes-residual", AmbientEnvironment: map[string]string{"PATH": t.TempDir()},
+		ExecutablePath: "missing-hermes-residual", AmbientEnvironment: map[string]string{"PATH": durableTempDir(t)},
 	}); err == nil || process != nil {
 		t.Fatalf("missing executable start = %#v, %v", process, err)
 	}
@@ -519,9 +519,9 @@ func TestResidualProcessStartEarlyFailures(t *testing.T) {
 }
 
 func TestResidualOrdinaryEnvironmentStartFailures(t *testing.T) {
-	originalPlatform := processRuntimePlatform
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
-	processRuntimePlatform = processPlatformWindows
+	originalPlatform := Platform
+	t.Cleanup(func() { Platform = originalPlatform })
+	Platform = processPlatformWindows
 
 	executable := fakeHermesExecutable(t, fakeProcessModeOK)
 	if process, err := Start(t.Context(), ProcessOptions{
@@ -535,12 +535,12 @@ func TestResidualOrdinaryEnvironmentStartFailures(t *testing.T) {
 		t.Fatalf("duplicate ambient environment start = %#v, %v", process, err)
 	}
 
-	processRuntimePlatform = originalPlatform
+	Platform = originalPlatform
 	executable = fakeHermesExecutable(t, fakeProcessModeOK)
-	processRuntimePlatform = processPlatformWindows
+	Platform = processPlatformWindows
 	if process, err := Start(t.Context(), ProcessOptions{
 		ExecutablePath:     executable,
-		ScratchParent:      t.TempDir(),
+		ScratchParent:      durableTempDir(t),
 		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")},
 		SessionEnv:         map[string]string{"TOKEN": "one", "token": "two"},
 		Timeout:            10 * time.Second,
@@ -721,9 +721,9 @@ func TestResidualManagedEnvironmentBranches(t *testing.T) {
 		t.Fatal("invalid managed environment key was accepted")
 	}
 
-	originalPlatform := processRuntimePlatform
-	t.Cleanup(func() { processRuntimePlatform = originalPlatform })
-	processRuntimePlatform = processPlatformWindows
+	originalPlatform := Platform
+	t.Cleanup(func() { Platform = originalPlatform })
+	Platform = processPlatformWindows
 	if _, err := managedEnvironment(map[string]string{"PATH": "one", "Path": "two"}); err == nil {
 		t.Fatal("duplicate folded managed environment key was accepted")
 	}
@@ -744,7 +744,7 @@ func TestResidualVersionProbeTransactions(t *testing.T) {
 	mkdirTemp = originalMkdirTemp
 
 	opts := ProcessOptions{
-		ScratchParent: t.TempDir(),
+		ScratchParent: durableTempDir(t),
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
 			return nil, errors.New("unexpected start")
 		},
@@ -828,8 +828,8 @@ func TestResidualVersionProbeTransactions(t *testing.T) {
 		t.Fatalf("uncertain managed probe wait = %v, retained=%d", err, retained)
 	}
 
-	ordinary := ProcessOptions{ScratchParent: t.TempDir(), AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}}
-	if err := probeExecutableVersion(t.Context(), filepath.Join(t.TempDir(), "missing"), ordinary); err == nil {
+	ordinary := ProcessOptions{ScratchParent: durableTempDir(t), AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}}
+	if err := probeExecutableVersion(t.Context(), filepath.Join(durableTempDir(t), "missing"), ordinary); err == nil {
 		t.Fatal("ordinary probe start failure was ignored")
 	}
 }
@@ -859,12 +859,12 @@ func TestResidualProbeSettlementAndReclaimBranches(t *testing.T) {
 			return true
 		},
 	}
-	if err := reclaimProbeTree(opts, t.TempDir(), true); !errors.Is(err, wantReclaim) || retained != 1 {
+	if err := reclaimProbeTree(opts, durableTempDir(t), true); !errors.Is(err, wantReclaim) || retained != 1 {
 		t.Fatalf("probe reclaim failure = %v, retained=%d", err, retained)
 	}
 
 	removeAll = func(string) error { return errors.New("remove refused") }
-	if err := reclaimProbeTree(opts, t.TempDir(), false); err == nil || retained != 2 {
+	if err := reclaimProbeTree(opts, durableTempDir(t), false); err == nil || retained != 2 {
 		t.Fatalf("probe remove failure = %v, retained=%d", err, retained)
 	}
 }
@@ -875,7 +875,7 @@ func TestResidualProcessRollbackRemovalFailures(t *testing.T) {
 	retained := 0
 	removeAll = func(string) error { return errors.New("home remove refused") }
 	process := &Process{
-		Home: t.TempDir(), preparedHome: true,
+		Home: durableTempDir(t), preparedHome: true,
 		reclaimNativeTree: func(context.Context, string) error { return nil },
 		retainNativeTree: func(string, error) bool {
 			retained++
@@ -928,7 +928,7 @@ func TestResidualProcessCloseBranches(t *testing.T) {
 
 	process = &Process{
 		native: &probeTestProcess{result: NativeResult{Revoked: true}, err: residualExitError{}},
-		shim:   &browserShim{dir: t.TempDir()},
+		shim:   &browserShim{dir: durableTempDir(t)},
 	}
 	if err := process.Close(t.Context()); err != nil {
 		t.Fatalf("revoked exit close = %v", err)
@@ -936,7 +936,7 @@ func TestResidualProcessCloseBranches(t *testing.T) {
 
 	wantReclaim := errors.New("close reclaim refused")
 	process = &Process{
-		managed: true, native: &probeTestProcess{}, Home: t.TempDir(), preparedHome: true,
+		managed: true, native: &probeTestProcess{}, Home: durableTempDir(t), preparedHome: true,
 		reclaimNativeTree: func(context.Context, string) error { return wantReclaim },
 	}
 	if err := process.Close(t.Context()); !errors.Is(err, wantReclaim) {
@@ -953,7 +953,7 @@ func TestResidualProcessCloseBranches(t *testing.T) {
 	}
 
 	process = &Process{
-		managed: true, shim: &browserShim{dir: t.TempDir()}, preparedShim: true,
+		managed: true, shim: &browserShim{dir: durableTempDir(t)}, preparedShim: true,
 		reclaimNativeTree: func(context.Context, string) error { return wantReclaim },
 	}
 	if err := process.reclaimAndRemove(t.Context()); !errors.Is(err, wantReclaim) {
@@ -1070,13 +1070,13 @@ func TestResidualOrdinaryNativeFallbackKill(t *testing.T) {
 }
 
 func TestResidualOrdinaryProcessStartupFailures(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "hermes")
+	executable := filepath.Join(durableTempDir(t), "hermes")
 	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes 0.20.0'; rm \"$0\"; exit 0; fi\nexit 1\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Start(t.Context(), ProcessOptions{
-		ExecutablePath: executable, ScratchParent: t.TempDir(),
+		ExecutablePath: executable, ScratchParent: durableTempDir(t),
 		AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: time.Second,
 	}); err == nil {
 		t.Fatal("ordinary serve spawn failure was ignored")
@@ -1094,7 +1094,7 @@ func TestResidualOrdinaryProcessStartupFailures(t *testing.T) {
 				executableProbeMu.Unlock()
 			})
 			if _, err := Start(t.Context(), ProcessOptions{
-				ExecutablePath: executable, ScratchParent: t.TempDir(),
+				ExecutablePath: executable, ScratchParent: durableTempDir(t),
 				AmbientEnvironment: map[string]string{"PATH": os.Getenv("PATH")}, Timeout: 2 * time.Second,
 			}); err == nil {
 				t.Fatal("incomplete gateway startup was accepted")
@@ -1121,7 +1121,7 @@ func TestResidualGatewayMethodProbeFailures(t *testing.T) {
 		client := fake.dialClient(t)
 		defer func() { _ = client.Close(1000, "done") }()
 
-		return (&Process{Client: client, Home: t.TempDir()}).probeGatewayMethods(t.Context())
+		return (&Process{Client: client, Home: durableTempDir(t)}).probeGatewayMethods(t.Context())
 	}
 
 	for _, test := range []struct {

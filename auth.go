@@ -501,6 +501,6 @@ func (p *providerAuth) goSafe(name string, fn func()) {
 func invalidAuthField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: authValueInvalid,
-		keyField:       path,
+		jsonFieldField: path,
 	})
 }

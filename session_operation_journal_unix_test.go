@@ -37,7 +37,7 @@ func TestSessionOperationAtomicWriteSyncFailure(t *testing.T) {
 		sessionOperationRemove = previousRemove
 	})
 
-	if err := atomicWriteSessionOperationFile(filepath.Join(t.TempDir(), "value"), []byte("x"), info.Mode().Perm()); err == nil {
+	if err := atomicWriteSessionOperationFile(filepath.Join(durableTempDir(t), "value"), []byte("x"), info.Mode().Perm()); err == nil {
 		t.Fatal("FIFO sync failure was ignored")
 	}
 	current, statErr := os.Stat("/dev/null")
@@ -56,7 +56,7 @@ func TestSessionOperationEnsureRequiresTheParentFlush(t *testing.T) {
 	previousChmod := sessionOperationChmod
 	t.Cleanup(func() { sessionOperationChmod = previousChmod })
 
-	path := filepath.Join(t.TempDir(), "operations")
+	path := filepath.Join(durableTempDir(t), "operations")
 	sessionOperationChmod = func(string, os.FileMode) error { return os.RemoveAll(filepath.Dir(path)) }
 
 	if err := ensureSessionOperationDirectory(path); err == nil {
@@ -70,7 +70,7 @@ func TestSessionOperationEnsureRequiresTheParentFlush(t *testing.T) {
 // itself, proven once beside the code that makes it.
 
 func TestSessionOperationJournalRoundTripAndPreparedStoreProof(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "hermes-home")
+	home := filepath.Join(durableTempDir(t), "hermes-home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestSessionOperationJournalRoundTripAndPreparedStoreProof(t *testing.T) {
 }
 
 func TestSessionOperationJournalPermissionsLocationAndNoSecretFields(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "official-home")
+	home := filepath.Join(durableTempDir(t), "official-home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestSessionOperationJournalPermissionsLocationAndNoSecretFields(t *testing.
 }
 
 func TestSessionOperationJournalAtomicRenameFailurePreservesCommittedBytes(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestSessionOperationJournalAtomicRenameFailurePreservesCommittedBytes(t *te
 }
 
 func TestSessionOperationJournalMalformedAndUnexpectedEntriesFailClosed(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestSessionOperationJournalMalformedAndUnexpectedEntriesFailClosed(t *testi
 }
 
 func TestSessionOperationPreparedPayloadTamperFailsClosed(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestSessionOperationPreparedPayloadTamperFailsClosed(t *testing.T) {
 }
 
 func TestSessionOperationStoreUnavailableRemainsUnknown(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestSessionOperationStoreUnavailableRemainsUnknown(t *testing.T) {
 }
 
 func TestSessionOperationFindFiltersAndPreparedDiscard(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestSessionOperationFindFiltersAndPreparedDiscard(t *testing.T) {
 }
 
 func TestSessionOperationJournalRejectsPhaseRegressionAndInvalidPreparation(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestSessionOperationJournalRejectsPhaseRegressionAndInvalidPreparation(t *t
 }
 
 func TestSessionOperationJournalTimestampsAdvance(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
+	home := filepath.Join(durableTempDir(t), "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 	})
 
 	t.Run("ensure operations", func(t *testing.T) {
-		home := t.TempDir()
+		home := durableTempDir(t)
 		previous := sessionOperationMkdirAll
 		sessionOperationMkdirAll = func(string, os.FileMode) error { return errors.New("mkdir all") }
 		t.Cleanup(func() { sessionOperationMkdirAll = previous })
@@ -414,7 +414,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 	t.Run("invalid record", func(t *testing.T) {
 		fields := validFields(t)
 		fields.Marker = ""
-		if _, err := beginSessionOperationJournal(t.TempDir(), fields); err == nil {
+		if _, err := beginSessionOperationJournal(durableTempDir(t), fields); err == nil {
 			t.Fatal("invalid record accepted")
 		}
 	})
@@ -423,7 +423,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 		previous := sessionOperationMkdir
 		sessionOperationMkdir = func(string, os.FileMode) error { return errors.New("mkdir") }
 		t.Cleanup(func() { sessionOperationMkdir = previous })
-		if _, err := beginSessionOperationJournal(t.TempDir(), validFields(t)); err == nil {
+		if _, err := beginSessionOperationJournal(durableTempDir(t), validFields(t)); err == nil {
 			t.Fatal("operation mkdir failure ignored")
 		}
 	})
@@ -449,7 +449,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 			sessionOperationChmod = previousChmod
 			sessionOperationRemoveAll = previousRemoveAll
 		})
-		if _, err := beginSessionOperationJournal(t.TempDir(), validFields(t)); err == nil || !removed {
+		if _, err := beginSessionOperationJournal(durableTempDir(t), validFields(t)); err == nil || !removed {
 			t.Fatalf("chmod error=%v removed=%v", err, removed)
 		}
 	})
@@ -468,7 +468,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 			return nil
 		}
 		t.Cleanup(func() { sessionOperationChmod = previous })
-		if _, err := beginSessionOperationJournal(t.TempDir(), validFields(t)); err == nil {
+		if _, err := beginSessionOperationJournal(durableTempDir(t), validFields(t)); err == nil {
 			t.Fatal("operation entry sync failure ignored")
 		}
 	})
@@ -477,7 +477,7 @@ func TestSessionOperationJournalBeginFailures(t *testing.T) {
 		previous := sessionOperationCreateTemp
 		sessionOperationCreateTemp = func(string, string) (sessionOperationFile, error) { return nil, errors.New("create temp") }
 		t.Cleanup(func() { sessionOperationCreateTemp = previous })
-		if _, err := beginSessionOperationJournal(t.TempDir(), validFields(t)); err == nil {
+		if _, err := beginSessionOperationJournal(durableTempDir(t), validFields(t)); err == nil {
 			t.Fatal("initial journal persist failure ignored")
 		}
 	})
@@ -488,7 +488,7 @@ func TestSessionOperationJournalDiscoveryAndLoadFailures(t *testing.T) {
 		t.Fatal("invalid shared home accepted")
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	previousReadDir := sessionOperationReadDir
 	sessionOperationReadDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("readdir") }
 	if _, err := findPendingSessionOperationJournals(home, "", ""); err == nil {
@@ -515,7 +515,7 @@ func TestSessionOperationJournalDiscoveryAndLoadFailures(t *testing.T) {
 	}
 	sessionOperationLstat = previousLstat
 
-	notDirectory := filepath.Join(t.TempDir(), "file")
+	notDirectory := filepath.Join(durableTempDir(t), "file")
 	if writeErr := os.WriteFile(notDirectory, []byte("x"), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
@@ -523,7 +523,7 @@ func TestSessionOperationJournalDiscoveryAndLoadFailures(t *testing.T) {
 		t.Fatal("non-directory accepted")
 	}
 
-	missingJournalDir := filepath.Join(t.TempDir(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	missingJournalDir := filepath.Join(durableTempDir(t), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	if mkdirErr := os.Mkdir(missingJournalDir, 0o700); mkdirErr != nil {
 		t.Fatal(mkdirErr)
 	}
@@ -573,7 +573,7 @@ func TestSessionOperationJournalUpdateAndPreparationFailures(t *testing.T) {
 		t.Fatal("nil preparation accepted")
 	}
 
-	home := t.TempDir()
+	home := durableTempDir(t)
 	journal := newTestSessionOperationJournal(t, home, sessionOperationKindNew)
 	marker := "changed-marker"
 	baseline := []string{"z", "a"}
@@ -585,7 +585,7 @@ func TestSessionOperationJournalUpdateAndPreparationFailures(t *testing.T) {
 		t.Fatal("invalid patch accepted")
 	}
 
-	committed := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+	committed := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 	committed.record.Phase = sessionOperationPhaseStoreCommitted
 	if err := committed.prepareReplacements(testSessionOperationReplacements()); err == nil {
 		t.Fatal("committed journal prepared")
@@ -644,7 +644,7 @@ func TestSessionOperationPreparedReplacementFailures(t *testing.T) {
 
 	newPrepared := func(t *testing.T) *sessionOperationJournal {
 		t.Helper()
-		journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+		journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 		identifyTestNewSessionOperationJournal(t, journal)
 		if err := journal.prepareReplacements(testSessionOperationReplacements()); err != nil {
 			t.Fatal(err)
@@ -764,7 +764,7 @@ func TestSessionOperationPreparedReplacementFailures(t *testing.T) {
 }
 
 func TestSessionOperationPreparedStoreInspectionFailures(t *testing.T) {
-	journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+	journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 	if _, err := inspectPreparedSessionOperationStore(t.Context(), NewInMemorySessionStore(), journal); err == nil {
 		t.Fatal("unprepared journal accepted")
 	}
@@ -800,7 +800,7 @@ func TestSessionOperationPreparedStoreInspectionFailures(t *testing.T) {
 }
 
 func TestSessionOperationJournalValidationMatrix(t *testing.T) {
-	journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+	journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 	base := journal.record
 
 	mutations := map[string]func(*sessionOperationJournalRecord){
@@ -864,7 +864,7 @@ func TestSessionOperationJournalValidationMatrix(t *testing.T) {
 }
 
 func TestPreparedSessionOperationManifestValidationMatrix(t *testing.T) {
-	journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+	journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 	identifyTestNewSessionOperationJournal(t, journal)
 	if err := journal.prepareReplacements(testSessionOperationReplacements()); err != nil {
 		t.Fatal(err)
@@ -927,7 +927,7 @@ func TestSessionOperationRemovalAndDirectoryFailures(t *testing.T) {
 		"recovered": func(journal *sessionOperationJournal) error { return journal.removeRecovered() },
 	} {
 		t.Run(name+" remove", func(t *testing.T) {
-			journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+			journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 			previous := sessionOperationRemoveAll
 			sessionOperationRemoveAll = func(string) error { return errors.New("remove") }
 			t.Cleanup(func() { sessionOperationRemoveAll = previous })
@@ -937,7 +937,7 @@ func TestSessionOperationRemovalAndDirectoryFailures(t *testing.T) {
 		})
 
 		t.Run(name+" sync", func(t *testing.T) {
-			journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+			journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 			previous := sessionOperationRemoveAll
 			sessionOperationRemoveAll = func(path string) error {
 				if err := os.RemoveAll(path); err != nil {
@@ -958,7 +958,7 @@ func TestSessionOperationMarshalFaults(t *testing.T) {
 	wantErr := errors.New("marshal fault")
 
 	t.Run("prepared manifest", func(t *testing.T) {
-		journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+		journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 		identifyTestNewSessionOperationJournal(t, journal)
 		previous := sessionOperationMarshal
 		sessionOperationMarshal = func(value any) ([]byte, error) {
@@ -976,7 +976,7 @@ func TestSessionOperationMarshalFaults(t *testing.T) {
 	})
 
 	t.Run("journal", func(t *testing.T) {
-		journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+		journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 		previous := sessionOperationMarshal
 		sessionOperationMarshal = func(value any) ([]byte, error) {
 			if _, ok := value.(sessionOperationJournalRecord); ok {
@@ -993,7 +993,7 @@ func TestSessionOperationMarshalFaults(t *testing.T) {
 	})
 
 	t.Run("manifest validation", func(t *testing.T) {
-		journal := newTestSessionOperationJournal(t, t.TempDir(), sessionOperationKindNew)
+		journal := newTestSessionOperationJournal(t, durableTempDir(t), sessionOperationKindNew)
 		identifyTestNewSessionOperationJournal(t, journal)
 		if err := journal.prepareReplacements(testSessionOperationReplacements()); err != nil {
 			t.Fatal(err)

@@ -91,7 +91,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 				Data: test.data, MimeType: test.mimeType,
 			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: test.want,
 				keyIndex:       0,
 			})
@@ -103,7 +103,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 		Uri: &uriOnly, MimeType: mimePNG,
 	}}}, ImageLimits{}, "")
 	requireImageInputError(t, uriErr, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrMissingData,
 		keyIndex:       0,
 	})
@@ -114,7 +114,7 @@ func TestImageInputErrorTaxonomyAndOrder(t *testing.T) {
 		{Image: &acp.ContentBlockImage{Data: "!", MimeType: mimePNG}},
 	}, ImageLimits{}, "")
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrInvalidBase64,
 		keyIndex:       1,
 	})
@@ -135,7 +135,7 @@ func TestImageInputRejectsAnimation(t *testing.T) {
 				Data: fixtureBase64(t, test.name), MimeType: test.mimeType,
 			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: imageErrAnimatedNotSupported,
 				keyIndex:       0,
 			})
@@ -160,7 +160,7 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 		MaxInputBytesPerImage: size - 1,
 	}, "")
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       0,
 		keySizeBytes:   size,
@@ -177,7 +177,7 @@ func TestImageInputDecodedByteLimits(t *testing.T) {
 		MaxInputBytesPerPrompt: size*2 - 1,
 	}, "")
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrTooLarge,
 		keyIndex:       1,
 		keySizeBytes:   size * 2,
@@ -208,7 +208,7 @@ func TestImageInputStructuralDefectsPrecedeTooLarge(t *testing.T) {
 				Data: base64.StdEncoding.EncodeToString(raw), MimeType: test.mimeType,
 			}}}, ImageLimits{MaxInputBytesPerImage: size - 1}, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: test.want,
 				keyIndex:       0,
 			})
@@ -229,7 +229,7 @@ func TestImageInputAnimationSurvivesDeepTruncation(t *testing.T) {
 		Data: base64.StdEncoding.EncodeToString(gif), MimeType: mimeGIF,
 	}}}, ImageLimits{MaxInputBytesPerImage: limit}, "")
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrAnimatedNotSupported,
 		keyIndex:       0,
 	})
@@ -306,7 +306,7 @@ func TestPromptImageValidationPrecedesNativeTurnAndUnknownModelForwards(t *testi
 		},
 	})
 	requireImageInputError(t, err, map[string]any{
-		keyField:       acpFieldPromptImage,
+		jsonFieldField: acpFieldPromptImage,
 		jsonFieldError: imageErrInvalidBase64,
 		keyIndex:       1,
 	})
@@ -404,7 +404,7 @@ func TestImageStructureMalformedHeaders(t *testing.T) {
 				Data: base64.StdEncoding.EncodeToString(test.data), MimeType: test.mimeType,
 			}}}, ImageLimits{}, "")
 			requireImageInputError(t, err, map[string]any{
-				keyField:       acpFieldPromptImage,
+				jsonFieldField: acpFieldPromptImage,
 				jsonFieldError: imageErrInvalidDimensions,
 				keyIndex:       0,
 			})

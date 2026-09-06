@@ -28,7 +28,7 @@ func TestEnsureScratchParent(t *testing.T) {
 	})
 
 	t.Run("missing nested dir created 0700", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "nested", "scratch")
+		dir := filepath.Join(durableTempDir(t), "nested", "scratch")
 		got, err := ensureScratchParent(dir)
 		if err != nil {
 			t.Fatalf("ensureScratchParent: %v", err)
@@ -49,7 +49,7 @@ func TestEnsureScratchParent(t *testing.T) {
 	})
 
 	t.Run("regular-file parent errors", func(t *testing.T) {
-		file := filepath.Join(t.TempDir(), "not-a-dir")
+		file := filepath.Join(durableTempDir(t), "not-a-dir")
 		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}

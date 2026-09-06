@@ -1,12 +1,14 @@
 package hermesacp
 
 import (
+	"fmt"
 	"maps"
-	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
@@ -20,19 +22,6 @@ const (
 	sessionHermesSessionTokenKey = "HERMES_DASHBOARD_SESSION_TOKEN"
 	sessionManagedPathEnvPrefix  = "ACP_GO_HERMES_PATH_DIR_"
 )
-
-var sessionEnvPlatform = runtime.GOOS
-
-// sessionEnvIdentity is the name the target platform resolves an environment
-// key by: the exact bytes on Unix, where PATH and path are two variables, and
-// the upper-cased spelling on Windows, where they are one.
-func sessionEnvIdentity(key string) string {
-	if sessionEnvPlatform == runtimePlatformWindows {
-		return strings.ToUpper(key)
-	}
-
-	return key
-}
 
 func validEnvName(key string) bool {
 	return key != "" && !strings.ContainsAny(key, "=\x00")
@@ -48,7 +37,7 @@ func carrierOwnedEnvKey(key string) bool {
 		return true
 	}
 
-	switch sessionEnvIdentity(key) {
+	switch nativehermes.EnvironmentKey(key) {
 	case sessionBashEnvironmentKey, sessionShellEnvironmentKey:
 		return true
 	default:
@@ -56,22 +45,57 @@ func carrierOwnedEnvKey(key string) bool {
 	}
 }
 
+// injectionEnvKey reports whether a key names a loader or node injection
+// vector. Each is read under an exact platform spelling, so the comparison
+// goes through the platform identity.
+func injectionEnvKey(key string) bool {
+	name := nativehermes.EnvironmentKey(key)
+
+	return name == sessionNodeOptionsEnvKey || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
+}
+
 // blockedSessionEnvKey reports whether a session env key names a variable the
 // adapter refuses to install on that session's Hermes process: the carrier's
-// own names, the search path that extraPathDirs alone owns, the state roots
-// the adapter writes itself, and the loader and node injection names. All but
-// the adapter namespace compare through the platform identity.
+// own names, the injection vectors, the search path that extraPathDirs alone
+// owns, and the state roots the adapter writes itself.
 func blockedSessionEnvKey(key string) bool {
-	if carrierOwnedEnvKey(key) {
+	if carrierOwnedEnvKey(key) || injectionEnvKey(key) {
 		return true
 	}
 
-	switch name := sessionEnvIdentity(key); name {
-	case sessionPathEnvironmentKey, sessionNodeOptionsEnvKey, sessionHermesHomeEnvKey, sessionHermesSessionTokenKey:
+	switch nativehermes.EnvironmentKey(key) {
+	case sessionPathEnvironmentKey, sessionHermesHomeEnvKey, sessionHermesSessionTokenKey:
 		return true
 	default:
-		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
+		return false
 	}
+}
+
+// validateAgentEnv applies the session name rule to the static Agent-scoped
+// environment, with PATH allowed because that surface establishes the native
+// base search path. A refusal fails Agent construction.
+func validateAgentEnv(env map[string]string) error {
+	seen := make(map[string]string, len(env))
+
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		switch {
+		case !validEnvName(key) || strings.ContainsRune(env[key], '\x00'):
+			return fmt.Errorf("environment key %q is not a variable name", key)
+		case carrierOwnedEnvKey(key):
+			return fmt.Errorf("environment key %q is reserved for the session PATH carrier", key)
+		case injectionEnvKey(key):
+			return fmt.Errorf("environment key %q is an injection vector", key)
+		}
+
+		identity := nativehermes.EnvironmentKey(key)
+		if previous, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
+		}
+
+		seen[identity] = key
+	}
+
+	return nil
 }
 
 // validateSessionEnv checks a session environment in sorted key order, so the
@@ -88,7 +112,7 @@ func validateSessionEnv(env map[string]string, path string) error {
 			return unsupportedField(path + "." + key)
 		}
 
-		identity := sessionEnvIdentity(key)
+		identity := nativehermes.EnvironmentKey(key)
 		if _, duplicate := seen[identity]; duplicate {
 			return ambiguousField(path + "." + key)
 		}
@@ -102,7 +126,7 @@ func validateSessionEnv(env map[string]string, path string) error {
 func ambiguousField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valAmbiguous,
-		keyField:       path,
+		jsonFieldField: path,
 	})
 }
 

@@ -67,15 +67,15 @@ func TestSessionMarkPartAcceptsFirstEmptyRawPayload(t *testing.T) {
 }
 
 func TestSessionClonesExtraPathDirsAcrossConstructionAndSnapshot(t *testing.T) {
-	first := t.TempDir()
-	second := t.TempDir()
+	first := durableTempDir(t)
+	second := durableTempDir(t)
 	input := []string{first, second, first}
 	env := map[string]string{"WAGIE_API_TOKEN": "one"}
 	client := newFakeHermesClient()
 	session := newSession(
 		newTestAgent(),
 		"session-carrier",
-		t.TempDir(),
+		durableTempDir(t),
 		nil,
 		nil,
 		testNativeSession("native-carrier"),
@@ -84,14 +84,14 @@ func TestSessionClonesExtraPathDirsAcrossConstructionAndSnapshot(t *testing.T) {
 		idmapRecord{},
 	)
 
-	input[0] = t.TempDir()
+	input[0] = durableTempDir(t)
 	env["WAGIE_API_TOKEN"] = "mutated"
 	snapshot := session.snapshot()
 	if !reflect.DeepEqual(snapshot.extraPathDirs, []string{first, second, first}) || snapshot.env["WAGIE_API_TOKEN"] != "one" {
 		t.Fatalf("constructed carrier = dirs %#v env %#v", snapshot.extraPathDirs, snapshot.env)
 	}
 
-	snapshot.extraPathDirs[0] = t.TempDir()
+	snapshot.extraPathDirs[0] = durableTempDir(t)
 	snapshot.env["WAGIE_API_TOKEN"] = "snapshot-mutated"
 	again := session.snapshot()
 	if again.extraPathDirs[0] != first || again.env["WAGIE_API_TOKEN"] != "one" {

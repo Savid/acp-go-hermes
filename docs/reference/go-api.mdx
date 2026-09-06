@@ -63,7 +63,7 @@ arbitrary error text are intentionally omitted.
 | `WithHome` | Unsupported. Use `WithScratchDir` for isolated ephemeral state or `WithSharedHermesHome` for the explicit official-Hermes durable mode. |
 | `WithSharedHermesHome` | Absolute, already-clean, supported local-filesystem path used as the exact durable `HERMES_HOME` by each per-session official Hermes process of this adapter. The adapter claims the home root exclusively for the lifetime of those processes and refuses to start when another adapter already holds it. Native database/auth state is shared; processes, environments, events, and wrapper controls remain separate. With `WithProviderAuthRoot` also set, the adapter resolves this path's symlinks and uses the resolved path everywhere instead. |
 | `WithDefaultModel` | Default `provider/model` for new sessions. |
-| `WithEnv` | Static Agent-scoped environment overlaid on the authority's complete native environment, or in ordinary mode on the inherited allowlist of the captured ambient environment (see the [CLI reference](/docs/reference/cli)), for version probing and each `hermes serve` process. It is the route for every provider key and every other variable Hermes should see that the allowlist does not inherit. This is the only API that may set the native base `PATH`. `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` are reserved; the PATH carrier exists only in ordinary mode and never crosses the host-authority boundary. |
+| `WithEnv` | Static Agent-scoped environment overlaid on the authority's complete native environment, or in ordinary mode on the inherited allowlist of the captured ambient environment (see the [CLI reference](/docs/reference/cli)), for version probing and each `hermes serve` process. It is the route for every provider key and every other variable Hermes should see that the allowlist does not inherit. This is the only API that may set the native base `PATH`. `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` are reserved for the PATH carrier, which exists only in ordinary mode and never crosses the host-authority boundary. Names follow the session `env` rule with `PATH` allowed: a key is non-empty and free of `=` and NUL, the value is free of NUL, the injection names `NODE_OPTIONS`, `BASH_ENV`, `ENV`, and any `LD_` or `DYLD_` prefix are refused under the platform identity, the private adapter namespace is refused under every spelling, and two spellings of one Windows variable are refused; a refusal fails Agent construction. |
 | `WithSeedFiles` | Files written into each session's config root before launch. |
 | `WithClient` | The `acp.Client` a directly constructed `Agent` streams session updates, permission requests, and elicitations to. Required for the embedding path; refused by `Serve`, which installs its own connection. |
 | `WithSessionStore` | Durable `SessionStore` for persistence. |
@@ -217,9 +217,8 @@ indexed metadata field. Session `Env` refuses `PATH`, `NODE_OPTIONS`,
 `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`,
 `HERMES_DASHBOARD_SESSION_TOKEN`, and `ACP_GO_HERMES_PATH_DIR_*` keys, and
 accepts every other structurally valid name in either case; see
-[Metadata](/docs/reference/meta). `WithEnv` and the host authority environment
-also reserve `BASH_ENV`, `ENV`, and the `ACP_GO_HERMES_PATH_DIR_*` namespace,
-and ambient shell hooks are scrubbed at ordinary launch. The dedicated ordered
+[Metadata](/docs/reference/meta). `WithEnv` applies the same rule with `PATH`
+allowed, and ambient shell hooks are scrubbed at ordinary launch. The dedicated ordered
 field is the sole session-scoped PATH authority.
 `ValidateHermesSessionMeta(meta)` returns the refusal a session-establishing
 request carrying that `_meta` map would receive, or nil, without an agent.

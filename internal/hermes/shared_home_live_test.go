@@ -35,7 +35,7 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 		}
 	}
 
-	sharedHome := t.TempDir()
+	sharedHome := durableTempDir(t)
 	authData, err := json.Marshal(map[string]any{
 		"version": 1,
 		"providers": map[string]any{
@@ -67,8 +67,8 @@ func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidenc
 		native Session
 	}
 	lanes := []*lane{
-		{id: "shared-a", cwd: t.TempDir(), xdg: testXDGDirs(t)},
-		{id: "shared-b", cwd: t.TempDir(), xdg: testXDGDirs(t)},
+		{id: "shared-a", cwd: durableTempDir(t), xdg: testXDGDirs(t)},
+		{id: "shared-b", cwd: durableTempDir(t), xdg: testXDGDirs(t)},
 	}
 
 	start := func(l *lane) error {

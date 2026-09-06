@@ -78,7 +78,7 @@ func TestManagedHermesServerSnapshotResidualBranches(t *testing.T) {
 	client := newFakeHermesClient()
 	client.closeErr = ErrContainmentIncomplete
 	server := &managedHermesServer{
-		Server: client, managed: true, root: t.TempDir(), sessionID: "session",
+		Server: client, managed: true, root: durableTempDir(t), sessionID: "session",
 		retainIncomplete: func(error, acp.SessionId, string) { retained++ },
 	}
 	if _, err := server.reclaimForSnapshot(t.Context()); !errors.Is(err, ErrContainmentIncomplete) || retained != 1 {
@@ -96,10 +96,10 @@ func TestManagedHermesServerSnapshotResidualBranches(t *testing.T) {
 	originalRemoveAll := managedRemoveAll
 	t.Cleanup(func() { managedRemoveAll = originalRemoveAll })
 	managedRemoveAll = func(string) error { return errors.New("scratch remove refused") }
-	if err := (&managedHermesServer{settled: true, root: t.TempDir()}).finishReclaimedSnapshot(); err == nil {
+	if err := (&managedHermesServer{settled: true, root: durableTempDir(t)}).finishReclaimedSnapshot(); err == nil {
 		t.Fatal("snapshot cleanup failure was ignored")
 	}
-	if err := (&managedHermesServer{Server: newFakeHermesClient(), settled: true, root: t.TempDir()}).Close(t.Context()); err == nil {
+	if err := (&managedHermesServer{Server: newFakeHermesClient(), settled: true, root: durableTempDir(t)}).Close(t.Context()); err == nil {
 		t.Fatal("close cleanup failure was ignored")
 	}
 	managedRemoveAll = originalRemoveAll
