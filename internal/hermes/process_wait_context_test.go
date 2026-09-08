@@ -169,15 +169,13 @@ func TestSynchronizedWriterSerializesUnderlyingWrites(t *testing.T) {
 
 	var workers sync.WaitGroup
 	for range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for range 32 {
 				if _, err := serialized.Write([]byte("output")); err != nil {
 					t.Errorf("write failed: %v", err)
 				}
 			}
-		}()
+		})
 	}
 	workers.Wait()
 	if witness.unlocked {

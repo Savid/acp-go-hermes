@@ -208,7 +208,8 @@ func WithScratchDir(dir string) Option {
 // Omitting the option leaves the form rejected as invalid_handoff, and the
 // acp-go.dev/handoff capability is then not advertised. Files under the root
 // stay host-owned: the adapter resolves, reads, and verifies them, and never
-// writes, moves, or removes anything there.
+// writes, moves, or removes anything there. Managed mode pins this read root
+// before native preparation; it must be disjoint from the complete scratch parent.
 func WithInputHandoffRoot(dir string) Option {
 	return func(options *Options) {
 		options.InputHandoffRoot = dir
@@ -268,8 +269,9 @@ func WithDefaultModel(model string) Option {
 }
 
 // WithEnv supplies the static Agent-scoped native environment overlay.
-// BASH_ENV and ACP_GO_HERMES_PATH_DIR_* are reserved for the adapter's native
-// terminal PATH carrier and fail Agent construction.
+// Shell and loader injection names and the ACP_GO_HERMES_PATH_DIR_* and
+// ACP_GO_HERMES_INTERNAL_* prefixes fail Agent construction. PATH sets the
+// static native search path; session paths prepend through WithHermesExtraPathDirs.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = cloneStringMap(env)

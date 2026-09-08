@@ -1,5 +1,7 @@
 package lifecycle
 
+import "slices"
+
 // applySnapshot opens the stream from a whole-state assertion. A snapshot is
 // taken whole or not at all: the entire assertion is judged before any of it is
 // projected, so a refused snapshot opens nothing and leaves no half-built
@@ -180,13 +182,7 @@ func (i introductions) holds(owner Owner) bool {
 // requires_action foreground. The set is complete, so a blocker it does not list
 // does not exist.
 func (s Snapshot) carriesBlocker() bool {
-	for _, action := range s.Actions {
-		if blocksForeground(action) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(s.Actions, blocksForeground)
 }
 
 // vacant reports whether the asserted state holds nothing live. The sets are the

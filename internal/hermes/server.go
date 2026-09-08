@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -619,9 +621,7 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 	configurationStarted := time.Now()
 
 	configurationEnv := cloneEnvironmentMap(options.Env)
-	for key, value := range options.SessionEnv {
-		configurationEnv[key] = value
-	}
+	maps.Copy(configurationEnv, options.SessionEnv)
 
 	servers, mcpSecretEnv, err := mcpServersWithSecretEnv(options.MCPServers, configurationEnv)
 	if err != nil {
@@ -644,13 +644,9 @@ func StartServer(ctx context.Context, options StartOptions) (_ Server, resultErr
 	observeHermesStartupStage(ctx, options.ObserveStartupStage, "session", "configuration", configurationStarted, nil)
 
 	processEnv := make(map[string]string, len(options.SessionEnv)+len(mcpSecretEnv)+1)
-	for key, value := range options.SessionEnv {
-		processEnv[key] = value
-	}
+	maps.Copy(processEnv, options.SessionEnv)
 
-	for key, value := range mcpSecretEnv {
-		processEnv[key] = value
-	}
+	maps.Copy(processEnv, mcpSecretEnv)
 
 	// Hermes approval.request events are session-keyed and do not carry the
 	// native tool-call id. The immediately preceding tool.start event is the
@@ -3363,9 +3359,7 @@ func RedactedMCPServers(servers []acp.McpServer) ([]acp.McpServer, error) {
 
 func cloneEnvironmentMap(source map[string]string) map[string]string {
 	cloned := make(map[string]string, len(source))
-	for key, value := range source {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, source)
 
 	return cloned
 }
@@ -3420,16 +3414,14 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 	}
 	// Reject any ".." segment so the cleaned join can never escape home; a
 	// relative path without ".." segments always stays confined under home.
-	for _, segment := range strings.Split(filepath.ToSlash(relative), "/") {
-		if segment == ".." {
-			return "", "", invalid()
-		}
+	if slices.Contains(strings.Split(filepath.ToSlash(relative), "/"), "..") {
+		return "", "", invalid()
 	}
 
 	clean := filepath.Clean(filepath.FromSlash(relative))
 
 	slashClean := filepath.ToSlash(clean)
-	for _, segment := range strings.Split(slashClean, "/") {
+	for segment := range strings.SplitSeq(slashClean, "/") {
 		folded := strings.ToLower(segment)
 		if strings.EqualFold(folded, sharedSessionOwnersDir) ||
 			strings.HasPrefix(folded, ".acp-go-hermes-") ||
@@ -3447,9 +3439,7 @@ func resolveSeedFilePath(home string, relative string) (string, string, error) {
 // merged recursively, and override wins for every conflicting key.
 func deepMergeYAML(base, override map[string]any) map[string]any {
 	merged := make(map[string]any, len(base)+len(override))
-	for key, value := range base {
-		merged[key] = value
-	}
+	maps.Copy(merged, base)
 
 	for key, value := range override {
 		if existing, ok := merged[key].(map[string]any); ok {

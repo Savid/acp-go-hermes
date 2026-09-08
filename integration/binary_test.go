@@ -27,7 +27,7 @@ func TestHermesACPAgentBinaryClosedInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), t.TempDir())...)
+	cmd := agentCommand(t, ctx, integrationAgentArgs(integrationHermesPath(t), t.TempDir())...)
 	cmd.Stdin = strings.NewReader("")
 
 	var stdout bytes.Buffer
@@ -60,26 +60,28 @@ func requireRunLiveTokens(t *testing.T) {
 
 func integrationHermesPath(t *testing.T) string {
 	t.Helper()
+	if os.Getenv(envRunIntegration) != "1" {
+		t.Skipf("set %s=1 to run hermes integration tests", envRunIntegration)
+	}
 	path := os.Getenv(envHermesPath)
 	if path == "" {
 		path = "hermes"
 	}
 	resolved, err := exec.LookPath(path)
 	if err != nil {
-		t.Skipf("find hermes CLI: %v", err)
+		if os.Getenv(envRunLiveTokens) == "1" || os.Getenv("ACP_GO_HERMES_RUN_ATTENDED") == "1" || os.Getenv("ACP_GO_HERMES_RUN_KEYSTORE") == "1" {
+			t.Fatalf("requested hermes integration tier requires the CLI: %v", err)
+		}
+		t.Skipf("hermes CLI absent for smoke: %v; set ACP_GO_HERMES_HARNESS_PATH", err)
 	}
 	return resolved
 }
 
-func agentCommand(ctx context.Context, args ...string) *exec.Cmd {
-	if binary := os.Getenv(envAgentBinary); binary != "" {
-		return exec.CommandContext(ctx, binary, args...) // #nosec G204,G702 -- opt-in integration test command.
-	}
-	commandArgs := make([]string, 0, 2+len(args))
-	commandArgs = append(commandArgs, "run", "./cmd/acp-go-hermes")
-	commandArgs = append(commandArgs, args...)
-	cmd := exec.CommandContext(ctx, "go", commandArgs...) // #nosec G204,G702 -- test runs the local wrapper command.
+func agentCommand(t *testing.T, ctx context.Context, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, integrationBinaryPath(t), args...)
 	cmd.Dir = repoRoot()
+	cmd.WaitDelay = 5 * time.Second
 	return cmd
 }
 

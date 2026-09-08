@@ -4,17 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"strings"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-hermes/internal/lifecycle"
 )
 
 const (
-	// reservedMetaNamespace is the family-global literal namespace. Everything
-	// under it is stamped by this package and read by every sibling, so no caller
-	// meta map may name it.
-	reservedMetaNamespace = "acp-go.dev/"
-
 	metaOptionsKey       = "options"
 	metaModelKey         = "model"
 	metaEnvKey           = "env"
@@ -133,14 +128,9 @@ func WithSessionAdditionalDirectories(paths ...string) SessionRequestOption {
 }
 
 // WithSessionMeta merges host-supplied metadata into a session lifecycle
-// request's `_meta`. The `acp-go.dev/*` namespace is family-global and reserved:
-// its envelopes are stamped by this package and read by every sibling, so a
-// caller key inside it is refused rather than merged or overwritten. A merged
-// one would put a host's value where a reader expects a family envelope; an
-// overwritten one would silently discard what the host asked for. Neither is a
-// request this builder can honestly produce, and there is no return value to
-// carry the refusal, so it panics — the caller is a program naming a namespace
-// that is not its own.
+// request's `_meta`. It panics when meta names one of the four reserved keys:
+// acp-go.dev/route, acp-go.dev/mediaEnvelope, acp-go.dev/handoff, or
+// acp-go.dev/lifecycle. Other keys are preserved.
 func WithSessionMeta(meta map[string]any) SessionRequestOption {
 	rejectReservedCallerMeta("WithSessionMeta", meta)
 
@@ -289,13 +279,11 @@ func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption {
 	}
 }
 
-// rejectReservedCallerMeta refuses a caller `_meta` map that names the
-// family-global reserved namespace. The set of `acp-go.dev/*` literals is closed
-// and every one of them is stamped by this package, so the whole prefix is
-// refused: a key nobody stamps today is still not the caller's to claim.
+// rejectReservedCallerMeta prevents builders from merging reserved envelopes.
 func rejectReservedCallerMeta(builder string, meta map[string]any) {
 	for key := range meta {
-		if strings.HasPrefix(key, reservedMetaNamespace) {
+		switch key {
+		case routeMetaKey, handoffMetaKey, mediaEnvelopeMetaKey, lifecycle.MetaKey:
 			panic(builder + ": reserved family meta key " + key)
 		}
 	}

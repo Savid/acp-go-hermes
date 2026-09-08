@@ -142,6 +142,8 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 		return
 	}
 
+	a.managedHandoff.freeze(a.options.InputHandoffRoot, start.ScratchParent)
+
 	start.RetainNativeTree = a.retainNativeTree
 	start.ContainmentIncomplete = ErrContainmentIncomplete
 	start.NativeTreeBusy = ErrNativeTreeBusy
@@ -166,10 +168,6 @@ func (a *Agent) configureHostAuthority(start *nativehermes.StartOptions) {
 		err = a.recordHostAuthorityError(a.options.HostAuthority.PrepareNativeTree(ctx, root))
 		if err == nil {
 			return nil
-		}
-
-		if errors.Is(err, ErrNativeTreeBusy) {
-			return err
 		}
 
 		return a.recordHostAuthorityError(errors.Join(err, ErrContainmentIncomplete))
@@ -223,7 +221,7 @@ func (a *Agent) reclaimNativeTree(ctx context.Context, root string) (err error) 
 }
 
 func (a *Agent) retainNativeTree(root string, err error) bool {
-	if root == "" || (err != nil && !errors.Is(err, ErrNativeTreeBusy)) {
+	if root == "" || errors.Is(err, ErrContainmentIncomplete) || (err != nil && !errors.Is(err, ErrNativeTreeBusy)) {
 		return false
 	}
 

@@ -8,7 +8,9 @@ This project is a Go implementation of an ACP agent for Hermes. It runs one
 isolated `hermes serve` process per ACP session and builds directly on
 `github.com/coder/acp-go-sdk`. Hermes owns model execution and native state;
 this package owns ACP dispatch, process launch, stream hygiene, per-session
-XDG isolation, options, storage, and embeddability.
+XDG isolation, options, storage, and embeddability. `WithSharedHermesHome`
+explicitly shares a durable native home in ordinary mode while retaining
+independent session processes. `WithHome` remains unsupported at session start.
 
 ## Project Map
 
@@ -27,46 +29,36 @@ details live in `internal/`.
   native message replay, config options, and raw gateway event handling.
 - **Session storage** (`session_store.go`, `session_state_store.go`): the
   host-facing `SessionStore` API and the `hermes-state-db-v1` durable store.
+- **Provider auth** (`auth*.go`): native OAuth coordination and the values-free
+  ledger, enabled only with a shared native home and provider-auth root.
+- **Lifecycle** (`session_lifecycle_stream.go`, `session_settlement.go`,
+  `internal/lifecycle`): ordered lifecycle updates, settlement, and fixture
+  reduction. Preserve canonical `testdata/lifecycle` bytes.
 - **Hermes gateway client** (`internal/hermes/client.go`,
   `internal/hermes/process*.go`): loopback WebSocket JSON-RPC client, process
   launch, and platform-specific process control for the `hermes serve`
   subprocess.
 - **Observability** (`internal/observer`): OpenTelemetry span, metric, and
   trace-context propagation helpers.
-- **Live tests** (`integration`): integration tests that launch the real local
+- **Integration tests** (`integration`): integration tests that launch the real local
   `hermes` CLI or a deterministic fake harness.
 - **Docs** (`docs/`, `docs.json`): Mintlify guide. Update alongside public API,
   CLI flag, ACP method, or `_meta` field changes.
 
 ## Commands
 
-```sh
-go build ./...
-go test ./...
-go test -race ./...
-golangci-lint run ./...
-```
+- `go build ./...`: compile all packages.
+- `make test`: deterministic unit suite with race detection and shuffled order.
+- `make lint`: pinned golangci-lint; rules live in `.golangci.yml`.
+- `make coverage-check`: full race/shuffle suite with coverage reporting.
+- `make audit`: complete local gate, including module tidy. Select focused
+  checks during edits and run the full gate when the combined change is ready.
 
-Lint details live in `.golangci.yml`.
-
-The Makefile wraps the main development checks:
-
-```sh
-make test
-make lint
-make audit
-```
-
-Run live integration tests only when a local Hermes CLI is installed and
-authenticated:
-
-```sh
-ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
-```
-
-`make test-integration-smoke` runs the tier that can skip without live auth.
-`make test-integration-live` adds `ACP_GO_HERMES_RUN_LIVE_TOKENS=1` and may
-spend model tokens. Use `make test-integration-cover` for compiled
+Native tests require explicit task authorization. Use
+`make test-integration-smoke` for native smoke and
+`make test-integration-live` for model turns that may spend tokens. The
+targets set execution gates; those gates do not authorize native or account
+activity. Use `make test-integration-cover` for compiled
 `acp-go-hermes` coverage through `GOCOVERDIR`. Set `ACP_GO_HERMES_MODEL` to the
 provider-qualified `provider/model` live tests should route through; the native
 config those tiers seed takes its provider and model from that same value. Set
@@ -80,7 +72,9 @@ explicit shared-home lane may share one temp residence across processes.
 provider-auth flows a human must approve at the provider.
 `make test-integration-keystore` sets `ACP_GO_HERMES_RUN_KEYSTORE=1` and runs the
 Linux state-boundary and browser-launcher probes; it fails rather than skips
-when no container runtime is available. Neither target joins `make audit`.
+when no container runtime is available.
+`make test-integration-native-browser` runs the separate native browser probe.
+None of these native targets joins `make audit`.
 
 ## Coding Rules
 
@@ -96,16 +90,11 @@ when no container runtime is available. Neither target joins `make audit`.
 - Follow existing package patterns before introducing new abstractions.
 - Keep stdout reserved for ACP JSON-RPC in the CLI; logs and diagnostics belong
   on stderr.
-- Prefer new wrapper options before translating more native Hermes behavior.
-
-## Ask Before
-
-Unless explicitly requested, ask before:
-
-- Changing the permission or elicitation flow shape.
-- Adding new ACP extension methods or `_meta` fields.
-- Changing the session-store contract or store format.
-- Changing per-session home isolation behavior.
+- Preserve the supported public surface and native programmatic semantics.
+  Add options only when the task requires the new behavior.
+- Honor authorization already supplied. Ask before expanding the task to change
+  permission/elicitation flow, ACP methods or metadata, the session-store
+  contract/format, or home isolation when that change is not already authorized.
 
 ## Testing Rules
 
@@ -113,28 +102,37 @@ Unless explicitly requested, ask before:
 - Run `go test ./...` for ordinary changes.
 - Run `go test -race ./...` or `make test` for session, gateway, concurrency, or
   cancellation changes.
-- Run `golangci-lint run ./...` before considering work complete.
-- Live integration tests launch the actual `hermes` binary from `PATH`.
-- Unit tests may use in-memory transports and the deterministic fake harness.
+- Run `make lint` before considering code changes complete.
+- Native behavior claims require the actual `hermes` CLI. In-memory transports
+  and deterministic fake harnesses prove wrapper behavior, not native fidelity.
+- Protect observable behavior and concrete failure boundaries. Synchronize
+  concurrent tests with explicit barriers; use deadlines to bound failure, not
+  sleeps to guess ordering.
 - Keep live prompts deterministic with exact sentinel replies, and assert the
   ACP stop reason plus streamed updates where practical.
-- Maintain 100% statement coverage; `make coverage-check` is part of `make
-  audit`.
+- Complete the required behavioral/race suite and review reported coverage. Do
+  not add production seams or artificial tests solely to raise a percentage.
+- Preserve canonical `testdata/lifecycle` fixture bytes.
 
 ## Security And Boundaries
 
 - **IMPORTANT**: Do not silently bypass permission prompts. Permission flow is
   load-bearing for user trust in this agent.
-- **IMPORTANT**: Do not manage the user's real Hermes authentication state.
-  Sessions use isolated temp homes except for the explicit shared-home proof,
-  which uses one disposable temp residence.
+- Ordinary sessions use isolated homes unless `WithSharedHermesHome` explicitly
+  selects a durable production home. Preserve the configured provider-auth
+  surface; tests use disposable homes and never manage real user credentials.
 - Ordinary execution inherits only the allowlist in
-  `internal/hermes/process_ordinary.go`. Hermes seeds its credential pool from
-  more than fifty environment names, so never widen that list with a name
-  that can carry a credential; a key reaches Hermes through `WithEnv` or
+  `internal/hermes/process_ordinary.go`. Never widen that list with a
+  credential-bearing name; a key reaches Hermes through `WithEnv` or
   session `env` alone.
 - Do not log auth material, user secrets, prompts, tool input, tool output, or
   raw Hermes gateway event bodies by default.
+- Reject `ACP_GO_HERMES_INTERNAL_*` and `ACP_GO_HERMES_PATH_DIR_*` in caller
+  environments under every spelling; managed launch strips the internal prefix
+  from its authority-provided base.
+- Respect borrowed host authority and opaque native-tree ownership, including
+  every failed prepare attempt. Keep managed handoff reads outside the reserved
+  scratch domain; see [security](docs/operations/security.mdx).
 - Keep permission rules session-scoped. Copy them only through intentional
   session fork behavior.
 - Reject unsupported ACP extension methods with explicit protocol errors unless

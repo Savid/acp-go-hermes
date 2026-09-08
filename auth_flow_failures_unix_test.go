@@ -5,6 +5,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"testing"
 	"time"
@@ -270,9 +271,7 @@ func TestCallbackRejectsMalformedAddressingAndUnavailableGateway(t *testing.T) {
 		authFieldInput,
 	} {
 		params := make(map[string]any, len(base))
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 		delete(params, field)
 
 		_, err := callLeg(t, agent, AuthCallbackMethod, params)
@@ -280,9 +279,7 @@ func TestCallbackRejectsMalformedAddressingAndUnavailableGateway(t *testing.T) {
 	}
 
 	wrongMethod := make(map[string]any, len(base))
-	for key, value := range base {
-		wrongMethod[key] = value
-	}
+	maps.Copy(wrongMethod, base)
 	wrongMethod["method"] = nativehermes.AuthFlowDeviceCode
 	_, err := callLeg(t, agent, AuthCallbackMethod, wrongMethod)
 	requireInvalidField(t, err, authFieldMethod)
@@ -312,9 +309,7 @@ func TestAddressedFlowLegRejectsEveryAddressingFailure(t *testing.T) {
 
 	for _, field := range []string{authFieldSessionID, authFieldProviderID, authFieldFlowID} {
 		params := make(map[string]any, len(base))
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 		delete(params, field)
 
 		_, err := callLeg(t, agent, AuthStatusMethod, params)

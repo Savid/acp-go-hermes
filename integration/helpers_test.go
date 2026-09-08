@@ -5,8 +5,11 @@ package integration
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,9 +79,7 @@ func liveHermesConfig(maxTokens int, extra string) string {
 // gateway reports the missing provider rather than the test inventing one.
 func liveTokenEnv(extra map[string]string) map[string]string {
 	env := make(map[string]string, len(extra)+1)
-	for key, value := range extra {
-		env[key] = value
-	}
+	maps.Copy(env, extra)
 
 	name := envOrDefault(envLiveKeyEnv, defaultLiveKeyEnv)
 	if value := os.Getenv(name); value != "" {
@@ -151,14 +152,7 @@ func startInProcessAgent(t *testing.T, ctx context.Context, opts ...hermesacp.Op
 // Each launch passes a caller-provided `-scratch-dir` temp root so the
 // subprocess owns an isolated HERMES_HOME. Tests that need durable credentials
 // use an explicit disposable shared HERMES_HOME.
-type liveAgent struct {
-	cmd    interface{ ProcessState() *os.ProcessState }
-	stdin  io.WriteCloser
-	stdout io.Reader
-	stderr safeBuffer
-	close  func()
-	wait   func() error
-}
+type liveAgent struct{ *integrationProcess }
 
 // integrationAgentArgs builds the launch args every wrapper subprocess in this
 // tier shares.
@@ -173,44 +167,8 @@ func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) [
 
 func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
 	t.Helper()
-	cmd := agentCommand(ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	agent := &liveAgent{stdin: stdin, stdout: stdout}
-	cmd.Stderr = &agent.stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitDone := make(chan struct{})
-	var waitErr error
-	go func() {
-		waitErr = cmd.Wait()
-		close(waitDone)
-	}()
-	agent.wait = func() error {
-		<-waitDone
-
-		return waitErr
-	}
-	agent.close = func() {
-		_ = stdin.Close()
-		timer := time.NewTimer(10 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-waitDone:
-			return
-		case <-timer.C:
-			_ = cmd.Process.Kill()
-			<-waitDone
-		}
-	}
-	return agent
+	cmd := agentCommand(t, ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
+	return &liveAgent{startIntegrationProcess(t, cmd)}
 }
 
 // startLiveTokenAgent caps only token-spending integration sessions through
@@ -235,24 +193,6 @@ func liveTokenSeedFiles() map[string]string {
 
 func (a *liveAgent) stderrString() string {
 	return a.stderr.String()
-}
-
-type safeBuffer struct {
-	mu sync.Mutex
-	b  []byte
-}
-
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.b = append(b.b, p...)
-	return len(p), nil
-}
-
-func (b *safeBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return string(b.b)
 }
 
 type recordingClient struct {
@@ -387,3 +327,68 @@ func envOrDefault(name string, fallback string) string {
 // "some inference provider is configured" precondition for tiers that make no
 // provider request. It is a fixed non-credential string, never a real key.
 const smokePlaceholderProviderKey = "acp-go-hermes-smoke-placeholder-not-a-credential"
+
+func TestIntegrationHarnessPrerequisites(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "harness-prerequisite-child" {
+		path := integrationHermesPath(t)
+		t.Log("resolved harness " + path)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, integration, tier, value, outcome string
+		available                               bool
+	}{
+		{name: "ungated", outcome: "SKIP"},
+		{name: "disabled", integration: "0", outcome: "SKIP"},
+		{name: "invalid_gate", integration: "true", outcome: "SKIP"},
+		{name: "missing_smoke", integration: "1", outcome: "SKIP"},
+		{name: "disabled_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "0", outcome: "SKIP"},
+		{name: "missing_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "1", outcome: "FAIL"},
+		{name: "missing_attended", integration: "1", tier: "RUN_ATTENDED", value: "1", outcome: "FAIL"},
+		{name: "missing_keystore", integration: "1", tier: "RUN_KEYSTORE", value: "1", outcome: "FAIL"},
+		{name: "fake_path", integration: "1", outcome: "PASS", available: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, suffix := range []string{"RUN_INTEGRATION", "RUN_LIVE_TOKENS", "RUN_ATTENDED", "RUN_KEYSTORE"} {
+				t.Setenv("ACP_GO_HERMES_"+suffix, "0")
+			}
+			t.Setenv("ACP_GO_HERMES_RUN_INTEGRATION", tc.integration)
+			if tc.tier != "" {
+				t.Setenv("ACP_GO_HERMES_"+tc.tier, tc.value)
+			}
+			dir := t.TempDir()
+			harness := filepath.Join(dir, "hermes")
+			if runtime.GOOS == "windows" {
+				harness += ".exe"
+			}
+			if tc.available {
+				// Resolution only: this file is never executed.
+				if err := os.WriteFile(harness, []byte("fake harness path"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ACP_GO_HERMES_HARNESS_PATH", harness)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestIntegrationHarnessPrerequisites$", "-test.v", "--", "harness-prerequisite-child")
+			cmd.WaitDelay = time.Second
+			output, runErr := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatal(ctx.Err())
+			}
+			if (runErr != nil) != (tc.outcome == "FAIL") {
+				t.Fatalf("unexpected child result: %v\n%s", runErr, output)
+			}
+			if !strings.Contains(string(output), "--- "+tc.outcome+": TestIntegrationHarnessPrerequisites") {
+				t.Fatalf("want child %s:\n%s", tc.outcome, output)
+			}
+			if tc.available && !strings.Contains(string(output), "resolved harness "+harness) {
+				t.Fatalf("fake harness selection was lost:\n%s", output)
+			}
+		})
+	}
+}

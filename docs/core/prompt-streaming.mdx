@@ -225,6 +225,11 @@ rather than dropped. That exact delivered fragment is also the text appended to
 the durable foreground prefix; the completion is never mirrored a second time in
 storage.
 
+A prompt response follows its durable foreground commit and terminal `idle`.
+When managed containment also proves quiescence, the retained settlement owner
+finishes that later notification separately. Close and delete join that owner
+and report its errors; a later failure cannot change the published prompt result.
+
 The stored foreground text is capped at 64 KiB. Truncation keeps the largest
 complete UTF-8 prefix that fits the byte bound; once the bound cuts a delivered
 fragment, later chunks are not appended behind the omitted bytes. The durable
@@ -249,12 +254,11 @@ carries a machine-readable `cause`:
 | `provider` | The model provider rejected or failed the turn, or reported a native finish outside the closed vocabulary the adapter maps. |
 | `timeout` | The turn exceeded [`WithTurnTimeout`](/docs/reference/go-api). |
 
-The wire data is deliberately bounded and secret-safe: it carries only
-`error`, `cause`, and a numeric `statusCode` when Hermes supplied one. Native
-messages, provider codes, malformed frames, request payloads, and arbitrary Go
-errors never cross the ACP error boundary. An embedded Go caller can instead
-use `errors.Is(err, hermesacp.ErrGatewayDisconnected)` and continue inspecting
-the returned error chain for the exact native cause.
+The wire data carries `error`, `cause`, and `message` with the native failure
+diagnostic. `statusCode` and `providerCode` appear only when Hermes supplies
+them. An embedded Go caller can also use
+`errors.Is(err, hermesacp.ErrGatewayDisconnected)` and inspect the returned
+error chain. Off-prompt internal errors use closed tokens without native text.
 
 <Note>
 A timeout is a failure, not a user cancel, so it surfaces as
@@ -272,13 +276,13 @@ or barge-in — also returns the `cancelled` stop reason rather than the clean e
 of turn a successful completion reports. That is a native terminal, not a client
 cancel: it commits the cancelled boundary and leaves the incarnation running.
 
-After cancellation, timeout, transport failure, or outbound update failure
+After cancellation, timeout, provider failure, transport failure, or outbound update failure
 whose selected containment boundary completed, the next authorized prompt
 waits for that containment latch, then lazily materializes exactly one fresh
 isolated home from the last committed `hermes-state-db-v1` snapshot and resumes
 the exact stored native session key. Shared-home mode instead resumes that key
 from the durable official database and never restores a per-session native
-archive. A provider-declared failure does not take this replacement path.
+archive.
 The fenced native turn never advances the durable assistant-history identity.
 Turn nonces and adapter event sequences remain monotonic across a replacement,
 and MCP is reloaded under the new turn's authorization before the model runs.

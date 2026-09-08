@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 
@@ -217,9 +218,7 @@ func routedMetaWith(t *testing.T, turnNonce string, extra map[string]any) map[st
 	t.Helper()
 
 	meta := turnRouteMeta(turnNonce)
-	for key, value := range extra {
-		meta[key] = value
-	}
+	maps.Copy(meta, extra)
 
 	return meta
 }

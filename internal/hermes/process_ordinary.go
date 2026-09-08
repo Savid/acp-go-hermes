@@ -23,6 +23,7 @@ import (
 const (
 	envHermesHome         = "HERMES_HOME"
 	envHermesSessionToken = "HERMES_DASHBOARD_SESSION_TOKEN"
+	envPrivatePrefix      = "ACP_GO_HERMES_INTERNAL_"
 	// envHermesWebDist is operator-supplied rather than adapter-managed, so it
 	// is read out of a phase map rather than scrubbed out of one.
 	envHermesWebDist = "HERMES_WEB_DIST"
@@ -55,7 +56,7 @@ const (
 func scrubOrdinaryEnvironmentKey(key string) bool {
 	upper := strings.ToUpper(key)
 
-	return slices.Contains(ordinaryManagedEnvironmentKeys, upper)
+	return strings.HasPrefix(upper, envPrivatePrefix) || slices.Contains(ordinaryManagedEnvironmentKeys, upper)
 }
 
 // ordinaryInheritedEnvironmentKeys is the closed set of ambient names an

@@ -63,10 +63,6 @@ func actionEvent(update ActionUpdate) Event {
 	return Event{Type: EventActionUpdate, Action: &update}
 }
 
-// stated marks a blocking claim an action's first sight actually made, which is
-// the difference an omitted member may not be read as.
-func stated(blocks bool) *bool { return &blocks }
-
 func TestStrictEventRoutingAndRunOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -153,7 +149,7 @@ func TestSnapshotIntroducesEveryIdentityItNames(t *testing.T) {
 		},
 		Actions: []ActionUpdate{{
 			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 		}},
 		Quiescence: QuiescenceFact{},
 	}})
@@ -280,7 +276,7 @@ func TestBlockingActionOwesItsForegroundTransition(t *testing.T) {
 	}}
 	blocking := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(true),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(true),
 	})
 
 	requireReduceRefusal(t, richConfiguration(), ViolationInconsistentForeground,
@@ -394,7 +390,7 @@ func TestParentTerminalizesAfterEveryOwnedAction(t *testing.T) {
 		}},
 		Actions: []ActionUpdate{{
 			ActionID: "req-1", Kind: ActionElicitation, State: ActionPending,
-			Owner: Owner{Type: OwnerActivity, ID: "act-1"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerActivity, ID: "act-1"}, BlocksForeground: new(false),
 		}},
 	}}
 
@@ -413,7 +409,7 @@ func TestActionRules(t *testing.T) {
 	opening := []Event{openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1")}
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: new(false),
 	})
 
 	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
@@ -422,14 +418,14 @@ func TestActionRules(t *testing.T) {
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
 		append(append([]Event{}, opening...), actionEvent(ActionUpdate{
 			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: new(false),
 		}))...)
 
 	for _, patch := range []ActionUpdate{
 		{ActionID: "req-1", State: ActionAccepted, Kind: ActionElicitation},
 		{ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-9"}},
 		{ActionID: "req-1", State: ActionAccepted, RunID: "run-9"},
-		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
+		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: new(true)},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationImmutableIdentityChange,
 			append(append([]Event{}, opening...), pending, actionEvent(patch))...)
@@ -458,7 +454,7 @@ func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
 		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
 		actionEvent(ActionUpdate{
 			ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 		}),
 		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted}),
 	}
@@ -466,7 +462,7 @@ func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
 	reducer, refusal := reduceAll(t, richConfiguration(),
 		append(append([]Event{}, opening...), actionEvent(ActionUpdate{
 			ActionID: "req-1", Kind: ActionPermission, State: ActionAccepted,
-			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 		}))...)
 	require.Nil(t, refusal, "a restatement carrying no difference says nothing new")
 	require.Equal(t, uint64(6), reducer.State().ReducedThrough, "a suppressed no-op still consumes its sequence")
@@ -478,7 +474,7 @@ func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
 		{ActionID: "req-1", Kind: ActionElicitation, State: ActionAccepted},
 		{ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-9"}},
 		{ActionID: "req-1", State: ActionAccepted, RunID: "run-9"},
-		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
+		{ActionID: "req-1", State: ActionAccepted, BlocksForeground: new(true)},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
 			append(append([]Event{}, opening...), actionEvent(restatement))...)
@@ -496,7 +492,7 @@ func TestTerminalActionOnFirstSightNeverBlocks(t *testing.T) {
 	}}
 	resolved := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionCancelled,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(true),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(true),
 	})
 
 	reducer, refusal := reduceAll(t, richConfiguration(),
@@ -633,7 +629,7 @@ func TestReducerAdmitsOnlyAValidReplacement(t *testing.T) {
 		}}
 		opening.Snapshot.Actions = []ActionUpdate{{
 			ActionID: "action", Kind: ActionPermission, State: ActionPending,
-			Owner: Owner{Type: OwnerActivity, ID: "activity"}, RunID: "run", BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerActivity, ID: "activity"}, RunID: "run", BlocksForeground: new(false),
 		}}
 		reducer, refusal := reduceAll(t, richConfiguration(), opening)
 		require.Nil(t, refusal)
@@ -676,7 +672,7 @@ func TestSnapshotRejectsDuplicateEntities(t *testing.T) {
 
 	action := ActionUpdate{
 		ActionID: "action", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: stated(false),
+		Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: new(false),
 	}
 	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
@@ -700,7 +696,7 @@ func TestReducerRejectsInvalidEventVocabulary(t *testing.T) {
 	requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
 		openSnapshot(), accepted, actionEvent(ActionUpdate{
 			ActionID: "action", Kind: ActionKind("future"), State: ActionPending,
-			Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: stated(false),
+			Owner: Owner{Type: OwnerTurn, ID: "turn"}, BlocksForeground: new(false),
 		}))
 }
 
@@ -786,7 +782,7 @@ func TestVacancyIsNotForegroundState(t *testing.T) {
 
 	background := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 	})
 	held, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
 		RunningEvent("cyc-1", "turn-1"), background,
@@ -806,7 +802,7 @@ func TestSnapshotRefusesAnUnresolvableSet(t *testing.T) {
 			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 			Actions: []ActionUpdate{{
 				ActionID: "req-1", Kind: ActionPermission, State: ActionAccepted,
-				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+				Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 			}},
 		}})
 
@@ -815,7 +811,7 @@ func TestSnapshotRefusesAnUnresolvableSet(t *testing.T) {
 			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 			Actions: []ActionUpdate{{
 				ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
-				Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: stated(false),
+				Owner: Owner{Type: OwnerActivity, ID: "act-ghost"}, BlocksForeground: new(false),
 			}},
 		}})
 }
@@ -991,7 +987,7 @@ func TestActionRestatementKeepsItPending(t *testing.T) {
 
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionElicitation, State: ActionPending,
-		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
+		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: new(false),
 	})
 
 	reducer, refusal := reduceAll(t, richConfiguration(),

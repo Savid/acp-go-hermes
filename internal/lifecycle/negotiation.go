@@ -1,8 +1,10 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 )
 
 // MetaPath is the request path a rejection names. Negotiation and correlation
@@ -39,12 +41,14 @@ type ParamError struct {
 func (e *ParamError) Error() string { return string(e.Verdict) + " " + e.Field }
 
 func paramError(members ...string) *ParamError {
-	field := MetaPath
+	var field strings.Builder
+	field.WriteString(MetaPath)
+
 	for _, member := range members {
-		field += "." + member
+		field.WriteString("." + member)
 	}
 
-	return &ParamError{Field: field, Verdict: VerdictUnsupported}
+	return &ParamError{Field: field.String(), Verdict: VerdictUnsupported}
 }
 
 // missingParamError refuses the absence of the key on a surface that requires
@@ -63,9 +67,9 @@ func DecodeCapability(meta map[string]any) (bool, *ParamError) {
 		return false, nil
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return false, paramError()
+	fields, refusal := paramFields(raw)
+	if refusal != nil {
+		return false, refusal
 	}
 
 	for key := range fields {
@@ -80,6 +84,57 @@ func DecodeCapability(meta map[string]any) (bool, *ParamError) {
 	}
 
 	return true, nil
+}
+
+// paramFields preserves number spelling and duplicate members until the owned
+// semantic validator runs. Submission keeps its raw object for the same checks
+// at its own field path. Embedded Go requests retain their existing map shape.
+func paramFields(raw any, members ...string) (map[string]any, *ParamError) {
+	if refusal, ok := raw.(*ParamError); ok {
+		return nil, refusal
+	}
+
+	if fields, ok := raw.(map[string]any); ok {
+		return fields, nil
+	}
+
+	encoded, ok := raw.(json.RawMessage)
+	if !ok || !json.Valid(encoded) {
+		return nil, paramError(members...)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+
+	opening, _ := decoder.Token() // json.Valid proved the token stream.
+	if opening != json.Delim('{') {
+		return nil, paramError(members...)
+	}
+
+	fields := make(map[string]any)
+
+	for decoder.More() {
+		token, _ := decoder.Token()
+
+		key, _ := token.(string)
+		if _, duplicate := fields[key]; duplicate {
+			return nil, paramError(append(members, key)...)
+		}
+
+		if key == fieldSubmission && len(members) == 0 {
+			var submission json.RawMessage
+
+			_ = decoder.Decode(&submission)
+			fields[key] = submission
+		} else {
+			var value any
+
+			_ = decoder.Decode(&value)
+			fields[key] = value
+		}
+	}
+
+	return fields, nil
 }
 
 // Submission names one accepted client prompt. The client nonce is the host's own
@@ -107,9 +162,9 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 		return Submission{}, missingParamError()
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError()
+	fields, refusal := paramFields(raw)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {
@@ -146,7 +201,7 @@ func integerValue(raw any) (int, bool) {
 	case json.Number:
 		number, err := value.Int64()
 
-		return int(number), err == nil
+		return int(number), err == nil && int64(int(number)) == number
 	default:
 		return 0, false
 	}
@@ -172,9 +227,9 @@ func integerFromFloat(value float64) (int, bool) {
 }
 
 func decodeSubmission(raw any) (Submission, *ParamError) {
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError(fieldSubmission)
+	fields, refusal := paramFields(raw, fieldSubmission)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {

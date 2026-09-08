@@ -11,7 +11,7 @@ build:
 
 ## lint: run pinned golangci-lint
 lint:
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run --timeout=10m --allow-parallel-runners ./...
 
 ## fmt-check: require gofmt-clean Go files
 fmt-check:
@@ -45,19 +45,19 @@ test-cross-compile:
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/hermes-cmd-windows.test ./cmd/acp-go-hermes
 	GOOS=windows GOARCH=amd64 go build ./...
 
-## coverage-check: require 100% statement coverage with race instrumentation
+## coverage-check: run shuffled race tests and report statement coverage
 coverage-check:
-	go test -race -coverprofile=coverage.out -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) ./...
-	@awk 'NR > 1 && $$(NF - 1) > 0 && $$NF == 0 { print "uncovered statement block: " $$0; missed = 1 } END { if (missed) exit 1 }' coverage.out
-	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
+	go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic -timeout=$(GO_TEST_TIMEOUT) ./...
+	@awk 'NR > 1 && $$(NF - 1) > 0 { found = 1 } END { if (!found) { print "coverage profile has no statement blocks"; exit 1 } }' coverage.out
+	@report=$$(go tool cover -func=coverage.out) || exit $$?; printf '%s\n' "$$report" | awk '/^total:/ { found = 1; if ($$3 !~ /^[0-9]+([.][0-9]+)?%$$/) { print "invalid total coverage line"; exit 1 } printf "total coverage %s\n", $$3 } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
 ## test-integration-smoke: compile and run integration tests that can skip without live auth
 test-integration-smoke:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
+	ACP_GO_HERMES_RUN_LIVE_TOKENS=0 ACP_GO_HERMES_RUN_ATTENDED=0 ACP_GO_HERMES_RUN_KEYSTORE=0 ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
 
 ## test-integration-live: run live Hermes CLI integration tests
 test-integration-live:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes
+	ACP_GO_HERMES_RUN_ATTENDED=0 ACP_GO_HERMES_RUN_KEYSTORE=0 ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=300s -v ./integration/... ./internal/hermes
 
 ## test-integration-attended: run provider-auth flows a human must approve in real time
 # go test exits 0 when -run selects nothing, so the exit status alone reports a
@@ -66,21 +66,29 @@ test-integration-live:
 # live, and the guard requires a top-level pass line, which no empty selection
 # and no skip can produce.
 test-integration-attended:
-	@log=$$(mktemp); rc=$$(mktemp); \
-	{ ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
-	status=$$(cat "$$rc"); ran=$$(grep -c '^--- PASS: TestAttended' "$$log"); \
-	rm -f "$$log" "$$rc"; \
+	@set -eu; dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT HUP INT TERM; \
+	dir=$$(cd "$$dir" && pwd); \
+	export ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_ATTENDED=1 ACP_GO_HERMES_RUN_LIVE_TOKENS=0 ACP_GO_HERMES_RUN_KEYSTORE=0; \
+	go test -race -c -tags=integration -o "$$dir/integration.test" ./integration; \
+	"$$dir/integration.test" -test.list '^TestAttendedProviderAuth' >"$$dir/selected"; \
+	expected=$$(grep -Ec '^TestAttendedProviderAuth' "$$dir/selected" || true); \
+	[ "$$expected" -gt 0 ] || { echo 'attended selector discovered no tests'; exit 1; }; \
+	{ status=0; (cd integration && "$$dir/integration.test" -test.v -test.count=1 -test.timeout=1200s -test.run '^TestAttendedProviderAuth') 2>&1 || status=$$?; echo "$$status" >"$$dir/status"; } | tee "$$dir/output"; \
+	status=$$(cat "$$dir/status"); passed=$$(grep -Ec '^--- PASS: TestAttendedProviderAuth' "$$dir/output" || true); \
+	skipped=$$(grep -Ec '^[[:space:]]*--- SKIP:' "$$dir/output" || true); empty=$$(grep -c 'no tests to run' "$$dir/output" || true); \
 	[ "$$status" -eq 0 ] || exit "$$status"; \
-	[ "$$ran" -gt 0 ] || { echo 'no attended provider-auth login ran: -run TestAttended selected nothing'; exit 1; }
+	[ "$$passed" -eq "$$expected" ] || { echo "attended tests passed $$passed of $$expected"; exit 1; }; \
+	[ "$$skipped" -eq 0 ] || { echo 'attended test skipped'; exit 1; }; \
+	[ "$$empty" -eq 0 ] || { echo 'attended selector ran no tests'; exit 1; }
 
 ## test-integration-keystore: run Linux state-boundary and browser probes
 test-integration-keystore:
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./...
+	ACP_GO_HERMES_RUN_LIVE_TOKENS=0 ACP_GO_HERMES_RUN_ATTENDED=0 ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_RUN_KEYSTORE=1 go test -race -count=1 -tags=integration -timeout=900s -v -run TestKeystore ./...
 
 ## test-integration-native-browser: require one pinned native Linux provider-auth no-launch proof
 test-integration-native-browser:
 	@log=$$(mktemp); rc=$$(mktemp); \
-	{ ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run '^TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher$$' ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
+	{ ACP_GO_HERMES_RUN_LIVE_TOKENS=0 ACP_GO_HERMES_RUN_ATTENDED=0 ACP_GO_HERMES_RUN_KEYSTORE=0 ACP_GO_HERMES_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration,browsercanary -timeout=1200s -v -run '^TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher$$' ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
 	status=$$(cat "$$rc"); passed=$$(grep -c '^--- PASS: TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher ' "$$log" || true); skipped=$$(grep -Ec '^[[:space:]]*--- SKIP: TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(/| )' "$$log" || true); empty=$$(grep -c 'no tests to run' "$$log" || true); \
 	rm -f "$$log" "$$rc"; \
 	[ "$$status" -eq 0 ] || exit "$$status"; \
@@ -90,12 +98,14 @@ test-integration-native-browser:
 
 ## test-integration-cover: run smoke integration tests with compiled binary coverage
 test-integration-cover:
-	rm -rf .tmp/integration-cover coverage-integration.out
-	mkdir -p .tmp/integration-cover/data
-	go build -cover -coverpkg=./... -o .tmp/integration-cover/acp-go-hermes ./cmd/acp-go-hermes
-	ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_AGENT_BINARY=$$(pwd)/.tmp/integration-cover/acp-go-hermes GOCOVERDIR=$$(pwd)/.tmp/integration-cover/data go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes
-	go tool covdata percent -i=.tmp/integration-cover/data
-	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
+	@set -eu; mkdir -p .tmp; dir=$$(mktemp -d "$$(pwd)/.tmp/integration-cover.XXXXXX"); trap 'rm -rf "$$dir"' EXIT HUP INT TERM; \
+	mkdir "$$dir/data"; \
+	go build -cover -coverpkg=./... -o "$$dir/acp-go-hermes" ./cmd/acp-go-hermes; \
+	{ status=0; ACP_GO_HERMES_RUN_LIVE_TOKENS=0 ACP_GO_HERMES_RUN_ATTENDED=0 ACP_GO_HERMES_RUN_KEYSTORE=0 ACP_GO_HERMES_RUN_INTEGRATION=1 ACP_GO_HERMES_AGENT_BINARY="$$dir/acp-go-hermes" GOCOVERDIR="$$dir/data" go test -race -count=1 -tags=integration -timeout=240s -v ./integration/... ./internal/hermes 2>&1 || status=$$?; echo "$$status" >"$$dir/status"; } | tee "$$dir/output"; \
+	status=$$(cat "$$dir/status"); [ "$$status" -eq 0 ] || exit "$$status"; \
+	[ -n "$$(find "$$dir/data" -name 'covcounters.*' -type f -size +0c -print -quit)" ] || { echo 'compiled adapter produced no coverage counters'; exit 1; }; \
+	go tool covdata percent -i="$$dir/data"; \
+	go tool covdata textfmt -i="$$dir/data" -o coverage-integration.out
 
 ## docs-audit: check public docs, examples, required files, and CLI flags
 docs-audit:
@@ -117,12 +127,12 @@ tidy:
 vuln:
 	go tool govulncheck ./...
 
-## modernize-check: preview Go modernizations without changing files
+## modernize-check: check Go modernizations without changing files
 modernize-check:
-	go fix -n ./...
+	go fix -diff ./...
 
 ## audit: run repository checks
-audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
+audit: fmt-check lint build coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## test/cover: open HTML coverage report

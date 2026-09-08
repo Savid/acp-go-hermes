@@ -437,19 +437,13 @@ func TestAgentCloseAuthAndRawEventHelpers(t *testing.T) {
 	}
 }
 
-// TestBuildersRejectReservedCallerMeta pins the one place a family-global
-// reserved literal can reach a request this package builds. `acp-go.dev/*` is
-// stamped by this package and read by every sibling, so a host key inside it is
-// refused rather than merged (which would put a host value where a reader
-// expects a family envelope) or overwritten (which would silently discard what
-// the host asked for).
+// TestBuildersRejectReservedCallerMeta checks the exact reserved set.
 func TestBuildersRejectReservedCallerMeta(t *testing.T) {
 	reserved := []string{
 		routeMetaKey,
 		handoffMetaKey,
 		mediaEnvelopeMetaKey,
 		lifecycle.MetaKey,
-		"acp-go.dev/notYetInvented",
 	}
 
 	for _, key := range reserved {
@@ -460,7 +454,7 @@ func TestBuildersRejectReservedCallerMeta(t *testing.T) {
 	}
 
 	// A host's own namespace, and this adapter's, are merged as before.
-	allowed := map[string]any{"host.example/trace": "t", hermesMetaKey: map[string]any{"options": map[string]any{}}}
+	allowed := map[string]any{"host.example/trace": "t", "acp-go.dev/unreserved": "opaque", hermesMetaKey: map[string]any{"options": map[string]any{}}}
 	request := NewSessionRequest(absTestPath("tmp", "project"), WithSessionMeta(allowed))
 	if request.Meta["host.example/trace"] != "t" {
 		t.Fatalf("caller meta was not merged: %#v", request.Meta)
@@ -468,6 +462,9 @@ func TestBuildersRejectReservedCallerMeta(t *testing.T) {
 	listed := ListSessionsRequest(WithListSessionsMeta(allowed))
 	if listed.Meta["host.example/trace"] != "t" {
 		t.Fatalf("caller list meta was not merged: %#v", listed.Meta)
+	}
+	if request.Meta["acp-go.dev/unreserved"] != "opaque" || listed.Meta["acp-go.dev/unreserved"] != "opaque" {
+		t.Fatal("builders discarded unreserved metadata")
 	}
 }
 

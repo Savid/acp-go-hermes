@@ -77,6 +77,64 @@ func TestServeContextAndInputDone(t *testing.T) {
 	}
 }
 
+// Exercise the real Serve transport: map decoding must not erase malformed
+// lifecycle offers before the handshake validates its owned metadata.
+func TestServeInitializeRejectsMalformedLifecycleOffer(t *testing.T) {
+	for _, tc := range []struct {
+		name, offer, field string
+		options            []Option
+		code               int
+	}{
+		{"duplicate version", `{"version":2,"version":1}`, ".version", nil, -32602},
+		{"equal duplicate", `{"version":1,"version":1}`, ".version", nil, -32602},
+		{"missing version", `{}`, ".version", nil, -32602},
+		{"wrong version", `{"version":2}`, ".version", nil, -32602},
+		{"rounded fraction", `{"version":1.0000000000000001}`, ".version", nil, -32602},
+		{"fraction", `{"version":1.5}`, ".version", nil, -32602},
+		{"decimal integer", `{"version":1.0}`, ".version", nil, -32602},
+		{"exponent integer", `{"version":1e0}`, ".version", nil, -32602},
+		{"string", `{"version":"1"}`, ".version", nil, -32602},
+		{"boolean", `{"version":true}`, ".version", nil, -32602},
+		{"non-object", `null`, "", nil, -32602},
+		{"unknown", `{"version":1,"extra":true}`, ".extra", nil, -32602},
+		{"construction precedence", `{"version":2,"version":1}`, "", []Option{WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1})}, -32603},
+		{"construction overflow precedence", `{"version":1e400}`, "", []Option{WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1})}, -32603},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			input, writer := io.Pipe()
+			reader, output := io.Pipe()
+			done := make(chan error, 1)
+			go func() { done <- Serve(ctx, input, output, tc.options...) }()
+			t.Cleanup(func() {
+				_ = writer.Close()
+				_ = reader.Close()
+				_ = input.Close()
+				_ = output.Close()
+				cancel()
+				<-done
+			})
+			request := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"_meta":{"acp-go.dev/lifecycle":` + tc.offer + `}}}`
+			_, err := io.WriteString(writer, request+"\n")
+			require.NoError(t, err)
+			var response struct {
+				Error *acp.RequestError `json:"error"`
+			}
+			require.NoError(t, json.NewDecoder(reader).Decode(&response))
+			require.NotNil(t, response.Error)
+			require.EqualValues(t, tc.code, response.Error.Code)
+			if tc.code == -32602 {
+				require.Equal(t, map[string]any{"error": "unsupported", "field": lifecycle.MetaPath + tc.field}, response.Error.Data)
+			} else {
+				data, ok := response.Error.Data.(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, "hermes_invalid_options", data["error"])
+			}
+		})
+	}
+}
+
 type signalBlockingReader struct {
 	started chan struct{}
 	release chan struct{}
@@ -716,9 +774,12 @@ func TestProtocolBoundaryNeverLeaksMalformedPayloadsOrArbitraryErrors(t *testing
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), valHermesTurnFailed)
 	require.Contains(t, string(encoded), string(nativehermes.CauseTransport))
-	if strings.Contains(string(encoded), secret) || strings.Contains(wire.Error(), secret) {
-		t.Fatalf("wire conversion leaked arbitrary native error: %s", encoded)
-	}
+	require.Contains(t, string(encoded), "native transport: "+secret, "turn failures preserve the native cause")
+
+	// Unclassified off-prompt errors still carry only the closed token.
+	encoded, err = json.Marshal(requestError(context.Background(), nativeCause))
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), secret)
 
 	local := &localAgentConnection{agent: newTestAgent()}
 	local.initialized.Store(true)

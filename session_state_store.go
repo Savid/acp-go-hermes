@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -635,9 +636,7 @@ func (s *session) publishSnapshotLocked(ctx context.Context, commit *sessionStor
 
 func cloneArchiveInfo(archives map[string]archiveInfo) map[string]archiveInfo {
 	out := make(map[string]archiveInfo, len(archives))
-	for name, info := range archives {
-		out[name] = info
-	}
+	maps.Copy(out, archives)
 
 	return out
 }
@@ -1198,9 +1197,7 @@ func validateHydratedStateAgreement(sessionID string, idmap idmapRecord, snapsho
 
 func durableSessionEnvironment(environment map[string]string) map[string]string {
 	cloned := make(map[string]string, len(environment))
-	for key, value := range environment {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, environment)
 
 	return cloned
 }

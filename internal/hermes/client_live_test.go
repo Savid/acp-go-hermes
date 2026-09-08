@@ -11,9 +11,7 @@ import (
 )
 
 func TestLiveServeRoundTrip(t *testing.T) {
-	if os.Getenv("ACP_GO_HERMES_RUN_INTEGRATION") == "" {
-		t.Skip("set ACP_GO_HERMES_RUN_INTEGRATION=1")
-	}
+	executable := integrationHermesCLI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -23,10 +21,11 @@ func TestLiveServeRoundTrip(t *testing.T) {
 		t.Fatalf("create generation root: %v", err)
 	}
 	opts := ProcessOptions{
-		Home:          home,
-		Cwd:           durableTempDir(t),
-		ScratchParent: scratch,
-		Timeout:       120 * time.Second,
+		ExecutablePath: executable,
+		Home:           home,
+		Cwd:            durableTempDir(t),
+		ScratchParent:  scratch,
+		Timeout:        120 * time.Second,
 		Env: map[string]string{
 			"NO_COLOR": "1",
 			"PATH":     os.Getenv("PATH"),

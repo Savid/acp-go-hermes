@@ -29,6 +29,11 @@ Hermes session key is recorded in the `idmap` store subpath so a stored session
 can be rehydrated later, while live gateway session IDs are runtime-only and are
 never persisted.
 
+Native auto-compression can rotate the durable session key. Hermes does not
+provide an authoritative replacement key that the adapter can use to update
+the stored mapping, so a later resume can address a stale key and fail. The
+adapter does not infer session identity from message text.
+
 ## Load, resume, and delete
 
 `session/load` hydrates native state, resumes the stored Hermes session, and
@@ -70,7 +75,9 @@ or resumed is the ordinary case and succeeds on the first call. An active prompt
 reason to refuse: the cancelled turn settles as `cancelled`, and the terminal
 commit it owes lands on a tombstoned id, so it publishes nothing and cannot
 recreate the deleted row. A teardown that fails is reported to the caller with
-the session already hidden and its tombstone already durable.
+the session already hidden and its tombstone already durable. The adapter
+retains the runtime and residence for cleanup retries, including `Agent.Close`,
+and removes ordinary scratch only after process close succeeds.
 
 Durable rehydration depends on a configured store — see
 [Session store](/docs/features/session-store).
@@ -138,9 +145,10 @@ validated directory names, never session credentials, and callers cannot
 supply either reserved namespace. The ordinary-mode hook is stored in both
 isolated and shared Hermes homes without editing operator `config.yaml`.
 
-Raw session `PATH`, `BASH_ENV`, `ENV`, and `ACP_GO_HERMES_PATH_DIR_*` keys are
-refused. `WithEnv` and the host authority environment also reserve `BASH_ENV`,
-`ENV`, and the private namespace. In ordinary mode the ambient environment is
+Raw session `PATH`, `BASH_ENV`, `ENV`, `ACP_GO_HERMES_PATH_DIR_*`, and
+`ACP_GO_HERMES_INTERNAL_*` keys are refused. `WithEnv` also rejects the two
+private prefixes under every spelling, and managed launch removes
+`ACP_GO_HERMES_INTERNAL_*` from the authority environment. In ordinary mode the ambient environment is
 not inherited wholesale: the base is a closed allowlist — the names a process
 needs to find its executable, its home, a temp directory, a locale, a
 terminal, and a network, listed in the [CLI reference](/docs/reference/cli) —

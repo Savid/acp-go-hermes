@@ -2,6 +2,8 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,9 +63,7 @@ func TestDecodeCapabilityExactVersion(t *testing.T) {
 // TestIntegerValueNamesExactlyOneInt pins the reader both surfaces share: a
 // spelling is one version only where it names exactly one int. Integrality alone
 // is not that — a magnitude past the target int is integral in the float's own
-// terms and holdable by nothing — and no wire lexeme survives the SDK's
-// pre-decode to `map[string]any`, so this value test is the whole of what the
-// integrality rule can mean here.
+// terms and holdable by nothing.
 func TestIntegerValueNamesExactlyOneInt(t *testing.T) {
 	t.Parallel()
 
@@ -74,7 +74,7 @@ func TestIntegerValueNamesExactlyOneInt(t *testing.T) {
 		reads bool
 	}{
 		{"wire float", 1.0, 1, true},
-		{"large holdable float", float64(1 << 53), 1 << 53, true},
+		{"large holdable float", float64(1 << 30), 1 << 30, true},
 		{"negative float", -2.0, -2, true},
 		{"host int", 7, 7, true},
 		{"preserved number", json.Number("3"), 3, true},
@@ -93,6 +93,46 @@ func TestIntegerValueNamesExactlyOneInt(t *testing.T) {
 				require.Equal(t, tc.value, value)
 			}
 		})
+	}
+}
+
+func TestIntegerValueTargetBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []int{math.MinInt, math.MaxInt} {
+		got, ok := integerValue(json.Number(strconv.Itoa(value)))
+		require.True(t, ok)
+		require.Equal(t, value, got)
+	}
+	for _, raw := range []any{
+		json.Number(strconv.FormatUint(uint64(math.MaxInt)+1, 10)),
+		json.Number("-" + strconv.FormatUint(uint64(math.MaxInt)+2, 10)),
+		math.NaN(), math.Inf(1), math.Inf(-1), float64(1 << 63),
+	} {
+		_, ok := integerValue(raw)
+		require.False(t, ok, "accepted %v", raw)
+	}
+
+	largestFloat := math.Trunc(math.Nextafter(float64(uint64(1)<<(strconv.IntSize-1)), 0))
+	got, ok := integerValue(largestFloat)
+	require.True(t, ok)
+	require.Equal(t, largestFloat, float64(got))
+}
+
+func TestLifecycleVersionCannotWrapToOne(t *testing.T) {
+	t.Parallel()
+
+	// Both fit int64 but wrap to version 1 on 386 without a target-int check.
+	for _, version := range []json.Number{"4294967297", "-4294967295"} {
+		offered, refusal := DecodeCapability(capabilityMeta(version))
+		require.False(t, offered)
+		require.NotNil(t, refusal)
+		require.Equal(t, MetaPath+".version", refusal.Field)
+		_, refusal = DecodePromptCorrelation(correlationMeta(map[string]any{
+			"version": version, "submission": map[string]any{"submissionId": "s", "clientNonce": "n"},
+		}), Negotiated{Version: Version})
+		require.NotNil(t, refusal)
+		require.Equal(t, MetaPath+".version", refusal.Field)
 	}
 }
 

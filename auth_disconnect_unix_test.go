@@ -5,6 +5,7 @@ package hermesacp
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"testing"
 	"time"
@@ -230,9 +231,7 @@ func TestDisconnectRejectsMalformedAddressing(t *testing.T) {
 		authFieldBindingGeneration,
 	} {
 		params := make(map[string]any, len(base))
-		for key, value := range base {
-			params[key] = value
-		}
+		maps.Copy(params, base)
 		delete(params, field)
 
 		if _, err := callLeg(t, agent, AuthDisconnectMethod, params); err == nil {

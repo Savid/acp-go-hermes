@@ -34,13 +34,23 @@ func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
 	environment, err = ordinaryEnvironment(
 		map[string]string{"PATH": "/usr/bin"},
 		map[string]string{
-			"MODEL":       "sonnet",
-			"PATH":        "/opt/bin",
-			envHermesHome: "/overlay/home",
+			"MODEL":                    "sonnet",
+			"PATH":                     "/opt/bin",
+			envHermesHome:              "/overlay/home",
+			envPrivatePrefix + "TOKEN": "private",
+			"acp_go_hermes_internal_x": "private-lowercase",
 		},
 	)
 	require.NoError(t, err)
 	require.Equal(t, []string{"MODEL=sonnet", "PATH=/opt/bin"}, environment)
+
+	environment, err = managedEnvironment(map[string]string{
+		"PATH":                     "/usr/bin",
+		envPrivatePrefix + "TOKEN": "private",
+		"acp_go_hermes_internal_x": "private-lowercase",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"PATH=/usr/bin"}, environment)
 
 	_, err = ordinaryEnvironment(nil, map[string]string{"BAD=KEY": "value"})
 	require.ErrorContains(t, err, "invalid key")

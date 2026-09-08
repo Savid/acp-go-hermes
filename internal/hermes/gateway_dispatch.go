@@ -1028,12 +1028,9 @@ func (s *hermesServer) failGatewayTransport(transport *gatewayTransport, cause e
 }
 
 func (s *hermesServer) closeGatewayClient(client *Client, status websocket.StatusCode, reason string) {
-	s.transportCloseWG.Add(1)
-	go func() {
-		defer s.transportCloseWG.Done()
-
+	s.transportCloseWG.Go(func() {
 		_ = client.Close(status, reason)
-	}()
+	})
 }
 
 func (s *hermesServer) actorForTransportSession(

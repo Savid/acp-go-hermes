@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -20,6 +21,38 @@ type blockingSessionIDReader struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+func TestInvalidConcurrencyOptionsFailWithoutPanickingOrLaunching(t *testing.T) {
+	for _, limits := range []ConcurrencyLimits{
+		{MaxActiveSessions: -1},
+		{MaxConcurrentClientCalls: -1},
+		{MaxActiveSessions: -1, MaxConcurrentClientCalls: -1},
+	} {
+		t.Run(fmt.Sprint(limits), func(t *testing.T) {
+			agent := NewAgent(WithConcurrencyLimits(limits), func(options *Options) {
+				options.clientFactory = func(context.Context, nativehermes.StartOptions) (nativehermes.Server, error) {
+					t.Fatal("invalid options reached native startup")
+
+					return nil, errors.New("unexpected native startup")
+				}
+			})
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+			cwd := absTestPath("workspace")
+			_, initializeErr := agent.Initialize(t.Context(), acp.InitializeRequest{})
+			_, newErr := agent.NewSession(t.Context(), NewSessionRequest(cwd))
+			_, loadErr := agent.LoadSession(t.Context(), LoadSessionRequest("session", cwd))
+			_, resumeErr := agent.ResumeSession(t.Context(), ResumeSessionRequest("session", cwd))
+			_, forkErr := agent.HandleExtensionMethod(t.Context(), ForkSessionMethod, mustJSON(t, ForkSessionRequest("session", cwd)))
+			for _, err := range []error{initializeErr, newErr, loadErr, resumeErr, forkErr} {
+				var requestErr *acp.RequestError
+				require.ErrorAs(t, err, &requestErr)
+				require.Equal(t, -32603, requestErr.Code)
+				require.Equal(t, map[string]any{jsonFieldError: valHermesInvalidOptions}, requestErr.Data)
+			}
+		})
+	}
 }
 
 func (r *blockingSessionIDReader) Read(buffer []byte) (int, error) {
@@ -326,7 +359,7 @@ func TestLifecycleAdmissionRemainingBranches(t *testing.T) {
 	}))
 	deferred := testSession(t, deferredBounded, newFakeHermesClient())
 	require.NoError(t, deferred.openLifecycleStream())
-	for index := 0; index < maxDeferredStreamOpens; index++ {
+	for range maxDeferredStreamOpens {
 		deferredBounded.streamOpens = append(deferredBounded.streamOpens, &deferredStreamOpen{
 			state: deferredStreamOpenPending,
 		})

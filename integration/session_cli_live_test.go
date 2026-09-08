@@ -148,7 +148,6 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 		{session: firstSession.SessionId, carrier: first, nonce: "session-cli-a"},
 		{session: secondSession.SessionId, carrier: second, nonce: "session-cli-b"},
 	} {
-		turn := turn
 		go func() {
 			_, promptErr := conn.Prompt(ctx, hermesacp.TextPromptRequest(
 				turn.session,

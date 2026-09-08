@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+var defaultLedgerCreateTemp = ledgerCreateTemp
+
 // restoreLedgerHooks resets every ledger file hook to its package default now
 // and again at test end, so a test may stub one, assert, and reset mid-test.
 func restoreLedgerHooks(t *testing.T) {
@@ -24,9 +26,7 @@ func restoreLedgerHooks(t *testing.T) {
 		ledgerRemove = os.Remove
 		ledgerMarshal = json.Marshal
 		ledgerEvalPath = filepath.EvalSymlinks
-		ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
-			return os.CreateTemp(dir, pattern)
-		}
+		ledgerCreateTemp = defaultLedgerCreateTemp
 	}
 
 	reset()

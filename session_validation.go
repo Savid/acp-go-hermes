@@ -167,7 +167,12 @@ func validateImageLimits(limits ImageLimits) error {
 
 func normalizeConcurrencyLimits(limits ConcurrencyLimits) (ConcurrencyLimits, error) {
 	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentClientCalls < 0 {
-		return limits, fmt.Errorf("concurrency limits must be non-negative")
+		// Construction retains the verdict until initialize or session admission.
+		// Its bookkeeping must still be safe to allocate and close.
+		return ConcurrencyLimits{
+			MaxActiveSessions:        defaultMaxActiveSessions,
+			MaxConcurrentClientCalls: defaultMaxConcurrentClientCalls,
+		}, fmt.Errorf("concurrency limits must be non-negative")
 	}
 
 	if limits.MaxActiveSessions == 0 {

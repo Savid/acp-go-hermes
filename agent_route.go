@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -72,6 +73,10 @@ func routeVersionIsOne(value any) bool {
 		return version == routeVersion
 	case float64:
 		return version == routeVersion
+	case json.Number:
+		number, ok := exactWireInteger(version)
+
+		return ok && number == routeVersion
 	default:
 		return false
 	}
@@ -111,14 +116,16 @@ func routeInvalid(reason string) error {
 }
 
 func routeUnsupported(members ...string) error {
-	field := routeMetaPath
+	var field strings.Builder
+	field.WriteString(routeMetaPath)
+
 	for _, member := range members {
-		field += "." + member
+		field.WriteString("." + member)
 	}
 
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: valUnsupported,
-		jsonFieldField: field,
+		jsonFieldField: field.String(),
 	})
 }
 

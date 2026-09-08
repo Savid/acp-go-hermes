@@ -132,18 +132,17 @@ format are rejected.
 
 ## Restore
 
-Restore after native deletion hydrates `state-db` into a fresh home, calls native
-`session.resume`, and — for `session/load` — replays `session.history` to the ACP
-client.
+In isolated mode, restore after native deletion hydrates `state-db` into a fresh
+home, calls native `session.resume`, and — for `session/load` — replays
+`session.history` to the ACP client.
 
-The same restore path is the recovery boundary after a turn cancellation or
-timeout whose selected containment boundary completed. The interrupted native
-runtime is closed without a fresh snapshot; the next authorized prompt hydrates
-the last completed-turn commit and resumes the exact native session key.
-Partially emitted or partially persisted native state from the interrupted turn
-is never adopted. In managed mode, the next runtime is not admitted until the
-host authority has returned the prior process's terminal result and reclaimed
-its prepared trees.
+After cancellation, timeout, transport failure, or provider failure, the
+interrupted runtime closes without replacing the committed snapshot. Isolated
+mode restores the last completed-turn archive and exact native session key;
+partial native state from the failed turn is discarded. Shared-home mode keeps
+the official database authoritative and does not roll back its native history.
+In managed mode, the next runtime is not admitted until the host authority has
+returned the prior process's terminal result and reclaimed its prepared trees.
 
 `session/close` captures protocol state before stopping the native client. In
 managed mode it then waits for terminality, reclaims the residence, and captures

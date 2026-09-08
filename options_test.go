@@ -91,6 +91,8 @@ func TestAgentEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
 		"acp_go_hermes_path_dir_1": "reserved for the session PATH carrier",
 		"NODE_OPTIONS":             "is an injection vector",
 		"LD_PRELOAD":               "is an injection vector",
+		"ACP_GO_HERMES_INTERNAL_X": "is adapter-private",
+		"acp_go_hermes_internal_x": "is adapter-private",
 		"":                         "is not a variable name",
 		"A=B":                      "is not a variable name",
 	} {
@@ -99,4 +101,13 @@ func TestAgentEnvironmentNamesFailAtAgentConstruction(t *testing.T) {
 
 	require.ErrorContains(t, NewAgent(WithEnv(map[string]string{"A": "x\x00y"})).optionsErr, "is not a variable name")
 	require.NoError(t, NewAgent(WithEnv(map[string]string{"PATH": "/usr/bin", "https_proxy": "", "ld_preload": "own"})).optionsErr)
+}
+
+func TestAgentEnvironmentRefusesAmbiguousWindowsNames(t *testing.T) {
+	env := map[string]string{"Https_Proxy": "first", "https_proxy": "second"}
+	simulateSessionEnvPlatform(t, "linux")
+	require.NoError(t, NewAgent(WithEnv(env)).optionsErr)
+
+	simulateSessionEnvPlatform(t, "windows")
+	require.ErrorContains(t, NewAgent(WithEnv(env)).optionsErr, "name the same variable")
 }

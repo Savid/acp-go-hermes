@@ -123,7 +123,9 @@ type imagePromptBudget struct {
 	// root is the opened read root, held for the life of one prompt mapping so
 	// every handoff open in that prompt is relative to one kernel-checked
 	// descriptor.
-	root *os.Root
+	root        *os.Root
+	managedRoot *managedHandoffRoot
+	releaseRoot func()
 }
 
 func newImagePromptBudget(limits ImageLimits, handoffRoot string) *imagePromptBudget {

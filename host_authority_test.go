@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,7 @@ type recordingHostAuthority struct {
 	environment map[string]string
 	events      []string
 	process     NativeProcess
+	prepareHook func(string) error
 	prepareErr  error
 	reclaimErr  error
 	startErr    error
@@ -55,6 +57,10 @@ func (a *recordingHostAuthority) PrepareNativeTree(_ context.Context, root strin
 			return err
 		}
 		a.prepared[root] = moved
+	}
+
+	if a.prepareHook != nil {
+		return a.prepareHook(root)
 	}
 
 	return a.prepareErr
@@ -931,25 +937,66 @@ func TestHostAuthorityStdioPanicFailsClosed(t *testing.T) {
 }
 
 func TestHostAuthorityPrepareFailureRetainsAttemptedTree(t *testing.T) {
-	want := errors.New("prepare uncertain")
-	authority := newTestHostAuthority()
-	authority.prepareErr = want
-	err := startWithRecordingAuthority(t, authority, WithHostAuthority(authority), "logical-hermes")
-	require.ErrorIs(t, err, want)
-	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	for _, tree := range []string{"probe", "browser-shim", "home"} {
+		for _, fault := range []struct {
+			name string
+			err  error
+		}{
+			{"busy", ErrNativeTreeBusy},
+			{"cancelled", context.Canceled},
+			{"failure", errors.New("prepare uncertain")},
+			{"panic", ErrHostAuthorityUnavailable},
+		} {
+			t.Run(tree+"/"+fault.name, func(t *testing.T) {
+				if tree == "browser-shim" && runtime.GOOS == "windows" {
+					return // Windows does not materialize a browser shim.
+				}
+				authority := newTestHostAuthority()
+				attempted := ""
+				authority.prepareHook = func(root string) error {
+					kind := "home"
+					if strings.Contains(filepath.Base(root), "probe-") {
+						kind = "probe"
+					} else if strings.Contains(filepath.Base(root), "browser-shim-") {
+						kind = "browser-shim"
+					}
+					if kind != tree {
+						return nil
+					}
+					attempted = root
+					if err := os.WriteFile(filepath.Join(root, "host-owned"), []byte("registered before refusal"), 0o600); err != nil {
+						return err
+					}
+					if fault.name == "panic" {
+						panic("prepare uncertain")
+					}
 
-	prepared := ""
-	for _, event := range authority.events {
-		if path, ok := strings.CutPrefix(event, "prepare:"); ok {
-			prepared = path
-		}
-		if strings.HasPrefix(event, "reclaim:") {
-			t.Fatalf("failed prepare was followed by reclaim: %v", authority.events)
+					return fault.err
+				}
+				scratch := durableTempDir(t)
+				agent := NewAgent(WithHostAuthority(authority), WithScratchDir(scratch), WithExecutablePath("logical-hermes"))
+				request := acp.NewSessionRequest{Cwd: scratch, McpServers: []acp.McpServer{}}
+				_, err := agent.NewSession(t.Context(), request)
+				require.ErrorIs(t, err, fault.err)
+				require.ErrorIs(t, err, ErrContainmentIncomplete)
+				require.NotEmpty(t, attempted)
+				events := append([]string(nil), authority.events...)
+				require.NotContains(t, events, "reclaim:"+attempted)
+				require.Equal(t, -1, eventIndex(events, "start:logical-hermes serve "))
+				if tree == "probe" {
+					require.Equal(t, -1, eventIndex(events, "start:"))
+				}
+				_, err = agent.NewSession(t.Context(), request)
+				require.ErrorIs(t, err, ErrContainmentIncomplete)
+				require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+				require.Equal(t, events, authority.events, "later admission or close touched host-owned preparation")
+				marker, readErr := os.ReadFile(filepath.Join(attempted, "host-owned"))
+				require.NoError(t, readErr)
+				require.Equal(t, "registered before refusal", string(marker))
+				require.NotContains(t, agent.retiredNativeRoots, attempted, "failed prepare must never enter reclaim retries")
+			})
 		}
 	}
-	require.NotEmpty(t, prepared)
-	_, statErr := os.Stat(prepared)
-	require.NoError(t, statErr)
 }
 
 func TestManagedHermesServerRetriesContainmentBeforeRemoval(t *testing.T) {

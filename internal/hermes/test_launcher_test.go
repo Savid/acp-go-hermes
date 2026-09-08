@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"maps"
 	"os"
 	"sort"
 	"strconv"
@@ -15,9 +16,7 @@ const fakeLauncherOwnerPIDEnv = "ACP_GO_HERMES_TEST_OWNER_PID"
 // environment alongside whatever the caller asked for.
 func launcherOwnerEnv(env map[string]string) map[string]string {
 	owned := make(map[string]string, len(env)+1)
-	for key, value := range env {
-		owned[key] = value
-	}
+	maps.Copy(owned, env)
 
 	owned[fakeLauncherOwnerPIDEnv] = strconv.Itoa(os.Getpid())
 

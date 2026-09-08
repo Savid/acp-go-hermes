@@ -794,7 +794,7 @@ func TestFailedTurnPersistsVisiblePrefixWithoutAdvancingNativeTerminal(t *testin
 
 	_, published, err := session.settlePrompt(t.Context(), turnCtx, session.currentTurnEpoch(), baseline, promptRun{
 		settle: true, err: wantErr, endsIncarnation: true,
-	}, nil)
+	}, nil, nil)
 	if !errors.Is(err, wantErr) || !published {
 		t.Fatalf("failed settlement published=%v err=%v", published, err)
 	}

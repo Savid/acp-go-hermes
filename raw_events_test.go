@@ -440,7 +440,7 @@ func TestRawEventDefaultOffEmitsNothing(t *testing.T) {
 	client := newFakeHermesClient()
 	session := testSession(t, agent, client) // rawMessages disabled by default
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		emitRaw(t, session, `{"n":1}`)
 	}
 

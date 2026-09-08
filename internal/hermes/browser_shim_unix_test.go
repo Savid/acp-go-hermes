@@ -100,9 +100,9 @@ func browserLaunchingHermesExecutable(t *testing.T) string {
 	serve := fakeHermesExecutable(t, fakeProcessModeOK)
 	path := filepath.Join(durableTempDir(t), "hermes")
 
-	launches := ""
+	var launches strings.Builder
 	for _, name := range browserLauncherNames {
-		launches += fmt.Sprintf("%s %q\n", name, browserProbeURL)
+		_, _ = fmt.Fprintf(&launches, "%s %q\n", name, browserProbeURL)
 	}
 
 	body := fmt.Appendf(nil, `#!/bin/sh
@@ -112,7 +112,7 @@ for arg in "$@"; do
 	fi
 done
 %sexec %q "$@"
-`, serve, launches, serve)
+`, serve, launches.String(), serve)
 
 	if err := os.WriteFile(path, body, 0o700); err != nil {
 		t.Fatalf("write browser-launching harness: %v", err)

@@ -220,6 +220,12 @@ func parseHandoffEnvelope(meta map[string]any) (handoffEnvelope, *handoffError) 
 }
 
 func handoffVersionIsOne(value any) bool {
+	if number, ok := value.(json.Number); ok {
+		version, valid := exactWireInteger(number)
+
+		return valid && version == handoffVersion
+	}
+
 	version, ok := handoffNumber(value)
 
 	return ok && version == handoffVersion
@@ -263,6 +269,12 @@ func isHandoffDigest(digest string) bool {
 // handoffSizeBytes validates a declared byte count entirely in float64, before
 // any int64 conversion: non-negative, integral, and strictly below 2^63.
 func handoffSizeBytes(value any) (int64, bool) {
+	if number, ok := value.(json.Number); ok {
+		size, valid := exactWireInteger(number)
+
+		return size, valid && size >= 0
+	}
+
 	size, ok := handoffNumber(value)
 	if !ok || size < 0 || size != math.Trunc(size) || size >= handoffSizeBytesExclusiveMax {
 		return 0, false
@@ -384,6 +396,18 @@ func (b *imagePromptBudget) handoffRootHandle() (*os.Root, *handoffError) {
 		return b.root, nil
 	}
 
+	if b.managedRoot != nil {
+		root, release := b.managedRoot.borrow()
+		if root == nil {
+			return nil, &handoffError{value: imageErrPathNotAllowed, message: handoffRootUnopenableMessage}
+		}
+
+		b.root = root
+		b.releaseRoot = release
+
+		return root, nil
+	}
+
 	root, err := openHandoffRoot(b.handoffRoot)
 	if err != nil {
 		return nil, &handoffError{value: imageErrPathNotAllowed, message: handoffRootUnopenableMessage}
@@ -398,7 +422,13 @@ func (b *imagePromptBudget) handoffRootHandle() (*os.Root, *handoffError) {
 // mapping that opened it.
 func (b *imagePromptBudget) closeHandoffRoot() {
 	if b.root != nil {
-		_ = b.root.Close()
+		if b.releaseRoot != nil {
+			b.releaseRoot()
+			b.releaseRoot = nil
+		} else {
+			_ = b.root.Close()
+		}
+
 		b.root = nil
 	}
 }

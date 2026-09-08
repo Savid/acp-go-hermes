@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,19 +17,19 @@ import (
 func writeTestBinaryLauncher(t *testing.T, dir, name, testBinary string, env map[string]string, args []string) string {
 	t.Helper()
 
-	assignments := ""
+	var assignments strings.Builder
 	owned := launcherOwnerEnv(env)
 	for _, key := range sortedLauncherEnvKeys(owned) {
-		assignments += fmt.Sprintf("%s=%s ", key, owned[key])
+		_, _ = fmt.Fprintf(&assignments, "%s=%s ", key, owned[key])
 	}
 
-	quoted := ""
+	var quoted strings.Builder
 	for _, arg := range args {
-		quoted += fmt.Sprintf("%q ", arg)
+		_, _ = fmt.Fprintf(&quoted, "%q ", arg)
 	}
 
 	path := filepath.Join(dir, name)
-	body := fmt.Sprintf("#!/bin/sh\n%sexec %q %s\"$@\"\n", assignments, testBinary, quoted)
+	body := fmt.Sprintf("#!/bin/sh\n%sexec %q %s\"$@\"\n", assignments.String(), testBinary, quoted.String())
 
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatalf("write fake executable: %v", err)

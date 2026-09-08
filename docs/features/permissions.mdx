@@ -30,14 +30,11 @@ that emitted the request and never gates the answer on a native tool identity
 Hermes did not give it.
 
 <Note>
-Recorded deviation. Hermes answers the approval that was appended to the
-session's queue first. What that guarantees is that one answer settles exactly
-one queued approval. What it does not guarantee is that the approval settled is
-the one the host was shown: Hermes appends the queue entry under its lock but
-notifies outside it, so two approvals raised concurrently can reach the adapter
-in the opposite order to the queue. The adapter presents one approval at a time
-and blocks its event pump on the host's answer, which bounds the window to
-approvals a single native turn raises concurrently but does not close it.
+Hermes answers the first approval in its session queue, but concurrent approval
+notifications can arrive in a different order. The adapter presents one question
+at a time; without a native request ID, it cannot prove that the next native
+answer settles the question the host saw. Native correlation support is required
+to resolve this limitation.
 
 `approval.respond` also has an `all` flag that answers every approval queued on
 the session with the same choice, including ones no host was ever shown. The

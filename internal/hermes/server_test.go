@@ -3810,12 +3810,10 @@ func exitWhenParentTestExits() {
 }
 
 func runFakeHermesGatewayProcess(args []string, mode string) error {
-	for _, arg := range args {
-		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
+	if slices.Contains(args, "--version") {
+		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
 
-			return nil
-		}
+		return nil
 	}
 
 	exitWhenParentTestExits()
@@ -3999,13 +3997,7 @@ func darwinTestStartOptions(t *testing.T, options StartOptions) StartOptions {
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(values, want)
 }
 
 func stdioMCPServer(name string, command string, args []string, env map[string]string) acp.McpServer {

@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && browsercanary
 
 package integration
 
@@ -293,7 +293,7 @@ func buildNativeBrowserProbe(t *testing.T) string {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "native-browser.test")
-	command := exec.CommandContext(t.Context(), "go", "test", "-c", "-tags=integration", "-o", out, "./integration")
+	command := exec.CommandContext(t.Context(), "go", "test", "-c", "-tags=integration,browsercanary", "-o", out, "./integration")
 	command.Dir = repoRoot()
 	command.Env = append(os.Environ(), "GOWORK=off", "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 	if output, err := command.CombinedOutput(); err != nil {

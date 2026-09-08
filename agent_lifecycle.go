@@ -1,4 +1,3 @@
-//nolint:tagliatelle // ACP wire member names keep their protocol spelling.
 package hermesacp
 
 import (
@@ -149,20 +148,12 @@ func rejectLifecycleMeta(meta map[string]any) error {
 // params are still raw JSON. It reads only the reserved member: a route that
 // decodes its own params later still refuses the family literal first.
 func rejectLifecycleRawMeta(params json.RawMessage) error {
-	var envelope struct {
-		Meta map[string]json.RawMessage `json:"_meta"`
+	if !json.Valid(params) {
+		return nil // The route reports malformed params against its own shape.
 	}
 
-	if err := json.Unmarshal(params, &envelope); err != nil {
-		return nil //nolint:nilerr // The route reports malformed params against its own shape.
-	}
+	var meta map[string]any
+	preserveRequestLifecycle(params, &meta)
 
-	if _, present := envelope.Meta[lifecycle.MetaKey]; !present {
-		return nil
-	}
-
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: lifecycle.MetaPath,
-	})
+	return rejectLifecycleMeta(meta)
 }

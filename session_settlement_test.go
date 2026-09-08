@@ -2,12 +2,14 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -74,7 +76,7 @@ func TestSettleClosedSessionAfterIncarnationEndingSettlement(t *testing.T) {
 
 	_, published, err := session.settlePrompt(
 		t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-		promptRun{settle: true, cancelled: true, endsIncarnation: true, markCancelled: true}, nil,
+		promptRun{settle: true, cancelled: true, endsIncarnation: true, markCancelled: true}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("settlement: published=%v err=%v", published, err)
@@ -145,7 +147,7 @@ func TestCloseSessionAfterCancelledTurn(t *testing.T) {
 	}
 	if _, _, err := session.settlePrompt(
 		t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-		promptRun{settle: true, cancelled: true, endsIncarnation: true, markCancelled: true}, nil,
+		promptRun{settle: true, cancelled: true, endsIncarnation: true, markCancelled: true}, nil, nil,
 	); err != nil {
 		t.Fatalf("settlement: %v", err)
 	}
@@ -373,7 +375,7 @@ func TestCloseNeverRewritesALossTerminalizedFailureAsCancelled(t *testing.T) {
 	// settlement records it, and the store holds `failed` from that moment on.
 	_, published, err := session.settlePrompt(
 		t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-		promptRun{settle: true, err: errors.New("gateway connection closed"), endsIncarnation: true}, nil,
+		promptRun{settle: true, err: errors.New("gateway connection closed"), endsIncarnation: true}, nil, nil,
 	)
 	require.Error(t, err, "a lost incarnation settles as the failure it was")
 	require.True(t, published)
@@ -647,7 +649,7 @@ func TestCancelDuringPreClaimCaptureSettlesCancelled(t *testing.T) {
 	go func() {
 		_, published, err := session.settlePrompt(
 			t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-			promptRun{settle: true, finish: "stop", nativeMessageID: "assistant-1"}, nil,
+			promptRun{settle: true, finish: "stop", nativeMessageID: "assistant-1"}, nil, nil,
 		)
 		settled <- settleResult{published: published, err: err}
 	}()
@@ -762,7 +764,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 
 		_, published, err := session.settlePrompt(
 			t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-			promptRun{settle: true, cancelled: true}, nil,
+			promptRun{settle: true, cancelled: true}, nil, nil,
 		)
 		require.False(t, published)
 		require.ErrorContains(t, err, "lifecycle delivery failed")
@@ -774,7 +776,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 
 		_, published, err := session.settlePrompt(
 			t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-			promptRun{settle: true, cancelled: true}, nil,
+			promptRun{settle: true, cancelled: true}, nil, nil,
 		)
 		require.True(t, published)
 		require.ErrorContains(t, err, "lifecycle delivery failed")
@@ -806,7 +808,7 @@ func TestPromptSettlementStopsAtLifecycleDeliveryFailure(t *testing.T) {
 
 		_, published, err := session.settlePrompt(
 			t.Context(), turnCtx, sessionTurnEpoch(session), SessionStoreTerminalState{},
-			promptRun{settle: true, cancelled: true, endsIncarnation: true}, nil,
+			promptRun{settle: true, cancelled: true, endsIncarnation: true}, nil, nil,
 		)
 		require.True(t, published)
 		require.ErrorContains(t, err, "lifecycle delivery failed")
@@ -832,7 +834,7 @@ func TestLifecycleRunFailureClassification(t *testing.T) {
 		{name: "missing dispatch proof"},
 		{name: "post-dispatch admission failure", acceptErr: acceptErr, dispatched: true, wantSettle: true, wantIncarnation: true},
 		{name: "post-dispatch transport failure", sendErr: nativehermes.ErrGatewayDisconnected, dispatched: true, wantSettle: true, wantIncarnation: true},
-		{name: "post-dispatch provider failure", sendErr: nativehermes.NewTurnFailure(nativehermes.CauseProvider, "provider failed"), dispatched: true, wantSettle: true},
+		{name: "post-dispatch provider failure", sendErr: nativehermes.NewTurnFailure(nativehermes.CauseProvider, "provider failed"), dispatched: true, wantSettle: true, wantIncarnation: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			run := session.nativeRun(t.Context(), nativehermes.NativeMessage{}, test.sendErr, test.acceptErr, test.dispatched)
@@ -1230,5 +1232,139 @@ func TestSettlementManagedCompletionResidualBranch(t *testing.T) {
 	}
 	if err := session.settleClosedSession(t.Context()); !errors.Is(err, want) || session.owedCloseCommit == nil {
 		t.Fatalf("managed settlement completion = %v, retained=%v", err, session.owedCloseCommit != nil)
+	}
+}
+
+type quiescenceBlockingClient struct {
+	*recordingAgentClient
+	entered chan struct{}
+	release chan struct{}
+	fault   string
+}
+
+func (c *quiescenceBlockingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	for _, event := range lifecycleEvents([]acp.SessionNotification{notification}) {
+		if event["type"] == string(lifecycle.EventQuiescenceUpdate) {
+			close(c.entered)
+			<-c.release
+			switch c.fault {
+			case "failure":
+				return errors.New("quiescence delivery failed")
+			case "panic":
+				panic("quiescence sink panicked")
+			}
+		}
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+func TestPromptForegroundReturnsBeforeQuiescenceAndCloseJoins(t *testing.T) {
+	for _, outcome := range []string{"provider", "cancelled"} {
+		for _, fault := range []string{"success", "failure", "panic"} {
+			t.Run(outcome+"/"+fault, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					store := NewInMemorySessionStore()
+					agent := newTestAgent(WithSessionStore(store), WithHostAuthority(newTestHostAuthority()))
+					require.NoError(t, agent.retainNegotiatedLifecycle(lifecycle.Negotiated{
+						Version: lifecycle.Version, AuthoritativeQuiescence: true,
+						QuiescenceSource: lifecycle.ProofClassProcessContainment, ActivityKinds: []lifecycle.ActivityKind{},
+					}))
+					conn := &quiescenceBlockingClient{
+						recordingAgentClient: newRecordingAgentClient(),
+						entered:              make(chan struct{}), release: make(chan struct{}), fault: fault,
+					}
+					var unblock sync.Once
+					defer unblock.Do(func() { close(conn.release) })
+					agent.setAgentClient(conn)
+					client := newFakeHermesClient()
+					started := make(chan struct{})
+					client.sendMessage = func(ctx context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+						close(started)
+						if outcome == "cancelled" {
+							<-ctx.Done()
+
+							return nativehermes.NativeMessage{}, ctx.Err()
+						}
+						failure := nativehermes.NewProviderTurnFailure("provider failed", 503, "overloaded")
+						client.emitEvent(nativehermes.TurnEvent{
+							Type: nativehermes.EventCycleFailed, CycleID: "fake/native-1/cycle-1",
+							TransportGeneration: 1, Origin: nativehermes.CycleOriginPrompt, Err: failure,
+						})
+
+						return nativehermes.NativeMessage{}, failure
+					}
+					session := testSession(t, agent, client)
+					require.NoError(t, session.openLifecycleStream())
+					require.NoError(t, session.lifecycleStream().ensureLifecycleOpened(t.Context()))
+					agent.sessions[session.id] = session
+					request := TextPromptRequest(session.id, "turn", "reply")
+					request.Meta[lifecycle.MetaKey] = map[string]any{
+						"version": 1, "submission": map[string]any{"submissionId": "submission", "clientNonce": "nonce"},
+					}
+					promptDone := make(chan promptSettlementResult, 1)
+					go func() {
+						response, err := agent.Prompt(t.Context(), request)
+						promptDone <- promptSettlementResult{response: response, err: err}
+					}()
+					<-started
+					if outcome == "cancelled" {
+						require.NoError(t, session.cancelRouted(turnRouteMeta("turn")))
+					}
+					<-conn.entered
+					synctest.Wait()
+					var published promptSettlementResult
+					select {
+					case published = <-promptDone:
+					default:
+						t.Fatal("foreground response waited on quiescence")
+					}
+					if outcome == "cancelled" {
+						require.NoError(t, published.err)
+						require.Equal(t, acp.StopReasonCancelled, published.response.StopReason)
+					} else {
+						requireTurnFailure(t, published.err, nativehermes.CauseProvider, "provider failed")
+						require.Empty(t, published.response.StopReason)
+					}
+					rows, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id), Subpath: SessionStoreMainSubpath})
+					require.NoError(t, err)
+					require.NotEmpty(t, rows)
+					var snapshot stateSnapshot
+					require.NoError(t, json.Unmarshal(rows[len(rows)-1], &snapshot))
+					wantOutcome := "failed"
+					if outcome == "cancelled" {
+						wantOutcome = "cancelled"
+					}
+					require.Equal(t, wantOutcome, snapshot.Wrapper.Foreground.Outcome)
+					conn.mu.Lock()
+					events := lifecycleEvents(append([]acp.SessionNotification(nil), conn.updates...))
+					conn.mu.Unlock()
+					require.Equal(t, "idle", events[len(events)-1]["state"])
+
+					closeDone := make(chan error, 1)
+					go func() {
+						_, closeErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+						closeDone <- closeErr
+					}()
+					synctest.Wait()
+					select {
+					case err := <-closeDone:
+						t.Fatalf("close crossed pending quiescence: %v", err)
+					default:
+					}
+					unblock.Do(func() { close(conn.release) })
+					closeErr := <-closeDone
+					if fault == "success" {
+						require.NoError(t, closeErr)
+					} else {
+						require.Error(t, closeErr)
+						_, retryErr := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: session.id})
+						require.NoError(t, retryErr)
+					}
+					require.True(t, session.lifecycleStream().fenced())
+					require.NoError(t, agent.Close())
+				})
+			})
+		}
 	}
 }
