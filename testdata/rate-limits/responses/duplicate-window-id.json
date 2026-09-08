@@ -1,0 +1,8 @@
+{
+  "name": "duplicate-window-id",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[{\"id\":\"primary\",\"usedPercent\":12.5,\"durationSeconds\":604800,\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetsAt\":\"2026-09-15T04:00:00Z\"},{\"id\":\"primary\",\"usedPercent\":80,\"durationSeconds\":604800,\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetsAt\":\"2026-09-15T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows[1].id"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "empty-object",
+  "raw": "{}",
+  "expect": {
+    "valid": true,
+    "normalized": {}
+  }
+}

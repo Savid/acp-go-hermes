@@ -1,0 +1,8 @@
+{
+  "name": "nonfinite-percent",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[{\"id\":\"primary\",\"usedPercent\":1e309,\"durationSeconds\":604800,\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetsAt\":\"2026-09-15T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows[0].usedPercent"
+  }
+}

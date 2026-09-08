@@ -1,0 +1,10 @@
+{
+  "name": "provider-id",
+  "raw": "{\"providerId\":\"anthropic\"}",
+  "expect": {
+    "valid": true,
+    "normalized": {
+      "providerId": "anthropic"
+    }
+  }
+}

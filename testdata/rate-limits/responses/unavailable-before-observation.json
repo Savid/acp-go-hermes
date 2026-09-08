@@ -1,0 +1,7 @@
+{
+  "name": "unavailable-before-observation",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"unavailable\",\"pools\":[],\"reason\":\"not_observed\"}",
+  "expect": {
+    "valid": true
+  }
+}

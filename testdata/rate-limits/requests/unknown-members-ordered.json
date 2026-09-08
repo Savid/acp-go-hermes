@@ -1,0 +1,9 @@
+{
+  "name": "unknown-members-ordered",
+  "raw": "{\"zeta\":1,\"alpha\":2}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "alpha"
+  }
+}

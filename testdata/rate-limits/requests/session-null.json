@@ -1,0 +1,9 @@
+{
+  "name": "session-null",
+  "raw": "{\"sessionId\":null}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "sessionId"
+  }
+}

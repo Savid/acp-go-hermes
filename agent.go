@@ -558,6 +558,8 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	}
 
 	switch method {
+	case RateLimitsMethod:
+		return a.handleRateLimits(ctx, params)
 	case ForkSessionMethod:
 		// An extension params object that cannot be decoded, or that fails its
 		// own validation as a whole, is refused as the whole params member:

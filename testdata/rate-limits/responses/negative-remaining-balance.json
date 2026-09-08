@@ -1,0 +1,7 @@
+{
+  "name": "negative-remaining-balance",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[],\"balances\":[{\"id\":\"credit\",\"used\":{\"amount\":10.5,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"limit\":{\"amount\":10,\"currency\":\"USD\"},\"remaining\":{\"amount\":-0.5,\"currency\":\"USD\"}}]}]}",
+  "expect": {
+    "valid": true
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "window-without-percent-or-status",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[{\"id\":\"session\",\"observedAt\":\"2026-09-08T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows[0]"
+  }
+}

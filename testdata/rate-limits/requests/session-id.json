@@ -1,0 +1,10 @@
+{
+  "name": "session-id",
+  "raw": "{\"sessionId\":\"session-1\"}",
+  "expect": {
+    "valid": true,
+    "normalized": {
+      "sessionId": "session-1"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "provider-null",
+  "raw": "{\"providerId\":null}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "providerId"
+  }
+}

@@ -1,6 +1,6 @@
 ---
 title: ACP Methods
-description: The ACP methods the adapter implements and the one native extension.
+description: The ACP methods the adapter implements and their extensions.
 ---
 
 ## Stable methods
@@ -19,6 +19,65 @@ description: The ACP methods the adapter implements and the one native extension
 | `session/close` | Close the session and stop its process. |
 | `session/delete` | Tombstone the store, cancel and settle any active turn, then delete the native session and destroy its generation. |
 | `session/set_config_option` | Apply a config option such as `model`. |
+
+## Rate Limits
+
+`RateLimitsMethod` (`_hermes/rateLimits`) is an on-demand ACP extension request.
+The handler is implemented and validates every request. This adapter has no
+provider quota readers, so a resolved provider returns `unsupported` with an
+empty pool array. Polling does not start a native process, read credentials,
+contact a provider, or generate model output.
+
+### Request
+
+```json
+{"providerId":"openrouter","sessionId":"<optional live session id>"}
+```
+
+Both fields are optional. Absent params, JSON `null`, and `{}` are accepted.
+Present selectors must be nonblank strings; their spelling is preserved.
+Unknown or duplicate members, invalid Unicode, malformed JSON, trailing JSON,
+and wrong field types return invalid params (`-32602`) with
+`{"error":"unsupported","field":"<path>"}`. Reserved lifecycle metadata
+retains its [placement rejection](/docs/reference/meta).
+
+Omitting `providerId` selects the provider in the addressed session's current
+model, or in `WithDefaultModel` when no session was supplied. A model without
+an unambiguous `provider/model` selection returns invalid params with
+`{"error":"missing","field":"providerId"}`. The adapter does not search other
+live sessions or native homes to guess a provider.
+
+A supplied `sessionId` must name a live eligible session; unknown, closed, and
+deleted sessions return `{"error":"unknown session","field":"sessionId"}`.
+Poisoned sessions retain their normal internal error. The selector is an ACP
+session context, not an OAuth flow ID or a requirement to retain the session
+that performed login.
+
+### Response
+
+The JSON-RPC `result` is the snapshot itself:
+
+```json
+{"providerId":"openrouter","availability":"unsupported","pools":[]}
+```
+
+The response has no `_meta` wrapper or push notification. `unsupported` means
+there is no reader for this provider context; it does not mean zero usage,
+failed authentication, or an exhausted account.
+
+The public types are `RateLimitsRequest`, `RateLimitsResponse`, `RateLimitPool`,
+`RateLimitWindow`, `RateLimitBalance`, and `RateLimitMoney`. The response type
+also represents `available` snapshots with nonempty measured pools and
+`unavailable` snapshots with empty pools and a reason: `not_observed`,
+`not_authenticated`, `read_failed`, `disabled`, or `session_required`.
+This implementation emits `unsupported` for every resolved provider.
+
+Windows carry their own IDs, source-reported percentage or status, optional
+duration and reset time, and observation time. Monetary balances carry explicit
+currencies; omitted values stay unknown. Empty arrays are `[]`, never `null`.
+Quota observations are separate from session context usage in `usage_update`.
+A host must not infer prompt admission or account-wide funds from a single
+quota percentage or an uncapped allowance.
 
 ## Provider-auth extension methods
 
@@ -52,7 +111,7 @@ shapes below are uniform across every method that can produce them:
 
 | Cause | `data` |
 |---|---|
-| A required reserved key the caller omitted | `{"error":"missing","field":"<path>"}` |
+| A required key the caller omitted, including an ambiguous quota provider selector | `{"error":"missing","field":"<path>"}` |
 | An unknown, misplaced, or malformed value | `{"error":"unsupported","field":"<path>"}` |
 | A `cwd` that is not an absolute path — relative or empty — on `session/new`, `session/load`, `session/resume`, or `_hermes/session/fork` | `{"error":"unsupported","field":"cwd"}` |
 | An `additionalDirectories[N]` entry that is not an absolute path | `{"error":"unsupported","field":"additionalDirectories[N]"}` |

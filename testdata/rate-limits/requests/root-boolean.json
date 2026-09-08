@@ -1,0 +1,9 @@
+{
+  "name": "root-boolean",
+  "raw": "true",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

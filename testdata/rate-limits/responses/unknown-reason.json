@@ -1,0 +1,8 @@
+{
+  "name": "unknown-reason",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"unavailable\",\"pools\":[],\"reason\":\"bad_credentials\"}",
+  "expect": {
+    "valid": false,
+    "field": "reason"
+  }
+}

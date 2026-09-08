@@ -1,0 +1,8 @@
+{
+  "name": "unavailable-without-reason",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"unavailable\",\"pools\":[]}",
+  "expect": {
+    "valid": false,
+    "field": "reason"
+  }
+}

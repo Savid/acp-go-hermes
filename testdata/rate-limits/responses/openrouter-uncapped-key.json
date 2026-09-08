@@ -1,0 +1,7 @@
+{
+  "name": "openrouter-uncapped-key",
+  "raw": "{\"providerId\":\"openrouter\",\"availability\":\"available\",\"pools\":[{\"id\":\"key\",\"windows\":[],\"balances\":[{\"id\":\"credit\",\"used\":{\"amount\":1.5,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"uncapped\":true}]}]}",
+  "expect": {
+    "valid": true
+  }
+}

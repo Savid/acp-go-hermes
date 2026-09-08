@@ -1,0 +1,9 @@
+{
+  "name": "provider-whitespace",
+  "raw": "{\"providerId\":\"  \"}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "providerId"
+  }
+}

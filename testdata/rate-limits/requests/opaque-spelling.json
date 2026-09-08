@@ -1,0 +1,11 @@
+{
+  "name": "opaque-spelling",
+  "raw": "{\"providerId\":\" providers/账户 \\t\",\"sessionId\":\"😀: session \"}",
+  "expect": {
+    "valid": true,
+    "normalized": {
+      "providerId": " providers/账户 \t",
+      "sessionId": "😀: session "
+    }
+  }
+}

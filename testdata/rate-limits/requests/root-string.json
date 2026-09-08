@@ -1,0 +1,9 @@
+{
+  "name": "root-string",
+  "raw": "\"hello\"",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

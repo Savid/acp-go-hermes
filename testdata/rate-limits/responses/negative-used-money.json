@@ -1,0 +1,8 @@
+{
+  "name": "negative-used-money",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[],\"balances\":[{\"id\":\"credit\",\"used\":{\"amount\":-1,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].balances[0].used.amount"
+  }
+}

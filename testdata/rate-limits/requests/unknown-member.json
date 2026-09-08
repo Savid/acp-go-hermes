@@ -1,0 +1,9 @@
+{
+  "name": "unknown-member",
+  "raw": "{\"unexpected\":1}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "unexpected"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "duplicate-escaped-member",
+  "raw": "{\"providerId\":\"a\",\"\\u0070roviderId\":\"a\"}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "providerId"
+  }
+}

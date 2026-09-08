@@ -1,0 +1,265 @@
+{
+  "version": 1,
+  "schemas": {
+    "request": "request.schema.json",
+    "response": "response.schema.json"
+  },
+  "fixtures": [
+    {
+      "kind": "request",
+      "file": "requests/absent.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/empty-raw.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/null.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/empty-object.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/provider-id.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/session-id.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/provider-and-session.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/opaque-spelling.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/provider-whitespace.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/session-whitespace.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/unknown-member.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/unknown-members-ordered.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/provider-null.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/provider-number.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/session-null.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/session-boolean.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/root-array.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/root-string.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/root-boolean.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/root-number.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/duplicate-provider.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/duplicate-session.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/duplicate-escaped-member.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/malformed-json.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/trailing-json.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/whitespace-raw.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/unpaired-surrogate.json"
+    },
+    {
+      "kind": "request",
+      "file": "requests/non-json-number.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/weekly-primary-window.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/status-without-percent.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/native-percent-above-100.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/multiple-pools.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/openrouter-uncapped-key.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/negative-remaining-balance.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unavailable-before-observation.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unsupported-provider.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/missing-provider.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/available-empty-pools.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/available-with-reason.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unavailable-without-reason.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unavailable-with-pools.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unsupported-with-pools.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unknown-response-member.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unknown-availability.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unknown-reason.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/duplicate-pool-id.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/duplicate-window-id.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/duplicate-balance-id.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/missing-windows.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/pool-without-observations.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/window-without-percent-or-status.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/nonfinite-percent.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/negative-percent.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/fractional-duration.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/duration-int64-overflow.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/non-utc-timestamp.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/unknown-window-status.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/null-optional-percent.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/balance-without-observations.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/uncapped-with-limit.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/money-missing-currency.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/money-currency-mismatch.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/negative-used-money.json"
+    },
+    {
+      "kind": "response",
+      "file": "responses/duplicate-json-member.json"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "money-currency-mismatch",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[],\"balances\":[{\"id\":\"credit\",\"used\":{\"amount\":1.5,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"limit\":{\"amount\":10,\"currency\":\"EUR\"}}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].balances[0].limit.currency"
+  }
+}

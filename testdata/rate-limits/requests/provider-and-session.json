@@ -1,0 +1,11 @@
+{
+  "name": "provider-and-session",
+  "raw": "{\"providerId\":\"openai\",\"sessionId\":\"session-1\"}",
+  "expect": {
+    "valid": true,
+    "normalized": {
+      "providerId": "openai",
+      "sessionId": "session-1"
+    }
+  }
+}

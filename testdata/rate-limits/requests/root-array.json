@@ -1,0 +1,9 @@
+{
+  "name": "root-array",
+  "raw": "[]",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

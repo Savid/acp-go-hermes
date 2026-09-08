@@ -1,0 +1,8 @@
+{
+  "name": "fractional-duration",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[{\"id\":\"primary\",\"usedPercent\":12.5,\"durationSeconds\":1.5,\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetsAt\":\"2026-09-15T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows[0].durationSeconds"
+  }
+}

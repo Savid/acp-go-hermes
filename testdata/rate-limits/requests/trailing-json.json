@@ -1,0 +1,9 @@
+{
+  "name": "trailing-json",
+  "raw": "{} {}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

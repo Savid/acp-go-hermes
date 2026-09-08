@@ -1,0 +1,8 @@
+{
+  "name": "absent",
+  "raw": null,
+  "expect": {
+    "valid": true,
+    "normalized": {}
+  }
+}

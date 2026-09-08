@@ -1,0 +1,7 @@
+{
+  "name": "multiple-pools",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"subscription\",\"windows\":[{\"id\":\"primary\",\"usedPercent\":12.5,\"durationSeconds\":604800,\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetsAt\":\"2026-09-15T04:00:00Z\",\"status\":\"ok\"}]},{\"id\":\"api-key\",\"windows\":[],\"balances\":[{\"id\":\"daily\",\"used\":{\"amount\":1.5,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetInterval\":\"daily\"},{\"id\":\"weekly\",\"used\":{\"amount\":0,\"currency\":\"EUR\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetInterval\":\"weekly\"},{\"id\":\"monthly\",\"used\":{\"amount\":2,\"currency\":\"AUD\"},\"observedAt\":\"2026-09-08T04:00:00Z\",\"resetInterval\":\"monthly\"}]}]}",
+  "expect": {
+    "valid": true
+  }
+}

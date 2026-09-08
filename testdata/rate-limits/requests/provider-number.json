@@ -1,0 +1,9 @@
+{
+  "name": "provider-number",
+  "raw": "{\"providerId\":1}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "providerId"
+  }
+}

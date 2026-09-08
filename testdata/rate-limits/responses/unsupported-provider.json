@@ -1,0 +1,7 @@
+{
+  "name": "unsupported-provider",
+  "raw": "{\"providerId\":\"xai\",\"availability\":\"unsupported\",\"pools\":[]}",
+  "expect": {
+    "valid": true
+  }
+}

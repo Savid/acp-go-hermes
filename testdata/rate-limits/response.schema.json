@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rate-limits response",
+  "type": "object",
+  "properties": {
+    "providerId": {
+      "$ref": "#/$defs/nonblankString"
+    },
+    "availability": {
+      "enum": [
+        "available",
+        "unavailable",
+        "unsupported"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "not_observed",
+        "not_authenticated",
+        "read_failed",
+        "disabled",
+        "session_required"
+      ]
+    },
+    "pools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pool"
+      }
+    }
+  },
+  "required": [
+    "providerId",
+    "availability",
+    "pools"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "availability": {
+            "const": "available"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "reason"
+          ]
+        },
+        "properties": {
+          "pools": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "availability": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "pools": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "availability": {
+            "const": "unsupported"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "reason"
+          ]
+        },
+        "properties": {
+          "pools": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "Pool IDs MUST be unique within pools. Every numeric value fits finite float64 except durationSeconds, which uses the positive int64 range. Duplicate JSON members and malformed Unicode are rejected before schema validation.",
+  "$defs": {
+    "nonblankString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "[^\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]",
+      "description": "Contains a character outside the Unicode White_Space set. Preserve the complete opaque spelling."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$",
+      "description": "A valid UTC calendar instant in RFC3339 form, with uppercase T and Z; seconds are 00 through 59."
+    },
+    "money": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "number",
+          "minimum": -1.7976931348623157e+308,
+          "maximum": 1.7976931348623157e+308
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        }
+      },
+      "required": [
+        "amount",
+        "currency"
+      ],
+      "additionalProperties": false
+    },
+    "nonnegativeMoney": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/money"
+        },
+        {
+          "properties": {
+            "amount": {
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "window": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonblankString"
+        },
+        "usedPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.7976931348623157e+308,
+          "description": "Native reported percent; values above 100 are preserved."
+        },
+        "durationSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "warning",
+            "exhausted"
+          ]
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "resetsAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "observedAt"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "usedPercent"
+          ]
+        },
+        {
+          "required": [
+            "status"
+          ]
+        }
+      ]
+    },
+    "balance": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonblankString"
+        },
+        "used": {
+          "$ref": "#/$defs/nonnegativeMoney"
+        },
+        "limit": {
+          "$ref": "#/$defs/nonnegativeMoney"
+        },
+        "remaining": {
+          "$ref": "#/$defs/money"
+        },
+        "uncapped": {
+          "type": "boolean",
+          "const": true
+        },
+        "resetInterval": {
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly"
+          ]
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "resetsAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "observedAt"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "used"
+          ]
+        },
+        {
+          "required": [
+            "limit"
+          ]
+        },
+        {
+          "required": [
+            "remaining"
+          ]
+        },
+        {
+          "required": [
+            "uncapped"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "uncapped"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "limit"
+                  ]
+                },
+                {
+                  "required": [
+                    "remaining"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "$comment": "When more than one Money member is present, used, limit, and remaining MUST use the same currency. The executable validator checks this cross-member invariant."
+    },
+    "pool": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonblankString"
+        },
+        "label": {
+          "$ref": "#/$defs/nonblankString"
+        },
+        "planType": {
+          "$ref": "#/$defs/nonblankString"
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/window"
+          }
+        },
+        "balances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/balance"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "windows"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "windows": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "balances"
+          ],
+          "properties": {
+            "balances": {
+              "minItems": 1
+            }
+          }
+        }
+      ],
+      "$comment": "Window IDs are unique within windows; balance IDs are unique within balances. The same spelling can occur in different collections or pools."
+    }
+  }
+}

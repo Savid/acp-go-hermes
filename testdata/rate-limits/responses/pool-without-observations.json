@@ -1,0 +1,8 @@
+{
+  "name": "pool-without-observations",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[],\"balances\":[]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0]"
+  }
+}

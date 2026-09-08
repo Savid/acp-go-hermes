@@ -1,0 +1,9 @@
+{
+  "name": "session-boolean",
+  "raw": "{\"sessionId\":true}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "sessionId"
+  }
+}

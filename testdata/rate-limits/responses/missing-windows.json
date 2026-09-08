@@ -1,0 +1,8 @@
+{
+  "name": "missing-windows",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"balances\":[{\"id\":\"credit\",\"used\":{\"amount\":1.5,\"currency\":\"USD\"},\"observedAt\":\"2026-09-08T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "non-utc-timestamp",
+  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[{\"id\":\"account\",\"windows\":[{\"id\":\"primary\",\"usedPercent\":12.5,\"durationSeconds\":604800,\"observedAt\":\"2026-09-08T14:00:00+10:00\",\"resetsAt\":\"2026-09-15T04:00:00Z\"}]}]}",
+  "expect": {
+    "valid": false,
+    "field": "pools[0].windows[0].observedAt"
+  }
+}

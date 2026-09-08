@@ -1,0 +1,9 @@
+{
+  "name": "root-number",
+  "raw": "1",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

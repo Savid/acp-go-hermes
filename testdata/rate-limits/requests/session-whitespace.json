@@ -1,0 +1,9 @@
+{
+  "name": "session-whitespace",
+  "raw": "{\"sessionId\":\" \\t\"}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "sessionId"
+  }
+}

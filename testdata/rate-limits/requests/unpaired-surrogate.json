@@ -1,0 +1,9 @@
+{
+  "name": "unpaired-surrogate",
+  "raw": "{\"providerId\":\"\\ud800\"}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "params"
+  }
+}

@@ -244,3 +244,13 @@ command from PATH.
 Setting a schema — through the field or `WithHermesOutputSchema` — is accepted
 for API symmetry but fails session start with the uniform unsupported-field
 error.
+
+## Quota types
+
+`RateLimitsMethod` names `_hermes/rateLimits`, dispatched through
+`Agent.HandleExtensionMethod`. `RateLimitsRequest` selects `providerId` and
+optional `sessionId`; `RateLimitsResponse` contains `providerId`, `availability`,
+optional `reason`, and `pools`. `RateLimitPool`, `RateLimitWindow`,
+`RateLimitBalance`, and `RateLimitMoney` describe the normalized observations.
+Optional numbers use pointers so measured zero remains present. See
+[Rate limits](/docs/reference/acp-methods#rate-limits) for selection and availability.

@@ -1,0 +1,8 @@
+{
+  "name": "empty-raw",
+  "raw": "",
+  "expect": {
+    "valid": true,
+    "normalized": {}
+  }
+}

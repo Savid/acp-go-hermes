@@ -1,0 +1,9 @@
+{
+  "name": "duplicate-provider",
+  "raw": "{\"providerId\":\"a\",\"providerId\":\"b\"}",
+  "expect": {
+    "valid": false,
+    "error": "unsupported",
+    "field": "providerId"
+  }
+}
