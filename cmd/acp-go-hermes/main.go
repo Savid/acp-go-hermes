@@ -76,12 +76,26 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	signals := forwardedSignals()
 	receivedSignals := make(chan os.Signal, 1)
+	handledSignals := make(chan os.Signal, 1)
 
+	// One consumer owns both cancellation and the recorded signal. Registering
+	// an independent NotifyContext would let its cancellation race ahead of the
+	// channel that preserves the conventional signal exit code.
 	signal.Notify(receivedSignals, signals...)
 	defer signal.Stop(receivedSignals)
 
-	ctx, stop := signal.NotifyContext(ctx, signals...)
-	defer stop()
+	ctx, cancelSignal := context.WithCancel(ctx)
+	defer cancelSignal()
+
+	go func() {
+		select {
+		case sig := <-receivedSignals:
+			handledSignals <- sig
+
+			cancelSignal()
+		case <-ctx.Done():
+		}
+	}()
 
 	version := agentVersion()
 
@@ -126,7 +140,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 1
 	}
 
-	if sig := pendingSignal(receivedSignals); sig != nil {
+	if sig := pendingSignal(handledSignals); sig != nil {
 		return signalCode(sig)
 	}
 

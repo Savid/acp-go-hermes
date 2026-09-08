@@ -58,11 +58,11 @@ func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
 
 func TestProcessPATHOrdersOperationBeforeBrowserShimAndBase(t *testing.T) {
 	separator := string(os.PathListSeparator)
-	operationOne := filepath.Join(durableTempDir(t), "operation-one")
-	operationTwo := filepath.Join(durableTempDir(t), "operation-two")
-	shimDir := filepath.Join(durableTempDir(t), "browser-shim")
-	baseOne := filepath.Join(durableTempDir(t), "base-one")
-	baseTwo := filepath.Join(durableTempDir(t), "base-two")
+	operationOne := filepath.Join(t.TempDir(), "operation-one")
+	operationTwo := filepath.Join(t.TempDir(), "operation-two")
+	shimDir := filepath.Join(t.TempDir(), "browser-shim")
+	baseOne := filepath.Join(t.TempDir(), "base-one")
+	baseTwo := filepath.Join(t.TempDir(), "base-two")
 
 	base := []string{
 		"STATIC=1",
@@ -86,13 +86,13 @@ func TestProcessPATHOrdersOperationBeforeBrowserShimAndBase(t *testing.T) {
 }
 
 func TestProcessCarrierValidation(t *testing.T) {
-	absolute := durableTempDir(t)
+	absolute := t.TempDir()
 	separator := string(os.PathListSeparator)
 
 	for name, dirs := range map[string][]string{
 		"empty":     {absolute, ""},
 		"relative":  {"relative"},
-		"separator": {absolute + separator + durableTempDir(t)},
+		"separator": {absolute + separator + t.TempDir()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := cloneAndValidateExtraPathDirs(dirs)
@@ -103,7 +103,7 @@ func TestProcessCarrierValidation(t *testing.T) {
 	input := []string{absolute, absolute}
 	cloned, err := cloneAndValidateExtraPathDirs(input)
 	require.NoError(t, err)
-	input[0] = durableTempDir(t)
+	input[0] = t.TempDir()
 	require.Equal(t, []string{absolute, absolute}, cloned)
 
 	require.Error(t, validateSessionEnvironmentNoPath(map[string]string{"PATH": "/bad"}))
@@ -144,8 +144,8 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	Platform = processPlatformWindows
 	t.Cleanup(func() { Platform = originalPlatform })
 
-	decoyDir := durableTempDir(t)
-	harnessDir := durableTempDir(t)
+	decoyDir := t.TempDir()
+	harnessDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "hermes.exe"), []byte("MZ"), 0o600))
 	harness := filepath.Join(harnessDir, "hermes.bat")
 	require.NoError(t, os.WriteFile(harness, []byte("@echo fixture\n"), 0o600))
@@ -167,7 +167,7 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	block := []string{"Path=" + decoyDir, "PATH=" + harnessDir}
 	require.Equal(t, harnessDir, envValueFold(block, "PATH", true))
 
-	operationDir := durableTempDir(t)
+	operationDir := t.TempDir()
 	rewritten := prependPathDirs(append([]string{"KEPT=yes"}, block...), []string{operationDir})
 	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + string(os.PathListSeparator) + harnessDir}, rewritten)
 
@@ -186,8 +186,8 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 }
 
 func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
-	staticDir := durableTempDir(t)
-	operationDir := durableTempDir(t)
+	staticDir := t.TempDir()
+	operationDir := t.TempDir()
 	want := writeTestHarness(t, staticDir)
 	_ = writeTestHarness(t, operationDir)
 
@@ -221,7 +221,7 @@ func writeTestHarness(t *testing.T, dir string) string {
 }
 
 func TestOrdinaryExecutableResolutionAcceptsShellEnvironment(t *testing.T) {
-	root := durableTempDir(t)
+	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	require.NoError(t, os.MkdirAll(binDir, 0o700))
 	harness := writeTestHarness(t, binDir)

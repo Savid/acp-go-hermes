@@ -80,7 +80,6 @@ func integrationHermesPath(t *testing.T) string {
 func agentCommand(t *testing.T, ctx context.Context, args ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, integrationBinaryPath(t), args...)
-	cmd.Dir = repoRoot()
 	cmd.WaitDelay = 5 * time.Second
 	return cmd
 }
