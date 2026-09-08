@@ -80,15 +80,12 @@ func (s *session) awaitPromptProjection(turnCtx context.Context, projection <-ch
 	}
 }
 
-// turnSettlement is the completion latch close and delete wait on. It is
-// released only once the prompt is wholly settled — the containment boundary,
-// the durable commit, the terminal idle, and the quiescence fact — so a close
-// response can never fence a stream this prompt is still writing to, and can
-// never return before the frames its host was shown are durable. The
-// settlement's own verdict belongs to the prompt that produced it: close and
-// delete wait for the boundary, they do not inherit its error.
+// turnSettlement retains full completion after a prompt publishes its foreground
+// result. Close and delete join the containment, commits and final emissions it
+// owns. err records a later failure separately from the published result.
 type turnSettlement struct {
 	done    chan struct{}
+	err     error // Written before done closes.
 	once    sync.Once
 	release func()
 	notify  func()
@@ -122,7 +119,7 @@ func (t *turnSettlement) await(ctx context.Context) error {
 
 	select {
 	case <-t.done:
-		return nil
+		return t.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -135,14 +132,34 @@ func (s *session) awaitSettlement(ctx context.Context) error {
 	s.mu.Lock()
 	foreground := s.foreground
 	reservation := s.promptReservation
+	lastPrompt := s.settlement
 	s.mu.Unlock()
 
-	foregroundErr := foreground.await(ctx)
-	if reservation == foreground {
-		return foregroundErr
+	var joined error
+
+	seen := make(map[*turnSettlement]bool, 3)
+	for _, owner := range []*turnSettlement{foreground, reservation, lastPrompt} {
+		if owner != nil && !seen[owner] {
+			joined = errors.Join(joined, owner.await(ctx))
+			seen[owner] = true
+		}
 	}
 
-	return errors.Join(foregroundErr, reservation.await(ctx))
+	// Retire only a joined owner. A timed-out waiter cannot abandon it, and a
+	// later close can retry remaining cleanup after reporting a spent failure.
+	if lastPrompt != nil {
+		select {
+		case <-lastPrompt.done:
+			s.mu.Lock()
+			if s.settlement == lastPrompt {
+				s.settlement = nil
+			}
+			s.mu.Unlock()
+		default:
+		}
+	}
+
+	return joined
 }
 
 // closeLifecycleAdmission stops admitting prompts before close or delete waits
@@ -209,6 +226,64 @@ func (s *session) fenceIncarnation(ctx context.Context, turnEpoch uint64, markCa
 	return containmentProof{vacantProven: true, empty: true, barrier: root}, nil
 }
 
+type promptSettlementResult struct {
+	response  acp.PromptResponse
+	committed bool
+	err       error
+}
+
+// runPromptSettlement retains the admitted reservation until full completion.
+// Its foreground result can resolve sooner, while close and delete still join
+// the same owner before crossing the remaining work.
+func (s *session) runPromptSettlement(
+	ctx context.Context,
+	turnCtx context.Context,
+	turnEpoch uint64,
+	baseline SessionStoreTerminalState,
+	run promptRun,
+	messageID *string,
+	settlement *turnSettlement,
+	release func(),
+	foreground chan<- promptSettlementResult,
+) {
+	result := promptSettlementResult{}
+	foregroundSent := false
+
+	defer func() {
+		if recover() != nil {
+			result.err = errors.New("hermes prompt settlement panicked")
+
+			s.lifecycleStream().fence()
+			s.closeLifecycleAdmission()
+
+			settlement.err = result.err
+		}
+
+		if foregroundSent {
+			settlement.err = result.err
+			if result.err != nil {
+				s.closeLifecycleAdmission()
+			}
+		}
+
+		release()
+		settlement.complete()
+
+		if !foregroundSent {
+			foreground <- result
+		}
+	}()
+
+	result.response, result.committed, result.err = s.settlePrompt(
+		ctx, turnCtx, turnEpoch, baseline, run, messageID,
+		func(response acp.PromptResponse, committed bool, err error) {
+			foregroundSent = true
+
+			foreground <- promptSettlementResult{response: response, committed: committed, err: err}
+		},
+	)
+}
+
 // settlePrompt is the one durability boundary every accepted turn passes
 // through. An ordinary prompt of a surviving generation is ordered
 //
@@ -232,6 +307,7 @@ func (s *session) settlePrompt(
 	baseline SessionStoreTerminalState,
 	run promptRun,
 	messageID *string,
+	foreground func(acp.PromptResponse, bool, error),
 ) (acp.PromptResponse, bool, error) {
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettlementTimeout)
 	defer cancel()
@@ -300,32 +376,31 @@ func (s *session) settlePrompt(
 		return acp.PromptResponse{}, published, errors.Join(run.err, err)
 	}
 
+	if run.err != nil {
+		response = acp.PromptResponse{}
+	} else if !run.cancelled {
+		response.Meta = terminalResponseMeta(s.committedTerminalState())
+	}
+
 	if run.endsIncarnation {
-		// One durable write discharges both commits where the boundaries coincide:
-		// this exit ends the incarnation, so the generation just committed is also
-		// the resumable snapshot the quiescence fact stands on.
+		defer stream.fence()
+		// One write discharges both commits when this exit ends the incarnation.
+		// The foreground verdict is final after commit and idle; quiescence is
+		// still owed by the retained settlement owner.
 		if proof.vacant() {
+			if foreground != nil {
+				foreground(response, published, run.err)
+
+				return response, published, stream.certify(settleCtx, proof.barrier)
+			}
+
 			if err := stream.certify(settleCtx, proof.barrier); err != nil {
 				return acp.PromptResponse{}, published, errors.Join(run.err, err)
 			}
 		}
-
-		stream.fence()
 	}
 
-	if run.err != nil {
-		return acp.PromptResponse{}, published, run.err
-	}
-
-	if !run.cancelled {
-		// The committed boundary is reported as it was committed. The commit
-		// above recorded the outcome this turn actually reached — derived from
-		// the native finish reason, not from anything this wrapper decided — so
-		// blanking it here would publish a field that could only ever be empty.
-		response.Meta = terminalResponseMeta(s.committedTerminalState())
-	}
-
-	return response, true, nil
+	return response, published, run.err
 }
 
 // terminalMapping derives the turn's recorded boundary and its ACP v1 response.
@@ -744,14 +819,7 @@ func (s *session) nativeRun(
 			return s.cancelledRun()
 		}
 
-		endsIncarnation := true
-
-		var failure *nativehermes.TurnFailureError
-		if errors.As(sendErr, &failure) && failure.Cause() == nativehermes.CauseProvider {
-			endsIncarnation = false
-		}
-
-		return promptRun{settle: true, endsIncarnation: endsIncarnation, err: mapTurnFailure(sendErr)}
+		return promptRun{settle: true, endsIncarnation: true, err: mapTurnFailure(sendErr)}
 	}
 
 	if err := s.emitMessage(turnCtx, message, false); err != nil {

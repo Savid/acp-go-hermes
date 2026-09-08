@@ -87,8 +87,8 @@ func TestHermesACPAgentFakeExecutableStdoutNoise(t *testing.T) {
 	if session.SessionId == "" {
 		t.Fatalf("empty fake session response: %#v", session)
 	}
-	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-complete-only", "reply")); err != nil {
-		t.Fatalf("completion-only prompt: %v\nstderr:\n%s", err, agent.stderrString())
+	if _, promptErr := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, "turn-complete-only", "reply")); promptErr != nil {
+		t.Fatalf("completion-only prompt: %v\nstderr:\n%s", promptErr, agent.stderrString())
 	}
 	deadline := time.Now().Add(time.Second)
 	for client.agentText() != "fake response" && time.Now().Before(deadline) {
@@ -358,7 +358,6 @@ func TestHermesACPAgentFakeSessionCLICarrier(t *testing.T) {
 	}
 	results := make(chan result, len(carriers))
 	for _, carrier := range carriers {
-		carrier := carrier
 		go func() {
 			session, err := conn.NewSession(ctx, sessionCLICarrierRequest(carrier))
 			results <- result{name: carrier.name, session: session, err: err}
@@ -463,26 +462,9 @@ func TestFakeHermesExecutable(t *testing.T) {
 
 func startAgentWithHermesPath(t *testing.T, ctx context.Context, hermesPath string, home string) *liveAgent {
 	t.Helper()
-	cmd := agentCommand(ctx, integrationAgentArgs(hermesPath, home)...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	agent := &liveAgent{stdin: stdin, stdout: stdout, wait: cmd.Wait}
-	cmd.Stderr = &agent.stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	agent.close = func() {
-		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}
-	return agent
+	cmd := agentCommand(t, ctx, integrationAgentArgs(hermesPath, home)...)
+
+	return &liveAgent{startIntegrationProcess(t, cmd)}
 }
 
 func fakeHermesExecutable(t *testing.T, mode string) string {
@@ -498,20 +480,21 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake hermes executable: %v", err)
 	}
+
 	return path
 }
 
 func runFakeHermesServer(args []string, mode string) error {
-	for _, arg := range args {
-		if arg == "--version" {
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
-			return nil
-		}
+	if slices.Contains(args, "--version") {
+		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
+
+		return nil
 	}
 	port := ""
 	for i, arg := range args {
 		if arg == "--port" && i+1 < len(args) {
 			port = args[i+1]
+
 			break
 		}
 	}
@@ -540,6 +523,7 @@ func runFakeHermesServer(args []string, mode string) error {
 		})
 	}
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+
 	return server.ListenAndServe()
 }
 
@@ -675,6 +659,15 @@ func handleFakeGatewayRPC(
 	case "session.history":
 		messages := state.history()
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{"count": len(messages), "messages": messages})
+	case "process.list":
+		live, _ := params["session_id"].(string)
+		if strings.HasPrefix(live, "__acp_go_hermes_missing_probe__") {
+			writeFakeGatewayError(ctx, conn, id, 4001, "session not found")
+
+			return
+		}
+
+		writeFakeGatewayResult(ctx, conn, id, map[string]any{"processes": []any{}})
 	case "session.branch":
 		writeFakeGatewayResult(ctx, conn, id, map[string]any{
 			"session_id":        "live-branch",
@@ -704,6 +697,7 @@ func handleFakeGatewayRPC(
 		live, _ := params["session_id"].(string)
 		if strings.HasPrefix(live, "__acp_go_hermes_missing_probe__") {
 			writeFakeGatewayError(ctx, conn, id, 4001, "session not found")
+
 			return
 		}
 		if mode == fakeModePreSubmitActivity {

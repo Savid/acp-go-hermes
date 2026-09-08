@@ -185,7 +185,7 @@ request, so the first refusal is the same each time. A key is accepted when
 it is non-empty and free of `=` and NUL and its value is free of NUL; case is
 not a rule, so `https_proxy` and `HTTPS_PROXY` are two ordinary variables.
 Blocked names fail as `{"error":"unsupported","field":"_meta.hermes.options.env.<key>"}`
-naming the key exactly as sent: `PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`, `HERMES_DASHBOARD_SESSION_TOKEN`, and `ACP_GO_HERMES_PATH_DIR_*`. All but the adapter's own
+naming the key exactly as sent: `PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`, `HERMES_DASHBOARD_SESSION_TOKEN`, `ACP_GO_HERMES_PATH_DIR_*`, and `ACP_GO_HERMES_INTERNAL_*`. All but the adapter's own
 namespace compare through the platform identity, exact on Unix and
 case-insensitive on Windows; the adapter namespace is refused under every
 spelling. Two keys that resolve to one variable under that identity fail as
@@ -201,7 +201,8 @@ entry fails closed naming the exact
 `_meta.hermes.options.extraPathDirs[i]` field. The same strict decoding applies
 to new, load, resume, and fork lifecycle requests. A raw session `env.PATH`
 fails naming `_meta.hermes.options.env.PATH`; `env.BASH_ENV`, `env.ENV`, and the
-private `env.ACP_GO_HERMES_PATH_DIR_*` namespace fail likewise. Top-level
+private `env.ACP_GO_HERMES_PATH_DIR_*` and `env.ACP_GO_HERMES_INTERNAL_*`
+namespaces fail likewise. Top-level
 `WithEnv` remains the separate static native-base environment surface, but
 reserves the latter three names. Managed execution composes PATH directly and
 sends none of them through the host authority. In ordinary execution the

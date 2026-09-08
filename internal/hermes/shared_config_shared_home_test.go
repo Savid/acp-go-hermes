@@ -41,11 +41,9 @@ func TestSharedHermesConfigSerializesIdenticalWritersAndRejectsMismatch(t *testi
 	errs := make(chan error, writers)
 	var group sync.WaitGroup
 	for range writers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			errs <- materializeSharedHermesConfig(t.Context(), home, servers, files)
-		}()
+		})
 	}
 	group.Wait()
 	close(errs)

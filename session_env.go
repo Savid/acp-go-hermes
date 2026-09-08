@@ -21,6 +21,7 @@ const (
 	sessionHermesHomeEnvKey      = "HERMES_HOME"
 	sessionHermesSessionTokenKey = "HERMES_DASHBOARD_SESSION_TOKEN"
 	sessionManagedPathEnvPrefix  = "ACP_GO_HERMES_PATH_DIR_"
+	sessionPrivateEnvPrefix      = "ACP_GO_HERMES_INTERNAL_"
 )
 
 func validEnvName(key string) bool {
@@ -54,12 +55,16 @@ func injectionEnvKey(key string) bool {
 	return name == sessionNodeOptionsEnvKey || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
 }
 
+func privateEnvKey(key string) bool {
+	return strings.HasPrefix(strings.ToUpper(key), sessionPrivateEnvPrefix)
+}
+
 // blockedSessionEnvKey reports whether a session env key names a variable the
 // adapter refuses to install on that session's Hermes process: the carrier's
 // own names, the injection vectors, the search path that extraPathDirs alone
 // owns, and the state roots the adapter writes itself.
 func blockedSessionEnvKey(key string) bool {
-	if carrierOwnedEnvKey(key) || injectionEnvKey(key) {
+	if privateEnvKey(key) || carrierOwnedEnvKey(key) || injectionEnvKey(key) {
 		return true
 	}
 
@@ -83,6 +88,8 @@ func validateAgentEnv(env map[string]string) error {
 			return fmt.Errorf("environment key %q is not a variable name", key)
 		case carrierOwnedEnvKey(key):
 			return fmt.Errorf("environment key %q is reserved for the session PATH carrier", key)
+		case privateEnvKey(key):
+			return fmt.Errorf("environment key %q is adapter-private", key)
 		case injectionEnvKey(key):
 			return fmt.Errorf("environment key %q is an injection vector", key)
 		}

@@ -232,9 +232,9 @@ func TestHandoffFormSelection(t *testing.T) {
 			"no uri":            nil,
 			"remote uri":        &remote,
 			"unparsable uri":    &unparsable,
-			"empty string uri":  acp.Ptr(""),
-			"data uri":          acp.Ptr("data:image/png;base64,AAAA"),
-			"relative file uri": acp.Ptr("File-Not-A-Scheme/x.png"),
+			"empty string uri":  new(""),
+			"data uri":          new("data:image/png;base64,AAAA"),
+			"relative file uri": new("File-Not-A-Scheme/x.png"),
 		} {
 			t.Run(name, func(t *testing.T) {
 				_, err := promptToHermesParts(t.Context(), []acp.ContentBlock{{Image: &acp.ContentBlockImage{
@@ -299,7 +299,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 		{
 			name: "envelope not an object",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
-				Type: "image", MimeType: mimePNG, Uri: acp.Ptr(handoffFileURI(path)),
+				Type: "image", MimeType: mimePNG, Uri: new(handoffFileURI(path)),
 				Meta: map[string]any{handoffMetaKey: "version=1"},
 			}},
 			root:    root,
@@ -413,7 +413,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 		{
 			name: "uri unparsable",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
-				Type: "image", MimeType: mimePNG, Uri: acp.Ptr("file://%zz"),
+				Type: "image", MimeType: mimePNG, Uri: new("file://%zz"),
 				Meta: map[string]any{handoffMetaKey: handoffEnvelopeFor(png)},
 			}},
 			root:    root,
@@ -422,7 +422,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 		{
 			name: "uri scheme is not file",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
-				Type: "image", MimeType: mimePNG, Uri: acp.Ptr("https://example.test/valid.png"),
+				Type: "image", MimeType: mimePNG, Uri: new("https://example.test/valid.png"),
 				Meta: map[string]any{handoffMetaKey: handoffEnvelopeFor(png)},
 			}},
 			root:    root,
@@ -431,7 +431,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 		{
 			name: "uri names a remote host",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
-				Type: "image", MimeType: mimePNG, Uri: acp.Ptr("file://example.test/valid.png"),
+				Type: "image", MimeType: mimePNG, Uri: new("file://example.test/valid.png"),
 				Meta: map[string]any{handoffMetaKey: handoffEnvelopeFor(png)},
 			}},
 			root:    root,
@@ -440,7 +440,7 @@ func TestHandoffBlockDefectsAreInvalidHandoff(t *testing.T) {
 		{
 			name: "uri path is not absolute",
 			block: acp.ContentBlock{Image: &acp.ContentBlockImage{
-				Type: "image", MimeType: mimePNG, Uri: acp.Ptr("file:valid.png"),
+				Type: "image", MimeType: mimePNG, Uri: new("file:valid.png"),
 				Meta: map[string]any{handoffMetaKey: handoffEnvelopeFor(png)},
 			}},
 			root:    root,

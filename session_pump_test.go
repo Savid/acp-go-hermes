@@ -230,7 +230,7 @@ func TestSessionPumpHoldsPostPromptActivityUntilForegroundSettlement(t *testing.
 	client.mu.Unlock()
 	_, published, err := session.settlePrompt(
 		t.Context(), turnCtx, epoch, SessionStoreTerminalState{},
-		promptRun{settle: true, finish: valStop, nativeMessageID: promptMessage.Info.ID}, nil,
+		promptRun{settle: true, finish: valStop, nativeMessageID: promptMessage.Info.ID}, nil, nil,
 	)
 	require.NoError(t, err)
 	require.True(t, published)

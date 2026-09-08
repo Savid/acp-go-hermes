@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -282,9 +283,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 	}
 
 	cloned := make(map[string]string, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, values)
 
 	return cloned
 }

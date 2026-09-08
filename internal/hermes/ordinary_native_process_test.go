@@ -86,6 +86,17 @@ func ordinaryNativeHelperRequest(t *testing.T, mode string) NativeRequest {
 func TestOrdinaryNativeNaturalCompletionIsNotReclassified(t *testing.T) {
 	process, err := startOrdinaryNative(t.Context(), ordinaryNativeHelperRequest(t, "exit"))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = process.Revoke(ctx)
+		_, _ = process.Wait(ctx)
+		for _, stream := range []io.Closer{process.Stdin(), process.Stdout(), process.Stderr()} {
+			if stream != nil {
+				_ = stream.Close()
+			}
+		}
+	})
 	require.NotNil(t, process.Stdin())
 	require.NotNil(t, process.Stderr())
 
@@ -109,6 +120,17 @@ func TestOrdinaryNativeNaturalCompletionIsNotReclassified(t *testing.T) {
 func TestOrdinaryNativeWaitCancellationDetachesUntilRevoke(t *testing.T) {
 	process, err := startOrdinaryNative(t.Context(), ordinaryNativeHelperRequest(t, "block"))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = process.Revoke(ctx)
+		_, _ = process.Wait(ctx)
+		for _, stream := range []io.Closer{process.Stdin(), process.Stdout(), process.Stderr()} {
+			if stream != nil {
+				_ = stream.Close()
+			}
+		}
+	})
 
 	ready := make([]byte, len("ready\n"))
 	_, err = io.ReadFull(process.Stdout(), ready)

@@ -94,7 +94,6 @@ approvals:
 		{session: firstSession, carrier: first},
 		{session: peerSession, carrier: peer},
 	} {
-		turn := turn
 		go func() {
 			response, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(
 				turn.session, "path-"+turn.carrier.marker, "Run the requested terminal probe.",
@@ -173,15 +172,16 @@ func newHermesPathCarrier(t *testing.T, marker string) hermesPathCarrier {
 
 func writeHermesPathProbe(t *testing.T, carrier hermesPathCarrier, forbidden ...string) {
 	t.Helper()
-	command := "#!/bin/sh\n" +
+	var command strings.Builder
+	command.WriteString("#!/bin/sh\n" +
 		"printf '%s\\n%s\\n' " + shellSingleQuoteHermesPath(carrier.marker) + " \"$PATH\" > " + shellSingleQuoteHermesPath(carrier.capture) + "\n" +
 		"test \"${PATH%%:*}\" = " + shellSingleQuoteHermesPath(carrier.dir) + " || exit 91\n" +
 		"test \"$(command -v carrier-probe)\" = " + shellSingleQuoteHermesPath(filepath.Join(carrier.dir, "carrier-probe")) + " || exit 92\n" +
-		"path_list=\":${PATH}:\"\n"
+		"path_list=\":${PATH}:\"\n")
 	for _, dir := range forbidden {
-		command += "case \"${path_list}\" in *" + shellSingleQuoteHermesPath(":"+dir+":") + "*) exit 93 ;; esac\n"
+		command.WriteString("case \"${path_list}\" in *" + shellSingleQuoteHermesPath(":"+dir+":") + "*) exit 93 ;; esac\n")
 	}
-	if err := os.WriteFile(filepath.Join(carrier.dir, "carrier-probe"), []byte(command), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(carrier.dir, "carrier-probe"), []byte(command.String()), 0o700); err != nil {
 		t.Fatal(err)
 	}
 }

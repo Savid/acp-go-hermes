@@ -185,6 +185,29 @@ func (p *Process) BrowserLaunchContained() bool {
 	return p != nil && p.shim != nil
 }
 
+// prepareNativeTree relinquishes adapter access before invoking the host. Every
+// unsuccessful attempt stays opaque, including busy, cancellation and panic;
+// only a successful prepare gives the caller ownership of a later reclaim.
+func (opts ProcessOptions) prepareNativeTree(ctx context.Context, root string) (err error) {
+	opaque := true
+	defer func() {
+		if recover() != nil {
+			err = errors.New("native tree preparation panicked")
+		}
+		if opaque {
+			err = errors.Join(err, opts.ContainmentIncomplete)
+			if opts.RetainNativeTree != nil {
+				_ = opts.RetainNativeTree(root, err)
+			}
+		}
+	}()
+
+	err = opts.PrepareNativeTree(ctx, root)
+	opaque = err != nil
+
+	return err
+}
+
 //nolint:gocyclo // Startup is one ordered native-tree and process transaction.
 func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	extraPathDirs, err := validatedProcessCarrier(opts)
@@ -269,27 +292,12 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	}
 	if process.managed {
 		if shim != nil {
-			if prepareErr := opts.PrepareNativeTree(ctx, shim.dir); prepareErr != nil {
-				if !process.treeBusy(prepareErr) && process.retainNativeTree != nil {
-					_ = process.retainNativeTree(shim.dir, prepareErr)
-				} else if process.treeBusy(prepareErr) {
-					removeErr := shim.remove()
-					if removeErr != nil && process.retainNativeTree != nil {
-						_ = process.retainNativeTree(shim.dir, nil)
-					}
-
-					prepareErr = errors.Join(prepareErr, removeErr)
-				}
-
+			if prepareErr := opts.prepareNativeTree(ctx, shim.dir); prepareErr != nil {
 				return nil, prepareErr
 			}
 			process.preparedShim = true
 		}
-		if prepareErr := opts.PrepareNativeTree(ctx, home); prepareErr != nil {
-			if !process.treeBusy(prepareErr) && process.retainNativeTree != nil {
-				_ = process.retainNativeTree(home, prepareErr)
-			}
-
+		if prepareErr := opts.prepareNativeTree(ctx, home); prepareErr != nil {
 			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), closeTimeout)
 			rollbackErr := process.reclaimAndRemove(rollbackCtx)
 			rollbackCancel()
@@ -776,19 +784,7 @@ func probeExecutableVersion(ctx context.Context, executable string, opts Process
 		if opts.PrepareNativeTree == nil || opts.ReclaimNativeTree == nil {
 			return errors.Join(errors.New("host authority tree operations are unavailable"), removeAll(probeRoot))
 		}
-		if prepareErr := opts.PrepareNativeTree(ctx, probeRoot); prepareErr != nil {
-			if opts.NativeTreeBusy != nil && errors.Is(prepareErr, opts.NativeTreeBusy) {
-				removeErr := removeAll(probeRoot)
-				if removeErr != nil && opts.RetainNativeTree != nil {
-					_ = opts.RetainNativeTree(probeRoot, nil)
-				}
-
-				return errors.Join(prepareErr, removeErr)
-			}
-			if opts.RetainNativeTree != nil {
-				_ = opts.RetainNativeTree(probeRoot, prepareErr)
-			}
-
+		if prepareErr := opts.prepareNativeTree(ctx, probeRoot); prepareErr != nil {
 			return prepareErr
 		}
 	}

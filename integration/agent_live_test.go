@@ -94,8 +94,8 @@ func TestLiveAgentForkStoreRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, err := agent.conn.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "turn-fork-parent", "Reply with exactly ACP_HERMES_FORK_PARENT.")); err != nil {
-		t.Fatalf("Prompt parent: %v", err)
+	if _, promptErr := agent.conn.Prompt(ctx, hermesacp.TextPromptRequest(parent.SessionId, "turn-fork-parent", "Reply with exactly ACP_HERMES_FORK_PARENT.")); promptErr != nil {
+		t.Fatalf("Prompt parent: %v", promptErr)
 	}
 	fork, err := hermesacp.CallForkSession(ctx, agent.conn, hermesacp.ForkSessionRequest(parent.SessionId, cwd))
 	if err != nil {

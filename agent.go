@@ -67,8 +67,9 @@ type Agent struct {
 	// ambientEnv is the adapter's environment as it stood at construction. It is
 	// the base ordinary same-identity execution sanitizes; managed execution
 	// uses the authority's environment instead.
-	ambientEnv map[string]string
-	nativeEnv  map[string]string
+	ambientEnv     map[string]string
+	nativeEnv      map[string]string
+	managedHandoff managedHandoffRoot
 
 	mu                 sync.Mutex
 	closed             bool
@@ -300,14 +301,14 @@ func (a *Agent) close() error {
 		cancel()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	err = errors.Join(err, a.retryRetiredNativeRoots(ctx))
+	err = errors.Join(err, a.retryDeletedSessionCleanup(ctx), a.retryRetiredNativeRoots(ctx))
 	cancel()
 	a.mu.Lock()
 	a.conn = nil
 	a.mu.Unlock()
 	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	a.mu.Lock()
-	err = errors.Join(err, a.containmentErr)
+	err = errors.Join(err, a.containmentErr, a.managedHandoff.close())
 	a.mu.Unlock()
 
 	return err
@@ -419,12 +420,7 @@ func (a *Agent) beginSessionConstruction(ctx context.Context) (context.Context, 
 // because the caller's params are blameless: the embedding host built an agent
 // this adapter refuses, so no request it can phrase would be served.
 //
-// The data is the closed token alone. Option-validation prose names the host's
-// own configuration, including filesystem paths it supplied, and a peer that
-// cannot phrase a request to fix it has no use for those details; the joined
-// prose stays on the embedding host's own error value, which NewAgent returns
-// to the code that built the options. The cmd entrypoint refuses the same
-// combinations at flag-parse time and names them on stderr.
+// Validation details remain internal; the wire carries only the closed token.
 func (a *Agent) optionsError() error {
 	if a.optionsErr == nil {
 		return nil

@@ -3,7 +3,7 @@ set -euo pipefail
 
 provider=hermes
 packages=(./internal/hermes)
-selector='^Test(WindowsChildResolvesTheConflictingCaseEnvironmentThisAdapterBuilt|WindowsInheritedBlockWithTwoPathSpellingsResolvesLastWins|ExecutableExtensionListFollowsPathext|WindowsOrdinaryRules.*|EnvValueFoldReadsAnInheritedEnvironmentBlock|OrdinaryExecutableRulesMatchThisPlatform|OrdinaryEnvironment.*|OrdinaryExecutableResolutionUsesAmbientPATH|AmbientEnvironmentSnapshotFoldsWindowsSpellings)$'
+selector='^(TestDarwinSharedHomeFilesystemLocalityAllowlist|TestOrdinaryExecutableRulesMatchThisPlatform|TestOrdinaryEnvironmentInheritsOnlyTheAllowlist|TestOrdinaryNativeNaturalCompletionIsNotReclassified|TestOrdinaryNativeWaitCancellationDetachesUntilRevoke)$'
 
 # The hosted image supplies MinGW-w64; Go's race runtime requires its
 # synchronization library (https://go.dev/doc/articles/race_detector).

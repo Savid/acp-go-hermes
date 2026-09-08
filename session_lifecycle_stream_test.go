@@ -89,7 +89,10 @@ func TestSessionLifecycleStreamReducesCompleteTurn(t *testing.T) {
 
 	stream.fence()
 	require.True(t, stream.fenced())
-	require.Error(t, stream.certify(t.Context(), "after-fence"))
+	require.NoError(t, stream.certify(t.Context(), "after-fence"))
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	require.Len(t, conn.updates, len(updates), "a fenced stream must emit no later quiescence")
 }
 
 func TestSessionLifecycleStreamAbsenceAndFailureFences(t *testing.T) {

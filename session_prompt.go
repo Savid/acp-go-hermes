@@ -101,15 +101,20 @@ func (e *mappedWireError) requestError() *acp.RequestError {
 // turn failure is an Internal error (-32603). An unclassified error is surfaced
 // as a transport failure carrying its real cause, never a fixed placeholder.
 func mapTurnFailure(err error) error {
-	data := map[string]any{jsonFieldError: valHermesTurnFailed}
+	data := map[string]any{jsonFieldError: valHermesTurnFailed, jsonFieldMessage: err.Error()}
 	cause := err
 
 	var failure *nativehermes.TurnFailureError
 	if errors.As(err, &failure) {
 		data[jsonFieldCause] = string(failure.Cause())
+		data[jsonFieldMessage] = failure.Error()
 
 		if failure.StatusCode() != 0 {
 			data[jsonFieldStatusCode] = failure.StatusCode()
+		}
+
+		if failure.ProviderCode() != "" {
+			data[jsonFieldProviderCode] = failure.ProviderCode()
 		}
 	} else {
 		data[jsonFieldCause] = string(nativehermes.CauseTransport)
@@ -284,8 +289,14 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	defer settlement.complete()
-	defer release()
+
+	settlementOwnsTurn := false
+	defer func() {
+		if !settlementOwnsTurn {
+			release()
+			settlement.complete()
+		}
+	}()
 
 	turnPublished := false
 
@@ -308,7 +319,7 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 		}()
 	}
 
-	parts, err := promptToHermesParts(ctx, params.Prompt, s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
+	parts, err := s.promptParts(ctx, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -332,15 +343,33 @@ func (s *session) Prompt(ctx context.Context, params acp.PromptRequest) (_ acp.P
 		return run.response, run.err
 	}
 
-	response, committed, settleErr := s.settlePrompt(ctx, turnCtx, turnEpoch, baseline, run, params.MessageId)
-	turnPublished = committed
+	foreground := make(chan promptSettlementResult, 1)
+	settlementOwnsTurn = true
 
-	return response, settleErr
+	go s.runPromptSettlement(ctx, turnCtx, turnEpoch, baseline, run, params.MessageId, settlement, release, foreground)
+
+	result := <-foreground
+	turnPublished = result.committed
+
+	return result.response, result.err
 }
 
 func promptToHermesParts(ctx context.Context, blocks []acp.ContentBlock, limits ImageLimits, handoffRoot string) ([]map[string]any, error) {
 	budget := newImagePromptBudget(limits, handoffRoot)
 
+	return mapPromptParts(ctx, blocks, budget)
+}
+
+func (s *session) promptParts(ctx context.Context, blocks []acp.ContentBlock) ([]map[string]any, error) {
+	budget := newImagePromptBudget(s.agent.options.ImageLimits, s.agent.options.InputHandoffRoot)
+	if s.agent.options.HostAuthority != nil {
+		budget.managedRoot = &s.agent.managedHandoff
+	}
+
+	return mapPromptParts(ctx, blocks, budget)
+}
+
+func mapPromptParts(ctx context.Context, blocks []acp.ContentBlock, budget *imagePromptBudget) ([]map[string]any, error) {
 	defer budget.closeHandoffRoot()
 
 	parts := make([]map[string]any, 0, len(blocks))

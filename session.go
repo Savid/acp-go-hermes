@@ -1064,6 +1064,20 @@ func (s *session) DeleteNativeAndClose(ctx context.Context) error {
 	return s.closeAfterTurns(ctx, true)
 }
 
+// closeWithoutSnapshot releases a discarded runtime without adopting its
+// history. Deleted sessions and failed establishment have no new commit owed.
+func (s *session) closeWithoutSnapshot(ctx context.Context) error {
+	s.lifecycleStream().fence()
+	s.prepareClose()
+	waitErr := s.awaitSettlement(ctx)
+
+	s.lifecycleMu.Lock()
+	closeErr := s.closeLocked(ctx, false)
+	s.lifecycleMu.Unlock()
+
+	return errors.Join(waitErr, closeErr)
+}
+
 func (s *session) closeAfterTurns(ctx context.Context, deleteNative bool) error {
 	if deleteNative {
 		s.prepareDelete()

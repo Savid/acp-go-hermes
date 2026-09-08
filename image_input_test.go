@@ -255,10 +255,7 @@ func writeGIFFrame(b *bytes.Buffer, pad int) {
 	b.WriteByte(0x02)
 
 	for pad > 0 {
-		n := pad
-		if n > 255 {
-			n = 255
-		}
+		n := min(pad, 255)
 
 		b.WriteByte(byte(n))
 		b.Write(make([]byte, n))

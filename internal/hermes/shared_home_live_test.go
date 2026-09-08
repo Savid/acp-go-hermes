@@ -8,7 +8,6 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -22,18 +21,7 @@ import (
 // the catalog, select models, observe one credential residence, close, and
 // resume both durable IDs through fresh processes.
 func TestOfficialSharedHomeConcurrentProcessesRestartModelCatalogAndAuthResidence(t *testing.T) {
-	if os.Getenv("ACP_GO_HERMES_RUN_INTEGRATION") == "" {
-		t.Skip("set ACP_GO_HERMES_RUN_INTEGRATION=1")
-	}
-
-	executable := os.Getenv("ACP_GO_HERMES_HARNESS_PATH")
-	if executable == "" {
-		var err error
-		executable, err = exec.LookPath("hermes")
-		if err != nil {
-			t.Fatalf("find hermes: %v", err)
-		}
-	}
+	executable := integrationHermesCLI(t)
 
 	sharedHome := durableTempDir(t)
 	authData, err := json.Marshal(map[string]any{

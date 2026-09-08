@@ -18,8 +18,8 @@
 // updates, permission requests, and elicitations to. Serve installs the
 // connection it builds as that client and refuses an option set carrying one.
 // A direct prompt error caused by gateway loss matches [ErrGatewayDisconnected]
-// and retains its exact native cause; Serve converts that chain to bounded,
-// secret-safe ACP error data at the wire boundary.
+// and retains its exact native cause. Prompt error data carries that diagnostic
+// in message, with statusCode and providerCode only when Hermes supplies them.
 // Hermes authentication and provider credentials remain owned by native
 // Hermes. Each session runs under its own ephemeral `HERMES_HOME` materialized
 // beneath the scratch parent from [WithScratchDir]. [WithSharedHermesHome]

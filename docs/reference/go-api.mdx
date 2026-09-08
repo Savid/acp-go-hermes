@@ -176,11 +176,9 @@ Session requests take options such as `WithSessionMCPServers`,
 and `WithSessionRawEvents`.
 
 `WithSessionMeta` and `WithListSessionsMeta` carry host-supplied `_meta` maps.
-The `acp-go.dev/*` namespace is reserved: its envelopes are stamped by this
-package and read by every consumer, so a caller key inside it is refused rather
-than merged or overwritten. Neither builder returns an error, so the refusal is
-a panic — passing a reserved key is a program naming a namespace that is not its
-own. Host namespaces and `_meta.hermes` merge as before.
+Both builders panic on the four reserved keys: `acp-go.dev/route`,
+`acp-go.dev/mediaEnvelope`, `acp-go.dev/handoff`, and `acp-go.dev/lifecycle`.
+Other keys, including unreserved keys under `acp-go.dev/`, are preserved.
 
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
@@ -215,10 +213,13 @@ actual local terminal commands. Order and duplicates are semantic. Empty,
 relative, or path-list-separator-bearing entries are rejected with the exact
 indexed metadata field. Session `Env` refuses `PATH`, `NODE_OPTIONS`,
 `BASH_ENV`, `ENV`, any `LD_` or `DYLD_` prefix, `HERMES_HOME`,
-`HERMES_DASHBOARD_SESSION_TOKEN`, and `ACP_GO_HERMES_PATH_DIR_*` keys, and
+`HERMES_DASHBOARD_SESSION_TOKEN`, `ACP_GO_HERMES_PATH_DIR_*`, and
+`ACP_GO_HERMES_INTERNAL_*` keys, and
 accepts every other structurally valid name in either case; see
-[Metadata](/docs/reference/meta). `WithEnv` applies the same rule with `PATH`
-allowed, and ambient shell hooks are scrubbed at ordinary launch. The dedicated ordered
+[Metadata](/docs/reference/meta). `WithEnv` allows a static base `PATH` and
+rejects malformed names, injection variables, and both adapter prefixes.
+Launch discards its native home and dashboard-token overrides. Ambient shell
+hooks are excluded from ordinary launch. The dedicated ordered
 field is the sole session-scoped PATH authority.
 `ValidateHermesSessionMeta(meta)` returns the refusal a session-establishing
 request carrying that `_meta` map would receive, or nil, without an agent.

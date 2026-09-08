@@ -140,7 +140,7 @@ func (g *wsGateway) handle(w http.ResponseWriter, r *http.Request) {
 				"error": map[string]any{"code": -32000, "message": "ambiguous"},
 			})
 		case "bad-rpc":
-			_ = conn.Write(r.Context(), websocket.MessageText, []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":"bad","message":"bad"}}`, req.ID)))
+			_ = conn.Write(r.Context(), websocket.MessageText, fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%d,"error":{"code":"bad","message":"bad"}}`, req.ID))
 		case "overflow":
 			for range 300 {
 				g.writeEvent(r.Context(), conn, Event{Type: "message.delta", SessionID: "live", Payload: json.RawMessage(`{"text":"overflow"}`)})

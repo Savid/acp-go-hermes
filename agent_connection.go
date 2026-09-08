@@ -227,13 +227,11 @@ func (g *connectionInputGate) stampLifecycleRequest(line []byte) ([]byte, error)
 	g.mu.Unlock()
 
 	encodedToken, _ := json.Marshal(token) // A Go string always has a JSON encoding.
-	params[lifecycleRequestMarkerField] = encodedToken
+	encodedParams := appendWireMember(envelope.Params, lifecycleRequestMarkerField, encodedToken)
 
 	var object map[string]json.RawMessage
 
 	_ = json.Unmarshal(line, &object) // The envelope decode above proved a JSON object with an id and method.
-
-	encodedParams, _ := json.Marshal(params) // Every member came from the already-valid input object, plus one string.
 
 	object["params"] = encodedParams
 
@@ -288,13 +286,13 @@ func (c *localAgentConnection) bindLifecycleRequest(ctx context.Context, params 
 		return ctx
 	}
 
-	delete(object, lifecycleRequestMarkerField)
+	*params = rewriteWireObject(*params, func(name string, raw json.RawMessage) json.RawMessage {
+		if name == lifecycleRequestMarkerField {
+			return nil
+		}
 
-	// Every RawMessage came from the successfully decoded object above, so
-	// deleting the private member cannot make the remaining object invalid.
-	clean, _ := json.Marshal(object)
-
-	*params = clean
+		return raw
+	})
 
 	identity, ok := c.inputGate.claimLifecycleRequest(token)
 	if !ok {
@@ -491,13 +489,15 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 // syntax error quotes the offending byte of the request back at the peer.
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
-	if err := json.Unmarshal(params, &value); err != nil {
+	if err := json.Unmarshal(prepareWireMetadata(params), &value); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 	}
 
 	if err := ReqPtr(&value).Validate(); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
 	}
+
+	restoreWireMetadata(params, &value)
 
 	return value, nil
 }
@@ -737,15 +737,9 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 		return mapped.requestError()
 	}
 
-	// A typed RequestError reaches the peer exactly as its construction site
-	// phrased it. Every such site in this package builds a closed, values-free
-	// payload -- a token from this package's own vocabulary plus, where one
-	// applies, the dotted path of the offending field -- so the host can act on
-	// the refusal without any native prose, tool input, or credential material
-	// ever reaching the wire. The guarantee is held at construction rather than
-	// by rewriting the payload here: flattening every code to a single token
-	// also erased the field path, leaving a host unable to tell a malformed
-	// option from a session that no longer exists.
+	// Typed refusals retain their protocol fields. Unclassified failures below
+	// carry only the closed internal token; classified turn failures above also
+	// carry the native diagnostics owed to the prompt caller.
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
 		return reqErr

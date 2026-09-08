@@ -91,7 +91,10 @@ func TestSessionEnvRefusesBlockedNamesUnderThePlatformIdentity(t *testing.T) {
 			requireLifecycleMetaField(t, err, hermesEnvOptionPath+"."+key)
 		}
 
-		for _, key := range []string{sessionManagedPathEnvPrefix + "COUNT", "acp_go_hermes_path_dir_count"} {
+		for _, key := range []string{
+			sessionManagedPathEnvPrefix + "COUNT", "acp_go_hermes_path_dir_count",
+			sessionPrivateEnvPrefix + "X", "acp_go_hermes_internal_x",
+		} {
 			_, err := sessionMetaFromLifecycle(HermesOptions{Env: map[string]string{key: "x"}}.Meta())
 			requireLifecycleMetaField(t, err, hermesEnvOptionPath+"."+key)
 		}

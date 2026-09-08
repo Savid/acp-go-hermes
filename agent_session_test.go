@@ -286,6 +286,43 @@ func (s *toggleReplaceStore) setFail(fail bool) {
 	s.mu.Unlock()
 }
 
+func TestDeletedSessionCleanupRetainsRuntimeUntilAgentClose(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		t.Run(fmt.Sprint(managed), func(t *testing.T) {
+			client := newFakeHermesClient()
+			agent := newTestAgent()
+			current := testSession(t, agent, client)
+			server := &managedHermesServer{Server: client, root: client.xdg.Root, managed: managed}
+			current.client = server
+			agent.sessions[current.id] = current
+			client.closeErr = ErrContainmentIncomplete
+
+			_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(current.id))
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.DirExists(t, client.xdg.Root)
+			require.Contains(t, agent.deleteCleanup, current.id)
+			_, err = agent.session(current.id)
+			require.Equal(t, unknownSessionError(), err)
+
+			// A repeated delete must retain the same failed runtime, including
+			// when its initial cleanup retry fails again.
+			_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(current.id))
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.DirExists(t, client.xdg.Root)
+			require.Contains(t, agent.deleteCleanup, current.id)
+
+			attempts := client.closeCalls
+			client.closeErr = nil
+			// Recorded containment uncertainty remains visible even after the
+			// deterministic runtime permits the final teardown retry.
+			require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+			require.Greater(t, client.closeCalls, attempts)
+			require.NoDirExists(t, client.xdg.Root)
+			require.Empty(t, agent.deleteCleanup)
+		})
+	}
+}
+
 func (s *toggleReplaceStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
 	s.mu.Lock()
 	fail := s.fail
@@ -330,6 +367,10 @@ func TestNewSessionSnapshotFailureLeavesNoOrphan(t *testing.T) {
 	if activeCount != 0 {
 		t.Fatalf("failed session still active: %d", activeCount)
 	}
+	require.DirExists(t, createClient.xdg.Root, "failed process close must retain its residence")
+	require.Len(t, agent.deleteCleanup, 1)
+	createClient.closeErr = nil
+	require.NoError(t, agent.retryDeletedSessionCleanup(ctx))
 	listResp, err := agent.ListSessions(ctx, acp.ListSessionsRequest{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
@@ -1509,7 +1550,7 @@ func TestAgentLoadResumeListPaginationAndForkErrors(t *testing.T) {
 	}
 
 	listStore := NewInMemorySessionStore()
-	for i := 0; i < listSessionsPageSize+2; i++ {
+	for i := range listSessionsPageSize + 2 {
 		id := fmt.Sprintf("stored-%02d", i)
 		entry, _ := json.Marshal(stateSnapshot{
 			Format:              SessionStoreFormat,
@@ -2341,6 +2382,21 @@ func TestDeleteSurfacesTeardownErrorsWithTheSessionAlreadyHidden(t *testing.T) {
 	_, live := agent.sessions[session.id]
 	agent.mu.Unlock()
 	require.False(t, live, "failed teardown left the session addressable")
+}
+
+func TestFailedEstablishmentRetainsUnremovedResidence(t *testing.T) {
+	agent := newTestAgent()
+	client := newFakeHermesClient()
+	client.xdg.Root = string([]byte{0}) // Deterministic filesystem removal failure.
+	session := testSession(t, agent, client)
+	agent.sessions[session.id] = session
+
+	require.Error(t, agent.cleanupFailedStartedSession(t.Context(), session))
+	require.Empty(t, agent.sessions)
+	require.True(t, client.closed)
+	require.Equal(t, []string{"native-1"}, client.deleted)
+	require.Equal(t, session, agent.deleteCleanup[session.id].Session)
+	require.Equal(t, client.xdg.Root, agent.deleteCleanup[session.id].XDGRoot)
 }
 
 func TestAgentDeletedCleanupBookkeeping(t *testing.T) {

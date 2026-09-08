@@ -58,6 +58,9 @@ For each native tree the adapter follows one order:
 terminality. `ErrHostAuthorityUnavailable` stops managed admission,
 `ErrContainmentIncomplete` retains native trees for host cleanup, and
 `ErrNativeTreeBusy` means reclaim was refused before changing tree ownership.
+Every failed prepare attempt, including busy, cancellation, and panic, leaves
+the attempted tree opaque and host-cleanup-owned. It fences later managed
+admission and never enters adapter reclaim retries.
 
 The session control lock lives in runtime scratch outside the prepared native
 home. Its descriptor remains in the adapter and is not inherited by Hermes.
@@ -72,14 +75,24 @@ absolute read-only root. The adapter resolves and reads files there but never
 writes, moves, or removes them. Native Hermes receives image bytes, not the
 source pathname.
 
+In managed mode the agent pins this root before the first native preparation.
+The root must be disjoint from the complete scratch parent, including directory
+aliases; an overlapping or unavailable root yields `path_not_allowed` when a
+handoff is read. Reads use the retained directory handle, which closes with the
+agent. The host must keep the native preparation and read domains disjoint for
+the authority lifetime, including mount aliases and native replacement of roots
+or ancestors. Ordinary mode opens its configured handoff root per prompt.
+
 Seed files are copied into a session tree before it is prepared. Their relative
 paths cannot be absolute, empty, or escape with `..`.
 
 ## Stdout discipline
 
 Stdout is reserved for ACP JSON-RPC. Structured diagnostics and native process
-output go to stderr or the configured logger. Error mapping omits native
-transport bodies and credential values.
+output go to stderr or the configured logger. Off-prompt internal and
+provider-auth errors carry closed tokens. Prompt failures preserve native
+diagnostics in their `message` field; these diagnostics are not logged by
+default.
 
 ## Credentials never leave the process
 

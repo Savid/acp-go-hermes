@@ -625,7 +625,7 @@ func (ui *chatUI) writeBlockLocked(label string, lines []string) {
 func cleanNoticeLines(lines []string) []string {
 	cleaned := make([]string, 0, len(lines))
 	for _, line := range lines {
-		for _, part := range strings.Split(strings.TrimRight(line, "\r\n"), "\n") {
+		for part := range strings.SplitSeq(strings.TrimRight(line, "\r\n"), "\n") {
 			if strings.TrimSpace(part) == "" {
 				continue
 			}
@@ -1191,7 +1191,7 @@ func previewLines(label string, text string, limit int) []string {
 	}
 
 	lines := []string{label + ":"}
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		lines = append(lines, "  "+line)
 	}
 

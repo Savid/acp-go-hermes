@@ -343,6 +343,10 @@ func (p *sessionStream) terminalizeBlockers(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if !p.opened || p.stream.Fenced() {
+		return nil
+	}
+
 	for _, record := range p.stream.State().Actions {
 		if record.State.Terminal() {
 			continue
@@ -371,6 +375,10 @@ func (p *sessionStream) settle(ctx context.Context, outcome lifecycleTurnOutcome
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if !p.opened || p.stream.Fenced() {
+		return nil
+	}
+
 	if err := p.emitLocked(ctx, lifecycle.IdleEventWithCause(
 		p.cycleID, p.turnID, outcome.stopReason, outcome.outcome, p.turnCause,
 	)); err != nil {
@@ -395,6 +403,10 @@ func (p *sessionStream) certify(ctx context.Context, barrier string) error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if !p.opened || p.stream.Fenced() {
+		return nil
+	}
 
 	return p.emitLocked(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
 		Quiescent: true,

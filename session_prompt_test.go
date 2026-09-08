@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1780,7 +1781,7 @@ func TestPromptHelpersAndAnswerMapping(t *testing.T) {
 		}}},
 		{Resource: &acp.ContentBlockResource{Type: "resource", Resource: acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{
-				Blob: fixtureBase64(t, "valid.png"), MimeType: acp.Ptr("image/png"), Uri: "file:///tmp/image",
+				Blob: fixtureBase64(t, "valid.png"), MimeType: new("image/png"), Uri: "file:///tmp/image",
 			},
 		}}},
 	}, ImageLimits{}, "")
@@ -2695,10 +2696,8 @@ func requireTurnFailure(t *testing.T, err error, cause nativehermes.TurnFailureC
 		t.Fatalf("turn failure cause = %v, want %q", data[jsonFieldCause], cause)
 	}
 
-	if _, exposed := data[jsonFieldMessage]; exposed {
-		t.Fatalf("turn failure exposed native message on the wire: %#v", data)
-	}
 	if wantMsgSubstr != "" {
+		require.Contains(t, data[jsonFieldMessage], wantMsgSubstr)
 		nativeCause := errors.Unwrap(err)
 		if nativeCause == nil || !strings.Contains(nativeCause.Error(), wantMsgSubstr) {
 			t.Fatalf("native cause = %v, want substring %q", nativeCause, wantMsgSubstr)
@@ -2720,6 +2719,7 @@ func promptOnce(ctx context.Context, session *session, text string) (acp.PromptR
 func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 	client := newFakeHermesClient()
 	client.sendMessage = func(_ context.Context, _ string, _ nativehermes.MessageRequest) (nativehermes.NativeMessage, error) {
+		require.NoError(t, os.WriteFile(filepath.Join(client.xdg.Root, fileStateDB), []byte("uncommitted failed native history"), 0o600))
 		failure := nativehermes.NewProviderTurnFailure("hermes assistant error: model overloaded", 503, "overloaded")
 		client.emitEvent(nativehermes.TurnEvent{
 			Type: nativehermes.EventCycleFailed, CycleID: "fake/native-1/cycle-1",
@@ -2733,6 +2733,8 @@ func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 	agent := newTestAgent()
 	agent.setAgentClient(conn)
 	session := testSession(t, agent, client)
+	require.NoError(t, os.WriteFile(filepath.Join(client.xdg.Root, fileStateDB), []byte("committed native history"), 0o600))
+	require.NoError(t, session.snapshotToStore(t.Context()))
 
 	resp, err := promptOnce(context.Background(), session, "hello")
 	if resp.StopReason != "" {
@@ -2744,13 +2746,26 @@ func TestTurnFailureProviderErrorMapsUniformly(t *testing.T) {
 		t.Fatalf("statusCode = %v, want 503", data[jsonFieldStatusCode])
 	}
 
-	if _, exposed := data[jsonFieldProviderCode]; exposed {
-		t.Fatalf("providerCode reached secret-safe wire data: %#v", data)
+	require.Equal(t, "overloaded", data[jsonFieldProviderCode])
+	require.Equal(t, 1, client.closeCount())
+	require.True(t, session.needsRuntimeResume())
+	replacement := newFakeHermesClient()
+	replacement.getSession = testNativeSession("native-1")
+	factoryCalls := 0
+	agent.options.clientFactory = func(_ context.Context, start nativehermes.StartOptions) (nativehermes.Server, error) {
+		factoryCalls++
+		bytes, readErr := os.ReadFile(filepath.Join(start.ExistingXDG.Root, fileStateDB))
+		require.NoError(t, readErr)
+		require.Equal(t, "committed native history", string(bytes))
+		replacement.xdg = start.ExistingXDG
+
+		return replacement, nil
 	}
-	if client.closeCount() != 0 || session.needsRuntimeResume() {
-		t.Fatalf("provider outcome ended runtime: close=%d needsResume=%v", client.closeCount(), session.needsRuntimeResume())
-	}
-	require.NoError(t, session.synchronizePump(t.Context()))
+	response, retryErr := promptOnce(t.Context(), session, "next prompt")
+	require.NoError(t, retryErr)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	require.Equal(t, 1, factoryCalls)
+	require.NoError(t, session.Close(t.Context()))
 }
 
 // nativehermes.TurnFailureError.Error falls back to a cause-derived string only when no
@@ -4140,7 +4155,7 @@ func TestPromptFailsOnUnmappedNativeFinish(t *testing.T) {
 	data, _ := reqErr.Data.(map[string]any)
 	require.Equal(t, valHermesTurnFailed, data[jsonFieldError])
 	require.Equal(t, string(nativehermes.CauseProvider), data[jsonFieldCause])
-	require.NotContains(t, data, jsonFieldMessage)
+	require.Contains(t, data[jsonFieldMessage], "tool_calls")
 	require.ErrorContains(t, errors.Unwrap(err), "tool_calls")
 }
 func TestActionOwnershipEdges(t *testing.T) {

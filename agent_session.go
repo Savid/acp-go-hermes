@@ -225,12 +225,16 @@ func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *sessio
 	cancel()
 	a.recordIncompleteContainment(err, session.id, record.XDGRoot)
 
-	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
+	if err != nil {
+		session.lifecycleStream().fence()
+		a.rememberDeleteCleanup(record)
+
 		return err
 	}
 
-	err = errors.Join(err, a.cleanupDeletedSession(record))
+	err = a.cleanupDeletedSession(record)
 	if err != nil {
+		a.rememberDeleteCleanup(record)
 		a.log.DebugContext(ctx, "clean up Hermes session after failed snapshot", slog.String(jsonFieldError, err.Error()))
 	}
 
@@ -509,19 +513,13 @@ func (a *Agent) cleanupFailedLoadedSession(session *session) error {
 		a.observe.AddActiveSession(context.Background(), -1)
 	}
 
-	session.lifecycleStream().fence()
-	session.prepareClose()
 	ctx, cancel := context.WithTimeout(context.Background(), sessionSettlementTimeout)
-	waitErr := session.awaitSettlement(ctx)
-
-	session.lifecycleMu.Lock()
-	closeErr := session.closeLocked(ctx, false)
-	session.lifecycleMu.Unlock()
+	closeErr := session.closeWithoutSnapshot(ctx)
 	cancel()
 
 	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
 
-	return errors.Join(waitErr, closeErr)
+	return closeErr
 }
 
 // failReuseAfterResponse contains an active session whose post-response replay
@@ -1052,11 +1050,8 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	}
 
 	// Close stops admitting prompts, then waits for the turn in flight to settle
-	// wholly. The wait is the boundary: a close that returned while a commit or
-	// a terminal emission was still owed would report a contained session over
-	// durable state nobody had finished writing. The settlement's own verdict
-	// was already delivered to the prompt that produced it, so it is not
-	// re-reported here.
+	// wholly. Later quiescence belongs to the retained settlement owner, so close
+	// joins its completion and reports failures after the foreground response.
 	session.prepareClose()
 	waitErr := session.awaitSettlement(ctx)
 
@@ -1110,6 +1105,13 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	a.mu.Unlock()
 
 	record := a.deleteCleanupRecord(params.SessionId, session)
+	if session == nil {
+		a.mu.Lock()
+		if pending, ok := a.deleteCleanup[params.SessionId]; ok {
+			record = pending
+		}
+		a.mu.Unlock()
+	}
 
 	// The tombstone is the first thing this delete does. An active turn is
 	// something delete cancels and settles, never a ground to refuse on, so
@@ -1719,9 +1721,9 @@ func (a *Agent) admitSharedHermesConfig(servers []acp.McpServer) error {
 
 type deleteCleanupRecord struct {
 	SessionID acp.SessionId
-	NativeID  string
 	XDGRoot   string
 	Server    *managedHermesServer
+	Session   *session
 }
 
 // deleteCleanupRecord names what a delete still owes the filesystem. The root
@@ -1733,10 +1735,10 @@ func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCl
 	if session == nil {
 		return record
 	}
+	record.Session = session
 
 	snapshot := session.snapshot()
 
-	record.NativeID = snapshot.idmap.NativeSessionID
 	if snapshot.client != nil {
 		if xdg := snapshot.client.XDGDirs(); xdg.Root != "" {
 			record.XDGRoot = xdg.Root
@@ -1799,15 +1801,26 @@ func (a *Agent) retryDeletedSessionCleanup(ctx context.Context) error {
 }
 
 func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
+	if record.Session != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		err := record.Session.closeWithoutSnapshot(ctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+
 	if record.SessionID == "" || record.XDGRoot == "" {
 		return nil
 	}
-	if record.Server != nil && record.Server.managed {
+	if record.Server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		err := record.Server.Close(ctx)
 		cancel()
 
-		return err
+		if err != nil || record.Server.managed {
+			return err
+		}
 	}
 
 	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))

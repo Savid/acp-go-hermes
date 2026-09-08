@@ -45,16 +45,10 @@ const measuredUnknownProviderRefusal = "Unknown provider 'missing-provider'. " +
 // against a disposable home, and the placeholder key only satisfies the
 // gateway's precondition that some provider be configured.
 func TestLiveModelSelectionNativeAnswers(t *testing.T) {
-	if os.Getenv("ACP_GO_HERMES_RUN_INTEGRATION") == "" {
-		t.Skip("set ACP_GO_HERMES_RUN_INTEGRATION=1")
-	}
+	executable := integrationHermesCLI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	executable := os.Getenv("ACP_GO_HERMES_HARNESS_PATH")
-	if executable == "" {
-		executable = valHermes
-	}
 	requireMeasuredHermesVersion(t, executable)
 
 	scratch := durableTempDir(t)
