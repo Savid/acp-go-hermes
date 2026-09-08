@@ -122,8 +122,8 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 	defer agent.close()
 	client := newRecordingClient()
 	conn := acp.NewClientSideConnection(client, agent.stdin, agent.stdout)
-	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize: %v\nstderr:\n%s", err, agent.stderrString())
+	if _, initializeErr := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); initializeErr != nil {
+		t.Fatalf("initialize: %v\nstderr:\n%s", initializeErr, agent.stderrString())
 	}
 
 	firstSession, err := conn.NewSession(ctx, liveSessionCLIRequest(first))
@@ -170,8 +170,8 @@ func TestHermesACPAgentLiveSessionCLICarrierRotation(t *testing.T) {
 
 	rotated := liveSessionCLICarrier{cwd: first.cwd, dir: t.TempDir(), token: "live-bearer-a-rotated", operation: "live-operation-a-rotated"}
 	writeLiveWagie(t, rotated.dir, curlPath, server.URL)
-	if _, err := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: firstSession.SessionId}); err != nil {
-		t.Fatalf("close first session: %v\nstderr:\n%s", err, agent.stderrString())
+	if _, closeErr := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: firstSession.SessionId}); closeErr != nil {
+		t.Fatalf("close first session: %v\nstderr:\n%s", closeErr, agent.stderrString())
 	}
 	probe.rotate(first.token, rotated.token, rotated.operation)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)

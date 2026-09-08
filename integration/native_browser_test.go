@@ -172,15 +172,7 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 		t.Fatalf("read native browser canary output: %v", err)
 	}
 	t.Log(string(logs))
-	if code != 0 {
-		t.Fatalf("native browser canary exited %d", code)
-	}
-	if got := strings.Count(string(logs), "--- PASS: "+nativeBrowserTestName); got != 1 {
-		t.Fatalf("native browser canary pass count = %d, want exactly 1: %s", got, logs)
-	}
-	if strings.Contains(string(logs), "SKIP") || strings.Contains(string(logs), "no tests to run") {
-		t.Fatalf("required native browser canary skipped or selected nothing: %s", logs)
-	}
+	requireNativeBrowserPass(t, code, string(logs))
 
 	trace := readNativeBrowserTrace(ctx, t, fixture)
 	if !strings.Contains(trace, nativeBrowserAdapterPath) || !strings.Contains(trace, nativeBrowserHermesPath) {
@@ -190,6 +182,20 @@ func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 		if traceExecsBase(trace, launcher) {
 			t.Fatalf("production Hermes auth attempted browser launcher %q:\n%s", launcher, trace)
 		}
+	}
+}
+
+func requireNativeBrowserPass(t *testing.T, code int, logs string) {
+	t.Helper()
+
+	if code != 0 {
+		t.Fatalf("native browser canary exited %d", code)
+	}
+	if got := strings.Count(logs, "--- PASS: "+nativeBrowserTestName); got != 1 {
+		t.Fatalf("native browser canary pass count = %d, want exactly 1: %s", got, logs)
+	}
+	if strings.Contains(logs, "SKIP") || strings.Contains(logs, "no tests to run") {
+		t.Fatalf("required native browser canary skipped or selected nothing: %s", logs)
 	}
 }
 
@@ -286,6 +292,21 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		"flowId":     authorization.FlowID,
 	}, nil); callErr != nil {
 		t.Fatalf("cancel native authorization: %v", callErr)
+	}
+
+	t.Log("native browser phase: close session")
+	if _, closeErr := conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId}); closeErr != nil {
+		t.Fatalf("close native session: %v\nstderr:\n%s", closeErr, agent.stderrString())
+	}
+
+	// Observe orderly shutdown before the fallback cleanup can kill the adapter
+	// while its native gateway is still settling under strace.
+	t.Log("native browser phase: stop adapter")
+	if closeErr := agent.stdin.Close(); closeErr != nil {
+		t.Fatalf("close adapter input: %v", closeErr)
+	}
+	if waitErr := agent.wait(ctx); waitErr != nil {
+		t.Fatalf("wait for adapter shutdown: %v\nstderr:\n%s", waitErr, agent.stderrString())
 	}
 }
 

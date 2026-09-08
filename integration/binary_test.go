@@ -74,6 +74,7 @@ func integrationHermesPath(t *testing.T) string {
 		}
 		t.Skipf("hermes CLI absent for smoke: %v; set ACP_GO_HERMES_HARNESS_PATH", err)
 	}
+
 	return resolved
 }
 
@@ -81,6 +82,7 @@ func agentCommand(t *testing.T, ctx context.Context, args ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, integrationBinaryPath(t), args...)
 	cmd.WaitDelay = 5 * time.Second
+
 	return cmd
 }
 
@@ -89,5 +91,6 @@ func repoRoot() string {
 	if !ok {
 		return ".."
 	}
+
 	return filepath.Dir(filepath.Dir(file))
 }

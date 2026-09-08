@@ -35,11 +35,13 @@ func (b *processLog) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.data = append(b.data, p...)
+
 	return len(p), nil
 }
 func (b *processLog) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return string(b.data)
 }
 
@@ -85,6 +87,7 @@ func startIntegrationProcess(t *testing.T, cmd *exec.Cmd) *integrationProcess {
 		}
 	})
 	t.Cleanup(p.close)
+
 	return p
 }
 

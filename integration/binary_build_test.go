@@ -34,6 +34,7 @@ var buildIntegrationBinary = sync.OnceValues(func() (string, error) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build adapter: %w\n%s", err, output)
 	}
+
 	return binary, nil
 })
 
@@ -42,6 +43,7 @@ func integrationRepositoryRoot() string {
 	if !ok {
 		panic("integration source location unavailable")
 	}
+
 	return filepath.Dir(filepath.Dir(file))
 }
 
@@ -52,12 +54,14 @@ func integrationBinaryPath(t *testing.T) string {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		return absolute
 	}
 	binary, err := buildIntegrationBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return binary
 }
 

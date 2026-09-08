@@ -37,8 +37,8 @@ func TestIntegrationProcessBoundsInheritedPipe(t *testing.T) {
 	_ = releaseRead.Close()
 	_ = exitedWrite.Close()
 	ready := make([]byte, 1)
-	if _, err := io.ReadFull(p.stdout, ready); err != nil || ready[0] != 'R' {
-		t.Fatalf("pipe-holder readiness: %q %v", ready, err)
+	if _, readErr := io.ReadFull(p.stdout, ready); readErr != nil || ready[0] != 'R' {
+		t.Fatalf("pipe-holder readiness: %q %v", ready, readErr)
 	}
 	err = p.wait(ctx)
 	// Release and observe the descendant's exit even when the Wait assertion fails.

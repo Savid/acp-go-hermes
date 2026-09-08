@@ -157,10 +157,11 @@ type liveAgent struct{ *integrationProcess }
 // integrationAgentArgs builds the launch args every wrapper subprocess in this
 // tier shares.
 func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) []string {
-	args := []string{
+	args := make([]string, 0, 4+len(extraArgs))
+	args = append(args,
 		"-path", hermesPath,
 		"-scratch-dir", home,
-	}
+	)
 
 	return append(args, extraArgs...)
 }
@@ -168,6 +169,7 @@ func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) [
 func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
 	t.Helper()
 	cmd := agentCommand(t, ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
+
 	return &liveAgent{startIntegrationProcess(t, cmd)}
 }
 
@@ -218,12 +220,14 @@ func (c *recordingClient) RequestPermission(_ context.Context, req acp.RequestPe
 	c.mu.Lock()
 	c.permissions = append(c.permissions, req)
 	c.mu.Unlock()
+
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("once")}, nil
 }
 func (c *recordingClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
 	c.mu.Lock()
 	c.updates = append(c.updates, notification)
 	c.mu.Unlock()
+
 	return nil
 }
 func (*recordingClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
@@ -252,6 +256,7 @@ func (c *recordingClient) UnstableCreateElicitation(_ context.Context, req acp.U
 			content[key] = "Yes"
 		}
 	}
+
 	return acp.UnstableCreateElicitationResponse{
 		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: content},
 	}, nil
@@ -260,12 +265,14 @@ func (c *recordingClient) UnstableCreateElicitation(_ context.Context, req acp.U
 func (c *recordingClient) permissionCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.permissions)
 }
 
 func (c *recordingClient) elicitationCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return len(c.elicitations)
 }
 
@@ -320,6 +327,7 @@ func envOrDefault(name string, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
 	}
+
 	return fallback
 }
 
@@ -332,6 +340,7 @@ func TestIntegrationHarnessPrerequisites(t *testing.T) {
 	if os.Args[len(os.Args)-1] == "harness-prerequisite-child" {
 		path := integrationHermesPath(t)
 		t.Log("resolved harness " + path)
+
 		return
 	}
 	executable, err := os.Executable()
