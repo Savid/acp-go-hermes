@@ -178,8 +178,8 @@ func TestHermesACPAgentProjectsPreSubmitActivityBeforePromptDispatch(t *testing.
 }
 
 // TestHermesACPAgentFakeExecutableModelSelection drives model selection over
-// the real ACP wire against a gateway that answers the way hermes 0.20.4 was
-// measured to. It carries the claim the model config surface rests on all the
+// the real ACP wire against a gateway double that answers the way the measured
+// Hermes release does. It carries the claim the model config surface rests on all the
 // way to a host: the published catalogue is a menu, so a value absent from it
 // still reaches the gateway and becomes the option's current value, while a
 // selection the gateway refuses comes back as the gateway's own refusal rather
@@ -486,7 +486,7 @@ func fakeHermesExecutable(t *testing.T, mode string) string {
 
 func runFakeHermesServer(args []string, mode string) error {
 	if slices.Contains(args, "--version") {
-		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
+		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.21.1 (fake)")
 
 		return nil
 	}
@@ -739,11 +739,11 @@ func handleFakeGatewayRPC(
 	case "config.set":
 		value, _ := params["value"].(string)
 		fields := strings.Fields(value)
-		// The double answers the way hermes 0.20.4 (2026.8.18) was measured to,
-		// message text included. Hermes refuses on the provider and never on the
-		// model: a selection naming a provider it does not publish is refused,
-		// while a model no provider advertises is taken. The measurement and its
-		// provenance live in internal/hermes' TestLiveModelSelectionNativeAnswers.
+		// A selection naming a provider Hermes does not publish is refused,
+		// message text included. A model absent from the published catalogue is
+		// taken, as Hermes does when it cannot reach the provider's live model
+		// listing. The measurement lives in internal/hermes'
+		// TestLiveModelSelectionNativeAnswers.
 		if len(fields) == 0 || strings.HasPrefix(fields[0], "--") {
 			writeFakeGatewayError(ctx, conn, id, 5001, "model value required")
 

@@ -76,6 +76,7 @@ type fakeGatewayServer struct {
 	requireDurable      bool
 	resumeNoLive        bool
 	resumeNoKey         bool
+	resumeStoredOnly    bool
 	resumeKey           string
 	resumeBuildDefault  string
 	expectedPromptModel string
@@ -330,6 +331,7 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.mu.Lock()
 		resumeNoLive := s.resumeNoLive
 		resumeNoKey := s.resumeNoKey
+		resumeStoredOnly := s.resumeStoredOnly
 		resumeKey := s.resumeKey
 		requireDurable := s.requireDurable
 		durableCreated := s.durableCreated
@@ -357,6 +359,10 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		}
 		if resumeNoKey {
 			delete(result, "session_key")
+		}
+		if resumeStoredOnly {
+			delete(result, "session_key")
+			result["stored_session_id"] = resumeKey
 		}
 		for _, event := range s.resumeEventScript(liveID, true) {
 			s.writeEvent(ctx, conn, event)
@@ -843,6 +849,12 @@ func (s *fakeGatewayServer) setCreateNoLive() {
 func (s *fakeGatewayServer) setResumeNoKey() {
 	s.mu.Lock()
 	s.resumeNoKey = true
+	s.mu.Unlock()
+}
+
+func (s *fakeGatewayServer) setResumeStoredOnly() {
+	s.mu.Lock()
+	s.resumeStoredOnly = true
 	s.mu.Unlock()
 }
 
@@ -1537,6 +1549,25 @@ func TestHermesGatewayCreateRejectsUnprovenDurability(t *testing.T) {
 				t.Fatalf("failed create retained live mapping %q", live)
 			}
 		})
+	}
+}
+
+func TestGetSessionReadsStoredSessionIDSpellingOnResume(t *testing.T) {
+	fake := newFakeGatewayServer(t)
+	fake.mu.Lock()
+	fake.activeEmpty = true
+	fake.durableCreated = true
+	fake.mu.Unlock()
+	fake.setResumeStoredOnly()
+	server := newGatewayBackedHermesServer(t, fake, "openai/gpt-test")
+
+	session, err := server.GetSession(t.Context(), "stored")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	if session.ID != "stored" {
+		t.Fatalf("session ID = %q, want %q", session.ID, "stored")
 	}
 }
 
@@ -2601,7 +2632,7 @@ func TestHermesGatewayServerEdgeBranches(t *testing.T) {
 			},
 			{
 				name: "get missing resume key",
-				want: "session.resume response missing session_key",
+				want: "session.resume response missing session_key and stored_session_id",
 				setup: func(fake *fakeGatewayServer) {
 					fake.setResumeNoKey()
 				},
@@ -2866,11 +2897,6 @@ func TestHermesGatewayBarrieredResumePreventsForkModelMutationLoss(t *testing.T)
 	if len(resumeCalls) != 1 {
 		t.Fatalf("fork child resume calls = %#v", resumeCalls)
 	}
-	// The resume must not ask the gateway to build eagerly: that flag is what
-	// makes the gateway hand its shared state.db handle to the resumed agent.
-	if _, present := resumeCalls[0].Params["eager_build"]; present {
-		t.Fatalf("fork child resume params = %#v", resumeCalls[0].Params)
-	}
 	calls := fake.callMethods()
 	resumeIndex := slices.Index(calls, "session.resume")
 	barrierIndex := slices.Index(calls, "process.list")
@@ -2890,9 +2916,6 @@ func TestHermesGatewayBarrieredResumePreventsForkModelMutationLoss(t *testing.T)
 	ensureResumeCalls := ensureFake.callsFor("session.resume")
 	if len(ensureResumeCalls) != 1 {
 		t.Fatalf("ensure-live resume calls = %#v", ensureResumeCalls)
-	}
-	if _, present := ensureResumeCalls[0].Params["eager_build"]; present {
-		t.Fatalf("ensure-live resume params = %#v", ensureResumeCalls[0].Params)
 	}
 	if len(ensureFake.callsFor("process.list")) != 1 {
 		t.Fatalf("ensure-live barrier calls = %#v", ensureFake.callsFor("process.list"))
@@ -3811,7 +3834,7 @@ func exitWhenParentTestExits() {
 
 func runFakeHermesGatewayProcess(args []string, mode string) error {
 	if slices.Contains(args, "--version") {
-		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (fake)")
+		_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.21.1 (fake)")
 
 		return nil
 	}

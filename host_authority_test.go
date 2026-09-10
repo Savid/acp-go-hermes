@@ -171,7 +171,7 @@ func newTestHostAuthority() *recordingHostAuthority {
 		stdout := io.NopCloser(strings.NewReader(""))
 		if len(request.Arguments) == 1 && request.Arguments[0] == "--version" {
 			name = "version"
-			stdout = io.NopCloser(strings.NewReader("Hermes 0.20.0\n"))
+			stdout = io.NopCloser(strings.NewReader("Hermes 0.21.1\n"))
 		}
 
 		process := &recordingNativeProcess{

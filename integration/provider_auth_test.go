@@ -82,7 +82,7 @@ func providerAuthAgent(t *testing.T, ctx context.Context) (*acp.ClientSideConnec
 	t.Helper()
 
 	authRoot := t.TempDir()
-	authHome := t.TempDir()
+	authHome := durableTempDir(t)
 	agent := startLiveAgent(
 		t,
 		ctx,

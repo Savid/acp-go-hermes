@@ -1846,7 +1846,7 @@ func (a *gatewaySessionActor) emitPart(cycle *gatewayCycle, part Part, event Eve
 }
 
 func (a *gatewaySessionActor) mapPermission(cycle *gatewayCycle, event Event) error {
-	// Hermes 0.20 approval.request has no request identity, so the actor mints
+	// Hermes approval.request has no request identity, so the actor mints
 	// one inside the exact cycle. It has no tool identity either, and hermes
 	// emits tool.start only for a progress-enabled surface and runs tool calls
 	// concurrently, so a callback can reach an adapter that sees no active

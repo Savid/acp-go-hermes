@@ -74,7 +74,7 @@ func runFakeHermesProcess(args []string, mode string) error {
 
 				return nil
 			}
-			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.20.0 (test)")
+			_, _ = fmt.Fprintln(os.Stdout, "Hermes Agent v0.21.1 (test)")
 
 			return nil
 		}

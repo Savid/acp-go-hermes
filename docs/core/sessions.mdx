@@ -156,7 +156,9 @@ so an ambient shell hook, an SSH agent socket, or a provider key never reaches
 Hermes unless `WithEnv` or session `env` names it. Hermes reads more than fifty
 environment names as provider credentials and persists each one it finds into
 the session home's auth store, which is why inheritance is closed rather than
-filtered. On Windows, validated
+filtered. An embedding host whose own process environment is not the base it
+intends supplies one with `WithAmbientEnvironment`; the allowlist applies to it
+unchanged, and its entries are folded in sorted key order. On Windows, validated
 native drive and UNC paths are converted directly to Git Bash path syntax
 without looking up or executing a converter from the effective PATH.
 

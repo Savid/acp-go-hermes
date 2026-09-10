@@ -529,9 +529,24 @@ type SessionCreateResult struct {
 	StoredSessionID string `json:"stored_session_id"`
 }
 
+// SessionResumeResult is the session.resume answer. The gateway names the
+// stored session key `session_key` on cold, deferred, and lazy resumes, and
+// `stored_session_id` when the resume reattaches a live session whose row is
+// not yet persisted. Both carry the same identity; read it through StoredKey.
 type SessionResumeResult struct {
-	SessionID  string `json:"session_id"`
-	SessionKey string `json:"session_key"`
+	SessionID       string `json:"session_id"`
+	SessionKey      string `json:"session_key"`
+	StoredSessionID string `json:"stored_session_id"`
+}
+
+// StoredKey returns the stored session key under either native spelling, or
+// "" when the response carried neither.
+func (r SessionResumeResult) StoredKey() string {
+	if r.SessionKey != "" {
+		return r.SessionKey
+	}
+
+	return r.StoredSessionID
 }
 
 type PromptSubmitResult struct {

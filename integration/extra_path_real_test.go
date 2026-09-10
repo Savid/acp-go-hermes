@@ -46,7 +46,7 @@ approvals:
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sharedHome := t.TempDir()
+	sharedHome := durableTempDir(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -7,9 +7,10 @@ import "strings"
 // is the one thing the block carries which a keyed phase map cannot. Folding it
 // here is what keeps the decision on the seam that still has the information.
 
-// AmbientEnvironmentSnapshot folds an ordered environment block — os.Environ(),
-// or any block a parent hand-built for CreateProcess — into the keyed ambient
-// phase ProcessOptions.AmbientEnvironment is assembled from.
+// AmbientEnvironmentSnapshot folds an ordered environment block — the one the
+// platform handed this process, or any block a parent hand-built for
+// CreateProcess — into the keyed ambient phase ProcessOptions.AmbientEnvironment
+// is assembled from.
 //
 // Where names fold, a later "PATH" is not a second variable beside an earlier
 // "Path"; it is one variable written twice, and the block's own order says

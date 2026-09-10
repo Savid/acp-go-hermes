@@ -1316,7 +1316,7 @@ func (s *hermesServer) GetSession(ctx context.Context, id string) (Session, erro
 			return Session{}, err
 		}
 
-		storedID = result.SessionKey // resumeGatewaySessionOn validated both native identities.
+		storedID = result.StoredKey() // resumeGatewaySessionOn validated both native identities.
 	}
 
 	return s.nativeSessionFromGateway(storedID, ""), nil
@@ -1589,21 +1589,12 @@ func (s *hermesServer) ensureLiveGatewaySessionOn(
 	return result.SessionID, nil
 }
 
-// resumeGatewaySession asks official Hermes to finish constructing the native
-// agent before publishing its live id. Hermes 0.20 otherwise returns from a
-// cold resume while a background build is still pending; a config.set sent in
-// that window can report success and then be overwritten by the stale build.
-//
-// The barrier is a separate call rather than the resume's own eager-build flag.
-// Hermes 0.20.4 builds an eagerly-resumed agent against the gateway's shared
-// process-wide state.db handle and then marks that agent the handle's owner, so
-// the next native session.close for the resumed session closes the shared
-// handle underneath the whole process: every later state.db-backed method in
-// that generation — session.delete and session.list included — fails with a
-// dead connection. The deferred build reaches the same finished agent through
-// the gateway's own build-aware session lookup without that ownership transfer,
-// so the barrier both preserves the ordering config.set needs and leaves the
-// generation able to serve its own teardown.
+// resumeGatewaySessionOn asks Hermes to finish constructing the native agent
+// before publishing its live id. A cold resume returns while the background
+// build is still pending, and a config.set sent in that window can report
+// success and then be overwritten by the finished build. The barrier is the
+// gateway's own build-aware session lookup, so the resume itself stays
+// deferred.
 func (s *hermesServer) resumeGatewaySessionOn(
 	ctx context.Context,
 	transport *gatewayTransport,
@@ -1717,11 +1708,12 @@ func (s *hermesServer) storedSessionIDFromResume(result SessionResumeResult) (st
 		return "", fmt.Errorf("hermes session.resume response missing session_id")
 	}
 
-	if result.SessionKey == "" {
-		return "", fmt.Errorf("hermes session.resume response missing session_key")
+	stored := result.StoredKey()
+	if stored == "" {
+		return "", fmt.Errorf("hermes session.resume response missing session_key and stored_session_id")
 	}
 
-	return result.SessionKey, nil
+	return stored, nil
 }
 
 func (s *hermesServer) nativeSessionFromGateway(stored string, title string) Session {

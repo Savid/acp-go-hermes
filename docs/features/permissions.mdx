@@ -12,7 +12,7 @@ load-bearing for user trust and is never silently auto-approved.
 A native `approval.request` gateway event maps to an ACP
 `session/request_permission` request. The adapter presents three options:
 
-Hermes 0.20.0's session-keyed `approval.request` payload has no request or tool
+Hermes' session-keyed `approval.request` payload has no request or tool
 identifier. The owning actor derives an adapter-owned permission-request
 identity inside the exact cycle, and never treats a command string as a tool
 identity. Where exactly one native tool is active, the adapter takes that exact

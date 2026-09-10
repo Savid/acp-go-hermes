@@ -16,7 +16,7 @@ import (
 // measuredHermesVersion names the release every literal in this file was read
 // off. It is provenance, not a floor: MinimumVersion already answers what this
 // adapter supports.
-const measuredHermesVersion = "0.20.4"
+const measuredHermesVersion = "0.21.1"
 
 // measuredUnknownProviderRefusal is what a real hermes answers config.set when
 // the selection names a provider it does not have.
@@ -24,26 +24,17 @@ const measuredUnknownProviderRefusal = "Unknown provider 'missing-provider'. " +
 	"Check 'hermes model' for available providers, or define it in config.yaml under 'providers:'."
 
 // TestLiveModelSelectionNativeAnswers measures what Hermes itself answers a
-// model mutation. The adapter classifies that answer into a stable bounded ACP
-// error; the native text remains here only as the version-pinned measurement
-// that proves the classifier is exercised by the real refusal.
-//
-// It measures two answers that together say where Hermes draws the line:
-//
-//   - An unknown provider is refused, with a JSON-RPC 5001 carrying the message
-//     pinned above.
-//   - A model no provider advertises is accepted, as long as the provider is
-//     real. The catalogue is a menu Hermes publishes, not the set it will take,
-//     which is the whole claim the model config surface rests on.
-//
-// The version is asserted rather than assumed. Measured text is only true of
-// the release it was read from, so a bump fails here with the two versions
-// named, and whatever the new release answers becomes the new literal here and
-// at the sites this comment lists.
+// model mutation: an unknown provider is refused with JSON-RPC 5001 and the
+// message pinned above, while a model absent from a real provider's published
+// catalogue is accepted when Hermes cannot reach that provider's live model
+// listing. Hermes decides the model verdict, not the adapter, so the adapter
+// forwards the exact value and publishes whatever Hermes answers. The version
+// is asserted so a Hermes bump fails here with both versions named.
 //
 // No credential and no model turn is involved: config.set is a gateway call
 // against a disposable home, and the placeholder key only satisfies the
-// gateway's precondition that some provider be configured.
+// gateway's precondition that some provider be configured. That key also keeps
+// the live listing unreachable, which is the acceptance path this test pins.
 func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 	executable := integrationHermesCLI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -125,8 +116,7 @@ func TestLiveModelSelectionNativeAnswers(t *testing.T) {
 	}
 	if err := proc.Client.SetModel(ctx, created.SessionID, provider.Slug+"/"+unadvertised); err != nil {
 		t.Fatalf("provider %q refused an unadvertised model: %v\n"+
-			"hermes %s accepted it: the model catalogue is a menu rather than an acceptance set, "+
-			"and the config surface is built on that",
+			"hermes %s accepted it while the provider's live listing was unreachable",
 			provider.Slug, err, measuredHermesVersion)
 	}
 }

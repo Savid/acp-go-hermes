@@ -1,4 +1,4 @@
-# NousResearch/hermes-agent v2026.8.3 (Hermes v0.20.0), commit
-# 3c27eb6234bf91b8ceee9e9071591b31e9b148cb. Consumed by sha256sum in the
+# NousResearch/hermes-agent v2026.9.7 (Hermes v0.21.1), commit
+# 2237be355906fbe6065ce1815711eee52b2d646e. Consumed by sha256sum in the
 # native-browser Dockerfile before extraction.
-a68e96f385768ec6c466122bf21fcb697680a5f349c9a673badfbe27752b6928  /tmp/hermes-agent.tar.gz
+c1f2401c8096e9372c46fa4ef8bdada18ed3cc84c0f5274562b86b7646ed3a87  /tmp/hermes-agent.tar.gz

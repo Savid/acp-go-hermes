@@ -45,11 +45,11 @@ func TestSharedHomeVersionProbeIsFreshAfterSamePathReplacement(t *testing.T) {
 	executable := filepath.Join(durableTempDir(t), "hermes")
 	options := darwinTestProcessOptions(t, ProcessOptions{SharedHome: true, ScratchParent: durableTempDir(t)})
 
-	writeVersionHarness(t, executable, "0.20.0", "", "")
+	writeVersionHarness(t, executable, "0.21.1", "", "")
+	require.NoError(t, ensureExecutableVersion(t.Context(), executable, options))
+	writeVersionHarness(t, executable, "0.22.0", "", "")
 	require.NoError(t, ensureExecutableVersion(t.Context(), executable, options))
 	writeVersionHarness(t, executable, "0.21.0", "", "")
-	require.NoError(t, ensureExecutableVersion(t.Context(), executable, options))
-	writeVersionHarness(t, executable, "0.19.0", "", "")
 	require.ErrorContains(t, ensureExecutableVersion(t.Context(), executable, options), "below minimum")
 }
 
@@ -73,7 +73,7 @@ func TestVersionProbeIsSingleflightedAcrossConcurrentStarts(t *testing.T) {
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
 	gatePath := filepath.Join(directory, "gate")
-	writeVersionHarness(t, executable, "0.20.0", countPath, gatePath)
+	writeVersionHarness(t, executable, "0.21.1", countPath, gatePath)
 	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: durableTempDir(t)})
 
 	holder := make(chan error, 1)
@@ -106,7 +106,7 @@ func TestAbandonedVersionProbeDoesNotFailTheStartsWaitingOnIt(t *testing.T) {
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
 	gatePath := filepath.Join(directory, "gate")
-	writeVersionHarness(t, executable, "0.20.0", countPath, gatePath)
+	writeVersionHarness(t, executable, "0.21.1", countPath, gatePath)
 	options := darwinTestProcessOptions(t, ProcessOptions{ScratchParent: durableTempDir(t)})
 
 	abandoningCtx, abandon := context.WithCancel(context.Background())
@@ -127,7 +127,7 @@ func TestVersionProbeSurvivesAStartThatFailsAfterIt(t *testing.T) {
 	directory := durableTempDir(t)
 	executable := filepath.Join(directory, "hermes")
 	countPath := filepath.Join(directory, "count")
-	writeVersionHarness(t, executable, "0.20.0", countPath, "")
+	writeVersionHarness(t, executable, "0.21.1", countPath, "")
 	options := darwinTestProcessOptions(t, ProcessOptions{
 		ExecutablePath: executable,
 		ScratchParent:  durableTempDir(t),

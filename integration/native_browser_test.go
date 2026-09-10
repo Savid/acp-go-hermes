@@ -4,8 +4,11 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +32,10 @@ const (
 	nativeBrowserAdapterPath = "/usr/local/bin/acp-go-hermes.test"
 	nativeBrowserTracePath   = "/tmp/native-browser.trace"
 	nativeBrowserHermesPath  = "/usr/local/bin/hermes"
+	nativeBrowserProviderID  = "minimax-oauth"
+	nativeBrowserPortalEnv   = "MINIMAX_PORTAL_BASE_URL"
+	nativeBrowserUserCode    = "CANARY-CODE"
+	nativeBrowserVerifyURL   = "https://portal.native-browser-canary.invalid/verify"
 	nativeBrowserStatePath   = "/native-browser-state"
 	nativeBrowserHostname    = "native-browser-canary"
 	nativeBrowserInsideEnv   = "ACP_GO_HERMES_NATIVE_BROWSER_INSIDE"
@@ -50,10 +57,12 @@ var nativeBrowserLauncherNames = []string{
 }
 
 // TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher drives the pinned
-// Hermes v0.20.0 source through the production adapter auth surface. Hermes'
-// dashboard auth API returns the authorization URL to its caller; the
-// dashboard, not the server, owns opening it. The syscall trace is therefore
-// an executable no-attempt proof, not a claim that the shim was exercised.
+// Hermes source through the production adapter auth surface inside a
+// network-disabled fixture. A loopback portal served by the canary answers the
+// device-code start, selected through the provider's portal base URL override.
+// Hermes' dashboard auth API returns the verification URL to its caller; the
+// dashboard, not the server, owns opening it. The syscall trace is therefore an
+// executable no-attempt proof, not a claim that the shim was exercised.
 func TestNativeBrowserLinuxProviderAuthExecsNoBrowserLauncher(t *testing.T) {
 	requireRunIntegration(t)
 
@@ -208,8 +217,8 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("run pinned Hermes version: %v: %s", err, versionOutput)
 	}
 	versionLine := strings.SplitN(strings.TrimSpace(string(versionOutput)), "\n", 2)[0]
-	if versionLine != "Hermes Agent v0.20.0 (2026.8.3)" {
-		t.Fatalf("Hermes version = %q, want exact official v0.20.0 release", versionLine)
+	if versionLine != "Hermes Agent v0.21.1 (2026.9.7)" {
+		t.Fatalf("Hermes version = %q, want exact official v0.21.1 release", versionLine)
 	}
 
 	root := nativeBrowserStatePath
@@ -242,8 +251,14 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		t.Fatalf("provider auth capability absent: %#v\nstderr:\n%s", hermesMeta, agent.stderrString())
 	}
 
+	portal := startNativeBrowserPortal(t)
+
 	t.Log("native browser phase: new session")
-	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
+	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd,
+		hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{
+			Env: map[string]string{nativeBrowserPortalEnv: portal.URL},
+		}),
+	))
 	if err != nil {
 		t.Fatalf("new production Hermes session: %v\nstderr:\n%s", err, agent.stderrString())
 	}
@@ -257,7 +272,7 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 	}
 
 	method := ""
-	for _, candidate := range methods.Providers["anthropic"] {
+	for _, candidate := range methods.Providers[nativeBrowserProviderID] {
 		if candidate.Type == "oauth" {
 			method = candidate.ID
 
@@ -265,30 +280,31 @@ func runNativeHermesProviderAuthCanary(t *testing.T) {
 		}
 	}
 	if method == "" {
-		t.Fatalf("Hermes 0.20.0 exposed no Anthropic OAuth method: %#v", methods.Providers)
+		t.Fatalf("Hermes exposed no %s OAuth method: %#v", nativeBrowserProviderID, methods.Providers)
 	}
 
 	var authorization authAuthorizeWire
 	t.Log("native browser phase: authorize")
 	err = callAuthLeg(t, ctx, conn, hermesacp.AuthAuthorizeMethod, map[string]any{
 		"sessionId":          string(session.SessionId),
-		"providerId":         "anthropic",
+		"providerId":         nativeBrowserProviderID,
 		"connectionId":       "native-browser-canary",
 		"methodsGeneration":  methods.Generation,
 		"method":             method,
 		"authorizeRequestId": "native-browser-canary",
 	}, &authorization)
 	if err != nil {
-		t.Fatalf("start native Anthropic OAuth: %v\nstderr:\n%s", err, agent.stderrString())
+		t.Fatalf("start native %s OAuth: %v\nstderr:\n%s", nativeBrowserProviderID, err, agent.stderrString())
 	}
-	if authorization.Interaction != "callback" || authorization.URL == "" || authorization.FlowID == "" {
+	if authorization.Interaction != "wait" || authorization.URL != nativeBrowserVerifyURL ||
+		authorization.UserCode != nativeBrowserUserCode || authorization.FlowID == "" {
 		t.Fatalf("native authorization presentation = %#v", authorization)
 	}
 
 	t.Log("native browser phase: cancel")
 	if callErr := callAuthLeg(t, ctx, conn, hermesacp.AuthCancelMethod, map[string]any{
 		"sessionId":  string(session.SessionId),
-		"providerId": "anthropic",
+		"providerId": nativeBrowserProviderID,
 		"flowId":     authorization.FlowID,
 	}, nil); callErr != nil {
 		t.Fatalf("cancel native authorization: %v", callErr)
@@ -354,6 +370,41 @@ func readNativeBrowserTrace(ctx context.Context, t *testing.T, fixture testconta
 	}
 
 	return string(contents)
+}
+
+// startNativeBrowserPortal serves the MiniMax device-code start endpoint on
+// loopback. It answers the user-code request with the fields Hermes requires,
+// echoing the caller's state, and refuses every other route so a poll or token
+// exchange can never complete inside the canary. The verification URL it hands
+// back is an unreachable https host: the adapter refuses loopback authorization
+// URLs, and nothing in the canary fetches it.
+func startNativeBrowserPortal(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/oauth/code" {
+			http.Error(w, "unsupported canary route", http.StatusNotFound)
+
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "unreadable form", http.StatusBadRequest)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user_code":        nativeBrowserUserCode,
+			"verification_uri": nativeBrowserVerifyURL,
+			"expired_in":       900,
+			"interval":         2000,
+			"state":            r.PostForm.Get("state"),
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	return server
 }
 
 func traceExecsBase(trace string, base string) bool {

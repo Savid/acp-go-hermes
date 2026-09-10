@@ -1,8 +1,8 @@
-# Build the exact official Hermes v0.20.0 source revision used by the canary.
+# Build the exact official Hermes v0.21.1 source revision used by the canary.
 # The source archive, uv image, Python image, and official Python lock are
-# immutable inputs. PyPI does not publish a Hermes 0.20 wheel.
+# immutable inputs. PyPI does not publish a Hermes 0.21 wheel.
 FROM ghcr.io/astral-sh/uv:0.12.3-python3.13-trixie@sha256:8e231456b9e5eab17151e10ca096b8a3d52936be045d6a48e006bede5f229a9a AS hermes_source
-ARG HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
+ARG HERMES_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
 WORKDIR /opt/hermes
@@ -17,7 +17,7 @@ RUN uv python install --no-cache --no-bin 3.11.15 \
  && UV_PYTHON_DOWNLOADS=never uv sync --locked --no-dev --no-cache --python "$PYTHON_BIN" \
  && test "$(.venv/bin/python --version)" = "Python 3.11.15" \
  && test "$(.venv/bin/python -c 'import sqlite3; print(sqlite3.sqlite_version)')" = "3.53.1" \
- && .venv/bin/hermes --version | grep -Fx 'Hermes Agent v0.20.0 (2026.8.3)'
+ && .venv/bin/hermes --version | grep -Fx 'Hermes Agent v0.21.1 (2026.9.7)'
 
 FROM ghcr.io/astral-sh/uv:0.12.3-python3.13-trixie@sha256:8e231456b9e5eab17151e10ca096b8a3d52936be045d6a48e006bede5f229a9a
 
@@ -34,5 +34,5 @@ ENV UV_PYTHON_DOWNLOADS=never
 WORKDIR /opt/hermes
 RUN test "$(.venv/bin/python --version)" = "Python 3.11.15" \
  && test "$(.venv/bin/python -c 'import sqlite3; print(sqlite3.sqlite_version)')" = "3.53.1" \
- && .venv/bin/hermes --version | grep -Fx 'Hermes Agent v0.20.0 (2026.8.3)' \
+ && .venv/bin/hermes --version | grep -Fx 'Hermes Agent v0.21.1 (2026.9.7)' \
  && ln -s /opt/hermes/.venv/bin/hermes /usr/local/bin/hermes

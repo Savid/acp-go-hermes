@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	MinimumVersion = "0.20.0"
+	MinimumVersion = "0.21.1"
 	argVersion     = "--version"
 	// A cold Hermes gateway may spend more than 15 seconds loading its model
 	// catalog before the required-method sweep reaches model.options.
@@ -41,8 +41,6 @@ var (
 	mkdirTemp             = os.MkdirTemp
 	mkdirAll              = os.MkdirAll
 	removeAll             = os.RemoveAll
-	userHomeDir           = os.UserHomeDir
-	statPath              = os.Stat
 	after                 = time.After
 	newStatusHTTPClient   = func() *http.Client { return &http.Client{Timeout: 2 * time.Second} }
 	newProcessBrowserShim = newBrowserShim
@@ -270,7 +268,7 @@ func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := processServeArgs(opts, port)
+	args := processServeArgs(port)
 	env = upsertProcessEnv(env, envHermesHome, home)
 	env = upsertProcessEnv(env, envHermesSessionToken, token)
 	env = upsertProcessEnv(env, "PYTHONUNBUFFERED", "1")
@@ -435,39 +433,10 @@ func validatedProcessCarrier(opts ProcessOptions) ([]string, error) {
 	return dirs, nil
 }
 
-func processServeArgs(opts ProcessOptions, port int) []string {
+func processServeArgs(port int) []string {
 	args := []string{valServe, "--host", "127.0.0.1", argPort, strconv.Itoa(port)}
-	if processEnvironmentValue(opts.Env, envHermesWebDist) != "" ||
-		processEnvironmentValue(opts.SessionEnv, envHermesWebDist) != "" ||
-		defaultWebDistExists() {
-		args = append(args, "--skip-build")
-	}
 
 	return args
-}
-
-// processEnvironmentValue reads an adapter-recognized Hermes variable out of one
-// phase map on the platform's own terms. Hermes itself reads its environment the
-// way the platform spells it, so an exact-only read here would answer differently
-// from the harness for a Windows operator who wrote a different case. Only one
-// spelling can be present: mergeProcessEnvironmentPhases has already refused a
-// phase carrying two.
-func processEnvironmentValue(env map[string]string, name string) string {
-	if value, ok := env[name]; ok {
-		return value
-	}
-
-	if !processEnvironmentKeysFold() {
-		return ""
-	}
-
-	for key, value := range env {
-		if processEnvironmentKeyMatches(key, name) {
-			return value
-		}
-	}
-
-	return ""
 }
 
 func cloneAndValidateExtraPathDirs(dirs []string) ([]string, error) {
@@ -1004,7 +973,7 @@ func (p *Process) probeGatewayMethods(ctx context.Context) (returnErr error) {
 		if presentErr := methodPresent("session.resume", err); presentErr != nil {
 			return presentErr
 		}
-	} else if resumed.SessionID == "" || resumed.SessionKey == "" {
+	} else if resumed.SessionID == "" || resumed.StoredKey() == "" {
 		return fmt.Errorf("hermes startup probe session.resume schema drift")
 	} else {
 		liveSessions[resumed.SessionID] = struct{}{}
@@ -1471,15 +1440,4 @@ func randomToken() (string, error) {
 	}
 
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
-}
-
-func defaultWebDistExists() bool {
-	home, err := userHomeDir()
-	if err != nil {
-		return false
-	}
-
-	info, err := statPath(filepath.Join(home, ".hermes", "hermes-agent", "hermes_cli", "web_dist"))
-
-	return err == nil && info.IsDir()
 }

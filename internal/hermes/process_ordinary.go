@@ -24,9 +24,6 @@ const (
 	envHermesHome         = "HERMES_HOME"
 	envHermesSessionToken = "HERMES_DASHBOARD_SESSION_TOKEN"
 	envPrivatePrefix      = "ACP_GO_HERMES_INTERNAL_"
-	// envHermesWebDist is operator-supplied rather than adapter-managed, so it
-	// is read out of a phase map rather than scrubbed out of one.
-	envHermesWebDist = "HERMES_WEB_DIST"
 	// envPath, envHome, and envPathExt are named once for the allowlist and
 	// the places executable resolution reads them.
 	envPath    = "PATH"
@@ -72,10 +69,9 @@ func scrubOrdinaryEnvironmentKey(key string) bool {
 // files, or a shared home's provider auth, each of them explicit.
 //
 // The first nineteen names and the LC_ prefix are the family's base; the
-// proxy, TLS bundle, and web-dist names are what a Python harness reaches the
-// network and serves its dashboard with. Both spellings of each proxy name are
-// listed because Unix treats them as distinct variables and Python honours
-// either.
+// proxy and TLS bundle names are what a Python harness reaches the network
+// with. Both spellings of each proxy name are listed because Unix treats them
+// as distinct variables and Python honours either.
 var ordinaryInheritedEnvironmentKeys = []string{
 	envPath, envHome, "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "TERM",
 	"COLORTERM", "NO_COLOR", "FORCE_COLOR", "SYSTEMROOT", "WINDIR", "COMSPEC", envPathExt,
@@ -83,7 +79,6 @@ var ordinaryInheritedEnvironmentKeys = []string{
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
 	"http_proxy", "https_proxy", "no_proxy", "all_proxy",
 	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-	envHermesWebDist,
 }
 
 // ordinaryInheritedEnvironmentPrefix admits the locale family as a whole.

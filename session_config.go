@@ -98,10 +98,10 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 
 		session.setModel(value)
 
-		// The catalogue is a host menu, not an accepted set. Read it only after
-		// Hermes has answered the mutation, then publish that menu against the
-		// exact value sent. A failed read cannot retroactively refuse a native
-		// selection that already succeeded.
+		// Hermes judges the selection, not this adapter. Read the catalogue only
+		// after Hermes has answered the mutation, then publish that menu against
+		// the exact value sent. A failed read cannot retroactively refuse a
+		// native selection that already succeeded.
 		options = session.configOptions(ctx)
 	default:
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyConfigID)

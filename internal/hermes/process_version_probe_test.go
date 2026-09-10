@@ -106,7 +106,7 @@ func TestVersionProbeUsesAuthorityAndReclaimsBeforeRemoval(t *testing.T) {
 			require.Contains(t, request.Environment, "HERMES_HOME="+root)
 
 			return &probeTestProcess{
-				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("hermes 0.20.0\n")),
+				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("hermes 0.21.1\n")),
 				stderr: io.NopCloser(strings.NewReader("")),
 			}, nil
 		},
@@ -132,7 +132,7 @@ func TestManagedVersionProbeBusyRetainsTreeAndFailsAdmission(t *testing.T) {
 		PrepareNativeTree: func(context.Context, string) error { return nil },
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
 			return &probeTestProcess{
-				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 				stderr: io.NopCloser(strings.NewReader("")),
 			}, nil
 		},
@@ -193,7 +193,7 @@ func TestVersionProbeWaitFailureRetainsPreparedTree(t *testing.T) {
 		},
 		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
 			return &probeTestProcess{
-				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+				stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 				stderr: io.NopCloser(strings.NewReader("")), err: waitErr,
 			}, nil
 		},
@@ -436,7 +436,7 @@ func TestManagedServeStartErrorReclaimsPreparedTreesInReverseOrder(t *testing.T)
 				events = append(events, "start:version")
 
 				return &probeTestProcess{
-					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 					stderr: io.NopCloser(strings.NewReader("")),
 				}, nil
 			}
@@ -490,7 +490,7 @@ func TestManagedServeRequestComposesPathWithoutStartupCarrier(t *testing.T) {
 		StartNative: func(_ context.Context, request NativeRequest) (NativeProcess, error) {
 			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
 				return &probeTestProcess{
-					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 					stderr: io.NopCloser(strings.NewReader("")),
 				}, nil
 			}

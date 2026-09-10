@@ -122,7 +122,8 @@ func NewAgent(opts ...Option) *Agent {
 	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
 	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
-		validateSharedHermesHomeOptions(options), validateAgentEnv(options.Env))
+		validateSharedHermesHomeOptions(options), validateAgentEnv(options.Env),
+		validateAmbientEnvironment(options.AmbientEnvironment))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger
@@ -159,7 +160,7 @@ func NewAgent(opts ...Option) *Agent {
 		lifecycleCancel:    make(map[uint64]context.CancelCauseFunc),
 		lifecycleLeases:    make(map[acp.SessionId]*sessionLifecycleLease),
 		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
-		ambientEnv:         ambientEnvironment(),
+		ambientEnv:         ambientEnvironment(options),
 		nativeEnv:          nativeEnv,
 	}
 	// Invalid option combinations must be side-effect free. In particular,

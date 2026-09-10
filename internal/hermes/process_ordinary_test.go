@@ -15,7 +15,6 @@ func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
 	environment, err := ordinaryEnvironment(map[string]string{
 		"PATH":                                 "/usr/bin",
 		"HOME":                                 "/home/operator",
-		"HERMES_WEB_DIST":                      "/opt/hermes/web",
 		envHermesHome:                          "/foreign/home",
 		envHermesSessionToken:                  "foreign-token",
 		strings.ToLower(envHermesHome):         "/foreign/lower-home",
@@ -26,7 +25,6 @@ func TestOrdinaryEnvironmentScrubsManagedState(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		"HERMES_WEB_DIST=/opt/hermes/web",
 		"HOME=/home/operator",
 		"PATH=/usr/bin",
 	}, environment)
@@ -171,18 +169,12 @@ func TestProcessEnvironmentPhasesFoldWindowsNames(t *testing.T) {
 	rewritten := prependPathDirs(append([]string{"KEPT=yes"}, block...), []string{operationDir})
 	require.Equal(t, []string{"KEPT=yes", "PATH=" + operationDir + string(os.PathListSeparator) + harnessDir}, rewritten)
 
-	require.Contains(t,
-		processServeArgs(ProcessOptions{SessionEnv: map[string]string{"Hermes_Web_Dist": "/opt/web"}}, 1),
-		"--skip-build",
-	)
-	require.Empty(t, processEnvironmentValue(map[string]string{"OTHER": "x"}, envHermesWebDist))
+	require.Equal(t, []string{valServe, "--host", "127.0.0.1", argPort, "1"}, processServeArgs(1))
 
 	Platform = processPlatformLinux
 	unfolded, err := ordinaryEnvironment(map[string]string{"Path": decoyDir, "PATH": "/ambient/bin"}, map[string]string{"PATH": harnessDir})
 	require.NoError(t, err)
 	require.Equal(t, []string{"PATH=" + harnessDir}, unfolded, "off Windows an inherited Path is a different variable and not an inherited name")
-	require.Empty(t, processEnvironmentValue(map[string]string{"Hermes_Web_Dist": "/opt/web"}, envHermesWebDist))
-	require.Equal(t, "/opt/web", processEnvironmentValue(map[string]string{envHermesWebDist: "/opt/web"}, envHermesWebDist))
 }
 
 func TestExecutableResolutionIgnoresSessionExtraPathDirs(t *testing.T) {
@@ -263,7 +255,7 @@ func TestScrubOrdinaryEnvironmentKeyIsCaseInsensitive(t *testing.T) {
 		require.True(t, scrubOrdinaryEnvironmentKey(key), "key %q must be scrubbed", key)
 	}
 
-	for _, key := range []string{"PATH", "HOME", envHermesWebDist, "ACP_GO_HERMES_MODEL"} {
+	for _, key := range []string{"PATH", "HOME", "ACP_GO_HERMES_MODEL"} {
 		require.False(t, scrubOrdinaryEnvironmentKey(key), "key %q must be inherited", key)
 	}
 }
@@ -346,7 +338,7 @@ func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
 		"PATH": "/usr/bin", "HOME": "/home/operator", "TMPDIR": "/tmp/op", "LANG": "en_AU.UTF-8",
 		"LC_ALL": "C.UTF-8", "TERM": "xterm-256color", "HTTPS_PROXY": "http://proxy:3128",
 		"https_proxy": "http://proxy:3128", "NO_PROXY": "localhost", "SSL_CERT_FILE": "/etc/ssl/ca.pem",
-		"REQUESTS_CA_BUNDLE": "/etc/ssl/ca.pem", envHermesWebDist: "/opt/hermes/web",
+		"REQUESTS_CA_BUNDLE": "/etc/ssl/ca.pem",
 		// Not inherited: every credential Hermes would seed its pool from, and
 		// everything else the operator happens to have exported.
 		"OPENAI_API_KEY": "sk-openai", "ANTHROPIC_API_KEY": "sk-ant", "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
@@ -363,7 +355,6 @@ func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
 	environment, err := ordinaryEnvironment(ambient)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		"HERMES_WEB_DIST=/opt/hermes/web",
 		"HOME=/home/operator",
 		"HTTPS_PROXY=http://proxy:3128",
 		"LANG=en_AU.UTF-8",
@@ -399,7 +390,7 @@ func TestOrdinaryEnvironmentInheritsOnlyTheAllowlist(t *testing.T) {
 		require.False(t, inheritOrdinaryEnvironmentKey(name), name)
 	}
 
-	for _, name := range []string{"PATH", "HOME", "LC_MESSAGES", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "PATHEXT", "COMSPEC", "USERPROFILE", "__CF_USER_TEXT_ENCODING", envHermesWebDist} {
+	for _, name := range []string{"PATH", "HOME", "LC_MESSAGES", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "PATHEXT", "COMSPEC", "USERPROFILE", "__CF_USER_TEXT_ENCODING"} {
 		require.True(t, inheritOrdinaryEnvironmentKey(name), name)
 	}
 }

@@ -143,7 +143,7 @@ func testGatewayControlRequests(
 }
 
 // TestGatewayMintedApprovalIdentityIsAnswerable pins the settlement half of the
-// minted permission identity. Hermes 0.20 hands an approval no request identity
+// minted permission identity. Hermes hands an approval no request identity
 // and no tool identity, and approval.respond takes a session and a choice: an
 // approval the adapter had to mint an identity for is answered exactly as a
 // tool-bound one is, never refused for owning no native tool.

@@ -57,9 +57,6 @@ never falls back to ordinary execution.
 For each ACP session, the adapter starts `hermes serve --host 127.0.0.1` with an
 isolated `HERMES_HOME` by default and connects to `/api/ws`. Explicit
 `-shared-hermes-home` mode uses that exact durable native home instead.
-`--skip-build` is passed only
-when `HERMES_WEB_DIST` is configured or the default Hermes web dist exists;
-otherwise Hermes builds or locates its web assets normally.
 
 The adapter wraps the dashboard gateway directly, not Hermes' native ACP server
 mode.

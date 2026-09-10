@@ -340,13 +340,9 @@ func TestResidualProcessHelperBranches(t *testing.T) {
 func TestResidualProcessPrimitiveFailures(t *testing.T) {
 	originalListen := listenTCP
 	originalRand := randReader
-	originalHome := userHomeDir
-	originalStat := statPath
 	t.Cleanup(func() {
 		listenTCP = originalListen
 		randReader = originalRand
-		userHomeDir = originalHome
-		statPath = originalStat
 	})
 
 	listenTCP = func(string, string) (net.Listener, error) { return nil, errors.New("listen refused") }
@@ -360,36 +356,6 @@ func TestResidualProcessPrimitiveFailures(t *testing.T) {
 		t.Fatal("random token ignored entropy failure")
 	}
 	randReader = originalRand
-
-	userHomeDir = func() (string, error) { return "", errors.New("home refused") }
-	if defaultWebDistExists() {
-		t.Fatal("web dist exists without a home")
-	}
-	userHomeDir = func() (string, error) { return durableTempDir(t), nil }
-	statPath = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
-	if defaultWebDistExists() {
-		t.Fatal("missing web dist exists")
-	}
-	file := filepath.Join(durableTempDir(t), "file")
-	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statPath = func(string) (os.FileInfo, error) { return info, nil }
-	if defaultWebDistExists() {
-		t.Fatal("file was accepted as web dist")
-	}
-	directoryInfo, err := os.Stat(durableTempDir(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	statPath = func(string) (os.FileInfo, error) { return directoryInfo, nil }
-	if !defaultWebDistExists() {
-		t.Fatal("directory web dist was rejected")
-	}
 }
 
 func residualManagedStartOptions(t *testing.T, serve func(context.Context, NativeRequest) (NativeProcess, error)) ProcessOptions {
@@ -406,7 +372,7 @@ func residualManagedStartOptions(t *testing.T, serve func(context.Context, Nativ
 			if len(request.Arguments) == 1 && request.Arguments[0] == argVersion {
 				return &probeTestProcess{
 					stdin:  &nopWriteCloser{},
-					stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+					stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 					stderr: io.NopCloser(strings.NewReader("")),
 				}, nil
 			}
@@ -819,7 +785,7 @@ func TestResidualVersionProbeTransactions(t *testing.T) {
 	opts.PrepareNativeTree = func(context.Context, string) error { return nil }
 	opts.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
 		return &probeTestProcess{
-			stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.20.0\n")),
+			stdin: &nopWriteCloser{}, stdout: io.NopCloser(strings.NewReader("Hermes 0.21.1\n")),
 			stderr: io.NopCloser(strings.NewReader("")), err: context.Canceled,
 		}, nil
 	}
@@ -1071,7 +1037,7 @@ func TestResidualOrdinaryNativeFallbackKill(t *testing.T) {
 
 func TestResidualOrdinaryProcessStartupFailures(t *testing.T) {
 	executable := filepath.Join(durableTempDir(t), "hermes")
-	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes 0.20.0'; rm \"$0\"; exit 0; fi\nexit 1\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes 0.21.1'; rm \"$0\"; exit 0; fi\nexit 1\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
