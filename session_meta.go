@@ -15,10 +15,12 @@ const (
 	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
 	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
 	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
+	hermesEffortOptionPath        = "_meta.hermes.options." + metaEffortKey
 )
 
 type sessionMeta struct {
 	Model            string
+	Effort           string
 	Env              map[string]string
 	EnvSet           bool
 	ExtraPathDirs    []string
@@ -39,6 +41,7 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 
 	return sessionMeta{
 		Model:            options.Model,
+		Effort:           options.Effort,
 		Env:              cloneStringMap(options.Env),
 		EnvSet:           options.EnvSet,
 		ExtraPathDirs:    slices.Clone(options.ExtraPathDirs),
@@ -49,6 +52,7 @@ func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, erro
 
 type hermesMetaOptions struct {
 	Model            string
+	Effort           string
 	Env              map[string]string
 	EnvSet           bool
 	ExtraPathDirs    []string
@@ -66,6 +70,10 @@ func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
 	options := hermesMetaOptions{}
 	if model, _ := optionsMap[metaModelKey].(string); model != "" {
 		options.Model = model
+	}
+
+	if effort, _ := optionsMap[metaEffortKey].(string); effort != "" {
+		options.Effort = effort
 	}
 
 	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
@@ -118,6 +126,11 @@ func validateLifecycleMeta(meta map[string]any) error {
 				case metaModelKey:
 					if _, ok := optionValue.(string); !ok {
 						return unsupportedField(hermesModelOptionPath)
+					}
+				case metaEffortKey:
+					effort, ok := optionValue.(string)
+					if !ok || (effort != "" && !hermesEffortLevel(effort)) {
+						return unsupportedField(hermesEffortOptionPath)
 					}
 				case metaEnvKey, metaExtraPathDirsKey:
 				case metaOutputSchemaKey:

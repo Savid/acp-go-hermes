@@ -906,6 +906,52 @@ func (c *Client) SetModel(ctx context.Context, liveSessionID string, value strin
 	return nil
 }
 
+// SetReasoning applies a session-scoped reasoning effort. config.set with key
+// reasoning and no scope pins the live session and updates its agent, and
+// Hermes acknowledges with the level it applied. An id Hermes does not hold is
+// not refused: the level is written to the global config instead, so the id
+// must be live.
+func (c *Client) SetReasoning(ctx context.Context, liveSessionID string, value string) (string, error) {
+	var out struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+
+	err := c.Call(ctx, "config.set", map[string]any{
+		fieldSessionID: liveSessionID,
+		"key":          valReasoning,
+		"value":        value,
+	}, &out)
+	if err != nil {
+		return "", err
+	}
+
+	if out.Key != valReasoning || out.Value == "" {
+		return "", fmt.Errorf("hermes config.set reasoning returned an invalid result")
+	}
+
+	return out.Value, nil
+}
+
+// Reasoning reads the effort the live session runs at: its own pin, else its
+// agent's, else the config default.
+func (c *Client) Reasoning(ctx context.Context, liveSessionID string) (string, error) {
+	var out struct {
+		Value string `json:"value"`
+	}
+
+	err := c.Call(ctx, "config.get", map[string]any{fieldSessionID: liveSessionID, "key": valReasoning}, &out)
+	if err != nil {
+		return "", err
+	}
+
+	if out.Value == "" {
+		return "", fmt.Errorf("hermes config.get reasoning returned no value")
+	}
+
+	return out.Value, nil
+}
+
 // ModelSelectionShapeError reports why value cannot name a model selection, or
 // nil when it can. A selection is provider-qualified: two tokens split on the
 // first "/", neither empty, neither a flag, neither carrying whitespace or

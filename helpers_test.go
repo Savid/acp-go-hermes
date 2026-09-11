@@ -71,6 +71,10 @@ type fakeHermesClient struct {
 	configProviderCalls int
 	setModelCalls       []fakeModelSelection
 	setModelErr         error
+	effort              string
+	setEffortCalls      []fakeModelSelection
+	setEffortErr        error
+	effortErr           error
 
 	permissionReplies []fakePermissionReply
 	questionReplies   []fakeQuestionReply
@@ -438,6 +442,31 @@ func (c *fakeHermesClient) SetModel(_ context.Context, sessionID string, value s
 	c.setModelCalls = append(c.setModelCalls, fakeModelSelection{sessionID: sessionID, value: value})
 
 	return c.setModelErr
+}
+
+func (c *fakeHermesClient) SetEffort(_ context.Context, sessionID string, value string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.setEffortCalls = append(c.setEffortCalls, fakeModelSelection{sessionID: sessionID, value: value})
+	if c.setEffortErr != nil {
+		return "", c.setEffortErr
+	}
+
+	c.effort = value
+
+	return value, nil
+}
+
+func (c *fakeHermesClient) Effort(context.Context, string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.effortErr != nil {
+		return "", c.effortErr
+	}
+
+	return c.effort, nil
 }
 
 // configProviderCallCount reports how many native model.options enumerations

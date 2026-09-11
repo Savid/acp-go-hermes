@@ -130,6 +130,7 @@ type stateSnapshotSession struct {
 	Cwd                   string             `json:"cwd"`
 	Title                 string             `json:"title"`
 	Model                 stateSnapshotModel `json:"model"`
+	Effort                string             `json:"effort,omitempty"`
 	Env                   map[string]string  `json:"env"`
 	ExtraPathDirs         []string           `json:"extraPathDirs"`
 }
@@ -333,6 +334,7 @@ func (s *session) captureSnapshotLocked(
 				ProviderID: snapshot.providerID,
 				ModelID:    snapshot.modelID,
 			},
+			Effort:        snapshot.effort,
 			Env:           durableSessionEnvironment(snapshot.env),
 			ExtraPathDirs: append([]string{}, snapshot.extraPathDirs...),
 		},

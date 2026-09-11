@@ -155,11 +155,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_
 
 		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
 	}
-	if claimErr := a.claimSharedNativeSession(client, native.ID); claimErr != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.NewSessionResponse{}, errors.Join(claimErr, closeErr)
+	if bindErr := a.claimAndBindNativeSession(ctx, client, id, native.ID, &meta); bindErr != nil {
+		return acp.NewSessionResponse{}, bindErr
 	}
 
 	idmap := idmapRecord{
@@ -467,6 +464,22 @@ func (a *Agent) loadOrResumeSession(
 
 	if meta.Model == "" {
 		meta.Model = modelSelectionValue(snapshot.Session.Model.ProviderID, snapshot.Session.Model.ModelID)
+	}
+
+	if meta.Effort == "" {
+		meta.Effort = snapshot.Session.Effort
+	}
+
+	if meta.Effort != "" {
+		applied, effortErr := applyNativeEffort(ctx, client, idmap.NativeSessionID, meta.Effort)
+		if effortErr != nil {
+			closeErr := closeHermesClientAfterStartupFailure(client)
+			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+			return nil, errors.Join(fmt.Errorf("bind Hermes session effort: %w", effortErr), closeErr)
+		}
+
+		meta.Effort = applied
 	}
 
 	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
@@ -777,6 +790,7 @@ func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr err
 // incarnation. Equal carriers can reuse the active incarnation; changed ones
 // cannot be mutated into a running hermes serve process.
 func applyActiveLifecycleRequest(
+	ctx context.Context,
 	existing *session,
 	cwd string,
 	additionalDirectories []string,
@@ -833,6 +847,19 @@ func applyActiveLifecycleRequest(
 	existing.rawMessages = meta.RawMessages
 	existing.mu.Unlock()
 
+	// A model selection rides the next prompt, but nothing carries an effort
+	// there, so a requested level is bound on the live session now.
+	if meta.Effort != "" {
+		current := existing.snapshot()
+
+		applied, err := applyNativeEffort(ctx, current.client, current.idmap.NativeSessionID, meta.Effort)
+		if err != nil {
+			return false, err
+		}
+
+		existing.setEffort(applied)
+	}
+
 	return false, nil
 }
 
@@ -881,7 +908,7 @@ func applyAdmittedActiveLifecycleRequest(
 		return false, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
 	}
 
-	return applyActiveLifecycleRequest(existing, cwd, additionalDirectories, mcpServers, meta)
+	return applyActiveLifecycleRequest(reuseCtx, existing, cwd, additionalDirectories, mcpServers, meta)
 }
 
 func lifecycleMismatch(field string) error {
@@ -1494,6 +1521,22 @@ func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionR
 
 			return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("bind Hermes fork model: %w", err), closeErr)
 		}
+	}
+	// The child starts on the config default effort; a fork keeps the parent's
+	// level unless the request names one.
+	if effort := firstNonEmpty(meta.Effort, parentSnapshot.effort); effort != "" {
+		applied, err := applyNativeEffort(ctx, client, nativeChild.ID, effort)
+		if err != nil {
+			closeErr := closeHermesClientAfterStartupFailure(client)
+			if errors.Is(closeErr, ErrContainmentIncomplete) {
+				cleanupNativeChild = false
+			}
+			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
+
+			return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("bind Hermes fork effort: %w", err), closeErr)
+		}
+
+		meta.Effort = applied
 	}
 
 	idmap := idmapRecord{

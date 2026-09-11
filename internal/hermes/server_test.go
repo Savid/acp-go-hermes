@@ -81,6 +81,7 @@ type fakeGatewayServer struct {
 	resumeBuildDefault  string
 	expectedPromptModel string
 	liveModels          map[string]string
+	liveReasoning       map[string]string
 	lazyResumeBuilds    map[string]bool
 	buildBarrierStalls  int
 	buildBarrierFails   bool
@@ -105,6 +106,7 @@ func newFakeGatewayServer(t *testing.T) *fakeGatewayServer {
 		notFoundMethods:    map[string]int{},
 		malformedResponses: map[string]string{},
 		liveModels:         map[string]string{},
+		liveReasoning:      map[string]string{},
 		lazyResumeBuilds:   map[string]bool{},
 		startingLives:      map[string]bool{},
 	}
@@ -590,6 +592,15 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 		s.writeResult(ctx, conn, id, map[string]any{})
 	case "config.set":
 		value, _ := params["value"].(string)
+		if key, _ := params["key"].(string); key == "reasoning" {
+			live, _ := params[fieldSessionID].(string)
+			s.mu.Lock()
+			s.liveReasoning[live] = value
+			s.mu.Unlock()
+			s.writeResult(ctx, conn, id, map[string]any{"key": "reasoning", "value": value})
+
+			return
+		}
 		fields := strings.Fields(value)
 		raw := strings.Trim(fields[0], "'")
 		qualified := raw
@@ -661,6 +672,15 @@ func (s *fakeGatewayServer) respond(ctx context.Context, conn *websocket.Conn, i
 			delete(result, "stored_session_id")
 		}
 		s.writeResult(ctx, conn, id, result)
+	case "config.get":
+		live, _ := params[fieldSessionID].(string)
+		s.mu.Lock()
+		reasoning := s.liveReasoning[live]
+		s.mu.Unlock()
+		if reasoning == "" {
+			reasoning = "medium"
+		}
+		s.writeResult(ctx, conn, id, map[string]any{"value": reasoning, "display": "show"})
 	case "model.options":
 		s.mu.Lock()
 		providersNil := s.modelProvidersNil
@@ -3523,6 +3543,22 @@ func TestGatewayOperationsPinOneTransportTupleAcrossRPCs(t *testing.T) {
 			name: "model selection", gate: "config.set", want: []string{"config.set"},
 			run: func(ctx context.Context, server *hermesServer) error {
 				return server.SetModel(ctx, "stored", "openai/gpt-test")
+			},
+		},
+		{
+			name: "effort selection", gate: "config.set", want: []string{"config.set"},
+			run: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.SetEffort(ctx, "stored", "high")
+
+				return err
+			},
+		},
+		{
+			name: "effort read", gate: "config.get", want: []string{"config.get"},
+			run: func(ctx context.Context, server *hermesServer) error {
+				_, err := server.Effort(ctx, "stored")
+
+				return err
 			},
 		},
 		{

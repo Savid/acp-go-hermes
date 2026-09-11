@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,10 +38,14 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 		t.Fatalf("value = %s", value.Value)
 	}
 	// The model catalogue answers an id and a name and nothing else, so the
-	// published metadata is exactly the qualified model id.
+	// published metadata is the qualified model id and the effort levels every
+	// Hermes model takes.
 	meta, metaOK := value.Meta[hermesMetaKey].(map[string]any)
-	if !metaOK || len(meta) != 1 || meta["modelId"] != "openai/gpt-test" {
+	if !metaOK || len(meta) != 2 || meta["modelId"] != "openai/gpt-test" {
 		t.Fatalf("model metadata schema = %#v", value.Meta)
+	}
+	if levels, _ := meta["supportedEffortLevels"].([]string); !slices.Equal(levels, hermesEffortLevels) {
+		t.Fatalf("model effort levels = %#v", meta["supportedEffortLevels"])
 	}
 }
 

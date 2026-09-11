@@ -71,6 +71,28 @@ func (s *managedHermesServer) SetModel(ctx context.Context, id, value string) er
 	return setter.SetModel(ctx, id, value)
 }
 
+func (s *managedHermesServer) SetEffort(ctx context.Context, id, value string) (string, error) {
+	setter, ok := s.Server.(interface {
+		SetEffort(context.Context, string, string) (string, error)
+	})
+	if !ok {
+		return "", errors.New("hermes server does not expose session effort selection")
+	}
+
+	return setter.SetEffort(ctx, id, value)
+}
+
+func (s *managedHermesServer) Effort(ctx context.Context, id string) (string, error) {
+	reader, ok := s.Server.(interface {
+		Effort(context.Context, string) (string, error)
+	})
+	if !ok {
+		return "", errors.New("hermes server does not expose session effort")
+	}
+
+	return reader.Effort(ctx, id)
+}
+
 func (s *managedHermesServer) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

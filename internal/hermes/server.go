@@ -2812,6 +2812,43 @@ func (s *hermesServer) setModelOn(ctx context.Context, transport *gatewayTranspo
 	}
 }
 
+// SetEffort applies a session-scoped reasoning effort and reports the level
+// Hermes acknowledged. The live id is resolved immediately before the call:
+// the reasoning key never answers not-found, it applies an id Hermes does not
+// hold to the global config instead.
+func (s *hermesServer) SetEffort(ctx context.Context, stored string, value string) (string, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return "", ErrGatewayDisconnected
+	}
+
+	live, err := s.ensureLiveGatewaySessionOn(ctx, transport, stored)
+	if err != nil {
+		return "", err
+	}
+
+	return transport.client.SetReasoning(ctx, live, value)
+}
+
+// Effort reads the reasoning effort the session runs at.
+func (s *hermesServer) Effort(ctx context.Context, stored string) (string, error) {
+	transport := s.beginGatewayTurn()
+	defer s.endGatewayTurn()
+
+	if transport == nil {
+		return "", ErrGatewayDisconnected
+	}
+
+	live, err := s.ensureLiveGatewaySessionOn(ctx, transport, stored)
+	if err != nil {
+		return "", err
+	}
+
+	return transport.client.Reasoning(ctx, live)
+}
+
 func (s *hermesServer) ReplyPermission(ctx context.Context, req PermissionRequest, reply string, message string) error {
 	_ = message
 	choice := "deny"

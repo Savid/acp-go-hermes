@@ -53,6 +53,27 @@ all. The current driven gateway does not expose an exhaustive selected-model
 image modality source, so image prompt validation uses `unknown` model support
 and forwards valid images to Hermes.
 
+## Effort selector
+
+The effort selector is an ACP config option with id `effort` and category
+`thought_level`. Its values are Hermes's own reasoning levels, `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`, where `none`
+disables thinking. Hermes clamps a level to what the model's provider accepts.
+
+The current value is the level the session runs at. A session that selected
+none reports the level Hermes resolved for it, which is `agent.reasoning_effort`
+or a matching `agent.reasoning_overrides` entry from the seeded `config.yaml`,
+read back through the gateway. A selection, from `_meta.hermes.options.effort`
+at creation, restore, or fork, or from `session/set_session_config_option`,
+reaches Hermes as a session-scoped `config.set reasoning` and never rewrites the
+global config. The level Hermes acknowledges becomes the option's exact
+`currentValue`, and a restored session rebinds the level its snapshot recorded.
+
+A value outside the vocabulary is refused locally as an unsupported `value`:
+Hermes's reasoning key also takes display words, and this option forwards only
+levels. A native refusal returns invalid params with
+`error: hermes_effort_selection_refused` and `field: value`.
+
 No mode selector is advertised: Hermes exposes no approved programmatic
 per-session agent/mode enumeration surface for this adapter. Structured output is
 also not advertised; supplying `_meta.hermes.options.outputSchema` returns the

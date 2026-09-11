@@ -1347,18 +1347,18 @@ func TestActiveLifecycleResolvesCarrierReuseAndRebind(t *testing.T) {
 	)
 
 	equal := sessionMeta{ExtraPathDirs: []string{first, second}, ExtraPathDirsSet: true}
-	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &equal); err != nil || rebind {
+	if rebind, err := applyActiveLifecycleRequest(t.Context(), session, cwd, nil, nil, &equal); err != nil || rebind {
 		t.Fatalf("equal ordered paths = rebind %t, err %v", rebind, err)
 	}
 	omitted := sessionMeta{}
-	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &omitted); err != nil || rebind {
+	if rebind, err := applyActiveLifecycleRequest(t.Context(), session, cwd, nil, nil, &omitted); err != nil || rebind {
 		t.Fatalf("omitted carrier = rebind %t, err %v", rebind, err)
 	}
 	if !slices.Equal(omitted.ExtraPathDirs, []string{first, second}) {
 		t.Fatalf("omitted carrier resolved to env %#v dirs %#v", omitted.Env, omitted.ExtraPathDirs)
 	}
 	changed := sessionMeta{ExtraPathDirs: []string{second, first}, ExtraPathDirsSet: true}
-	if rebind, err := applyActiveLifecycleRequest(session, cwd, nil, nil, &changed); err != nil || !rebind {
+	if rebind, err := applyActiveLifecycleRequest(t.Context(), session, cwd, nil, nil, &changed); err != nil || !rebind {
 		t.Fatalf("changed ordered paths = rebind %t, err %v", rebind, err)
 	}
 }

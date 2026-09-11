@@ -12,6 +12,7 @@ import (
 const (
 	metaOptionsKey       = "options"
 	metaModelKey         = "model"
+	metaEffortKey        = "effort"
 	metaEnvKey           = "env"
 	metaExtraPathDirsKey = "extraPathDirs"
 	metaOutputSchemaKey  = "outputSchema"
@@ -21,6 +22,7 @@ const (
 // _meta.hermes.options.
 type HermesOptions struct {
 	Model         string            `json:"model,omitempty"`
+	Effort        string            `json:"effort,omitempty"`
 	Env           map[string]string `json:"env,omitempty"`
 	ExtraPathDirs []string          `json:"extraPathDirs,omitempty"`
 	OutputSchema  map[string]any    `json:"outputSchema,omitempty"`
@@ -31,6 +33,10 @@ func (options HermesOptions) Meta() map[string]any {
 	values := map[string]any{}
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
+	}
+
+	if options.Effort != "" {
+		values[metaEffortKey] = options.Effort
 	}
 
 	if options.Env != nil {
@@ -227,6 +233,12 @@ func SetModelRequest(sessionID acp.SessionId, model string) acp.SetSessionConfig
 	return SetConfigOptionRequest(sessionID, configModel, acp.SessionConfigValueId(model))
 }
 
+// SetEffortRequest builds the request that selects the session's reasoning
+// effort.
+func SetEffortRequest(sessionID acp.SessionId, effort string) acp.SetSessionConfigOptionRequest {
+	return SetConfigOptionRequest(sessionID, configEffort, acp.SessionConfigValueId(effort))
+}
+
 func CallForkSession(ctx context.Context, conn *acp.ClientSideConnection, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
 	raw, err := conn.CallExtension(ctx, ForkSessionMethod, params)
 	if err != nil {
@@ -306,6 +318,14 @@ func WithHermesModel(model string) HermesOption {
 	}
 }
 
+// WithHermesEffort selects the reasoning effort the session runs at, one of
+// none, minimal, low, medium, high, xhigh, max, or ultra.
+func WithHermesEffort(effort string) HermesOption {
+	return func(options *HermesOptions) {
+		options.Effort = effort
+	}
+}
+
 func WithHermesEnv(env map[string]string) HermesOption {
 	cloned := cloneStringMap(env)
 
@@ -358,6 +378,7 @@ func (config sessionRequestConfig) additionalDirectoriesClone() []string {
 func cloneHermesOptions(options HermesOptions) HermesOptions {
 	return HermesOptions{
 		Model:         options.Model,
+		Effort:        options.Effort,
 		Env:           cloneStringMap(options.Env),
 		ExtraPathDirs: slices.Clone(options.ExtraPathDirs),
 		OutputSchema:  cloneAnyMap(options.OutputSchema),

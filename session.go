@@ -57,6 +57,7 @@ type session struct {
 	updatedAt             string
 	providerID            string
 	modelID               string
+	effort                string
 	env                   map[string]string
 	extraPathDirs         []string
 	rawMessages           rawMessageConfig
@@ -214,6 +215,7 @@ type sessionSnapshot struct {
 	updatedAt             string
 	providerID            string
 	modelID               string
+	effort                string
 	env                   map[string]string
 	extraPathDirs         []string
 	rawMessages           rawMessageConfig
@@ -268,6 +270,7 @@ func newSession(agent *Agent, id acp.SessionId, cwd string, additionalDirectorie
 		updatedAt:             updatedAt,
 		providerID:            providerID,
 		modelID:               modelID,
+		effort:                meta.Effort,
 		env:                   cloneStringMap(meta.Env),
 		extraPathDirs:         append([]string(nil), meta.ExtraPathDirs...),
 		rawMessages:           meta.RawMessages,
@@ -1003,6 +1006,7 @@ func (s *session) snapshot() sessionSnapshot {
 		updatedAt:             s.updatedAt,
 		providerID:            s.providerID,
 		modelID:               s.modelID,
+		effort:                s.effort,
 		env:                   cloneStringMap(s.env),
 		extraPathDirs:         append([]string(nil), s.extraPathDirs...),
 		rawMessages:           s.rawMessages,

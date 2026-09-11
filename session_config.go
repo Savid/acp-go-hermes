@@ -103,6 +103,38 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 		// the exact value sent. A failed read cannot retroactively refuse a
 		// native selection that already succeeded.
 		options = session.configOptions(ctx)
+	case configEffort:
+		// Hermes's reasoning key also takes display words, so the level
+		// vocabulary is held here: a value outside it never reaches config.set.
+		if !hermesEffortLevel(value) {
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyValue)
+		}
+
+		snapshot := session.snapshot()
+
+		client := snapshot.client
+		if managed, ok := client.(*managedHermesServer); ok {
+			client = managed.Server
+		}
+
+		applied, err := applyNativeEffort(ctx, client, snapshot.idmap.NativeSessionID, value)
+		if err != nil {
+			var nativeRefusal *nativehermes.RPCError
+			if errors.As(err, &nativeRefusal) {
+				return acp.SetSessionConfigOptionResponse{}, &mappedWireError{
+					wire: acp.NewInvalidParams(map[string]any{
+						jsonFieldError: valHermesEffortSelectionRefused,
+						jsonFieldField: keyValue,
+					}),
+					cause: err,
+				}
+			}
+
+			return acp.SetSessionConfigOptionResponse{}, err
+		}
+
+		session.setEffort(applied)
+		options = session.configOptions(ctx)
 	default:
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(keyConfigID)
 	}
@@ -129,12 +161,16 @@ func sessionConfigOptionMeta(params acp.SetSessionConfigOptionRequest) map[strin
 }
 
 func (s *session) configOptions(ctx context.Context) []acp.SessionConfigOption {
-	providers, ok := s.configProviders(ctx)
-	if !ok {
-		return nil
+	var options []acp.SessionConfigOption
+	if providers, ok := s.configProviders(ctx); ok {
+		options = s.configOptionsFrom(providers)
 	}
 
-	return s.configOptionsFrom(providers)
+	if effort := s.effortConfigOption(ctx); effort.Select != nil {
+		options = append(options, effort)
+	}
+
+	return options
 }
 
 // configProvidersTimeout bounds one native model.options read. The gateway
@@ -220,7 +256,7 @@ func modelConfigOption(
 			group.Options = append(group.Options, acp.SessionConfigSelectOption{
 				Name:  firstNonEmpty(model.Name, value),
 				Value: acp.SessionConfigValueId(value),
-				Meta:  map[string]any{hermesMetaKey: map[string]any{"modelId": value}},
+				Meta:  modelChoiceMeta(value),
 			})
 		}
 

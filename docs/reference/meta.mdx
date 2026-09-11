@@ -173,6 +173,7 @@ Lifecycle requests accept:
 | Field | Meaning |
 |---|---|
 | `options.model` | Selects the `provider/model` pair for the session. On a load or resume that reuses a live session it replaces the next prompt's selection, and a value that is not provider-qualified fails naming `_meta.hermes.options.model` — see [Models And Config](/docs/features/models-config). |
+| `options.effort` | Selects the reasoning effort the session runs at: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. It is bound natively at session creation, restore, and fork, and a value outside that vocabulary fails naming `_meta.hermes.options.effort` — see [Models And Config](/docs/features/models-config). |
 | `options.env` | Per-session environment variables injected into only that session's Hermes process. Blocked names are listed below. |
 | `options.extraPathDirs` | Ordered absolute native directories placed first for that process and restored first in actual local terminal commands after login/profile startup. |
 | `rawEvent.enabled` | Opt the session into `_hermes/rawEvent` notifications. |
@@ -215,14 +216,16 @@ executing a helper from PATH.
 
 ## Response metadata
 
-Advertised model config options carry exactly one per-model `_meta.hermes`
-field, `modelId`, holding the qualified `provider/model` selection value.
-Hermes' model catalogue answers a model id, a display name, and a per-model
-capability map naming `fast` and `reasoning`, alongside per-provider pricing and
-featured hints. It advertises no limits, effort levels, or modalities, and this
-agent publishes only the id and the name, so nothing else appears in a config
-option. The context window a session reports in its usage updates comes from the
-completion Hermes returns, not from this catalogue.
+Advertised model config options carry two per-model `_meta.hermes` fields:
+`modelId`, the qualified `provider/model` selection value, and
+`supportedEffortLevels`, the reasoning levels of the
+[effort selector](/docs/features/models-config#effort-selector), which Hermes
+takes for every model and clamps to what the provider accepts. Hermes' model
+catalogue answers a model id, a display name, and a per-model capability map
+naming `fast` and `reasoning`, alongside per-provider pricing and featured
+hints. It advertises no limits or modalities, so nothing else appears in a
+config option. The context window a session reports in its usage updates comes
+from the completion Hermes returns, not from this catalogue.
 
 A successful `session/prompt` response carries `_meta.hermes.messageId` and
 `_meta.hermes.outcome` under the Hermes namespace, plus `_meta.hermes.stopReason`
