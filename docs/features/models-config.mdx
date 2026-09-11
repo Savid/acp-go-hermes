@@ -58,6 +58,15 @@ per-session agent/mode enumeration surface for this adapter. Structured output i
 also not advertised; supplying `_meta.hermes.options.outputSchema` returns the
 uniform unsupported-field error.
 
+### Host-listed models
+
+A host that knows what its endpoint serves lists those ids with
+`WithConfiguredModels`, each as `<provider>/<model>`. Each id follows the
+native rows on every route under the group its provider prefix names, created
+when native enumeration has none, as the id alone with no metadata. An id
+Hermes already enumerated keeps its native row. An empty, whitespace,
+unqualified, or duplicate id fails construction.
+
 ## Seeding native config
 
 Use `WithSeedFiles` (or the `-seed-file` CLI flag) to write Hermes' own config

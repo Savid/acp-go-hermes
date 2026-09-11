@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
@@ -96,6 +97,11 @@ type Options struct {
 	// then uses.
 	SharedHermesHome string
 	DefaultModel     string
+	// ConfiguredModels are the model ids the host lists explicitly, each as
+	// <provider>/<model>. Each is a configured catalog entry: published after
+	// the native rows on every route under its provider group, standing aside
+	// for a native row of the same value, and carrying no invented facts.
+	ConfiguredModels []string
 	Env              map[string]string
 	// AmbientEnvironment replaces the adapter's own process environment as the
 	// block ordinary execution inherits from. Its names are judged exactly as
@@ -270,6 +276,13 @@ func WithSharedHermesHome(path string) Option {
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
+	}
+}
+
+// WithConfiguredModels names the models the host lists explicitly.
+func WithConfiguredModels(ids []string) Option {
+	return func(options *Options) {
+		options.ConfiguredModels = slices.Clone(ids)
 	}
 }
 

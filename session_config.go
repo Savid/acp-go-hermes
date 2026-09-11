@@ -175,7 +175,7 @@ func (s *session) configProviders(ctx context.Context) (nativehermes.ProvidersRe
 // configOptionsFrom builds the published option list from an enumeration the
 // caller already read, against the session's current selection.
 func (s *session) configOptionsFrom(providers nativehermes.ProvidersResponse) []acp.SessionConfigOption {
-	model := modelConfigOption(s.snapshot(), providers)
+	model := modelConfigOption(s.snapshot(), providers, s.agent.options.ConfiguredModels)
 	if model.Select == nil {
 		return nil
 	}
@@ -183,7 +183,11 @@ func (s *session) configOptionsFrom(providers nativehermes.ProvidersResponse) []
 	return []acp.SessionConfigOption{model}
 }
 
-func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.ProvidersResponse) acp.SessionConfigOption {
+func modelConfigOption(
+	snapshot sessionSnapshot,
+	providers nativehermes.ProvidersResponse,
+	hostListed []string,
+) acp.SessionConfigOption {
 	category := acp.SessionConfigOptionCategoryModel
 	current := snapshot.modelValue()
 
@@ -224,6 +228,8 @@ func modelConfigOption(snapshot sessionSnapshot, providers nativehermes.Provider
 			groups = append(groups, group)
 		}
 	}
+
+	groups = appendHostListedModels(groups, hostListed, &current)
 
 	if len(groups) == 0 {
 		if current == "" {

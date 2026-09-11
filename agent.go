@@ -123,7 +123,8 @@ func NewAgent(opts ...Option) *Agent {
 	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
 		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
 		validateSharedHermesHomeOptions(options), validateAgentEnv(options.Env),
-		validateAmbientEnvironment(options.AmbientEnvironment))
+		validateAmbientEnvironment(options.AmbientEnvironment),
+		validateConfiguredModels(options.ConfiguredModels))
 	options.ConcurrencyLimits = limits
 
 	log := options.Logger

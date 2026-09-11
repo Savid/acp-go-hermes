@@ -21,7 +21,7 @@ func TestModelConfigOptionMetadataMapping(t *testing.T) {
 			"gpt-test": {ID: "gpt-test", Name: "GPT Test"},
 		},
 	}}}
-	option := modelConfigOption(sessionSnapshot{}, providers)
+	option := modelConfigOption(sessionSnapshot{}, providers, nil)
 	if option.Select == nil {
 		t.Fatal("missing select option")
 	}
@@ -125,11 +125,11 @@ func TestSessionConfigBranchesAndValidation(t *testing.T) {
 		t.Fatal("set model did not emit config update")
 	}
 
-	fallback := modelConfigOption(sessionSnapshot{providerID: "p", modelID: "m"}, nativehermes.ProvidersResponse{})
+	fallback := modelConfigOption(sessionSnapshot{providerID: "p", modelID: "m"}, nativehermes.ProvidersResponse{}, nil)
 	if fallback.Select == nil || fallback.Select.Options.Ungrouped == nil || fallback.Select.CurrentValue != "p/m" {
 		t.Fatalf("fallback model option = %#v", fallback)
 	}
-	if empty := modelConfigOption(sessionSnapshot{}, nativehermes.ProvidersResponse{}); empty.Select != nil {
+	if empty := modelConfigOption(sessionSnapshot{}, nativehermes.ProvidersResponse{}, nil); empty.Select != nil {
 		t.Fatalf("empty model option = %#v", empty)
 	}
 	if unstableConfigOptions(nil) != nil {
