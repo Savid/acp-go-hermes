@@ -557,6 +557,6 @@ func (a *Agent) environment(sessionEnv map[string]string, owned map[string]strin
 	}
 }
 
-// internalClassNativeStart is the one documented pi_internal_failure class: a
+// internalClassNativeStart is the one documented hermes_internal_failure class: a
 // native hermes process that could not be started or configured for a session.
 const internalClassNativeStart = "native_start"
