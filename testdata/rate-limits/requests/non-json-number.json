@@ -1,9 +1,0 @@
-{
-  "name": "non-json-number",
-  "raw": "{\"providerId\":NaN}",
-  "expect": {
-    "valid": false,
-    "error": "unsupported",
-    "field": "params"
-  }
-}

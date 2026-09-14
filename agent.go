@@ -1,114 +1,80 @@
-//nolint:wsl_v5 // Agent construction keeps dependent lifecycle state adjacent.
 package hermesacp
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-hermes/internal/lifecycle"
-	"github.com/savid/acp-go-hermes/internal/observer"
-)
 
-const capabilityScopeSession = "session"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/image"
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
+)
 
 const (
-	listSessionsPageSize            = 50
-	defaultMaxActiveSessions        = 32
-	sessionTurnCapacity             = 1
-	defaultMaxConcurrentClientCalls = 16
-	closeTimeout                    = 5 * time.Second
-	mcpReloadTimeout                = 2 * time.Minute
+	// RawEventMethod is the notification carrying one raw hermes event when a
+	// session opted in through _meta.hermes.rawEvent.enabled.
+	RawEventMethod = "_hermes/rawEvent"
+	// SessionStoreFormat identifies the store layout this package writes: native
+	// per-conversation JSON exports under main plus the adapter's session
+	// record under the config subpath.
+	SessionStoreFormat = "hermes-session-json-v1"
 
-	valElicitation    = "elicitation"
-	valBackpressure   = "backpressure"
-	valUnknownSession = "unknown session"
-	// The closed off-prompt -32603 vocabulary. Every internal error this
-	// package reports outside a prompt turn carries exactly one of these
-	// vendor-prefixed tokens in `data.error`, with `message` left at the
-	// JSON-RPC constant and no Go or native prose anywhere in `data`. A more
-	// specific fact is carried as a documented closed `class` or `cause`.
-	valHermesInvalidOptions     = "hermes_invalid_options"
-	valHermesRestoreFailed      = "hermes_restore_failed"
-	valHermesRuntimeUnavailable = "hermes_runtime_unavailable"
-	valHermesSessionPoisoned    = "hermes_session_poisoned"
-	valHermesInternalFailure    = "hermes_internal_failure"
-	// The closed `class` vocabulary hermes_internal_failure may carry.
-	classLifecycleOverlap   = "lifecycle_overlap"
-	classLifecycleViolation = "lifecycle_violation"
-	classRouteCorrelation   = "route_correlation"
-	keyClass                = "class"
-	// valRequestCancelled is the token a withdrawn request answers with.
-	valRequestCancelled = "request_cancelled"
-	valSessionActive    = "session already active"
-	agentClosedMessage  = "agent closed"
-	keyLimit            = "limit"
-	keyParams           = "params"
+	vendor = "hermes"
+
+	capabilityMethodKey = "method"
 )
 
-var (
-	agentJSONMarshal   = json.Marshal
-	agentJSONUnmarshal = json.Unmarshal
-	newAgentForServe   = NewAgent
-)
+// client is the host side of the connection, as the sessions use it.
+type client interface {
+	SessionUpdate(ctx context.Context, params acp.SessionNotification) error
+	RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
+	UnstableCreateElicitation(ctx context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	NotifyExtension(ctx context.Context, method string, params any) error
+}
 
-// Agent exposes Hermes through ACP.
+// Agent exposes the hermes coding agent through ACP.
 type Agent struct {
-	options      Options
-	log          *slog.Logger
-	observe      *observer.Observer
-	optionsErr   error
-	providerAuth *providerAuth
-	// ambientEnv is the adapter's environment as it stood at construction. It is
-	// the base ordinary same-identity execution sanitizes; managed execution
-	// uses the authority's environment instead.
-	ambientEnv     map[string]string
-	nativeEnv      map[string]string
-	managedHandoff managedHandoffRoot
+	options   Options
+	log       *slog.Logger
+	observe   *observer.Observer
+	optionErr *acp.RequestError
+	// processEnv is the adapter's own environment, read once at construction.
+	processEnv []string
+	store      acpcore.SessionStore
 
 	mu                 sync.Mutex
+	conn               client
+	transport          *wire.Transport
 	closed             bool
-	closeOnce          sync.Once
-	closeErr           error
-	containmentErr     error
-	authorityErr       error
-	constructions      sync.WaitGroup
-	constructing       int
-	constructionSeq    uint64
-	constructionCancel map[uint64]context.CancelCauseFunc
-	lifecycleOps       sync.WaitGroup
-	lifecycleSeq       uint64
-	lifecycleCancel    map[uint64]context.CancelCauseFunc
-	lifecycleLeases    map[acp.SessionId]*sessionLifecycleLease
-	conn               agentClient
-	sessions           map[acp.SessionId]*session
-	deleted            map[acp.SessionId]struct{}
-	deleteCleanup      map[acp.SessionId]deleteCleanupRecord
-	incompleteRoots    map[acp.SessionId]map[string]struct{}
-	retiredNativeRoots map[string]bool
-	retiredNativeRetry sync.Mutex
-	nativeAdmissionMu  sync.Mutex
-	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
-	lifecycleAnswer    lifecycle.Negotiated
-	// lifecycleAnswered records that this connection's one answer has been
-	// given. The answer binds the whole connection, so it is written once and
-	// never rewritten by a later initialize.
-	lifecycleAnswered bool
+	// lifecycle is the answer this connection gave at initialize. An absent
+	// answer leaves the extension dormant for every session on it.
+	lifecycle    lifecycle.Negotiated
+	restores     wire.SessionRequests
+	sessions     map[acp.SessionId]*session
+	deleted      map[acp.SessionId]struct{}
+	clientCalls  chan struct{}
+	incarnations uint64
 
-	streamOpenMu   sync.Mutex
-	streamOpens    []*deferredStreamOpen
-	streamOpenWait sync.WaitGroup
-
-	sharedConfigMu          sync.Mutex
-	sharedConfigInitialized bool
-	sharedMCPServers        []acp.McpServer
+	versionOnce sync.Once
+	versionErr  error
+	executable  string
 }
 
 var (
@@ -117,89 +83,147 @@ var (
 	_ acp.ExtensionMethodHandler = (*Agent)(nil)
 )
 
+// NewAgent creates an ACP agent for the hermes coding agent CLI. Construction
+// never fails; a refused option is reported by Initialize and every
+// session-establishing method as pi_invalid_options.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
-	limits, optionsErr := normalizeConcurrencyLimits(options.ConcurrencyLimits)
-	optionsErr = errors.Join(optionsErr, validateHostAuthority(options), validateImageLimits(options.ImageLimits),
-		validateInputHandoffRoot(options.InputHandoffRoot), validateProviderAuthRoots(options),
-		validateSharedHermesHomeOptions(options), validateAgentEnv(options.Env),
-		validateAmbientEnvironment(options.AmbientEnvironment),
-		validateConfiguredModels(options.ConfiguredModels))
-	options.ConcurrencyLimits = limits
 
 	log := options.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 
-	if options.SessionStore == nil {
-		options.SessionStore = NewInMemorySessionStore()
-	}
-
-	observe := observer.New(observer.Config{
-		MeterProvider:  options.MeterProvider,
-		Propagator:     options.TextMapPropagator,
-		TracerProvider: options.TracerProvider,
-		Version:        options.AgentVersion,
-	})
-	var nativeEnv map[string]string
-	if options.hostAuthoritySupplied && optionsErr == nil {
-		nativeEnv, optionsErr = readHostEnvironment(options.HostAuthority)
+	store := options.SessionStore
+	if store == nil {
+		store = acpcore.NewInMemorySessionStore()
 	}
 
 	agent := &Agent{
-		options:            options,
-		log:                log,
-		optionsErr:         optionsErr,
-		observe:            observe,
-		sessions:           make(map[acp.SessionId]*session),
-		deleted:            make(map[acp.SessionId]struct{}),
-		deleteCleanup:      make(map[acp.SessionId]deleteCleanupRecord),
-		incompleteRoots:    make(map[acp.SessionId]map[string]struct{}),
-		retiredNativeRoots: make(map[string]bool),
-		constructionCancel: make(map[uint64]context.CancelCauseFunc),
-		lifecycleCancel:    make(map[uint64]context.CancelCauseFunc),
-		lifecycleLeases:    make(map[acp.SessionId]*sessionLifecycleLease),
-		clientCalls:        make(chan struct{}, limits.MaxConcurrentClientCalls),
-		ambientEnv:         ambientEnvironment(options),
-		nativeEnv:          nativeEnv,
+		options: options,
+		log:     log,
+		observe: observer.New(observer.Config{
+			Vendor: vendor, NativeClient: "hermes-coding-agent",
+			MeterProvider:  options.MeterProvider,
+			Propagator:     options.TextMapPropagator,
+			TracerProvider: options.TracerProvider,
+			Version:        options.AgentVersion,
+		}),
+		processEnv:       os.Environ(),
+		store:            store,
+		sessions:         make(map[acp.SessionId]*session),
+		deleted:          make(map[acp.SessionId]struct{}),
+		clientCalls:      make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
+		positionEncoding: acp.PositionEncodingKindUtf16,
 	}
-	// Invalid option combinations must be side-effect free. In particular,
-	// provider-auth initialization prepares the durable Hermes residence, which
-	// must never happen after shared-home or host-authority validation failed.
-	if optionsErr == nil && options.HostAuthority == nil {
-		agent.providerAuth = newProviderAuth(agent)
-	}
-
-	// An embedding host's client is installed at construction, so the very
-	// first session it opens already has somewhere to stream to. Serve installs
-	// its own connection instead and refuses this option.
-	if options.Client != nil {
-		agent.setAgentClient(newEmbeddedAgentClient(agent, options.Client))
-	}
+	agent.optionErr = agent.validateOptions()
 
 	return agent
 }
 
+// validateOptions reports the first refused option. The reason goes to the
+// log; the wire answer names only the option.
+func (a *Agent) validateOptions() *acp.RequestError {
+	options := a.options
+
+	checks := []struct {
+		field string
+		err   error
+	}{
+		{"home", validateOptionalAbsolute(options.Home)},
+		{"inputHandoffRoot", validateHandoffRoot(options.InputHandoffRoot)},
+		{"defaultModel", validateOptionalModel(options.DefaultModel)},
+		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
+		{metaEnvKey, process.ValidateNames(options.Env)},
+		{"concurrencyLimits", validateConcurrencyLimits(options.ConcurrencyLimits)},
+		{"imageLimits", options.ImageLimits.core().Validate()},
+	}
+
+	for _, check := range checks {
+		if check.err == nil {
+			continue
+		}
+
+		a.log.Error("hermes agent option rejected", slog.String("field", check.field), slog.String("reason", check.err.Error()))
+
+		return wire.InvalidOptions(vendor, check.field)
+	}
+
+	return nil
+}
+
+func validateOptionalAbsolute(path string) error {
+	if path == "" || filepath.IsAbs(path) {
+		return nil
+	}
+
+	return errors.New("path must be absolute")
+}
+
+func validateHandoffRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+
+	return image.ValidateHandoffRoot(root)
+}
+
+func validateOptionalModel(model string) error {
+	if model == "" {
+		return nil
+	}
+
+	err := hermes.ModelSelectionShapeError(model)
+
+	return err
+}
+
+func validateConfiguredModels(ids []string) error {
+	seen := make(map[string]struct{}, len(ids))
+
+	for index, id := range ids {
+		if err := hermes.ModelSelectionShapeError(id); err != nil || id != strings.TrimSpace(id) {
+			return fmt.Errorf("configured model %d %q is not a model id", index, id)
+		}
+
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("configured model %q is listed twice", id)
+		}
+
+		seen[id] = struct{}{}
+	}
+
+	return nil
+}
+
+func validateConcurrencyLimits(limits ConcurrencyLimits) error {
+	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentClientCalls < 0 {
+		return errors.New("concurrency limits must not be negative")
+	}
+
+	return nil
+}
+
+// Serve runs an ACP agent over the provided streams. It blocks until the
+// context is cancelled or the peer closes the connection, then closes the
+// agent.
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	agent := newAgentForServe(opts...)
-	if agent.options.Client != nil {
-		return errors.Join(errServeClientSupplied, agent.Close())
-	}
-
+	agent := NewAgent(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Hermes ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
 			returnErr = closeErr
 		}
 	}()
 
-	conn := newLocalAgentConnection(agent, output, input)
-	agent.setAgentClient(conn)
+	transport := wire.NewTransport(input, output)
+	conn := acp.NewAgentSideConnection(agent, transport.Writer(), transport.Reader())
+	conn.SetLogger(agent.log)
+	agent.attach(conn, transport)
+	transport.Start()
 
 	select {
 	case <-ctx.Done():
@@ -209,283 +233,130 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	}
 }
 
-func (a *Agent) setAgentClient(conn agentClient) {
+// attach binds the host connection the sessions emit through.
+func (a *Agent) attach(conn client, transport *wire.Transport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	a.conn = conn
+	a.transport = transport
 }
 
-func (a *Agent) connection() agentClient {
+func (a *Agent) connection() client {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	return a.conn
 }
 
-// turnTimeout is the per-turn native deadline, or 0 when no deadline applies.
-func (a *Agent) turnTimeout() time.Duration {
-	return a.options.TurnTimeout
-}
-
+// Close runs the shutdown ladder for every session and refuses every later
+// request.
 func (a *Agent) Close() error {
-	a.closeOnce.Do(func() { a.closeErr = a.close() })
-
-	return a.closeErr
-}
-
-func (a *Agent) close() error {
-	a.mu.Lock()
-	a.closed = true
-	constructionCancellations := make([]context.CancelCauseFunc, 0, len(a.constructionCancel))
-	for _, cancel := range a.constructionCancel {
-		constructionCancellations = append(constructionCancellations, cancel)
-	}
-	lifecycleCancellations := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancel))
-	for _, cancel := range a.lifecycleCancel {
-		lifecycleCancellations = append(lifecycleCancellations, cancel)
-	}
-	conn := a.conn
-	a.mu.Unlock()
-	closedErr := acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	for _, cancel := range constructionCancellations {
-		cancel(closedErr)
-	}
-	for _, cancel := range lifecycleCancellations {
-		cancel(closedErr)
-	}
-
-	a.cancelStreamOpens()
-	var err error
-	a.lifecycleOps.Wait()
-	a.constructions.Wait()
-	if preparer, ok := conn.(interface{ PrepareTransportClose(context.Context) error }); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, preparer.PrepareTransportClose(ctx))
-		cancel()
-	}
-	a.awaitStreamOpens()
-	if closer, ok := conn.(interface{ CloseTransport(context.Context) error }); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err = errors.Join(err, closer.CloseTransport(ctx))
-		cancel()
-	}
-
-	a.mu.Lock()
-	sessions := make([]*session, 0, len(a.sessions))
-	for _, session := range a.sessions {
-		sessions = append(sessions, session)
-	}
-
-	a.sessions = make(map[acp.SessionId]*session)
-	a.mu.Unlock()
-
-	// The shutdown ladder applies identically here, and that includes the durable
-	// rung: an embedded shutdown owes every commit a wire session/close would have
-	// made, rather than dropping retained state along with the wrapper. The
-	// connection is already gone, so the boundary's emission rungs have nowhere to
-	// speak; its containment proof and its commits run exactly as they do on the
-	// wire, and a commit the store refuses fails this close.
-	for _, session := range sessions {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-
-		session.prepareClose()
-
-		waitErr := session.awaitSettlement(ctx)
-
-		session.lifecycleMu.Lock()
-		closeErr := session.settleClosedSession(ctx)
-		session.lifecycleMu.Unlock()
-
-		a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
-		err = errors.Join(err, waitErr, closeErr)
-
-		cancel()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	err = errors.Join(err, a.retryDeletedSessionCleanup(ctx), a.retryRetiredNativeRoots(ctx))
-	cancel()
-	a.mu.Lock()
-	a.conn = nil
-	a.mu.Unlock()
-	a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
-	a.mu.Lock()
-	err = errors.Join(err, a.containmentErr, a.managedHandoff.close())
-	a.mu.Unlock()
-
-	return err
-}
-
-func (a *Agent) beginActiveReuse(ctx context.Context, id acp.SessionId) (*session, context.Context, func(), error) {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
 
-		return nil, nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-
-	existing := a.sessions[id]
-	a.mu.Unlock()
-	if existing == nil {
-		return nil, nil, nil, nil
-	}
-
-	admissionCtx, release, err := existing.beginReuse(ctx)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	return existing, admissionCtx, release, nil
-}
-
-type activeReuseAdmissionHookKey struct{}
-
-func (a *Agent) completeActiveReuse(
-	ctx context.Context,
-	id acp.SessionId,
-	existing *session,
-	replay bool,
-	release func(),
-) (*deferredStreamOpen, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.closed || context.Cause(ctx) != nil {
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-	if a.sessions[id] != existing {
-		return nil, unknownSessionError()
-	}
-
-	owed, deferred, err := a.deferStreamOpenLocked(ctx, existing)
-	if err != nil {
-		return nil, err
-	}
-
-	identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
-	if deferred && orderedResponse && identity.token != "" {
-		owed.afterResponse = func() {
-			var replayErr error
-			if replay {
-				replayErr = existing.replayMessages(ctx)
-			}
-			release()
-			if replayErr != nil {
-				existing.failReuseAfterResponse(replayErr)
-			}
-		}
-		owed.onCancel = release
-	}
-
-	return owed, nil
-}
-
-func (a *Agent) beginSessionConstruction(ctx context.Context) (context.Context, func(), error) {
-	a.mu.Lock()
-
-	if a.closed {
-		a.mu.Unlock()
-
-		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-	if len(a.sessions)+a.constructing >= a.options.ConcurrencyLimits.MaxActiveSessions {
-		a.mu.Unlock()
-
-		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
-	}
-
-	a.constructionSeq++
-	constructionID := a.constructionSeq
-	constructionCtx, cancel := context.WithCancelCause(ctx)
-	a.constructionCancel[constructionID] = cancel
-	a.constructing++
-	a.constructions.Add(1)
-	a.mu.Unlock()
-
-	var once sync.Once
-	release := func() {
-		once.Do(func() {
-			a.mu.Lock()
-			delete(a.constructionCancel, constructionID)
-			a.constructing--
-			a.mu.Unlock()
-			cancel(nil)
-			a.constructions.Done()
-		})
-	}
-
-	return constructionCtx, release, nil
-}
-
-// optionsError reports a construction-time option failure as the uniform
-// internal error, or nil when every option validated. The code is -32603
-// because the caller's params are blameless: the embedding host built an agent
-// this adapter refuses, so no request it can phrase would be served.
-//
-// Validation details remain internal; the wire carries only the closed token.
-func (a *Agent) optionsError() error {
-	if a.optionsErr == nil {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: valHermesInvalidOptions})
-}
-
-func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
-	if err := a.optionsError(); err != nil {
-		return acp.InitializeResponse{}, err
-	}
-
-	// The lifecycle answer is resolved before anything else this handshake
-	// records, so a malformed offer is refused before the connection adopts a
-	// client capability set it would then have to unwind.
-	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
-	if err != nil {
-		return acp.InitializeResponse{}, err
-	}
-
-	title := a.options.AgentTitle
-	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
-
-	a.mu.Lock()
-	a.clientCapabilities = cloneClientCapabilities(params.ClientCapabilities)
-	a.positionEncoding = positionEncoding
+	a.closed = true
+	sessions := slices.Collect(func(yield func(*session) bool) {
+		for _, s := range a.sessions {
+			if !yield(s) {
+				return
+			}
+		}
+	})
+	a.conn = nil
 	a.mu.Unlock()
 
-	hermesMeta := map[string]any{
-		"fork": map[string]any{
-			"unstable":      true,
-			jsonFieldMethod: ForkSessionMethod,
-			keyRequest:      "acp.UnstableForkSessionRequest JSON payload only",
-			"response":      "acp.UnstableForkSessionResponse JSON payload only",
-		},
-		valElicitation: map[string]any{
-			"unstable": true,
-			"scope":    capabilityScopeSession,
-			"tracks":   "ACP v1 elicitation",
-		},
-		rawEventCapabilityKey: map[string]any{
-			jsonFieldMethod:  RawEventMethod,
-			"enabledBy":      rawEventEnabledByPath,
-			"maxBytes":       rawEventMaxBytes,
-			"defaultEnabled": false,
-		},
-		"sessionStore": map[string]any{
-			jsonFieldFormat: SessionStoreFormat,
-			jsonFieldKey:    []string{jsonFieldSessionID, "subpath"},
-		},
+	var errs []error
+
+	for _, s := range sessions {
+		if err := s.close(context.Background()); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
-	if a.providerAuth != nil {
-		hermesMeta[providerAuthCapabilityKey] = a.providerAuth.capability()
+	a.mu.Lock()
+	clear(a.sessions)
+	a.mu.Unlock()
+
+	return errors.Join(errs...)
+}
+
+func (a *Agent) ensureOpen() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return errAgentClosed()
 	}
 
-	capabilityMeta := capabilityMediaMeta(a.options)
-	capabilityMeta[hermesMetaKey] = hermesMeta
-	capabilityMeta[routeMetaKey] = map[string]any{keyVersion: routeVersion}
+	return nil
+}
+
+// errAgentClosed answers every request after Close.
+func errAgentClosed() *acp.RequestError {
+	return acp.NewInvalidRequest(map[string]any{wire.FieldError: "agent closed"})
+}
+
+// Initialize implements ACP initialize.
+func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
+	_, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodInitialize)
+	defer func() { finish(err) }()
+
+	if a.optionErr != nil {
+		return acp.InitializeResponse{}, a.optionErr
+	}
+
+	meta := params.Meta
+	if t := a.transportRef(); t != nil {
+		meta = lifecycle.RetainRequestMetadata(meta, t.TakeRaw(acp.AgentMethodInitialize))
+	}
+
+	offer, present, paramErr := lifecycle.DecodeOffer(meta)
+	if paramErr != nil {
+		return acp.InitializeResponse{}, invalidParam(paramErr)
+	}
+
+	var negotiated lifecycle.Negotiated
+	if present {
+		negotiated = offer.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}})
+	}
+
+	encoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
+
+	a.mu.Lock()
+	a.clientCapabilities = params.ClientCapabilities
+	a.positionEncoding = encoding
+	a.lifecycle = negotiated
+	a.mu.Unlock()
+
+	title := a.options.AgentTitle
+
+	capabilityMeta := map[string]any{
+		vendor: map[string]any{
+			"elicitation": map[string]any{"unstable": true, "scope": nativeScopeSession, "tracks": "ACP v1 elicitation"},
+			metaRawEventKey: map[string]any{
+				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.hermes.rawEvent.enabled",
+				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
+			},
+			"sessionStore": map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+		},
+		wire.MediaEnvelopeKey: image.MediaEnvelope(a.options.ImageLimits.core(), image.Envelope{DocumentFormats: []string{}}),
+	}
+	if a.options.InputHandoffRoot != "" {
+		capabilityMeta[wire.HandoffKey] = image.HandoffAdvertisement()
+	}
+
+	var responseMeta map[string]any
+	if negotiated.Present() {
+		responseMeta = map[string]any{wire.LifecycleKey: negotiated.Advertisement()}
+	}
 
 	return acp.InitializeResponse{
-		Meta:            lifecycleMeta,
+		Meta:            responseMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
@@ -494,370 +365,198 @@ func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp
 		},
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta:        capabilityMeta,
-			LoadSession: true,
-			McpCapabilities: acp.McpCapabilities{
-				Http: true,
-			},
-			PositionEncoding: &positionEncoding,
+			Meta:             capabilityMeta,
+			LoadSession:      true,
+			PositionEncoding: &encoding,
 			PromptCapabilities: acp.PromptCapabilities{
 				EmbeddedContext: true,
 				Image:           true,
 			},
 			SessionCapabilities: acp.SessionCapabilities{
-				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 				Close:                 &acp.SessionCloseCapabilities{},
 				Delete:                &acp.SessionDeleteCapabilities{},
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
+				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 			},
 		},
 	}, nil
 }
 
-// Authenticate advertises no method, so every call is refused. The reserved
-// lifecycle literal is inspected first: a request naming a key this surface
-// never carries is malformed before it is unauthenticated.
-func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.AuthenticateResponse{}, err
-	}
-
-	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
-}
-
-func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.LogoutResponse{}, err
-	}
-
-	return acp.LogoutResponse{}, nil
-}
-
-// SetSessionMode carries no native mode surface, so it answers method-not-found.
-// The lifecycle refusal still precedes that answer, for the same reason
-// Authenticate's does.
-func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-
-	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
-}
-
-func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
-	if err := a.ensureOpen(); err != nil {
-		return nil, err
-	}
-
-	// Every extension route inspects the reserved lifecycle literal before its
-	// own side effects or its own refusal. An unconfigured provider-auth leg
-	// answers method-not-found, and a family literal is never foreign, so the
-	// refusal that names the key has to come first or a host would learn the
-	// leg is absent instead of learning its request was malformed.
-	if err := rejectLifecycleRawMeta(params); err != nil {
-		return nil, err
-	}
-
-	switch method {
-	case RateLimitsMethod:
-		return a.handleRateLimits(ctx, params)
-	case ForkSessionMethod:
-		// An extension params object that cannot be decoded, or that fails its
-		// own validation as a whole, is refused as the whole params member:
-		// the same uniform {error, field} refusal every other inbound shape
-		// takes. Decoder prose is withheld because a syntax error quotes the
-		// offending byte of the request back at the peer.
-		var req acp.UnstableForkSessionRequest
-		if err := json.Unmarshal(params, &req); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
-		}
-
-		if err := req.Validate(); err != nil {
-			return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnsupported, jsonFieldField: keyParams})
-		}
-
-		return a.forkSession(ctx, req)
-	default:
-		if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
-			return result, err
-		}
-
-		return nil, acp.NewMethodNotFound(method)
-	}
-}
-
-func (a *Agent) ensureOpen() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-
-	return nil
-}
-
-func (a *Agent) sessionStore() SessionStore {
-	if a.options.SessionStore == nil {
-		return NewInMemorySessionStore()
-	}
-
-	return a.options.SessionStore
-}
-
-func (a *Agent) sessionStoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	timeout := a.options.SessionStoreLoadTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-
-	return context.WithTimeout(ctx, timeout)
-}
-
-func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
-	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
-		return func() {}, nil
-	}
-
-	select {
-	case a.clientCalls <- struct{}{}:
-		return func() { <-a.clientCalls }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "client_calls"})
-	}
-}
-
-type clientCallLeaseKey struct{}
-
-type clientCallLease struct {
-	agent *Agent
-}
-
-func (a *Agent) beginClientOperation(ctx context.Context) (context.Context, func(), error) {
-	if lease, ok := ctx.Value(clientCallLeaseKey{}).(*clientCallLease); ok && lease.agent == a {
-		return ctx, func() {}, nil
-	}
-
-	release, err := a.acquireClientCall(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return context.WithValue(ctx, clientCallLeaseKey{}, &clientCallLease{agent: a}), release, nil
-}
-
-func (a *Agent) session(id acp.SessionId) (*session, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if _, ok := a.deleted[id]; ok {
-		return nil, unknownSessionError()
-	}
-
-	session := a.sessions[id]
-	if session == nil {
-		return nil, unknownSessionError()
-	}
-
-	return session, nil
-}
-
-// unknownSessionError is the uniform rejection every surface gives an id nobody
-// knows, so a caller cannot tell an unknown session from a deleted one.
-func unknownSessionError() error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
-}
-
-func (a *Agent) activeSession(id acp.SessionId) *session {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	return a.sessions[id]
-}
-
-// storeStartedSession publishes one fully prepared session under its id, and it
-// is the only place an id becomes live. Every reason the id may not be published
-// is re-read here, under the lock that installs it: the entry checks ran before a
-// hydration, an ownership acquisition, and a `hermes serve` launch that take as
-// long as they take, so a verdict reached there is only a guess by the time there
-// is something to install.
-//
-// The deletion tombstone is the reason that guess is load-bearing. A delete that
-// completes while a load or resume is preparing wins, however far the preparation
-// got: the marker is re-read here and the replacement is refused, and the marker
-// is never cleared as a side effect of installing. Clearing it would un-hide the
-// id for every later reader and let the next publish rewrite the very row the
-// delete removed, since the durable publish guard is that same marker.
-func (a *Agent) storeStartedSession(session *session) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	return a.storeStartedSessionLocked(session)
-}
-
-func (a *Agent) storeStartedSessionWithOpening(ctx context.Context, session *session) (*deferredStreamOpen, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.closed {
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-
-	owed, _, err := a.deferStreamOpenLocked(ctx, session)
-	if err != nil {
-		return nil, err
-	}
-	if err := a.storeStartedSessionLocked(session); err != nil {
-		a.abandonStreamOpen(owed)
-
-		return nil, err
-	}
-
-	return owed, nil
-}
-
-func (a *Agent) storeStartedSessionLocked(session *session) error {
-	if a.closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: agentClosedMessage})
-	}
-
-	if _, deleted := a.deleted[session.id]; deleted {
-		return unknownSessionError()
-	}
-	if a.sessions[session.id] != nil {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionActive})
-	}
-
-	if len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valBackpressure, keyLimit: "active_sessions"})
-	}
-
-	a.sessions[session.id] = session
-
-	// This is the one place an id becomes live, so it is where the provider-auth
-	// closed mark is cleared. session/close leaves the durable snapshot in place,
-	// so the same id can be hydrated again, and a closed mark that outlived the
-	// reopen would refuse every leg on it for the agent's life.
-	if a.providerAuth != nil {
-		a.providerAuth.reopenSession(session.id)
-	}
-
-	a.observe.AddActiveSession(context.Background(), 1)
-
-	return nil
-}
-
-// refuseStartedSession tears down a fully prepared session the install lock
-// refused and answers with the refusal itself. Nothing else can reach that
-// session — it never became live, so no id names it and no close will ever be
-// addressed to it — which is why the launched process, its scratch generation,
-// and its ownership claims are released here.
-//
-// The refusal is returned unwrapped: the SDK maps a handler error onto its
-// JSON-RPC error by type assertion, so joining a teardown result into it would
-// answer a tombstoned id with an internal error rather than the uniform
-// unknown-session error every other door gives it. A teardown that could not
-// prove containment is recorded on the agent, which is where that verdict is
-// reported from.
-func (a *Agent) refuseStartedSession(ctx context.Context, session *session, refusal error) error {
-	closeErr := session.Close(context.Background())
-
-	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
-	a.log.DebugContext(ctx, "close a Hermes session the install refused",
-		slog.String(jsonFieldError, refusal.Error()),
-		slog.Any(jsonFieldCause, closeErr),
-	)
-
-	return refusal
-}
-
-func (a *Agent) removeSessionIf(id acp.SessionId, target *session) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.sessions[id] != target {
-		return false
-	}
-
-	delete(a.sessions, id)
-
-	return true
-}
-
-func (a *Agent) isDeleted(id acp.SessionId) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	_, ok := a.deleted[id]
-
-	return ok
-}
-
-func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	caps := a.clientCapabilities.Elicitation
-	if caps == nil {
-		return nil
-	}
-
-	encoded, err := agentJSONMarshal(caps)
-	if err != nil {
-		return caps
-	}
-
-	var cloned acp.ElicitationCapabilities
-	if err := agentJSONUnmarshal(encoded, &cloned); err != nil {
-		return caps
-	}
-
-	return &cloned
-}
-
-func (a *Agent) clientSupportsFormElicitation() bool {
-	caps := a.clientElicitationCapabilities()
-	if caps == nil {
-		return false
-	}
-
-	return caps.Form != nil
-}
-
-func (a *Agent) clientSupportsURLElicitation() bool {
-	caps := a.clientElicitationCapabilities()
-
-	return caps != nil && caps.Url != nil
-}
-
-func selectPositionEncoding(values []acp.PositionEncodingKind) acp.PositionEncodingKind {
-	for _, value := range values {
-		if value == acp.PositionEncodingKindUtf8 {
-			return value
-		}
-	}
-
-	for _, value := range values {
-		if value == acp.PositionEncodingKindUtf16 {
-			return value
-		}
+func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEncodingKind {
+	if slices.Contains(encodings, acp.PositionEncodingKindUtf8) {
+		return acp.PositionEncodingKindUtf8
 	}
 
 	return acp.PositionEncodingKindUtf16
 }
 
-func cloneClientCapabilities(caps acp.ClientCapabilities) acp.ClientCapabilities {
-	encoded, err := agentJSONMarshal(caps)
-	if err != nil {
-		return caps
+// Authenticate exists because the SDK interface requires it. The harness
+// authenticates itself in its own home, outside ACP.
+func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.AuthenticateResponse{}, invalidParam(refusal)
 	}
 
-	var cloned acp.ClientCapabilities
-	if err := agentJSONUnmarshal(encoded, &cloned); err != nil {
-		return caps
-	}
-
-	return cloned
+	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
+
+// Logout exists because the SDK interface requires it.
+func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.LogoutResponse{}, invalidParam(refusal)
+	}
+
+	return acp.LogoutResponse{}, acp.NewMethodNotFound(acp.AgentMethodLogout)
+}
+
+// SetSessionMode exists because the SDK interface requires it. Native modes
+// are config options, never ACP session modes.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.SetSessionModeResponse{}, invalidParam(refusal)
+	}
+
+	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
+}
+
+// HandleExtensionMethod answers every extension method with method-not-found.
+// The only extension surface is the outbound RawEventMethod notification.
+func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	var envelope struct {
+		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP reserves this wire spelling.
+	}
+
+	if err := json.Unmarshal(params, &envelope); err == nil {
+		if refusal := lifecycle.RejectKey(envelope.Meta); refusal != nil {
+			return nil, invalidParam(refusal)
+		}
+	}
+
+	return nil, acp.NewMethodNotFound(method)
+}
+
+func (a *Agent) transportRef() *wire.Transport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.transport
+}
+
+func (a *Agent) lifecycleNegotiated() lifecycle.Negotiated {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.lifecycle
+}
+
+func (a *Agent) clientSupportsFormElicitation() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.clientCapabilities.Elicitation != nil && a.clientCapabilities.Elicitation.Form != nil
+}
+
+// nextIncarnation mints a stream identity no earlier incarnation of any
+// session on this agent used.
+func (a *Agent) nextIncarnation() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.incarnations++
+
+	return a.incarnations
+}
+
+// acquireClientCall takes one slot of the server-to-client call budget
+// without waiting.
+func (a *Agent) acquireClientCall() (func(), error) {
+	select {
+	case a.clientCalls <- struct{}{}:
+		return func() { <-a.clientCalls }, nil
+	default:
+		return nil, wire.Backpressure("client_calls")
+	}
+}
+
+// invalidParam renders a lifecycle negotiation refusal as the uniform
+// invalid-params verdict.
+func invalidParam(err *lifecycle.ParamError) *acp.RequestError {
+	if err.Verdict == lifecycle.VerdictMissing {
+		return wire.Missing(err.Field)
+	}
+
+	return wire.Unsupported(err.Field)
+}
+
+// ensureExecutable resolves the hermes executable against the base environment
+// and probes its version once per agent.
+func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
+	a.versionOnce.Do(func() {
+		base, err := a.environment(nil, nil).Base()
+		if err != nil {
+			a.versionErr = err
+
+			return
+		}
+
+		selector := a.options.ExecutablePath
+		if selector == "" {
+			selector = vendor
+		}
+
+		executable, err := process.ResolveExecutable(selector, base)
+		if err != nil {
+			a.versionErr = err
+
+			return
+		}
+
+		version, err := hermes.ProbeVersion(ctx, executable, base)
+		if err != nil {
+			a.versionErr = err
+
+			return
+		}
+
+		if err := hermes.CheckMinimumVersion(version, hermes.MinimumVersion); err != nil {
+			a.versionErr = err
+
+			return
+		}
+
+		a.executable = executable
+	})
+
+	if a.versionErr != nil {
+		a.log.ErrorContext(ctx, "hermes version probe failed", slog.String("reason", a.versionErr.Error()))
+
+		return "", wire.InternalFailure(vendor, internalClassNativeStart)
+	}
+
+	return a.executable, nil
+}
+
+// environment builds the merge for one launch: the inherited process
+// environment, the agent overlay, the session env, then the keys this
+// adapter owns because of how it launches hermes.
+func (a *Agent) environment(sessionEnv map[string]string, owned map[string]string) process.Environment {
+	merged := make(map[string]string, len(owned)+1)
+	if a.options.Home != "" {
+		merged[hermes.EnvAgentDir] = a.options.Home
+	}
+
+	maps.Copy(merged, owned)
+
+	return process.Environment{
+		Process:        a.processEnv,
+		Agent:          a.options.Env,
+		Session:        sessionEnv,
+		Owned:          merged,
+		InternalPrefix: hermes.InternalEnvPrefix,
+	}
+}
+
+// internalClassNativeStart is the one documented pi_internal_failure class: a
+// native hermes process that could not be started or configured for a session.
+const internalClassNativeStart = "native_start"

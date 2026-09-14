@@ -17,8 +17,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
+	"github.com/savid/acp-go-core/observer"
 	hermesacp "github.com/savid/acp-go-hermes"
-	"github.com/savid/acp-go-hermes/internal/observer"
 )
 
 const defaultServiceName = "acp-go-hermes"
@@ -87,7 +87,7 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 				sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
 			)
 			handler := otelslog.NewHandler(
-				observer.InstrumentationName,
+				observer.InstrumentationName("hermes"),
 				otelslog.WithLoggerProvider(provider),
 				otelslog.WithVersion(version),
 			)
@@ -98,12 +98,12 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 	}
 
 	config.shutdown = func(ctx context.Context) error {
-		var errs []error
+		var shutdownErrs []error
 		for i := len(shutdowns) - 1; i >= 0; i-- {
-			errs = append(errs, shutdowns[i](ctx))
+			shutdownErrs = append(shutdownErrs, shutdowns[i](ctx))
 		}
 
-		return errors.Join(errs...)
+		return errors.Join(shutdownErrs...)
 	}
 
 	return config, nil

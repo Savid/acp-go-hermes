@@ -1,8 +1,0 @@
-{
-  "name": "missing-provider",
-  "raw": "{\"availability\":\"unsupported\",\"pools\":[]}",
-  "expect": {
-    "valid": false,
-    "field": "providerId"
-  }
-}

@@ -1,319 +1,76 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
-	hermesacp "github.com/savid/acp-go-hermes"
+	"github.com/stretchr/testify/require"
 )
 
-func TestRunVersionAndFlagError(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	agentVersion = func() string { return "v-test" }
+func TestRunVersionFlag(t *testing.T) {
+	t.Parallel()
 
-	var stdout bytes.Buffer
-	if code := run(context.Background(), []string{"-version"}, strings.NewReader(""), &stdout, io.Discard); code != 0 {
-		t.Fatalf("run version code = %d", code)
-	}
-	if strings.TrimSpace(stdout.String()) != "v-test" {
-		t.Fatalf("version stdout = %q", stdout.String())
-	}
-	if code := run(context.Background(), []string{"-unknown"}, strings.NewReader(""), io.Discard, io.Discard); code != 2 {
-		t.Fatalf("flag error code = %d, want 2", code)
-	}
+	var stdout, stderr bytes.Buffer
+
+	code := run(context.Background(), []string{"-version"}, strings.NewReader(""), &stdout, &stderr)
+	require.Equal(t, 0, code)
+	require.Equal(t, "dev\n", stdout.String())
 }
 
-func TestRunServeSuccessAndError(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	agentVersion = func() string { return "v-test" }
+func TestRunBadFlag(t *testing.T) {
+	t.Parallel()
 
-	var gotOptions []hermesacp.Option
-	serve = func(ctx context.Context, input io.Reader, output io.Writer, opts ...hermesacp.Option) error {
-		gotOptions = append([]hermesacp.Option(nil), opts...)
-		_, _ = io.Copy(io.Discard, input)
-		_, _ = output.Write([]byte{})
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	var stdout, stderr bytes.Buffer
 
-		return nil
-	}
-	if code := run(context.Background(), []string{
-		"-path", "hermes",
-		"-scratch-dir", "/tmp/scratch",
-		"-model", "openai/gpt-test",
-		"-debug",
-	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
-		t.Fatalf("serve success code = %d", code)
-	}
-	if len(gotOptions) == 0 {
-		t.Fatal("serve received no options")
-	}
-	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
-		return errors.New("boom")
-	}
-	var stderr bytes.Buffer
-	if code := run(context.Background(), nil, strings.NewReader(""), io.Discard, &stderr); code != 1 {
-		t.Fatalf("serve error code = %d", code)
-	}
-	if !strings.Contains(stderr.String(), "boom") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
-		return context.Canceled
-	}
-	if code := run(cancelled, nil, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
-		t.Fatalf("cancelled serve code = %d", code)
-	}
-}
-
-func TestRunRejectsUndefinedFlag(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	var stderr bytes.Buffer
-	if code := run(context.Background(), []string{"-not-a-flag"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
-		t.Fatalf("undefined flag code = %d", code)
-	}
-	if !strings.Contains(stderr.String(), "flag provided but not defined") {
-		t.Fatalf("undefined flag stderr = %q", stderr.String())
-	}
+	code := run(context.Background(), []string{"-bogus"}, strings.NewReader(""), &stdout, &stderr)
+	require.Equal(t, 2, code)
+	require.Contains(t, stderr.String(), "flag provided but not defined")
 }
 
 func TestSeedFileFlag(t *testing.T) {
-	var flag seedFileFlag
-	if err := flag.Set("config.yaml=/host/config.yaml"); err != nil {
-		t.Fatalf("Set valid: %v", err)
-	}
-	for _, value := range []string{"", "noequals", "=missing-rel", "missing-host="} {
-		if err := (&seedFileFlag{}).Set(value); err == nil {
-			t.Fatalf("Set(%q) accepted invalid value", value)
-		}
-	}
+	t.Parallel()
 
-	dir := t.TempDir()
-	hostPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(hostPath, []byte("model: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ok := seedFileFlag{pairs: []seedFilePair{{relative: "config.yaml", hostPath: hostPath}}}
-	seeded, err := ok.contents()
-	if err != nil {
-		t.Fatalf("contents: %v", err)
-	}
-	if seeded["config.yaml"] != "model: {}\n" {
-		t.Fatalf("contents = %#v", seeded)
-	}
-	missing := seedFileFlag{pairs: []seedFilePair{{relative: "config.yaml", hostPath: filepath.Join(dir, "absent")}}}
-	if _, err := missing.contents(); err == nil {
-		t.Fatal("contents accepted missing host file")
-	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+
+	flag := &seedFileFlag{}
+	require.Equal(t, "", flag.String())
+	require.NoError(t, flag.Set("settings.json="+path))
+	require.Equal(t, "settings.json", flag.String())
+	require.Equal(t, "{}", flag.files["settings.json"])
+	require.Error(t, flag.Set("nope"))
+	require.Error(t, flag.Set("=x"))
+	require.Error(t, flag.Set("a="+filepath.Join(t.TempDir(), "missing")))
 }
 
-func TestRunSeedFileFlag(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	agentVersion = func() string { return "v-test" }
+func TestRunServesUntilPeerCloses(t *testing.T) {
+	t.Parallel()
 
-	dir := t.TempDir()
-	hostPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(hostPath, []byte("model: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var gotOptions []hermesacp.Option
-	serve = func(_ context.Context, input io.Reader, _ io.Writer, opts ...hermesacp.Option) error {
-		gotOptions = append([]hermesacp.Option(nil), opts...)
-		_, _ = io.Copy(io.Discard, input)
-
-		return nil
-	}
-	if code := run(context.Background(), []string{
-		"-seed-file", "config.yaml=" + hostPath,
-	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
-		t.Fatalf("seed-file run code = %d", code)
-	}
-	if len(gotOptions) == 0 {
-		t.Fatal("serve received no options")
-	}
-
-	if code := run(context.Background(), []string{
-		"-seed-file", "invalid",
-	}, strings.NewReader(""), io.Discard, io.Discard); code != 2 {
-		t.Fatalf("invalid seed-file code = %d, want 2", code)
-	}
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
 
 	var stderr bytes.Buffer
-	if code := run(context.Background(), []string{
-		"-seed-file", "config.yaml=" + filepath.Join(dir, "absent"),
-	}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
-		t.Fatalf("missing host file code = %d, want 2", code)
-	}
-	if !strings.Contains(stderr.String(), "seed file") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
 
-func TestSignals(t *testing.T) {
-	signals := forwardedSignals()
-	if len(signals) == 0 {
-		t.Fatal("no forwarded signals")
-	}
-	ch := make(chan os.Signal, 1)
-	if pendingSignal(ch) != nil {
-		t.Fatal("empty channel returned signal")
-	}
-	ch <- syscall.SIGTERM
-	if got := pendingSignal(ch); got != syscall.SIGTERM {
-		t.Fatalf("pendingSignal = %v", got)
-	}
-	if signalCode(syscall.SIGTERM) != 143 {
-		t.Fatalf("SIGTERM code = %d", signalCode(syscall.SIGTERM))
-	}
-	if signalCode(fakeSignal("fake")) != 1 {
-		t.Fatalf("fake signal code = %d", signalCode(fakeSignal("fake")))
-	}
-}
+	codes := make(chan int, 1)
 
-func TestMainAndVersion(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-	oldArgs := os.Args
-	oldBuildVersion := buildVersion
-	defer func() {
-		os.Args = oldArgs
-		buildVersion = oldBuildVersion
+	go func() {
+		codes <- run(context.Background(), []string{"-path", "/nonexistent/hermes", "-scratch-dir", t.TempDir()}, stdinReader, stdoutWriter, &stderr)
+		_ = stdoutWriter.Close()
 	}()
 
-	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
-		return errors.New("main failed")
-	}
-	os.Args = []string{"acp-go-hermes"}
-	exitCode := -1
-	exit = func(code int) { exitCode = code }
-	main()
-	if exitCode != 1 {
-		t.Fatalf("main exit code = %d", exitCode)
-	}
-	buildVersion = ""
-	if version() != "dev" {
-		t.Fatalf("empty build version = %q", version())
-	}
-	buildVersion = "v-test"
-	if version() != "v-test" {
-		t.Fatalf("build version = %q", version())
-	}
-}
+	_, err := io.WriteString(stdinWriter, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`+"\n")
+	require.NoError(t, err)
 
-func replaceGlobals(t *testing.T) func() {
-	t.Helper()
-	oldServe := serve
-	oldVersion := agentVersion
-	oldExit := exit
+	line, err := bufio.NewReader(stdoutReader).ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, line, `"protocolVersion"`)
 
-	return func() {
-		serve = oldServe
-		agentVersion = oldVersion
-		exit = oldExit
-	}
-}
-
-type fakeSignal string
-
-func (s fakeSignal) String() string {
-	return string(s)
-}
-
-func (s fakeSignal) Signal() {}
-
-// TestRunRejectsProviderAuthRootWithoutSharedHome pins the flag pairing. The
-// ledger binds the durable native residence -shared-hermes-home names, so the
-// combination is refused before the agent is built: without this the process
-// starts, answers initialize with an internal error, and serves nothing while
-// naming neither flag.
-func TestRunRejectsProviderAuthRootWithoutSharedHome(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-
-	served := false
-	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
-		served = true
-
-		return nil
-	}
-
-	var stderr bytes.Buffer
-
-	code := run(context.Background(), []string{"-provider-auth-root", t.TempDir()},
-		strings.NewReader(""), io.Discard, &stderr)
-	if code != 2 {
-		t.Fatalf("run code = %d, want 2", code)
-	}
-
-	if served {
-		t.Fatal("agent was served despite refused flag combination")
-	}
-
-	message := stderr.String()
-	for _, flagName := range []string{"-provider-auth-root", "-shared-hermes-home"} {
-		if !strings.Contains(message, flagName) {
-			t.Fatalf("stderr %q does not name %s", message, flagName)
-		}
-	}
-}
-
-// TestRunAcceptsProviderAuthRootWithSharedHome keeps the refusal narrow: the
-// supported pairing still reaches serve.
-func TestRunAcceptsProviderAuthRootWithSharedHome(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-
-	served := false
-	serve = func(context.Context, io.Reader, io.Writer, ...hermesacp.Option) error {
-		served = true
-
-		return nil
-	}
-
-	code := run(context.Background(),
-		[]string{"-provider-auth-root", t.TempDir(), "-shared-hermes-home", t.TempDir()},
-		strings.NewReader(""), io.Discard, io.Discard)
-	if code != 0 {
-		t.Fatalf("run code = %d, want 0", code)
-	}
-
-	if !served {
-		t.Fatal("supported flag pairing did not reach serve")
-	}
-}
-
-// TestProviderAuthRootUsageNamesSharedHome keeps -help honest about the
-// dependency the validation enforces.
-func TestProviderAuthRootUsageNamesSharedHome(t *testing.T) {
-	restore := replaceGlobals(t)
-	defer restore()
-
-	var stderr bytes.Buffer
-
-	_ = run(context.Background(), []string{"-help"}, strings.NewReader(""), io.Discard, &stderr)
-
-	usage := stderr.String()
-	if !strings.Contains(usage, "-provider-auth-root") {
-		t.Fatalf("usage does not list -provider-auth-root: %q", usage)
-	}
-
-	if !strings.Contains(usage, "requires -shared-hermes-home") {
-		t.Fatalf("usage does not state the -shared-hermes-home dependency: %q", usage)
-	}
+	require.NoError(t, stdinWriter.Close())
+	require.Equal(t, 0, <-codes)
 }

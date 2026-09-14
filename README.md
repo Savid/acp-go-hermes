@@ -1,188 +1,114 @@
 # acp-go-hermes
 
-Go ACP agent that exposes the local Hermes CLI as an [Agent Client Protocol](https://agentclientprotocol.com/) agent.
+`acp-go-hermes` exposes the [Hermes](https://github.com/NousResearch/hermes-agent) as an [Agent Client Protocol](https://agentclientprotocol.com) agent.
+It launches one `hermes serve` process per ACP session, connects to its
+authenticated loopback WebSocket, and streams ACP session updates back to the client.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-hermes.svg)](https://pkg.go.dev/github.com/savid/acp-go-hermes)
-[![CI](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-hermes/actions/workflows/go-test.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-
-Use it as either:
-
-- a standalone ACP subprocess: `acp-go-hermes`
-- an embedded Go adapter through `hermesacp.Serve`, or in-process through `hermesacp.NewAgent` with `hermesacp.WithClient`
-
-## Install
-
-Library:
+hermes inherits the adapter's environment and keeps sessions in its own home. A
+session started over ACP can be continued natively:
 
 ```sh
-go get github.com/savid/acp-go-hermes
+acp-go-hermes              # host runs a session in /work
+cd /work && hermes chat --cli --resume SESSION_ID
 ```
 
-CLI:
+## Install
 
 ```sh
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-For local development, run the command straight from a checkout:
+Requires `hermes` 0.21.2 or newer on `PATH` or named with `-path`.
+
+## Run
 
 ```sh
-go run ./cmd/acp-go-hermes -path "$(command -v hermes)"
+acp-go-hermes [-path hermes] [-home DIR] [-scratch-dir DIR] [-model provider/id] [-seed-file rel=host]... [-debug]
 ```
 
-The process speaks ACP over stdin/stdout and reserves stdout for ACP JSON-RPC;
-diagnostics go to stderr. In normal use an editor or ACP host launches it as a
-subprocess rather than a human-facing chat UI.
+| Flag | Meaning |
+|---|---|
+| `-path` | hermes executable; a bare name is searched on `PATH` |
+| `-home` | hermes config root, passed as `HERMES_HOME`; empty inherits hermes's own resolution |
+| `-scratch-dir` | parent for ephemeral adapter state; empty means the system temp directory |
+| `-model` | default model for new sessions as `provider/id` |
+| `-seed-file` | `<relpath>=<hostpath>` written into hermes's config root before launch; repeatable |
+| `-debug` | debug logs to stderr |
+| `-version` | print the adapter version |
 
-## Quickstart
+OpenTelemetry exporters are configured from the standard `OTEL_*` variables.
 
-The example programs run from a checkout of this repo, so clone it first:
-
-```sh
-git clone https://github.com/savid/acp-go-hermes && cd acp-go-hermes
-```
-
-Run a tiny local client that launches the agent, sends one prompt, and prints
-the reply (the prompt argument is optional):
-
-```sh
-go run ./examples/minimal-client "Reply with hello from ACP"
-```
-
-Or drive the agent from an interactive client session:
-
-```sh
-go run ./examples/interactive-chat
-```
-
-Load and resume a stored session transcript:
-
-```sh
-go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
-```
-
-## Embedded Go
+## Embed
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-
-	hermesacp "github.com/savid/acp-go-hermes"
+err := hermesacp.Serve(ctx, os.Stdin, os.Stdout,
+    hermesacp.WithHome("/srv/hermes"),
+    hermesacp.WithSessionStore(store),
 )
-
-func main() {
-	err := hermesacp.Serve(context.Background(), os.Stdin, os.Stdout,
-		hermesacp.WithExecutablePath("hermes"),
-		hermesacp.WithScratchDir("/tmp/hermes-acp-scratch"),
-		hermesacp.WithDefaultModel("openai/gpt-5.5"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
 ```
 
-See [Go API docs](docs/reference/go-api.mdx) for options such as the Hermes
-executable path, the scratch directory for ephemeral per-session state, default
-model, environment, session storage, concurrency limits, and OpenTelemetry
-providers. `WithHome` is unsupported and rejects a non-empty value at session
-start. Use `WithScratchDir` for ephemeral
-state. `WithSharedHermesHome` explicitly opts official Hermes into one durable
-native home shared by this adapter's otherwise independent per-session
-processes; that adapter claims the home root exclusively and a second adapter
-asking for the same root is refused.
-`WithProviderAuthRoot` names the durable directory that holds the values-free
-provider-auth ledger. Provider auth is advertised only when that ledger root
-and the shared Hermes home are configured; naming the ledger root without a
-shared home fails `initialize` instead. Configuring both also canonicalizes the
-shared home — the adapter resolves its symlinks and uses the resolved path as
-`HERMES_HOME`.
+Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
+`WithInputHandoffRoot`, `WithDefaultModel`, `WithConfiguredModels`, `WithEnv`,
+`WithSeedFiles`, `WithSessionStore`, `WithSessionStoreLoadTimeout`,
+`WithTurnTimeout`, `WithConcurrencyLimits`, `WithImageLimits`, `WithLogger`,
+`WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`,
+`WithAgentName`, `WithAgentTitle`, `WithAgentVersion`.
 
-A host that embeds the `Agent` and calls its ACP methods in-process builds it
-with `NewAgent` and supplies the ACP client itself through `WithClient`; that
-client is what the agent streams session updates, permission requests, and
-elicitations to. `Serve` installs the connection it builds as that client and
-refuses an option set carrying one.
+### Session options
 
-An embedded host can pass `WithHostAuthority` to supply the complete native
-environment, prepare and reclaim native trees, and launch every managed Hermes
-process. A supplied authority is mandatory for that agent instance: errors do
-not fall back to direct execution. Provider-auth extensions are not advertised
-in this mode; ordinary ACP sessions remain available.
+`_meta.hermes.options` on `session/new`, `session/load`, and `session/resume`, or
+`WithSessionHermesOptions` from Go:
 
-## What It Provides
+| Field | Meaning |
+|---|---|
+| `model` | `provider/id` for the session |
+| `env` | environment overlay for the session's hermes process |
+| `extraPathDirs` | absolute directories prepended to `PATH`, in order |
+| `effort` | session reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 
-- ACP session lifecycle: create, prompt, cancel, close, list, load, resume,
-  delete, and fork.
-- Provider OAuth brokered through seven session-scoped `_hermes/auth/*`
-  extension methods over the `hermes serve` REST auth API. Native Hermes owns
-  credential bytes in the explicit shared durable `HERMES_HOME`; the adapter
-  keeps only values-free connection lineage. A login has one hard precondition:
-  the authorize leg refuses before any native call unless the session's process
-  runs behind the private browser-launcher shim, because Hermes accepts
-  `--no-browser` and then ignores it. Hermes returns its authorization
-  URL on this API path without executing a browser launcher; a required pinned
-  Linux canary verifies that no-launch behavior through the production adapter.
-- One `hermes serve` process per session. By default each has a freshly
-  generated `HERMES_HOME` and runs as the adapter's operating-system account.
-  Embedded hosts can supply `WithHostAuthority` to route the version probe and
-  session server through a host-owned process and filesystem boundary. The
-  adapter materializes each native tree before preparing it, then reclaims it
-  before snapshot reads or removal. The explicit shared-home mode remains an
-  ordinary standalone residence with separate processes, ports, tokens,
-  browser shims, event streams, environment, and wrapper control roots.
-- Gateway event mapping from the loopback Hermes WebSocket into ACP methods and
-  notifications.
-- Prompt streaming for messages, tool calls, diffs, usage, and session
-  metadata.
-- Static PNG, JPEG, GIF, and WebP prompt images through Hermes
-  `image.attach_bytes`, including image-MIME embedded resource blobs, with the
-  enforced byte and format bounds advertised at initialize under
-  `_meta["acp-go.dev/mediaEnvelope"]`.
-- Two inbound image transports: embedded base64, and — for a co-located host
-  that sets `WithInputHandoffRoot` — digest-verified local files read under that
-  read-only root, contained by the kernel and never named in the native request.
-- Input-only image transport: Hermes image artifacts are not projected as
-  typed ACP image output.
-- Command, file, and generic permission prompts, plus MCP elicitation bridging.
-- MCP stdio and streamable HTTP server configuration through the session
-  request builders.
-- Native message replay on `session/load`, replay-free `session/resume`, and
-  store tombstones on `session/delete`.
-- Forking through `_hermes/session/fork`, and optional raw gateway events
-  through `_hermes/rawEvent` after per-session opt-in.
-- Durable mirroring through a host-provided `SessionStore` in the
-  `hermes-state-db-v1` format with sequenced tar+zstd+base64 archive chunks.
-- OpenTelemetry telemetry through injected tracer, meter, and propagator
-  providers, recording no prompt or tool secrets by default.
+Unknown option fields and nonempty `mcpServers` are invalid parameters.
+`outputSchema` is unsupported. Authentication uses Hermes's native configuration.
+Permissions are native approvals; an unavailable or cancelled host answer denies
+that request. Native clarify requests use ACP form elicitation.
 
-## Docs
+`_meta.hermes.rawEvent.enabled` forwards native events on `_hermes/rawEvent`.
+Optional lifecycle negotiation enables ordered lifecycle updates.
 
-- [Overview](docs/overview.mdx)
-- [Run modes](docs/get-started/run-modes.mdx)
-- [Go API](docs/reference/go-api.mdx)
-- [ACP methods](docs/reference/acp-methods.mdx)
-- [Observability](docs/operations/observability.mdx)
-- [Go package reference](https://pkg.go.dev/github.com/savid/acp-go-hermes)
+### Config options
+
+`session/set_config_option` accepts `model` (`provider/id`) and `effort`.
+The model menu contains Hermes's catalog and any `WithConfiguredModels` entries.
+Images are accepted as inline data or through `WithInputHandoffRoot` and passed
+to Hermes's image attachment API. Image output is not advertised.
+
+### Session store
+
+`WithSessionStore` commits the native per-conversation JSON export under the main
+subpath and the session configuration under `config`, format
+`hermes-session-json-v1`. Native auth files are not part of the snapshot.
+The default store is in memory; provide a durable store to restore across adapter
+restarts.
+
+`session/load` restores and replays history; `session/resume` restores without
+replay. A missing conversation is imported through Hermes's native HTTP API.
+Existing native history must contain the stored history as a prefix; divergent
+or shorter native histories fail restore. Each completed prompt commits its
+snapshot before returning. Close preserves Hermes's native state, and delete
+removes the store entry without deleting the native conversation.
+
+The ACP session ID is the durable Hermes conversation ID. Transient gateway IDs
+stay internal. Native compression that changes the durable ID poisons the session
+instead of storing a different conversation under the original ID.
 
 ## Development
 
 ```sh
+make test
+make lint
 make audit
-make test-integration-smoke
-make test-integration-live
-make test-integration-cover
+make test-integration-smoke   # needs hermes installed, spends no tokens
+make test-integration-live    # spends model tokens
 ```
 
-Live integration tests use disposable temporary Hermes homes. The official
-shared-home proof plants a fake xAI OAuth fixture, makes no provider request,
-and never reads or mutates the operator's Hermes home.
-
-## License
-
-[GNU General Public License v3.0](LICENSE).
+Unit tests run the test binary as a scripted fake hermes and need no installed
+hermes, credentials, or network.

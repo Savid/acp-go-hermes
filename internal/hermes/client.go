@@ -47,10 +47,6 @@ type Client struct {
 	closed   bool
 	terminal error
 	close    *clientCloseAttempt
-
-	beforeCallWait        func()
-	beforeDoneResultCheck func()
-	closeTransport        func(websocket.StatusCode, string) error
 }
 
 type clientCloseAttempt struct {
@@ -71,15 +67,6 @@ type Event struct {
 type GatewayDelivery struct {
 	Event *Event
 	Err   error
-}
-
-// GatewayWatermark identifies one response frame in a transport generation.
-// The server adds the generation when it installs the connection; Sequence is
-// the monotonic position assigned by the WebSocket reader to every inbound text
-// frame, including events and responses.
-type GatewayWatermark struct {
-	TransportGeneration uint64
-	Sequence            uint64
 }
 
 var ErrGatewayInputOverflow = errors.New("hermes gateway input overflow")
@@ -152,12 +139,6 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("hermes json-rpc %d: %s", e.Code, e.Message)
 }
 
-func IsNotFound(err error) bool {
-	var rpcErr *RPCError
-
-	return errors.As(err, &rpcErr) && rpcErr.Code == 4007
-}
-
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int64  `json:"id"`
@@ -188,11 +169,10 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 	conn.SetReadLimit(readLimitBytes)
 
 	client := &Client{
-		conn:           conn,
-		deliveries:     make(chan GatewayDelivery, gatewayEventDeliveryCapacity+1),
-		done:           make(chan struct{}),
-		pending:        make(map[int64]chan rpcResponse),
-		closeTransport: conn.Close,
+		conn:       conn,
+		deliveries: make(chan GatewayDelivery, gatewayEventDeliveryCapacity+1),
+		done:       make(chan struct{}),
+		pending:    make(map[int64]chan rpcResponse),
 	}
 	go client.readLoop() //nolint:gosec // WebSocket reader owns the connection lifetime, not the dial context.
 
@@ -201,14 +181,6 @@ func Dial(ctx context.Context, url string, header http.Header) (*Client, error) 
 
 func (c *Client) Deliveries() <-chan GatewayDelivery {
 	return c.deliveries
-}
-
-// Done is closed when the read loop exits, i.e. when the underlying WebSocket
-// connection has terminated (normal close or disconnect). It carries no value
-// and never blocks a producer, so a reconnect loop can watch it without competing
-// with ordered delivery consumers.
-func (c *Client) Done() <-chan struct{} {
-	return c.done
 }
 
 func (c *Client) Close(status websocket.StatusCode, reason string) error {
@@ -226,7 +198,7 @@ func (c *Client) Close(status websocket.StatusCode, reason string) error {
 	c.pending = map[int64]chan rpcResponse{}
 	c.mu.Unlock()
 
-	attempt.err = c.closeTransport(status, reason)
+	attempt.err = c.conn.Close(status, reason)
 
 	c.mu.Lock()
 	close(attempt.done)
@@ -298,18 +270,10 @@ func (c *Client) callWithWriteState(ctx context.Context, method string, params a
 		return resp.sequence, true, true, nil
 	}
 
-	if c.beforeCallWait != nil {
-		c.beforeCallWait()
-	}
-
 	select {
 	case resp := <-respCh:
 		return resolve(resp)
 	case <-c.done:
-		if c.beforeDoneResultCheck != nil {
-			c.beforeDoneResultCheck()
-		}
-
 		select {
 		case resp := <-respCh:
 			return resolve(resp)
@@ -521,9 +485,7 @@ func (c *Client) writeUnsupportedRequest(id json.RawMessage) error {
 }
 
 // SessionCreateResult and SessionResumeResult name the two identities a new or
-// resumed session answers with. Both responses also carry a message projection
-// and a session-info block; replay reads history through session.history, so
-// neither is decoded here.
+// resumed session answers with. History is replayed from the persisted export.
 type SessionCreateResult struct {
 	SessionID       string `json:"session_id"`
 	StoredSessionID string `json:"stored_session_id"`
@@ -553,38 +515,6 @@ type PromptSubmitResult struct {
 	Status string `json:"status"`
 }
 
-type SessionTitleResult struct {
-	Pending bool   `json:"pending"`
-	Title   string `json:"title"`
-}
-
-type SessionHistoryResult struct {
-	Messages []Message `json:"messages"`
-}
-
-// Message is one row of the gateway's session.history projection. The gateway
-// renders every visible row as {"role", "text"}; a tool row carries no text at
-// all, so an empty Text is a row with nothing to replay, never a missed key.
-type Message struct {
-	Role string          `json:"role"`
-	Text string          `json:"text"`
-	Raw  json.RawMessage `json:"-"`
-}
-
-func (m *Message) UnmarshalJSON(data []byte) error {
-	type alias Message
-
-	var value alias
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-
-	*m = Message(value)
-	m.Raw = append(m.Raw[:0], data...)
-
-	return nil
-}
-
 type ActiveListResult struct {
 	Sessions []ActiveSession `json:"sessions"`
 }
@@ -600,51 +530,17 @@ type ActiveSession struct {
 	Status string `json:"status"`
 }
 
-// ActiveSessionStarting is the session.active_list status a session carries
-// while its deferred agent build is still running.
-const ActiveSessionStarting = "starting"
-
-// PersistedSession is one durable state.db row returned by session.list.
-type PersistedSession struct {
-	SessionID string `json:"id"`
-	Title     string `json:"title"`
-}
-
-type SessionListResult struct {
-	Sessions []PersistedSession `json:"sessions"`
-}
-
 type ModelOptionsResult struct {
-	Model     string          `json:"model"`
-	Provider  string          `json:"provider"`
-	Providers []Provider      `json:"providers"`
-	Raw       json.RawMessage `json:"-"`
+	Model     string     `json:"model"`
+	Provider  string     `json:"provider"`
+	Providers []Provider `json:"providers"`
 }
 
-func (m *ModelOptionsResult) UnmarshalJSON(data []byte) error {
-	type alias ModelOptionsResult
-
-	var value alias
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-
-	*m = ModelOptionsResult(value)
-	m.Raw = append(m.Raw[:0], data...)
-
-	return nil
-}
-
-// Provider is one row of the gateway's model catalogue. The row also carries
-// authentication state, pricing, featured hints, and a per-model capability map
-// ({model: {fast, reasoning}}); the config surface this adapter builds publishes
-// the model ids and their names, so nothing else is decoded. Raw keeps the whole
-// row for callers that need to read the catalogue as the gateway wrote it.
+// Provider is one native provider and its invokable model ids.
 type Provider struct {
-	Slug   string          `json:"slug"`
-	Name   string          `json:"name"`
-	Models []string        `json:"models"`
-	Raw    json.RawMessage `json:"-"`
+	Slug   string   `json:"slug"`
+	Name   string   `json:"name"`
+	Models []string `json:"models"`
 }
 
 func (p *Provider) UnmarshalJSON(data []byte) error {
@@ -673,74 +569,24 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	p.Slug = object.Slug
 	p.Name = object.Name
 	p.Models = models
-	p.Raw = append(p.Raw[:0], data...)
 
 	return nil
 }
 
-type BranchResult struct {
-	SessionID       string `json:"session_id"`
-	StoredSessionID string `json:"stored_session_id"`
-	Title           string `json:"title"`
-	Parent          string `json:"parent"`
-}
-
 func (c *Client) CreateSession(ctx context.Context, params map[string]any) (SessionCreateResult, error) {
-	out, _, err := c.CreateSessionWatermark(ctx, params)
-
-	return out, err
-}
-
-func (c *Client) CreateSessionWatermark(
-	ctx context.Context,
-	params map[string]any,
-) (SessionCreateResult, uint64, error) {
 	var out SessionCreateResult
 
-	watermark, err := c.call(ctx, "session.create", params, &out)
-
-	return out, watermark, err
-}
-
-func (c *Client) ResumeSession(ctx context.Context, storedSessionID string, params map[string]any) (SessionResumeResult, error) {
-	out, _, err := c.ResumeSessionWatermark(ctx, storedSessionID, params)
+	err := c.Call(ctx, "session.create", params, &out)
 
 	return out, err
 }
 
-func (c *Client) ResumeSessionWatermark(
-	ctx context.Context,
-	storedSessionID string,
-	params map[string]any,
-) (SessionResumeResult, uint64, error) {
-	if params == nil {
-		params = map[string]any{}
-	}
-
-	params[fieldSessionID] = storedSessionID
+func (c *Client) ResumeSession(ctx context.Context, id string, params map[string]any) (SessionResumeResult, error) {
+	params[fieldSessionID] = id
 
 	var out SessionResumeResult
 
-	watermark, err := c.call(ctx, "session.resume", params, &out)
-
-	return out, watermark, err
-}
-
-func (c *Client) SetSessionTitle(ctx context.Context, liveSessionID string, title string) (SessionTitleResult, error) {
-	var out SessionTitleResult
-
-	err := c.Call(ctx, "session.title", map[string]any{
-		fieldSessionID: liveSessionID,
-		fieldTitle:     title,
-	}, &out)
-
-	return out, err
-}
-
-func (c *Client) History(ctx context.Context, liveSessionID string) (SessionHistoryResult, error) {
-	var out SessionHistoryResult
-
-	err := c.Call(ctx, "session.history", map[string]any{fieldSessionID: liveSessionID}, &out)
+	err := c.Call(ctx, "session.resume", params, &out)
 
 	return out, err
 }
@@ -756,49 +602,6 @@ func (c *Client) AwaitSessionBuild(ctx context.Context, liveSessionID string) er
 	return c.Call(ctx, "process.list", map[string]any{fieldSessionID: liveSessionID}, nil)
 }
 
-func (c *Client) ActiveList(ctx context.Context) (ActiveListResult, error) {
-	var out ActiveListResult
-
-	err := c.Call(ctx, "session.active_list", map[string]any{}, &out)
-
-	return out, err
-}
-
-// PersistedSessions lists durable Hermes sessions, including sessions that are
-// not currently resident in this gateway process.
-func (c *Client) PersistedSessions(ctx context.Context) (SessionListResult, error) {
-	var out SessionListResult
-
-	err := c.Call(ctx, "session.list", map[string]any{"limit": 10000}, &out)
-
-	return out, err
-}
-
-func (c *Client) DeleteSession(ctx context.Context, storedSessionID string) error {
-	return c.Call(ctx, "session.delete", map[string]any{fieldSessionID: storedSessionID}, nil)
-}
-
-func (c *Client) CloseSession(ctx context.Context, liveSessionID string) error {
-	return c.Call(ctx, "session.close", map[string]any{fieldSessionID: liveSessionID}, nil)
-}
-
-func (c *Client) Branch(ctx context.Context, liveSessionID string, name string) (BranchResult, error) {
-	params := map[string]any{fieldSessionID: liveSessionID}
-	if name != "" {
-		params["name"] = name
-	}
-
-	var out BranchResult
-
-	err := c.Call(ctx, "session.branch", params, &out)
-
-	return out, err
-}
-
-func (c *Client) SubmitPrompt(ctx context.Context, liveSessionID string, text string) error {
-	return c.Call(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, nil)
-}
-
 func (c *Client) SubmitPromptWatermark(
 	ctx context.Context,
 	liveSessionID string,
@@ -806,7 +609,7 @@ func (c *Client) SubmitPromptWatermark(
 ) (PromptSubmitResult, uint64, bool, error) {
 	var result PromptSubmitResult
 
-	watermark, written, proven, err := c.callWithWriteState(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text}, &result)
+	watermark, written, proven, err := c.callWithWriteState(ctx, "prompt.submit", map[string]any{fieldSessionID: liveSessionID, valText: text, "queued": true}, &result)
 
 	return result, watermark, written && !proven, err
 }
@@ -841,26 +644,6 @@ func (c *Client) AttachImageBytes(ctx context.Context, liveSessionID string, dat
 
 func (c *Client) Interrupt(ctx context.Context, liveSessionID string) error {
 	return c.Call(ctx, "session.interrupt", map[string]any{fieldSessionID: liveSessionID}, nil)
-}
-
-// ApprovalRespond answers exactly one native approval: the session's oldest
-// waiting one. Hermes's `all` flag answers every approval queued on the session
-// with the same choice, including ones no host was ever shown, so this adapter
-// never sends it.
-func (c *Client) ApprovalRespond(ctx context.Context, liveSessionID string, choice string) error {
-	return c.Call(ctx, "approval.respond", map[string]any{fieldSessionID: liveSessionID, "choice": choice, "all": false}, nil)
-}
-
-func (c *Client) ClarifyRespond(ctx context.Context, liveSessionID, requestID string, answer any) error {
-	if requestID == "" {
-		return errors.New("clarify request_id is required")
-	}
-
-	return c.Call(ctx, "clarify.respond", map[string]any{
-		fieldSessionID: liveSessionID,
-		"request_id":   requestID,
-		"answer":       answer,
-	}, nil)
 }
 
 func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelOptionsResult, error) {
@@ -982,3 +765,14 @@ func modelSwitchCommand(value string) (string, string, error) {
 
 	return rawModel + " --provider " + provider + " --session", rawModel, nil
 }
+
+func gatewayTransportCause(err error) error {
+	if err == nil {
+		return errors.New("hermes gateway disconnected")
+	}
+
+	return err
+}
+
+// Sequence is the latest frame read in this transport generation.
+func (c *Client) Sequence() uint64 { return c.sequence.Load() }
