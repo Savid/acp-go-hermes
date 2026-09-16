@@ -6,13 +6,15 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
+	eventMessageComplete = "message.complete"
 	statusComplete       = "complete"
 	fieldSource          = "source"
 	promptStreaming      = "streaming"
@@ -28,8 +30,8 @@ const (
 	fieldCwd             = "cwd"
 	nativeSessionIDKey   = "session_id"
 	effortMedium         = "medium"
-	eventApprovalRequest = "approval.request"
-	eventClarifyRequest  = "clarify.request"
+	eventApprovalRequest = "approval"
+	eventClarifyRequest  = "clarify"
 	fieldValue           = "value"
 	fieldText            = "text"
 	approvalAlways       = "always"
@@ -37,9 +39,11 @@ const (
 	statusInterrupted    = "interrupted"
 	roleUser             = "user"
 	roleAssistant        = "assistant"
-)
 
-const sessionTitleMaxRunes = 256
+	eventSudoRequest         = "sudo"
+	eventSecretRequest       = "secret"
+	eventTerminalReadRequest = "terminal.read"
+)
 
 type cycleState struct {
 	text          strings.Builder
@@ -52,9 +56,14 @@ type cycleState struct {
 	contextMax    int64
 }
 
+// bearsWork reports whether an event is native work a lifecycle cycle must
+// own. Every kind projectEvent acts on is listed: a native dialog that arrives
+// outside a prompt is answered only if it opens an agent-origin cycle first.
 func bearsWork(event hermes.Event) bool {
 	switch event.Type {
-	case "message.start", "message.delta", "message.complete", "thinking.delta", eventToolStart, eventToolComplete, eventApprovalRequest, eventClarifyRequest:
+	case "message.start", "message.delta", eventMessageComplete, "thinking.delta",
+		eventToolStart, eventToolComplete, eventApprovalRequest, eventClarifyRequest,
+		eventSudoRequest, eventSecretRequest, eventTerminalReadRequest, stopReasonError:
 		return true
 	default:
 		return false
@@ -76,7 +85,7 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		state.thought.WriteString(text)
 
 		return false, s.emit(ctx, acp.UpdateAgentThoughtText(text))
-	case "message.complete":
+	case eventMessageComplete:
 		var result struct {
 			Text      string          `json:"text"`
 			Status    string          `json:"status"`
@@ -115,7 +124,7 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		return true, nil
 	case eventToolStart, eventToolComplete:
 		return false, s.emitTool(ctx, state, event)
-	case eventApprovalRequest, eventClarifyRequest, "sudo.request", "secret.request", "terminal.read_request":
+	case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
 		s.handleControl(ctx, rt, c, event)
 	}
 
@@ -245,7 +254,7 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.updatedAt = updatedAt
 
 	if s.title == "" {
-		if title := promptTitle(prompt); title != "" {
+		if title := wire.PromptTitle(prompt); title != "" {
 			s.title = title
 			update.Title = &title
 		}
@@ -253,31 +262,6 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.mu.Unlock()
 
 	_ = s.emit(ctx, acp.SessionUpdate{SessionInfoUpdate: &update})
-}
-
-func promptTitle(prompt []acp.ContentBlock) string {
-	for _, block := range prompt {
-		if block.Text == nil {
-			continue
-		}
-
-		if title := normalizeTitle(block.Text.Text); title != "" {
-			return title
-		}
-	}
-
-	return ""
-}
-
-func normalizeTitle(text string) string {
-	title := strings.Join(strings.Fields(text), " ")
-	if utf8.RuneCountInString(title) <= sessionTitleMaxRunes {
-		return title
-	}
-
-	runes := []rune(title)
-
-	return strings.TrimSpace(string(runes[:sessionTitleMaxRunes-3])) + "..."
 }
 
 func (s *session) sessionInfo() acp.SessionInfo {
@@ -291,6 +275,7 @@ func (s *session) sessionInfo() acp.SessionInfo {
 	}
 
 	info := acp.SessionInfo{
+		Meta:                  wire.NativeSessionMeta(vendor, s.nativeID),
 		SessionId:             s.id,
 		Title:                 &title,
 		Cwd:                   s.cwd,

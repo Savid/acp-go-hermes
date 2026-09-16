@@ -12,7 +12,12 @@ func TestOptionDefaults(t *testing.T) {
 
 	options := applyOptions(nil)
 	require.Equal(t, "acp-go-hermes", options.AgentName)
-	require.Equal(t, int64(6291456), options.ImageLimits.MaxInputBytesPerImage)
+	require.Equal(t, ImageLimits{
+		MaxInputBytesPerImage:     6291456,
+		MaxInputBytesPerPrompt:    6291456,
+		MaxOutputBytesPerImage:    6291456,
+		MaxOutputBytesPerToolCall: 6291456,
+	}, options.ImageLimits, "every omitted image limit falls back to the default")
 	require.Equal(t, defaultMaxActiveSessions, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, defaultMaxConcurrentClientCalls, options.ConcurrencyLimits.MaxConcurrentClientCalls)
 	require.Equal(t, defaultSessionStoreLoadTimeout, options.SessionStoreLoadTimeout)

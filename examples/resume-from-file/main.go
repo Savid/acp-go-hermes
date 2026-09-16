@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,23 +14,41 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 
 	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/wire"
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
 // fileStore is an in-memory store whose whole content is written to one JSON
-// file after every write. It is an example, not a durable store.
+// file after every write. It is an example, not a durable store, and it
+// implements acpcore.SessionStore in full, including tombstone finality.
 type fileStore struct {
-	path    string
-	entries map[string][]acpcore.SessionStoreEntry
+	mu   sync.Mutex
+	path string
+	data storeContent
+}
+
+// storeContent is the persisted form: the live records, when each was last
+// written, and the tombstones that keep a deleted record deleted.
+type storeContent struct {
+	Entries    map[string][]acpcore.SessionStoreEntry `json:"entries"`
+	UpdatedAt  map[string]int64                       `json:"updatedAt"`
+	Tombstones map[string]int64                       `json:"tombstones"`
 }
 
 func loadFileStore(path string) (*fileStore, error) {
-	store := &fileStore{path: path, entries: make(map[string][]acpcore.SessionStoreEntry)}
+	store := &fileStore{path: path, data: storeContent{
+		Entries:    make(map[string][]acpcore.SessionStoreEntry),
+		UpdatedAt:  make(map[string]int64),
+		Tombstones: make(map[string]int64),
+	}}
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -39,13 +59,48 @@ func loadFileStore(path string) (*fileStore, error) {
 		return nil, err
 	}
 
-	return store, json.Unmarshal(data, &store.entries)
+	if err := json.Unmarshal(data, &store.data); err != nil {
+		return nil, err
+	}
+
+	if store.data.Entries == nil {
+		store.data.Entries = make(map[string][]acpcore.SessionStoreEntry)
+	}
+
+	if store.data.UpdatedAt == nil {
+		store.data.UpdatedAt = make(map[string]int64)
+	}
+
+	if store.data.Tombstones == nil {
+		store.data.Tombstones = make(map[string]int64)
+	}
+
+	return store, nil
 }
 
 func storeKey(key acpcore.SessionKey) string { return key.SessionID + "\x00" + key.Subpath }
 
+func parseStoreKey(encoded string) acpcore.SessionKey {
+	id, subpath, _ := strings.Cut(encoded, "\x00")
+
+	return acpcore.SessionKey{SessionID: id, Subpath: subpath}
+}
+
+func cloneEntries(entries []acpcore.SessionStoreEntry) []acpcore.SessionStoreEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	cloned := make([]acpcore.SessionStoreEntry, 0, len(entries))
+	for _, entry := range entries {
+		cloned = append(cloned, bytes.Clone(entry))
+	}
+
+	return cloned
+}
+
 func (s *fileStore) save() error {
-	data, err := json.Marshal(s.entries)
+	data, err := json.Marshal(s.data)
 	if err != nil {
 		return err
 	}
@@ -53,66 +108,181 @@ func (s *fileStore) save() error {
 	return os.WriteFile(s.path, data, 0o600)
 }
 
-func (s *fileStore) Append(_ context.Context, key acpcore.SessionKey, entries []acpcore.SessionStoreEntry) error {
-	if len(entries) == 0 {
-		return nil
+// tombstoned reports whether a record is deleted, either directly or through
+// its session's main tombstone.
+func (s *fileStore) tombstoned(key acpcore.SessionKey) bool {
+	if _, ok := s.data.Tombstones[storeKey(key)]; ok {
+		return true
 	}
 
-	s.entries[storeKey(key)] = append(s.entries[storeKey(key)], entries...)
+	if key.Subpath != acpcore.SessionStoreMainSubpath {
+		_, ok := s.data.Tombstones[storeKey(acpcore.SessionKey{SessionID: key.SessionID})]
 
-	return s.save()
+		return ok
+	}
+
+	return false
 }
 
-func (s *fileStore) Load(_ context.Context, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
-	return s.entries[storeKey(key)], nil
+func (s *fileStore) Load(_ context.Context, sessionID string) (map[string][]acpcore.SessionStoreEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if sessionID == "" || s.tombstoned(acpcore.SessionKey{SessionID: sessionID}) {
+		return nil, nil //nolint:nilnil // Missing or tombstoned sessions have no generation.
+	}
+
+	var generation map[string][]acpcore.SessionStoreEntry
+
+	for encoded, entries := range s.data.Entries {
+		key := parseStoreKey(encoded)
+		if key.SessionID != sessionID || s.tombstoned(key) {
+			continue
+		}
+
+		if generation == nil {
+			generation = make(map[string][]acpcore.SessionStoreEntry)
+		}
+
+		generation[key.Subpath] = cloneEntries(entries)
+	}
+
+	return generation, nil
 }
 
 func (s *fileStore) Replace(_ context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
-	for key := range s.entries {
-		if strings.HasPrefix(key, main.SessionID+"\x00") {
-			delete(s.entries, key)
+	if main.SessionID == "" {
+		return acpcore.ErrSessionIDRequired
+	}
+
+	if main.Subpath != acpcore.SessionStoreMainSubpath {
+		return fmt.Errorf("main subpath must be %q", acpcore.SessionStoreMainSubpath)
+	}
+
+	if err := checkReplacements(main, replacements); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// A tombstone this write did not create is final.
+	if s.tombstoned(main) {
+		return nil
+	}
+
+	now := time.Now().UnixMilli()
+
+	for encoded := range s.data.Entries {
+		if parseStoreKey(encoded).SessionID != main.SessionID {
+			continue
 		}
+
+		delete(s.data.Entries, encoded)
+		delete(s.data.UpdatedAt, encoded)
+		s.data.Tombstones[encoded] = now
 	}
 
 	for _, replacement := range replacements {
-		s.entries[storeKey(replacement.Key)] = replacement.Entries
+		encoded := storeKey(replacement.Key)
+		s.data.Entries[encoded] = cloneEntries(replacement.Entries)
+		s.data.UpdatedAt[encoded] = now
+		delete(s.data.Tombstones, encoded)
 	}
 
 	return s.save()
 }
 
-func (s *fileStore) Delete(_ context.Context, key acpcore.SessionKey) error {
-	for candidate := range s.entries {
-		if strings.HasPrefix(candidate, key.SessionID+"\x00") && (key.Subpath == "" || candidate == storeKey(key)) {
-			delete(s.entries, candidate)
+// checkReplacements validates the whole set before any key is written.
+func checkReplacements(main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	mainCount := 0
+	seen := make(map[acpcore.SessionKey]struct{}, len(replacements))
+
+	for _, replacement := range replacements {
+		if replacement.Key.SessionID != main.SessionID {
+			return fmt.Errorf("replacement key %q does not belong to session %q", storeKey(replacement.Key), main.SessionID)
 		}
+
+		if _, duplicate := seen[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement key %q", storeKey(replacement.Key))
+		}
+
+		seen[replacement.Key] = struct{}{}
+
+		if replacement.Key.Subpath == acpcore.SessionStoreMainSubpath {
+			mainCount++
+		}
+	}
+
+	if mainCount != 1 {
+		return errors.New("replacements must include the main key exactly once")
+	}
+
+	return nil
+}
+
+func (s *fileStore) Delete(_ context.Context, key acpcore.SessionKey) error {
+	if key.SessionID == "" {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	matched := false
+
+	for encoded := range s.data.Entries {
+		candidate := parseStoreKey(encoded)
+		if candidate.SessionID != key.SessionID {
+			continue
+		}
+
+		if key.Subpath != acpcore.SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
+			continue
+		}
+
+		delete(s.data.Entries, encoded)
+		delete(s.data.UpdatedAt, encoded)
+		s.data.Tombstones[encoded] = now
+		matched = true
+	}
+
+	if !matched {
+		s.data.Tombstones[storeKey(key)] = now
+	}
+
+	if key.Subpath == acpcore.SessionStoreMainSubpath {
+		s.data.Tombstones[storeKey(acpcore.SessionKey{SessionID: key.SessionID})] = now
 	}
 
 	return s.save()
 }
 
 func (s *fileStore) ListSessions(context.Context) ([]acpcore.SessionSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	summaries := make([]acpcore.SessionSummary, 0)
 
-	for key := range s.entries {
-		if id, subpath, _ := strings.Cut(key, "\x00"); subpath == "" {
-			summaries = append(summaries, acpcore.SessionSummary{SessionID: id})
+	for encoded := range s.data.Entries {
+		key := parseStoreKey(encoded)
+		if key.SessionID == "" || key.Subpath != acpcore.SessionStoreMainSubpath || s.tombstoned(key) {
+			continue
 		}
+
+		summaries = append(summaries, acpcore.SessionSummary{SessionID: key.SessionID, UpdatedAtUnixMilli: s.data.UpdatedAt[encoded]})
 	}
+
+	slices.SortFunc(summaries, func(left, right acpcore.SessionSummary) int {
+		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
+			return byTime
+		}
+
+		return strings.Compare(left.SessionID, right.SessionID)
+	})
 
 	return summaries, nil
-}
-
-func (s *fileStore) ListSubkeys(_ context.Context, key acpcore.SessionKey) ([]string, error) {
-	subkeys := make([]string, 0)
-
-	for candidate := range s.entries {
-		if id, subpath, _ := strings.Cut(candidate, "\x00"); id == key.SessionID && subpath != "" {
-			subkeys = append(subkeys, subpath)
-		}
-	}
-
-	return subkeys, nil
 }
 
 type printer struct{ output io.Writer }
@@ -245,13 +415,13 @@ func converse(ctx context.Context, conn agentConnection, cwd string, sessionID a
 	}
 
 	if sessionID == "" {
-		session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd))
+		session, err := conn.NewSession(ctx, wire.NewSessionRequest(cwd))
 		if err != nil {
 			return "", err
 		}
 
 		sessionID = session.SessionId
-	} else if _, err := conn.ResumeSession(ctx, hermesacp.ResumeSessionRequest(sessionID, cwd)); err != nil {
+	} else if _, err := conn.ResumeSession(ctx, wire.ResumeSessionRequest(sessionID, cwd)); err != nil {
 		return "", err
 	}
 
@@ -259,7 +429,7 @@ func converse(ctx context.Context, conn agentConnection, cwd string, sessionID a
 		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: sessionID})
 	}()
 
-	if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(sessionID, prompt)); err != nil {
+	if _, err := conn.Prompt(ctx, wire.TextPromptRequest(sessionID, prompt)); err != nil {
 		return "", err
 	}
 

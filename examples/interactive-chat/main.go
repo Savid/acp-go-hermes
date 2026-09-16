@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/savid/acp-go-core/wire"
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
@@ -162,12 +163,12 @@ func chat(ctx context.Context, conn agentConnection, input *bufio.Reader, cwd st
 		return err
 	}
 
-	var opts []hermesacp.SessionRequestOption
+	var opts []wire.SessionRequestOption
 	if model != "" {
 		opts = append(opts, hermesacp.WithSessionHermesOptions(hermesacp.NewHermesOptions(hermesacp.WithHermesModel(model))))
 	}
 
-	session, err := conn.NewSession(ctx, hermesacp.NewSessionRequest(cwd, opts...))
+	session, err := conn.NewSession(ctx, wire.NewSessionRequest(cwd, opts...))
 	if err != nil {
 		return err
 	}
@@ -186,7 +187,7 @@ func chat(ctx context.Context, conn agentConnection, input *bufio.Reader, cwd st
 			return nil
 		}
 
-		if _, err := conn.Prompt(ctx, hermesacp.TextPromptRequest(session.SessionId, text)); err != nil {
+		if _, err := conn.Prompt(ctx, wire.TextPromptRequest(session.SessionId, text)); err != nil {
 			return err
 		}
 

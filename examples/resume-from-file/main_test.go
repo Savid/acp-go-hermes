@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/storetest"
 )
 
 type fakeAgent struct {
@@ -57,7 +58,20 @@ func TestConverseNewAndResume(t *testing.T) {
 	require.Equal(t, 2, agent.prompts)
 }
 
-func TestFileStoreRoundTrip(t *testing.T) {
+func TestFileStoreMeetsTheStoreContract(t *testing.T) {
+	t.Parallel()
+
+	storetest.Run(t, func(t *testing.T) acpcore.SessionStore {
+		t.Helper()
+
+		store, err := loadFileStore(filepath.Join(t.TempDir(), "store.json"))
+		require.NoError(t, err)
+
+		return store
+	})
+}
+
+func TestFileStoreSurvivesReload(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "store.json")
@@ -66,30 +80,33 @@ func TestFileStoreRoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 	key := acpcore.SessionKey{SessionID: "s"}
-	require.NoError(t, store.Append(ctx, key, []acpcore.SessionStoreEntry{[]byte(`{"a":1}`)}))
-	require.NoError(t, store.Append(ctx, acpcore.SessionKey{SessionID: "s", Subpath: "config"}, []acpcore.SessionStoreEntry{[]byte(`{}`)}))
+	config := acpcore.SessionKey{SessionID: "s", Subpath: "config"}
+
+	require.NoError(t, store.Replace(ctx, key, []acpcore.SessionStoreReplacement{
+		{Key: key, Entries: []acpcore.SessionStoreEntry{[]byte(`{"a":1}`)}},
+		{Key: config, Entries: []acpcore.SessionStoreEntry{[]byte(`{}`)}},
+	}))
 
 	reloaded, err := loadFileStore(path)
 	require.NoError(t, err)
 
-	rows, err := reloaded.Load(ctx, key)
+	generation, err := reloaded.Load(ctx, "s")
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
+	require.Len(t, generation[""], 1)
+	require.Len(t, generation["config"], 1)
 
 	sessions, err := reloaded.ListSessions(ctx)
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
 
-	subkeys, err := reloaded.ListSubkeys(ctx, key)
-	require.NoError(t, err)
-	require.Equal(t, []string{"config"}, subkeys)
-
-	require.NoError(t, reloaded.Replace(ctx, key, []acpcore.SessionStoreReplacement{{Key: key, Entries: nil}}))
 	require.NoError(t, reloaded.Delete(ctx, key))
 
-	sessions, err = reloaded.ListSessions(ctx)
+	final, err := loadFileStore(path)
 	require.NoError(t, err)
-	require.Empty(t, sessions)
+
+	sessions, err = final.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Empty(t, sessions, "a tombstone survives the reload that a host restarts through")
 
 	var out bytes.Buffer
 

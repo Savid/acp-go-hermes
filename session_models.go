@@ -51,7 +51,7 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 
 		option := acp.SessionConfigSelectOption{Value: acp.SessionConfigValueId(id), Name: name}
 		if native {
-			option.Meta = map[string]any{vendor: map[string]any{"modelId": id, "supportedEffortLevels": effortLevels()}}
+			option.Meta = map[string]any{vendor: map[string]any{"modelId": id}}
 		}
 
 		models = append(models, option)
@@ -136,7 +136,7 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, s.startFailure(ctx, err)
 	}
 
-	if err := s.commitMirror(ctx); err != nil {
+	if err := s.commitMirror(ctx, rt); err != nil {
 		return nil, wire.InternalFailure(vendor, "")
 	}
 

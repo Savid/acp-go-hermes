@@ -93,12 +93,8 @@ linters:
           - gocritic
           - goconst
           - gosec
-          - wsl
           - wsl_v5
         path: _test\.go
-      - linters:
-          - goconst
-        path: cmd/tools/
     paths:
       - third_party$
       - builtin$

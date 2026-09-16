@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -21,6 +22,7 @@ import (
 // sessionRecord carries the accepted session configuration beside its native export.
 type sessionRecord struct {
 	SessionID             string            `json:"sessionId"`
+	NativeSessionID       string            `json:"nativeSessionId"`
 	Cwd                   string            `json:"cwd"`
 	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
 	Env                   map[string]string `json:"env,omitempty"`
@@ -34,11 +36,11 @@ func (s *session) record() sessionRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return sessionRecord{SessionID: string(s.id), Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: cloneStringMap(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, UpdatedAtUnixMilli: time.Now().UnixMilli()}
+	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, UpdatedAtUnixMilli: time.Now().UnixMilli()}
 }
 
 func (r sessionRecord) validate(id string) error {
-	if r.SessionID != id || !filepath.IsAbs(r.Cwd) || r.UpdatedAtUnixMilli <= 0 {
+	if r.NativeSessionID == "" || r.SessionID != id || !filepath.IsAbs(r.Cwd) || r.UpdatedAtUnixMilli <= 0 {
 		return errors.New("invalid session record")
 	}
 
@@ -56,13 +58,15 @@ func (r sessionRecord) validate(id string) error {
 	return nil
 }
 
-// commitMirror replaces only a complete native snapshot and its matching carrier.
-func (s *session) commitMirror(ctx context.Context) error {
+// commitMirror replaces only a complete native snapshot and its matching
+// carrier. The runtime the caller dispatched on reads the snapshot, so a
+// commit that cannot be attempted fails instead of reporting success.
+func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 
-	rows, err := s.snapshotRows(ctx)
-	if err != nil || len(rows) == 0 {
+	rows, err := s.snapshotRows(ctx, rt)
+	if err != nil {
 		return err
 	}
 
@@ -73,13 +77,13 @@ func (s *session) commitMirror(ctx context.Context) error {
 	return err
 }
 
-func (s *session) snapshotRows(ctx context.Context) ([][]byte, error) {
+func (s *session) snapshotRows(ctx context.Context, rt *runtime) ([][]byte, error) {
 	s.mu.Lock()
-	rt, id := s.runtime, s.id
+	id := s.nativeID
 	s.mu.Unlock()
 
 	if rt == nil || id == "" {
-		return nil, nil
+		return nil, errors.New("native session binding missing")
 	}
 
 	var active hermes.ActiveListResult
@@ -96,7 +100,7 @@ func (s *session) snapshotRows(ctx context.Context) ([][]byte, error) {
 
 		found = true
 
-		if native.SessionKey != string(id) {
+		if native.SessionKey != id {
 			s.poisonSession(ctx, "native_session_identity_drift")
 
 			return nil, errors.New("native session identity changed")
@@ -107,7 +111,7 @@ func (s *session) snapshotRows(ctx context.Context) ([][]byte, error) {
 		return nil, errors.New("native session binding missing")
 	}
 
-	snapshot, err := rt.endpoint.Export(ctx, string(id))
+	snapshot, err := rt.endpoint.Export(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -133,17 +137,19 @@ func (a *Agent) loadStored(ctx context.Context, id acp.SessionId) (storedSession
 
 	var record sessionRecord
 
-	rows, err := sessionlog.Load(ctx, a.store, string(id), &record)
-	if err == nil && len(rows) != 0 {
+	rows, found, err := sessionlog.Load(ctx, a.store, string(id), &record)
+	if err == nil && found {
 		err = record.validate(string(id))
 	}
 
-	if err == nil && len(rows) > 1 {
+	// One native conversation export is the whole main record. A generation
+	// with any other row count is not a hermes conversation.
+	if err == nil && found && len(rows) != 1 {
 		err = errors.New("invalid native snapshot count")
 	}
 
-	if err == nil && len(rows) == 1 {
-		_, err = decodeSnapshot(rows[0], string(id))
+	if err == nil && found {
+		_, err = decodeSnapshot(rows[0], record.NativeSessionID)
 	}
 
 	finish(err)
@@ -152,7 +158,7 @@ func (a *Agent) loadStored(ctx context.Context, id acp.SessionId) (storedSession
 		return storedSession{}, a.restoreRefused(ctx, id, err)
 	}
 
-	return storedSession{rows: rows, record: record, found: len(rows) > 0}, nil
+	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
 type nativeSnapshot struct {
@@ -176,7 +182,11 @@ func decodeSnapshot(data []byte, id string) (nativeSnapshot, error) {
 // hydrate imports a missing native conversation. An existing conversation wins
 // only when its history contains every stored message in order.
 func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession) ([][]byte, error) {
-	native, err := rt.endpoint.Export(ctx, string(s.id))
+	if len(stored.rows) != 1 {
+		return nil, s.agent.restoreRefused(ctx, s.id, errors.New("invalid native snapshot count"))
+	}
+
+	native, err := rt.endpoint.Export(ctx, s.nativeID)
 	if err != nil {
 		return nil, s.agent.restoreRefused(ctx, s.id, err)
 	}
@@ -189,12 +199,12 @@ func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession
 		return stored.rows, nil
 	}
 
-	want, err := decodeSnapshot(stored.rows[0], string(s.id))
+	want, err := decodeSnapshot(stored.rows[0], s.nativeID)
 	if err != nil {
 		return nil, s.agent.restoreRefused(ctx, s.id, err)
 	}
 
-	have, err := decodeSnapshot(native, string(s.id))
+	have, err := decodeSnapshot(native, s.nativeID)
 	if err != nil {
 		return nil, s.agent.restoreRefused(ctx, s.id, err)
 	}
@@ -214,7 +224,7 @@ func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession
 
 // Native import assigns new row ids. They do not identify message content.
 func messageContent(message map[string]any) map[string]any {
-	cloned := cloneAnyMap(message)
+	cloned := wire.CloneMap(message)
 	delete(cloned, fieldID)
 	delete(cloned, nativeSessionIDKey)
 
@@ -239,8 +249,8 @@ func storedTitle(id string, rows [][]byte) string {
 
 	for _, message := range snapshot.Messages {
 		if message["role"] == roleUser {
-			if text, ok := message["content"].(string); ok && normalizeTitle(text) != "" {
-				return normalizeTitle(text)
+			if text, ok := message["content"].(string); ok && wire.NormalizeTitle(text) != "" {
+				return wire.NormalizeTitle(text)
 			}
 		}
 	}
@@ -253,7 +263,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 		return nil
 	}
 
-	snapshot, err := decodeSnapshot(rows[0], string(s.id))
+	snapshot, err := decodeSnapshot(rows[0], s.nativeID)
 	if err != nil {
 		return err
 	}
@@ -352,12 +362,12 @@ func nativeText(content any) []string {
 
 // persistDraft gives an empty native conversation a durable row before NewSession returns.
 func (s *session) persistDraft(ctx context.Context, rt *runtime) error {
-	snapshot, err := rt.endpoint.Export(ctx, string(s.id))
+	snapshot, err := rt.endpoint.Export(ctx, s.nativeID)
 	if err != nil || len(snapshot) != 0 {
 		return err
 	}
 
-	draft, err := json.Marshal(map[string]any{fieldID: string(s.id), fieldSource: nativeSource, fieldCwd: s.cwd, "started_at": time.Now().Unix(), "messages": []any{}})
+	draft, err := json.Marshal(map[string]any{fieldID: s.nativeID, fieldSource: nativeSource, fieldCwd: s.cwd, "started_at": time.Now().Unix(), "messages": []any{}})
 	if err != nil {
 		return err
 	}

@@ -9,8 +9,13 @@ session started over ACP can be continued natively:
 
 ```sh
 acp-go-hermes              # host runs a session in /work
-cd /work && hermes chat --cli --resume SESSION_ID
+cd /work && hermes chat --cli --resume NATIVE_SESSION_ID
 ```
+
+New, load, and resume responses and session-list entries expose the current
+native ID as `_meta.hermes.nativeSessionId`. Use it for native CLI continuation.
+ACP requests continue to use the stable ACP `sessionId`. The store's configuration
+record saves both IDs with the matching native history.
 
 ## Install
 
@@ -18,7 +23,7 @@ cd /work && hermes chat --cli --resume SESSION_ID
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-Requires `hermes` 0.21.2 or newer on `PATH` or named with `-path`.
+Requires `hermes` 0.21.3 or newer on `PATH` or named with `-path`.
 
 ## Run
 
@@ -30,7 +35,7 @@ acp-go-hermes [-path hermes] [-home DIR] [-scratch-dir DIR] [-model provider/id]
 |---|---|
 | `-path` | hermes executable; a bare name is searched on `PATH` |
 | `-home` | hermes config root, passed as `HERMES_HOME`; empty inherits hermes's own resolution |
-| `-scratch-dir` | parent for ephemeral adapter state; empty means the system temp directory |
+| `-scratch-dir` | accepted and ignored; this adapter allocates no ephemeral state |
 | `-model` | default model for new sessions as `provider/id` |
 | `-seed-file` | `<relpath>=<hostpath>` written into hermes's config root before launch; repeatable |
 | `-debug` | debug logs to stderr |
@@ -66,10 +71,16 @@ Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
 | `extraPathDirs` | absolute directories prepended to `PATH`, in order |
 | `effort` | session reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 
+The session environment reaches Hermes and its direct subprocesses. The native
+terminal starts a login shell, whose system and user startup files can reorder
+`PATH`.
+
 Unknown option fields and nonempty `mcpServers` are invalid parameters.
 `outputSchema` is unsupported. Authentication uses Hermes's native configuration.
 Permissions are native approvals; an unavailable or cancelled host answer denies
-that request. Native clarify requests use ACP form elicitation.
+that request. Native clarify requests use ACP form elicitation. Sudo, secret,
+and terminal-buffer requests receive an empty value; desktop, vault, and setup
+bridges are unsupported.
 
 `_meta.hermes.rawEvent.enabled` forwards native events on `_hermes/rawEvent`.
 Optional lifecycle negotiation enables ordered lifecycle updates.
@@ -78,8 +89,17 @@ Optional lifecycle negotiation enables ordered lifecycle updates.
 
 `session/set_config_option` accepts `model` (`provider/id`) and `effort`.
 The model menu contains Hermes's catalog and any `WithConfiguredModels` entries.
+
+### Image input
+
 Images are accepted as inline data or through `WithInputHandoffRoot` and passed
-to Hermes's image attachment API. Image output is not advertised.
+to Hermes's image attachment API. Put all text, resource links, and text
+resources before the images; images alone and multiple images are accepted.
+Forwarded text after the first image fails with
+`{"error":"unsupported","field":"prompt"}` before any native image upload
+or prompt dispatch. User-only text excluded from native input does not affect
+ordering. An image blob's URI is provenance and is not sent as prompt text.
+Image output is not advertised.
 
 ### Session store
 
@@ -96,8 +116,8 @@ or shorter native histories fail restore. Each completed prompt commits its
 snapshot before returning. Close preserves Hermes's native state, and delete
 removes the store entry without deleting the native conversation.
 
-The ACP session ID is the durable Hermes conversation ID. Transient gateway IDs
-stay internal. Native compression that changes the durable ID poisons the session
+The native binding identifies the durable Hermes conversation. Transient gateway
+IDs stay internal. Native compression that changes the durable ID poisons the session
 instead of storing a different conversation under the original ID.
 
 ## Development

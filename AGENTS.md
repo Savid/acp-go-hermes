@@ -5,7 +5,7 @@
 This Go module exposes the local `hermes` CLI as an Agent Client Protocol agent.
 Each ACP session drives one `hermes serve` process that inherits the
 adapter's environment and keeps its session in hermes's own home, so a session
-started over ACP can be continued natively with `hermes chat --cli --resume SESSION_ID` afterwards.
+started over ACP can be continued natively with `hermes chat --cli --resume NATIVE_SESSION_ID` afterwards.
 
 ## Project Map
 
@@ -16,7 +16,7 @@ started over ACP can be continued natively with `hermes chat --cli --resume SESS
   prompt turns, permissions and elicitation, lifecycle stream, store mirror,
   replay, config options, and image input.
 - `internal/hermes`: WebSocket JSON-RPC client, HTTP session import/export,
-  launch arguments, and native version validation.
+  launch arguments, and the native version probe and floor.
 - `integration`: gated tests against the installed hermes.
 - `examples`: runnable ACP clients.
 

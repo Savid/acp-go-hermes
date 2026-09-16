@@ -1,0 +1,47 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+      "seq": 2,
+      "session_id": "fixture-session",
+      "type": "message.start"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+      "payload": {
+        "text": "synthtok-00001 "
+      },
+      "seq": 3,
+      "session_id": "fixture-session",
+      "type": "message.delta"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+      "payload": {
+        "status": "complete",
+        "text": "[synthetic heavy turn] deltas=1 out_tokens=1 interrupted=False checksum=ed40",
+        "usage": {
+          "active_subagents": 0,
+          "calls": 1,
+          "completion": 1,
+          "input": 0,
+          "model": "synthetic-heavy",
+          "output": 1,
+          "prompt": 0,
+          "reasoning": 0,
+          "total": 1
+        }
+      },
+      "seq": 4,
+      "session_id": "fixture-session",
+      "type": "message.complete"
+    }
+  }
+]

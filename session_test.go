@@ -12,13 +12,11 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
-	"github.com/savid/acp-go-core/storetest"
+
+	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/stretchr/testify/require"
 )
-
-func TestStoreContract(t *testing.T) {
-	storetest.Run(t, func(_ *testing.T) acpcore.SessionStore { return acpcore.NewInMemorySessionStore() })
-}
 
 func TestConversationRestoreAndNativeContinuation(t *testing.T) {
 	t.Parallel()
@@ -26,7 +24,7 @@ func TestConversationRestoreAndNativeContinuation(t *testing.T) {
 	home, cwd := t.TempDir(), t.TempDir()
 	h := newHarness(t, WithHome(home), WithSessionStore(store))
 	h.initialize(withLifecycle())
-	created, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd, WithSessionAdditionalDirectories(t.TempDir())))
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, wire.WithSessionAdditionalDirectories(t.TempDir())))
 	require.NoError(t, err)
 	response, err := h.prompt(created.SessionId, "HELLO", promptMeta(1))
 	require.NoError(t, err)
@@ -47,7 +45,7 @@ func TestConversationRestoreAndNativeContinuation(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 	restored := newHarness(t, WithHome(home), WithSessionStore(store))
 	restored.initialize()
-	_, err = restored.conn.LoadSession(restored.ctx(), LoadSessionRequest(created.SessionId, cwd))
+	_, err = restored.conn.LoadSession(restored.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
 	require.NoError(t, err)
 	require.Contains(t, agentText(restored.rec.snapshot()), "native answer")
 	_, err = restored.prompt(created.SessionId, "HELLO", nil)
@@ -57,15 +55,15 @@ func TestConversationRestoreAndNativeContinuation(t *testing.T) {
 	newHome := t.TempDir()
 	hydrated := newHarness(t, WithHome(newHome), WithSessionStore(store))
 	hydrated.initialize()
-	_, err = hydrated.conn.ResumeSession(hydrated.ctx(), ResumeSessionRequest(created.SessionId, cwd, WithSessionHermesOptions(NewHermesOptions(WithHermesEffort("high")))))
+	_, err = hydrated.conn.ResumeSession(hydrated.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd, WithSessionHermesOptions(NewHermesOptions(WithHermesEffort("high")))))
 	require.NoError(t, err)
 	require.Empty(t, agentText(hydrated.rec.snapshot()))
 	require.FileExists(t, filepath.Join(newHome, string(created.SessionId)+".json"))
 	_, err = hydrated.prompt(created.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	_, err = hydrated.conn.UnstableDeleteSession(hydrated.ctx(), DeleteSessionRequest(created.SessionId))
+	_, err = hydrated.conn.UnstableDeleteSession(hydrated.ctx(), wire.DeleteSessionRequest(created.SessionId))
 	require.NoError(t, err)
-	_, err = hydrated.conn.LoadSession(hydrated.ctx(), LoadSessionRequest(created.SessionId, cwd))
+	_, err = hydrated.conn.LoadSession(hydrated.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
 	require.Equal(t, "unknown session", requestErrorData(t, err)[stopReasonError])
 	require.FileExists(t, filepath.Join(newHome, string(created.SessionId)+".json"))
 }
@@ -88,7 +86,7 @@ func TestNativePermissionsAndElicitation(t *testing.T) {
 	}
 	h := newHarness(t)
 	h.rec.elicit = func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
-		return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{Content: map[string]any{"answer": "blue"}}}, nil
+		return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{Content: map[string]any{clarifyAnswerKey: "blue"}}}, nil
 	}
 	h.initialize(withLifecycle(), withFormElicitation())
 	session := h.newSession()
@@ -119,12 +117,12 @@ func TestFailedSnapshotKeepsCommittedConversation(t *testing.T) {
 	_, err := h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
 	key := acpcore.SessionKey{SessionID: string(session.SessionId)}
-	before, err := store.Load(t.Context(), key)
+	before, err := loadEntries(t.Context(), store, key)
 	require.NoError(t, err)
 	store.fail.Store(true)
 	_, err = h.prompt(session.SessionId, "HELLO", nil)
 	require.Equal(t, "hermes_turn_failed", requestErrorData(t, err)[stopReasonError])
-	after, err := store.Load(t.Context(), key)
+	after, err := loadEntries(t.Context(), store, key)
 	require.NoError(t, err)
 	require.Equal(t, before, after)
 	store.fail.Store(false)
@@ -178,7 +176,7 @@ func TestReplayPreservesToolsAndTextParts(t *testing.T) {
 	h.initialize()
 	agent := NewAgent(testOptions(t)...)
 	agent.attach(h.rec, nil)
-	s := &session{agent: agent, id: "conversation"}
+	s := &session{agent: agent, id: "acp-conversation", nativeID: "conversation"}
 	snapshot := []byte(`{"id":"conversation","messages":[{"role":"user","content":[{"type":"text","text":"read it"}]},{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},{"role":"tool","tool_call_id":"call-1","tool_name":"read_file","content":"file contents"},{"role":"assistant","content":"done"}]}`)
 	require.NoError(t, s.replay(t.Context(), [][]byte{snapshot}))
 	require.Eventually(t, func() bool { return agentText(h.rec.snapshot()) == "done" }, time.Second, time.Millisecond)
@@ -205,4 +203,156 @@ func TestClarifyChoiceValidation(t *testing.T) {
 	q.Multi = false
 	require.Equal(t, "red", q.answer("red"))
 	require.Nil(t, q.answer("green"))
+}
+
+type backgroundFaultStore struct {
+	acpcore.SessionStore
+	fail bool
+}
+
+func (s *backgroundFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail {
+		return errors.New("mirror store unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+func TestBackgroundCommitFailureFencesStream(t *testing.T) {
+	store := &backgroundFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	a := NewAgent(testOptions(t, WithSessionStore(store))...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(newRecorder(), nil)
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	store.fail = true
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	s.handleEvent(t.Context(), rt, hermes.Event{Type: eventMessageComplete, Payload: []byte(`{"text":"background","status":"complete"}`)})
+	require.False(t, s.lc.Active(), "a failed background commit fences the lifecycle stream")
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		return s.runtime == nil
+	}, testTimeout, time.Millisecond, "a failed background commit drops the gateway binding")
+	store.fail = false
+	request := wire.TextPromptRequest(created.SessionId, "HELLO")
+	request.Meta = promptMeta(1)
+	_, err = a.Prompt(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, s.lc.Active(), "the next prompt relaunches and publishes a new incarnation")
+}
+
+// gatewayLossStore ends the gateway generation from inside a durable commit,
+// after the snapshot has been read, and holds the commit until the loss has
+// been reaped, so the turn is committed and still settling when the generation
+// ends.
+type gatewayLossStore struct {
+	acpcore.SessionStore
+	lose  func()
+	armed atomic.Bool
+}
+
+func (s *gatewayLossStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.armed.CompareAndSwap(true, false) {
+		s.lose()
+	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+// The generation, not the way the turn ended, decides the fence: a gateway
+// lost while a turn that already reached its terminal result is still
+// settling ends the incarnation, so the next generation publishes its own.
+func TestGatewayLossAfterASettledTurnFencesTheIncarnation(t *testing.T) {
+	t.Parallel()
+
+	store := &gatewayLossStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	a := NewAgent(testOptions(t, WithSessionStore(store))...)
+	t.Cleanup(func() { _ = a.Close() })
+
+	rec := newRecorder()
+	a.attach(rec, nil)
+
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+
+	store.lose = func() {
+		rt.cancel()
+
+		for {
+			s.mu.Lock()
+			reaped := s.runtime == nil
+			s.mu.Unlock()
+
+			if reaped {
+				return
+			}
+
+			time.Sleep(time.Millisecond)
+		}
+	}
+	store.armed.Store(true)
+
+	first := wire.TextPromptRequest(created.SessionId, "HELLO")
+	first.Meta = promptMeta(1)
+	_, err = a.Prompt(t.Context(), first)
+	require.NoError(t, err)
+
+	second := wire.TextPromptRequest(created.SessionId, "HELLO")
+	second.Meta = promptMeta(2)
+	_, err = a.Prompt(t.Context(), second)
+	require.NoError(t, err)
+
+	require.Len(t, lifecycleStreams(rec.snapshot()), 2, "the relaunched gateway publishes a new incarnation")
+}
+
+// The readiness window ends with the child instead of running to the settle
+// timeout.
+func TestStartupFailsFastWhenTheChildDies(t *testing.T) {
+	t.Parallel()
+
+	// hermes cannot create its home under a regular file, so the child exits
+	// before it can serve the gateway.
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+
+	h := newHarness(t, WithHome(filepath.Join(blocker, "home")))
+	h.initialize()
+
+	start := time.Now()
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Equal(t, "hermes_internal_failure", requestErrorData(t, err)[stopReasonError])
+	require.Less(t, time.Since(start), 5*time.Second, "a child that already exited ends the readiness window")
+}
+
+func TestConfiguredModelPrecedesNativeBuild(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithDefaultModel("fake/text-only"), WithEnv(map[string]string{fakeHermesEnv: "1", "ACP_GO_HERMES_TEST_BUILD_MODEL": "fake/text-only"}))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest(session.SessionId, "HELLO"))
+	require.NoError(t, err)
 }

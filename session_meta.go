@@ -1,14 +1,12 @@
 package hermesacp
 
 import (
-	"errors"
-	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/coder/acp-go-sdk"
 
 	"github.com/savid/acp-go-core/lifecycle"
-	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
@@ -19,7 +17,6 @@ const (
 	metaModelKey         = "model"
 	metaEnvKey           = "env"
 	metaExtraPathDirsKey = "extraPathDirs"
-	metaOutputSchemaKey  = "outputSchema"
 	metaEffortKey        = "effort"
 	metaEnabledKey       = "enabled"
 )
@@ -33,9 +30,6 @@ type HermesOptions struct {
 	// ExtraPathDirs are absolute directories prepended, in order, to the PATH
 	// of this session's hermes process.
 	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
-	// OutputSchema requests structured output. hermes has no native surface for
-	// it, so a session carrying it fails at session start.
-	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	// Effort is a reasoning-level value passed unchanged to hermes.
 	Effort string `json:"effort,omitempty"`
 }
@@ -60,9 +54,9 @@ func WithHermesModel(model string) HermesOption {
 
 // WithHermesEnv configures the session environment overlay.
 func WithHermesEnv(env map[string]string) HermesOption {
-	cloned := cloneStringMap(env)
+	cloned := maps.Clone(env)
 
-	return func(options *HermesOptions) { options.Env = cloneStringMap(cloned) }
+	return func(options *HermesOptions) { options.Env = maps.Clone(cloned) }
 }
 
 // WithHermesExtraPathDirs configures the directories prepended to the session PATH.
@@ -70,14 +64,6 @@ func WithHermesExtraPathDirs(dirs ...string) HermesOption {
 	cloned := slices.Clone(dirs)
 
 	return func(options *HermesOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
-}
-
-// WithHermesOutputSchema configures structured output, which hermes refuses at
-// session start.
-func WithHermesOutputSchema(schema map[string]any) HermesOption {
-	cloned := cloneAnyMap(schema)
-
-	return func(options *HermesOptions) { options.OutputSchema = cloneAnyMap(cloned) }
 }
 
 // WithHermesEffort configures the reasoning level passed to hermes.
@@ -94,15 +80,11 @@ func (options HermesOptions) Meta() map[string]any {
 	}
 
 	if options.Env != nil {
-		values[metaEnvKey] = cloneStringMap(options.Env)
+		values[metaEnvKey] = maps.Clone(options.Env)
 	}
 
 	if options.ExtraPathDirs != nil {
 		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
-	}
-
-	if options.OutputSchema != nil {
-		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
 	}
 
 	if options.Effort != "" {
@@ -114,9 +96,8 @@ func (options HermesOptions) Meta() map[string]any {
 
 func (options HermesOptions) clone() HermesOptions {
 	cloned := options
-	cloned.Env = cloneStringMap(options.Env)
+	cloned.Env = maps.Clone(options.Env)
 	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
-	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
 
 	return cloned
 }
@@ -147,7 +128,7 @@ type sessionMeta struct {
 // namespaces are ignored; the lifecycle literal is refused by name.
 func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 	if refusal := lifecycle.RejectKey(meta); refusal != nil {
-		return sessionMeta{}, invalidParam(refusal)
+		return sessionMeta{}, wire.ParamRefusal(refusal)
 	}
 
 	raw, exists := meta[vendor]
@@ -193,7 +174,7 @@ func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 
 	values, isObject := rawOptions.(map[string]any)
 	if !isObject {
-		return sessionMeta{}, wire.Unsupported(metaOptionPath(""))
+		return sessionMeta{}, wire.Unsupported(wire.MetaOptionPath(vendor, ""))
 	}
 
 	options, err := parseHermesOptions(values)
@@ -216,40 +197,33 @@ func parseHermesOptions(values map[string]any) (HermesOptions, *acp.RequestError
 		case metaModelKey:
 			model, ok := item.(string)
 			if !ok {
-				return HermesOptions{}, wire.Unsupported(metaOptionPath(key))
+				return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.Model = model
 		case metaEnvKey:
-			env, err := stringMapOption(item, metaOptionPath(key))
+			env, err := wire.StringMapOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return HermesOptions{}, err
 			}
 
 			options.Env = env
 		case metaExtraPathDirsKey:
-			dirs, err := stringSliceOption(item, metaOptionPath(key))
+			dirs, err := wire.StringSliceOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return HermesOptions{}, err
 			}
 
 			options.ExtraPathDirs = dirs
-		case metaOutputSchemaKey:
-			schema, ok := item.(map[string]any)
-			if !ok {
-				return HermesOptions{}, wire.Unsupported(metaOptionPath(key))
-			}
-
-			options.OutputSchema = cloneAnyMap(schema)
 		case metaEffortKey:
 			level, ok := item.(string)
 			if !ok || level == "" {
-				return HermesOptions{}, wire.Unsupported(metaOptionPath(key))
+				return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.Effort = level
 		default:
-			return HermesOptions{}, wire.Unsupported(metaOptionPath(key))
+			return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 		}
 	}
 
@@ -257,140 +231,15 @@ func parseHermesOptions(values map[string]any) (HermesOptions, *acp.RequestError
 }
 
 func validateHermesOptions(options HermesOptions) *acp.RequestError {
-	if options.OutputSchema != nil {
-		return wire.Unsupported(metaOptionPath(metaOutputSchemaKey))
-	}
-
 	if options.Model != "" {
 		if err := hermes.ModelSelectionShapeError(options.Model); err != nil {
-			return wire.Unsupported(metaOptionPath(metaModelKey))
+			return wire.Unsupported(wire.MetaOptionPath(vendor, metaModelKey))
 		}
 	}
 
 	if options.Effort != "" && !slices.Contains(effortLevels(), options.Effort) {
-		return wire.Unsupported(metaOptionPath(metaEffortKey))
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaEffortKey))
 	}
 
-	if err := process.ValidateNames(options.Env); err != nil {
-		var nameErr *process.NameError
-		if errors.As(err, &nameErr) {
-			return wire.Unsupported(metaOptionPath(metaEnvKey) + "." + nameErr.Key)
-		}
-
-		return wire.Unsupported(metaOptionPath(metaEnvKey))
-	}
-
-	if err := process.ValidateExtraPathDirs(options.ExtraPathDirs); err != nil {
-		var dirErr *process.PathDirError
-		if errors.As(err, &dirErr) {
-			return wire.Unsupported(fmt.Sprintf("%s[%d]", metaOptionPath(metaExtraPathDirsKey), dirErr.Index))
-		}
-
-		return wire.Unsupported(metaOptionPath(metaExtraPathDirsKey))
-	}
-
-	return nil
-}
-
-func metaOptionPath(key string) string {
-	path := "_meta." + vendor + "." + metaOptionsKey
-	if key == "" {
-		return path
-	}
-
-	return path + "." + key
-}
-
-func stringMapOption(value any, path string) (map[string]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case map[string]string:
-		return cloneStringMap(typed), nil
-	case map[string]any:
-		result := make(map[string]string, len(typed))
-		for key, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(path + "." + key)
-			}
-
-			result[key] = text
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func stringSliceOption(value any, path string) ([]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case []string:
-		return slices.Clone(typed), nil
-	case []any:
-		result := make([]string, 0, len(typed))
-		for index, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(fmt.Sprintf("%s[%d]", path, index))
-			}
-
-			result = append(result, text)
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if values == nil {
-		return nil
-	}
-
-	cloned := make(map[string]any, len(values))
-	for key, value := range values {
-		cloned[key] = cloneAny(value)
-	}
-
-	return cloned
-}
-
-func cloneAny(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case []any:
-		cloned := make([]any, len(typed))
-		for index, item := range typed {
-			cloned[index] = cloneAny(item)
-		}
-
-		return cloned
-	case []string:
-		return slices.Clone(typed)
-	default:
-		return typed
-	}
-}
-
-func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
-	result := cloneAnyMap(base)
-	if result == nil {
-		result = map[string]any{}
-	}
-
-	for key, value := range overlay {
-		if valueMap, ok := value.(map[string]any); ok {
-			if existing, ok := result[key].(map[string]any); ok {
-				result[key] = mergeAnyMap(existing, valueMap)
-
-				continue
-			}
-		}
-
-		result[key] = cloneAny(value)
-	}
-
-	return result
+	return wire.ValidateSessionEnvironment(options.Env, options.ExtraPathDirs, wire.MetaOptionPath(vendor, ""))
 }

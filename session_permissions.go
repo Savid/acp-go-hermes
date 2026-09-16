@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -12,13 +11,14 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-// handleControl reserves callbacks in wire order and preserves native request
-// identity. Requests without an id are answered in FIFO order.
+// handleControl preserves native server-request identity while answering
+// callbacks in arrival order. Unresolved host input is denied or skipped.
 func (s *session) handleControl(ctx context.Context, rt *runtime, c *cycle, event hermes.Event) {
-	id := fmt.Sprintf("native-%d", event.InboundSequence)
+	id := rt.liveID + ":" + event.RequestID
 	callbackCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	release := s.registerDialog(id, cancel)
 
@@ -26,37 +26,27 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, c *cycle, even
 		defer release()
 		defer cancel(nil)
 
-		method := ""
-		params := map[string]any{nativeSessionIDKey: rt.liveID}
+		result := map[string]any{}
 
 		switch event.Type {
 		case eventApprovalRequest:
-			method = "approval.respond"
-			params["choice"] = s.requestPermission(callbackCtx, c, id, event.Payload)
-
-			params["all"] = false
-			if requestID := hermes.String(event.Payload, "request_id"); requestID != "" {
-				params["request_id"] = requestID
-			}
+			result["choice"] = s.requestPermission(callbackCtx, c, id, event.Payload)
+			result["all"] = false
 		case eventClarifyRequest:
-			method = "clarify.respond"
-			params["request_id"] = hermes.String(event.Payload, "request_id")
-			params["answer"] = s.elicit(callbackCtx, c, event.Payload)
-		case "sudo.request":
-			method = "sudo.respond"
-			params["password"] = ""
-		case "secret.request":
-			method = "secret.respond"
-			params[fieldValue] = ""
-		case "terminal.read_request":
-			method = "terminal.read.respond"
-			params[fieldText] = ""
+			answer := s.elicit(callbackCtx, c, event.Payload)
+			if answers, ok := answer.(map[string]any); ok {
+				result["answers"] = answers
+			} else if answer != nil {
+				result["answer"] = answer
+			}
+		case eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
+			result[fieldValue] = ""
 		}
 
 		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), sessionAbortTimeout)
 		defer replyCancel()
 
-		if err := rt.client.Call(replyCtx, method, params, nil); err != nil {
+		if err := rt.client.Reply(replyCtx, event.RequestID, result); err != nil {
 			rt.cancel()
 			_ = rt.proc.Kill()
 		}
@@ -249,69 +239,44 @@ func announcedRequest[T any](
 	}
 	defer releaseCall()
 
-	actionID, err := s.reserveAction(c)
-	if err != nil {
-		return zero, err
-	}
-
+	actionID := s.reserveAction(c)
 	if actionID == "" {
 		return send(ctx, nil)
 	}
 
-	type answer struct {
-		value T
-		err   error
-	}
-
-	answers := make(chan answer, 1)
-
-	var written <-chan struct{}
-	if t := s.agent.transportRef(); t != nil {
-		written = t.AwaitRequestWrite(actionID)
-	}
-
-	go func() {
-		value, err := send(ctx, s.actionCorrelation(c, actionID))
-		answers <- answer{value: value, err: err}
-	}()
-
-	if written != nil {
-		select {
-		case <-written:
-		case result := <-answers:
-			answers <- result
+	value, callErr := wire.CallAndAnnounce(ctx, s.agent.transportRef(), s.lc.Correlation(c.Cycle, actionID), send, func() {
+		if err := s.lc.ActionPending(ctx, c.Cycle, actionID, kind); err != nil {
+			s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
+				slog.String(nativeSessionIDKey, string(s.id)), slog.String("reason", err.Error()))
 		}
-	}
+	})
 
-	if err := s.lcActionPendingWithID(ctx, c, actionID, kind); err != nil {
-		s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
-			slog.String(nativeSessionIDKey, string(s.id)), slog.String("reason", err.Error()))
-	}
+	state := resolved(value, callErr)
 
-	result := <-answers
-	state := resolved(result.value, result.err)
-
-	if result.err != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
+	if callErr != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
 		state = lifecycle.ActionCancelled
 	}
 
-	if err := s.lcActionResolved(context.WithoutCancel(ctx), c, actionID, state); err != nil {
+	if err := s.lc.ActionResolved(context.WithoutCancel(ctx), c.Cycle, actionID, state); err != nil {
 		s.agent.log.ErrorContext(ctx, "resolve lifecycle action failed",
 			slog.String(nativeSessionIDKey, string(s.id)), slog.String("reason", err.Error()))
 	}
 
-	return result.value, result.err
+	return value, callErr
 }
 
-func (s *session) reserveAction(c *cycle) (string, error) {
-	s.lcMu.Lock()
-	defer s.lcMu.Unlock()
-
-	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
-		return "", nil
+// reserveAction mints the action id one client request announces itself with,
+// or "" while no lifecycle turn can carry it. The cycle identity it reads is
+// published before the pump can route an event into that cycle — a turn's by
+// acceptTurn ahead of the close of t.ready every pump read waits on, an agent
+// cycle's by OpenAgentCycle ahead of its first projection — so the read is
+// ordered rather than locked.
+func (s *session) reserveAction(c *cycle) string {
+	if !s.lc.Active() || c.TurnID == "" {
+		return ""
 	}
 
-	return s.nextLifecycleID("action"), nil
+	return s.lc.NextID("action")
 }
 
 //nolint:tagliatelle // Native clarify payloads use multi_select.

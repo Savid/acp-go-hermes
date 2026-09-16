@@ -9,10 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	acpcore "github.com/savid/acp-go-core"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
@@ -31,7 +34,7 @@ func TestMain(m *testing.M) {
 const testTimeout = 20 * time.Second
 
 // testOptions configures an agent that launches the test binary as hermes, with
-// an isolated hermes home and scratch directory.
+// an isolated hermes home.
 func testOptions(t *testing.T, extra ...Option) []Option {
 	t.Helper()
 
@@ -180,11 +183,10 @@ func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotificatio
 
 // harness serves an agent over pipes to a recording client.
 type harness struct {
-	t      *testing.T
-	conn   *acp.ClientSideConnection
-	rec    *recorder
-	cancel context.CancelFunc
-	served chan error
+	input *requestWriter
+	t     *testing.T
+	conn  *acp.ClientSideConnection
+	rec   *recorder
 }
 
 func newHarness(t *testing.T, extra ...Option) *harness {
@@ -198,10 +200,11 @@ func newHarness(t *testing.T, extra ...Option) *harness {
 
 	go func() { served <- Serve(ctx, agentReader, agentWriter, testOptions(t, extra...)...) }()
 
-	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	input := &requestWriter{Writer: clientWriter}
+	conn := acp.NewClientSideConnection(rec, input, clientReader)
 	conn.SetLogger(slog.New(slog.DiscardHandler))
 
-	h := &harness{t: t, conn: conn, rec: rec, cancel: cancel, served: served}
+	h := &harness{t: t, conn: conn, rec: rec, input: input}
 
 	t.Cleanup(func() {
 		cancel()
@@ -250,10 +253,10 @@ func withFormElicitation() func(*acp.InitializeRequest) {
 	}
 }
 
-func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionResponse {
+func (h *harness) newSession(opts ...wire.SessionRequestOption) acp.NewSessionResponse {
 	h.t.Helper()
 
-	resp, err := h.conn.NewSession(h.ctx(), NewSessionRequest(h.t.TempDir(), opts...))
+	resp, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(h.t.TempDir(), opts...))
 	require.NoError(h.t, err)
 
 	return resp
@@ -262,7 +265,7 @@ func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionRespons
 func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
 	h.t.Helper()
 
-	request := TextPromptRequest(sessionID, text)
+	request := wire.TextPromptRequest(sessionID, text)
 	request.Meta = meta
 
 	return h.conn.Prompt(h.ctx(), request)
@@ -329,4 +332,89 @@ func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
 	}
 
 	return events
+}
+
+// lifecycleStreams lists the incarnation ids the envelopes carried, in
+// first-seen order.
+// eventTypes renders each lifecycle event as its type, with the state or
+// action state appended where one exists.
+func eventTypes(events []map[string]any) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		kind, _ := event["type"].(string)
+		state, _ := event["state"].(string)
+
+		if action, ok := event["action"].(map[string]any); ok {
+			state, _ = action["state"].(string)
+		}
+
+		if state != "" {
+			kind += ":" + state
+		}
+
+		types = append(types, kind)
+	}
+
+	return types
+}
+
+func lifecycleStreams(updates []acp.SessionNotification) []string {
+	streams := make([]string, 0)
+
+	for _, update := range updates {
+		envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id, _ := envelope["streamId"].(string)
+		if id != "" && !slices.Contains(streams, id) {
+			streams = append(streams, id)
+		}
+	}
+
+	return streams
+}
+
+// newSharedStore is the durable store two harnesses in one test share.
+func newSharedStore() acpcore.SessionStore { return acpcore.NewInMemorySessionStore() }
+
+func loadEntries(ctx context.Context, store acpcore.SessionStore, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
+	generation, err := store.Load(ctx, key.SessionID)
+
+	return generation[key.Subpath], err
+}
+
+// requestWriter retains the wire JSON-RPC id of the latest prompt so a test
+// can cancel that request without also sending session/cancel.
+type requestWriter struct {
+	io.Writer
+	mu       sync.Mutex
+	promptID json.RawMessage
+}
+
+func (w *requestWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var frame struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if json.Unmarshal(data, &frame) == nil && frame.Method == acp.AgentMethodSessionPrompt {
+		w.promptID = frame.ID
+	}
+
+	return w.Writer.Write(data)
+}
+
+func (w *requestWriter) cancelPrompt() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "$/cancel_request", "params": map[string]any{"requestId": w.promptID}})
+	if err != nil {
+		return err
+	}
+	_, err = w.Writer.Write(append(data, '\n'))
+
+	return err
 }

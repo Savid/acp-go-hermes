@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -137,7 +138,6 @@ func TestSessionMetaStrictness(t *testing.T) {
 		{"unknown option", map[string]any{"hermes": map[string]any{"options": map[string]any{"bogus": 1}}}, "_meta.hermes.options.bogus"},
 		{"output schema", map[string]any{"hermes": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, "_meta.hermes.options.outputSchema"},
 		{"bad model", map[string]any{"hermes": map[string]any{"options": map[string]any{"model": "nomodel"}}}, "_meta.hermes.options.model"},
-		{"bad permission", map[string]any{"hermes": map[string]any{"options": map[string]any{"permission": "deny"}}}, "_meta.hermes.options.permission"},
 		{"relative path dir", map[string]any{"hermes": map[string]any{"options": map[string]any{"extraPathDirs": []any{"rel"}}}}, "_meta.hermes.options.extraPathDirs[0]"},
 		{"bad env name", map[string]any{"hermes": map[string]any{"options": map[string]any{"env": map[string]any{"A=B": "x"}}}}, "_meta.hermes.options.env.A=B"},
 		{"lifecycle literal", map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}, `_meta["` + wire.LifecycleKey + `"]`},
@@ -150,7 +150,7 @@ func TestSessionMetaStrictness(t *testing.T) {
 			h := newHarness(t)
 			h.initialize()
 
-			request := NewSessionRequest(t.TempDir())
+			request := wire.NewSessionRequest(t.TempDir())
 			request.Meta = tc.meta
 
 			_, err := h.conn.NewSession(h.ctx(), request)
@@ -169,7 +169,7 @@ func TestForeignMetaIgnored(t *testing.T) {
 	h := newHarness(t)
 	h.initialize()
 
-	session := h.newSession(WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	session := h.newSession(wire.WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
 	require.NotEmpty(t, session.SessionId)
 }
 
@@ -190,17 +190,17 @@ func TestUniformRejections(t *testing.T) {
 
 	session := h.newSession()
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, "unknown session", requestErrorData(t, err)[stopReasonError])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest("00000000-0000-4000-8000-000000000000")))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest("00000000-0000-4000-8000-000000000000")))
 }
 
 func TestPromptCorrelationGate(t *testing.T) {
@@ -276,7 +276,7 @@ func TestInvalidOptionsVerdict(t *testing.T) {
 			require.Equal(t, "hermes_invalid_options", data[stopReasonError])
 			require.Equal(t, field, data["field"])
 
-			_, err = agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			_, err = agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 			require.Equal(t, "hermes_invalid_options", requestErrorData(t, err)[stopReasonError])
 		})
 	}
@@ -303,7 +303,7 @@ func TestPromptBackpressure(t *testing.T) {
 	require.Equal(t, "backpressure", requestErrorData(t, err)[stopReasonError])
 	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest(session.SessionId)))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
 	require.NoError(t, <-done)
 }
 
@@ -314,7 +314,7 @@ func TestActiveSessionLimit(t *testing.T) {
 	h.initialize()
 	h.newSession()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "backpressure", requestErrorData(t, err)[stopReasonError])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
 }
@@ -325,7 +325,7 @@ func TestVersionFloor(t *testing.T) {
 	h := newHarness(t, WithEnv(map[string]string{fakeHermesEnv: "1", fakeHermesEnvVersion: "0.1.0"}))
 	h.initialize()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, "hermes_internal_failure", requestErrorData(t, err)[stopReasonError])
 	require.Equal(t, "native_start", requestErrorData(t, err)["class"])
@@ -338,7 +338,7 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 	require.NoError(t, agent.Close())
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	_, err := agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32600, requestErrorCode(t, err))
 }
 
@@ -348,4 +348,101 @@ func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
 	defer agent.Close()
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	require.Equal(t, "hermes_invalid_options", requestErrorData(t, err)[stopReasonError])
+}
+
+// TestNoCommandCatalogIsAdvertised checks that no session update carries a
+// command catalog; hermes has no slash-command surface.
+func TestNoCommandCatalogIsAdvertised(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+	require.NoError(t, err)
+
+	for _, update := range h.rec.snapshot() {
+		require.Nil(t, update.Update.AvailableCommandsUpdate)
+	}
+}
+
+// TestElicitationRequiresTheFormCapability proves a native clarify request is
+// answered without asking a client that advertised no elicitation form.
+// clarifyAnswerKey is the form field a clarify question is answered through.
+const clarifyAnswerKey = "answer"
+
+// Form elicitation is relayed only when the client advertises form support,
+// in every shape the capability can take; without it the native clarify
+// request is answered with no value and the client is never called.
+func TestElicitationCapabilityGating(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name, json string
+		form       bool
+	}{
+		{"omitted", `{}`, false},
+		{"empty", `{"elicitation":{}}`, false},
+		{"form", `{"elicitation":{"form":{}}}`, true},
+		{"url", `{"elicitation":{"url":{}}}`, false},
+		{"both", `{"elicitation":{"form":{},"url":{}}}`, true},
+		{"null", `{"elicitation":{"form":null,"url":null}}`, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+
+			var calls atomic.Int32
+
+			h.rec.elicit = func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+				calls.Add(1)
+
+				return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{Content: map[string]any{clarifyAnswerKey: "blue"}}}, nil
+			}
+			h.initialize(func(request *acp.InitializeRequest) {
+				require.NoError(t, json.Unmarshal([]byte(tc.json), &request.ClientCapabilities))
+			})
+			session := h.newSession()
+
+			_, err := h.prompt(session.SessionId, "QUESTION", nil)
+			require.NoError(t, err)
+
+			if tc.form {
+				require.Contains(t, agentText(h.rec.snapshot()), "blue")
+				require.Equal(t, int32(1), calls.Load())
+			} else {
+				require.Contains(t, agentText(h.rec.snapshot()), "<nil>")
+				require.Equal(t, int32(0), calls.Load())
+			}
+		})
+	}
+}
+
+// Lines the gateway writes to its stdout and stderr never reach the ACP
+// stream.
+func TestNativeNoiseCannotCorruptACPStdout(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "NOISE", nil)
+	require.NoError(t, err)
+	require.Contains(t, agentText(h.rec.snapshot()), "quiet")
+
+	for _, update := range h.rec.snapshot() {
+		encoded, marshalErr := json.Marshal(update)
+		require.NoError(t, marshalErr)
+		require.NotContains(t, string(encoded), "not a json record at all")
+		require.NotContains(t, string(encoded), "chatter on stderr")
+	}
+
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, list.Sessions, 1)
 }

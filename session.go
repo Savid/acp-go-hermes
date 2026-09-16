@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,13 +21,13 @@ const (
 	sessionSettleTimeout   = 60 * time.Second
 	sessionShutdownTimeout = 10 * time.Second
 	sessionShutdownGrace   = 2 * time.Second
-	stderrTailBytes        = 8 << 10
 )
 
 // session owns one native conversation and at most one serve generation.
 type session struct {
 	agent                 *Agent
 	id                    acp.SessionId
+	nativeID              string
 	cwd                   string
 	additionalDirectories []string
 	options               HermesOptions
@@ -52,7 +51,7 @@ type session struct {
 	callbacks             sync.WaitGroup
 	mirrorMu              sync.Mutex
 	lcMu                  sync.Mutex
-	lc                    lifecycleState
+	lc                    lifecycle.Publisher
 }
 
 // runtime binds one gateway connection to its native live-session identity.
@@ -61,7 +60,6 @@ type runtime struct {
 	client       *hermes.Client
 	endpoint     hermes.Endpoint
 	liveID       string
-	stderr       *stderrTail
 	cancel       context.CancelFunc
 	bound        chan struct{}
 	bindOnce     sync.Once
@@ -71,9 +69,7 @@ type runtime struct {
 }
 
 type cycle struct {
-	turnID  string
-	cycleID string
-	origin  lifecycle.Cause
+	lifecycle.Cycle
 	state   cycleState
 	failure error
 	done    chan struct{}
@@ -89,7 +85,10 @@ const (
 
 type turn struct {
 	cycle
-	submission  lifecycle.Submission
+	submission lifecycle.Submission
+	// cancel ends this turn's own context; only cancel, timeout, and close
+	// call it, so a peer prompt's refusal cannot end a live turn.
+	cancel      context.CancelFunc
 	accepted    bool
 	cancelled   bool
 	timedOut    bool
@@ -112,35 +111,6 @@ type dialog struct{ cancel context.CancelCauseFunc }
 
 var errDialogCancelled = errors.New("dialog cancelled by the session")
 
-// stderrTail retains the last bytes hermes wrote to stderr.
-type stderrTail struct {
-	mu   sync.Mutex
-	data []byte
-}
-
-func (t *stderrTail) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.data = append(t.data, p...)
-	if len(t.data) > stderrTailBytes {
-		t.data = t.data[len(t.data)-stderrTailBytes:]
-	}
-
-	return len(p), nil
-}
-
-// lastLine is the final non-empty stderr line, which is where a dying harness
-// names its reason.
-func (t *stderrTail) lastLine() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	lines := strings.Split(strings.TrimSpace(string(t.data)), "\n")
-
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
 // launch starts the authenticated loopback transport in the session's native home.
 func (s *session) launch(ctx context.Context) (*runtime, error) {
 	executable, err := s.agent.ensureExecutable(ctx)
@@ -162,6 +132,10 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 	}
 
 	if seedErr := process.WriteSeedFiles(s.agentDir, s.agent.options.SeedFiles); seedErr != nil {
+		if refusal := wire.SeedFileRefusal(seedErr); refusal != nil {
+			return nil, refusal
+		}
+
 		return nil, s.startFailure(ctx, seedErr)
 	}
 
@@ -170,19 +144,30 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		return nil, s.startFailure(ctx, err)
 	}
 
-	stderr := &stderrTail{}
-	go func() { _, _ = io.Copy(stderr, proc.Stderr()) }()
 	go func() { _, _ = io.Copy(io.Discard, proc.Stdout()) }()
 
 	readyCtx, readyCancel := context.WithTimeout(ctx, sessionSettleTimeout)
 	defer readyCancel()
+
+	// A child that is already gone can never dial or answer, so its exit ends
+	// the readiness window instead of leaving it to the settle timeout.
+	watching := make(chan struct{})
+	defer close(watching)
+
+	go func() {
+		select {
+		case <-proc.Done():
+			readyCancel()
+		case <-watching:
+		}
+	}()
 
 	client, err := endpoint.Connect(readyCtx)
 	if err != nil {
 		_ = proc.Kill()
 		_ = proc.Close()
 
-		return nil, s.startFailure(ctx, err)
+		return nil, s.startFailure(ctx, launchFailure(proc, err))
 	}
 
 	for {
@@ -193,7 +178,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 				_ = proc.Kill()
 				_ = proc.Close()
 
-				return nil, s.startFailure(ctx, errors.New("gateway closed before readiness"))
+				return nil, s.startFailure(ctx, launchFailure(proc, errors.New("gateway closed before readiness")))
 			}
 
 			if delivery.Event != nil && delivery.Event.Type == "gateway.ready" {
@@ -204,14 +189,14 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 			_ = proc.Kill()
 			_ = proc.Close()
 
-			return nil, s.startFailure(ctx, readyCtx.Err())
+			return nil, s.startFailure(ctx, launchFailure(proc, readyCtx.Err()))
 		}
 	}
 
 ready:
 	readCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
-	rt := &runtime{proc: proc, client: client, endpoint: endpoint, stderr: stderr, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
+	rt := &runtime{proc: proc, client: client, endpoint: endpoint, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
 
 	s.mu.Lock()
 	s.runtime = rt
@@ -229,6 +214,22 @@ ready:
 	return rt, nil
 }
 
+// launchFailure names the real reason a startup ended: a child that is already
+// gone, otherwise the transport error the caller observed.
+func launchFailure(proc *process.Process, err error) error {
+	select {
+	case <-proc.Done():
+		reason := "hermes exited before the gateway was ready"
+		if line := proc.StderrLastLine(); line != "" {
+			reason += ": " + line
+		}
+
+		return errors.New(reason)
+	default:
+		return err
+	}
+}
+
 func (s *session) startFailure(ctx context.Context, err error) error {
 	s.agent.log.ErrorContext(ctx, "Hermes session start failed", slog.String("reason", err.Error()))
 
@@ -244,6 +245,8 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 		}
 
 		rt.liveID = created.SessionID
+
+		s.nativeID = created.StoredSessionID
 
 		s.id = acp.SessionId(created.StoredSessionID)
 		if s.id == "" || rt.liveID == "" {
@@ -273,19 +276,19 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 		return s.startFailure(ctx, errors.New("native session identity missing"))
 	}
 
+	if model != "" {
+		if err := rt.client.SetModel(ctx, rt.liveID, model); err != nil {
+			return wire.Unsupported(wire.MetaOptionPath(vendor, metaModelKey))
+		}
+	}
+
 	if err := rt.client.AwaitSessionBuild(ctx, rt.liveID); err != nil {
 		return s.startFailure(ctx, err)
 	}
 
-	if model != "" {
-		if err := rt.client.SetModel(ctx, rt.liveID, model); err != nil {
-			return wire.Unsupported(metaOptionPath(metaModelKey))
-		}
-	}
-
 	if s.options.Effort != "" {
 		if _, err := rt.client.SetReasoning(ctx, rt.liveID, s.options.Effort); err != nil {
-			return wire.Unsupported(metaOptionPath(metaEffortKey))
+			return wire.Unsupported(wire.MetaOptionPath(vendor, metaEffortKey))
 		}
 	}
 
@@ -321,7 +324,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	if err := s.configureRuntime(ctx, rt, s.model, string(s.id)); err != nil {
+	if err := s.configureRuntime(ctx, rt, s.model, s.nativeID); err != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return nil, err
@@ -379,6 +382,20 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		return
 	}
 
+	if event.Type == "request.cancel" {
+		id := rt.liveID + ":" + hermes.String(event.Payload, "id")
+
+		s.mu.Lock()
+		d := s.dialogs[id]
+		s.mu.Unlock()
+
+		if d != nil {
+			d.cancel(errDialogCancelled)
+		}
+
+		return
+	}
+
 	if t != nil {
 		select {
 		case <-t.ready:
@@ -405,9 +422,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		}
 
 		settled, err := s.projectEvent(ctx, rt, &t.cycle, event)
-		if err != nil && t.failure == nil {
-			t.failure = err
-		}
+		s.recordFailure(&t.cycle, err)
 
 		if settled {
 			s.cancelDialogs()
@@ -424,10 +439,8 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 	}
 
 	if c == nil && bearsWork(event) {
-		c = &cycle{origin: lifecycle.CauseActivity, done: make(chan struct{})}
-		if err := s.lcOpenAgentCycle(ctx, c); err != nil {
-			c.failure = err
-		}
+		c = &cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseActivity}, done: make(chan struct{})}
+		s.recordFailure(c, s.lc.OpenAgentCycle(ctx, &c.Cycle))
 
 		s.mu.Lock()
 		s.cycle = c
@@ -439,9 +452,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 	}
 
 	settled, err := s.projectEvent(ctx, rt, c, event)
-	if err != nil && c.failure == nil {
-		c.failure = err
-	}
+	s.recordFailure(c, err)
 
 	if settled {
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
@@ -451,11 +462,14 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		s.callbacks.Wait()
 		s.emitUsage(settleCtx, &c.state)
 
-		if err := s.commitMirror(settleCtx); err != nil {
-			c.failure = s.mirrorFailure(err)
+		if err := s.commitMirror(settleCtx, rt); err != nil {
+			s.recordFailure(c, s.mirrorFailure(err))
+			s.lc.Fence()
+			s.dropRuntime(rt)
 		}
 
-		_ = s.lcIdle(settleCtx, c, judgeCycle(c, false))
+		verdict := s.judgeCycle(c, false)
+		_ = s.lc.Idle(settleCtx, c.Cycle, verdict.stopReason, verdict.outcome)
 		close(c.done)
 		s.mu.Lock()
 		if s.cycle == c {
@@ -489,10 +503,20 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	<-rt.controlsDone
 	s.callbacks.Wait()
 
+	// A turn still running settles as transport-ended and fences the stream
+	// itself once it has published its terminal idle. A turn that already
+	// reached its terminal result publishes nothing more, so the generation is
+	// fenced here.
 	if t != nil {
-		t.settle(turnTransportEnded)
+		select {
+		case <-t.settled:
+		default:
+			t.settle(turnTransportEnded)
 
-		return
+			_ = rt.proc.Close()
+
+			return
+		}
 	}
 
 	if c != nil {
@@ -501,13 +525,23 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 			verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
 		}
 
-		_ = s.lcIdle(ctx, c, verdict)
+		_ = s.lc.Idle(ctx, c.Cycle, verdict.stopReason, verdict.outcome)
 		close(c.done)
 	}
 
 	if !closing {
-		s.lcFence()
+		s.lc.Fence()
 	}
+
+	_ = rt.proc.Close()
+}
+
+// dropRuntime releases the binding from inside the pump: the gateway is closed
+// and the read context cancelled, so the pump's own exit reaps the child and
+// the next operation relaunches.
+func (s *session) dropRuntime(rt *runtime) {
+	_ = rt.client.Close(websocket.StatusNormalClosure, "closing")
+	rt.cancel()
 }
 
 func (s *session) stopRuntime(ctx context.Context, rt *runtime) {
@@ -547,7 +581,7 @@ func (s *session) cancel(ctx context.Context) {
 	t := s.turn
 	rt := s.runtime
 
-	if t == nil || t.cancelled {
+	if t == nil || t.cancelled || t.timedOut {
 		s.mu.Unlock()
 
 		return
@@ -555,7 +589,7 @@ func (s *session) cancel(ctx context.Context) {
 
 	t.cancelled = true
 	s.mu.Unlock()
-
+	t.cancel()
 	s.cancelDialogs()
 
 	if rt != nil {
@@ -576,7 +610,7 @@ func (s *session) timeout(ctx context.Context, t *turn) {
 
 	t.timedOut = true
 	s.mu.Unlock()
-
+	t.cancel()
 	s.cancelDialogs()
 
 	if rt != nil {
@@ -679,12 +713,7 @@ func (s *session) acquireGate(limit string) (func(), error) {
 		return nil, wire.UnknownSession()
 	}
 
-	select {
-	case s.gate <- struct{}{}:
-		return func() { <-s.gate }, nil
-	default:
-		return nil, wire.Backpressure(limit)
-	}
+	return wire.AcquireSessionGate(s.gate, limit)
 }
 
 // close interrupts and joins session work, captures native state, then stops its server.
@@ -706,6 +735,11 @@ func (s *session) close(ctx context.Context) error {
 		t.cancelled = true
 	}
 	s.mu.Unlock()
+
+	if t != nil {
+		t.cancel()
+	}
+
 	s.cancelDialogs()
 	s.callbacks.Wait()
 
@@ -736,14 +770,14 @@ func (s *session) close(ctx context.Context) error {
 	var errs []error
 
 	if rt != nil {
-		if err := s.commitMirror(commitCtx); err != nil {
+		if err := s.commitMirror(commitCtx, rt); err != nil {
 			errs = append(errs, err)
 		}
 
 		s.stopRuntime(commitCtx, rt)
 	}
 
-	s.lcFence()
+	s.lc.Fence()
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)
 	close(s.closeDone)

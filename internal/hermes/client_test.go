@@ -87,3 +87,92 @@ func TestMalformedResponseCannotCompleteCall(t *testing.T) {
 		})
 	}
 }
+
+func TestServerRequestsKeepTheirIdentity(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{"approval", "clarify", "sudo", "secret", "terminal.read"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			replies := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.CloseNow() }()
+				frame, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0", "id": "srq-native", "method": method,
+					"params": map[string]any{"session_id": "live", "command": "probe"},
+				})
+				if conn.Write(r.Context(), websocket.MessageText, frame) != nil {
+					return
+				}
+				_, reply, err := conn.Read(r.Context())
+				if err == nil {
+					replies <- reply
+				}
+				_, _, _ = conn.Read(r.Context())
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1), nil)
+			require.NoError(t, err)
+			defer func() { _ = client.Close(websocket.StatusNormalClosure, "") }()
+			var delivery GatewayDelivery
+			select {
+			case delivery = <-client.Deliveries():
+			case <-ctx.Done():
+				t.Fatal("native request was not delivered")
+			}
+			require.NoError(t, delivery.Err)
+			require.NotNil(t, delivery.Event)
+			require.Equal(t, method, delivery.Event.Type)
+			require.Equal(t, "live", delivery.Event.SessionID)
+			require.Equal(t, "srq-native", delivery.Event.RequestID)
+			require.EqualValues(t, 1, delivery.Event.InboundSequence)
+			require.NoError(t, client.Reply(ctx, delivery.Event.RequestID, map[string]any{"choice": "once"}))
+			select {
+			case reply := <-replies:
+				require.JSONEq(t, `{"jsonrpc":"2.0","id":"srq-native","result":{"choice":"once"}}`, string(reply))
+			case <-ctx.Done():
+				t.Fatal("native request was not answered")
+			}
+		})
+	}
+}
+
+func TestMalformedServerRequestEndsTransport(t *testing.T) {
+	t.Parallel()
+	for _, frame := range []string{
+		`{"jsonrpc":"2.0","id":7,"method":"approval","params":{"session_id":"live"}}`,
+		`{"jsonrpc":"2.0","id":"","method":"approval","params":{"session_id":"live"}}`,
+		`{"jsonrpc":"2.0","id":"srq-1","method":"approval","params":{}}`,
+		`{"jsonrpc":"2.0","id":"srq-1","method":"approval"}`,
+	} {
+		t.Run(frame, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.CloseNow() }()
+				_ = conn.Write(r.Context(), websocket.MessageText, []byte(frame))
+				_, _, _ = conn.Read(r.Context())
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1), nil)
+			require.NoError(t, err)
+			defer func() { _ = client.Close(websocket.StatusNormalClosure, "") }()
+			select {
+			case delivery := <-client.Deliveries():
+				require.Error(t, delivery.Err)
+			case <-ctx.Done():
+				t.Fatal("malformed request did not end the transport")
+			}
+		})
+	}
+}

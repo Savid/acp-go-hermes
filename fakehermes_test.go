@@ -18,6 +18,15 @@ import (
 const fakeHermesEnv = "ACP_GO_HERMES_TEST_FAKE"
 const fakeHermesEnvVersion = "ACP_GO_HERMES_TEST_VERSION"
 
+// fakeHermesEnvResumeHold names a file the gateway creates when a
+// session.resume arrives that it will never answer, so a test can act while
+// the adapter is still relaunching.
+const fakeHermesEnvResumeHold = "ACP_GO_HERMES_TEST_RESUME_HOLD"
+
+// heldAttachMarker is written into the home when the gateway takes an
+// attachment it will never answer, so a test knows the upload is in flight.
+const heldAttachMarker = "attach-held"
+
 // fakeGateway speaks the same JSON-RPC and per-session persistence surfaces as serve.
 type fakeGateway struct {
 	home     string
@@ -37,6 +46,8 @@ type fakeSession struct {
 	permission chan string
 	answer     chan any
 	images     []string
+	dialogs    []string
+	holdAttach bool
 }
 
 func fakeID() string {
@@ -50,7 +61,7 @@ func runFakeHermes(args []string) int {
 	if len(args) > 0 && args[0] == "--version" {
 		version := os.Getenv(fakeHermesEnvVersion)
 		if version == "" {
-			version = "0.21.2"
+			version = "0.21.3"
 		}
 		fmt.Println("Hermes v" + version)
 
@@ -105,7 +116,15 @@ func (g *fakeGateway) persistence(w http.ResponseWriter, r *http.Request) {
 
 			return
 		}
-		if err := os.WriteFile(filepath.Join(g.home, item.ID+".json"), body.Sessions[0], 0o600); err != nil {
+		path := filepath.Join(g.home, item.ID+".json")
+		// Hermes's import creates missing conversations and refuses to replace
+		// one that exists.
+		if _, statErr := os.Stat(path); statErr == nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "imported": 0})
+
+			return
+		}
+		if err := os.WriteFile(path, body.Sessions[0], 0o600); err != nil {
 			http.Error(w, "write failed", http.StatusInternalServerError)
 
 			return
@@ -143,6 +162,17 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Write(r.Context(), websocket.MessageText, data)
 	}
 	emit := func(id, kind string, payload any) {
+		switch kind {
+		case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
+			params, ok := payload.(map[string]any)
+			if !ok {
+				panic("native control fixture requires object params")
+			}
+			params[nativeSessionIDKey] = id
+			send(map[string]any{"jsonrpc": "2.0", "id": kind + "|" + id + "|" + fakeID(), "method": kind, "params": params})
+
+			return
+		}
 		send(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{fieldType: kind, nativeSessionIDKey: id, "payload": payload}})
 	}
 	emit("", "gateway.ready", map[string]any{})
@@ -152,12 +182,21 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var request struct {
-			ID     int            `json:"id"`
-			Method string         `json:"method"`
-			Params map[string]any `json:"params"`
+			ID     json.RawMessage `json:"id"`
+			Result map[string]any  `json:"result"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
 		}
 		if json.Unmarshal(data, &request) != nil {
 			return
+		}
+		if request.Method == "" {
+			var responseID string
+			if json.Unmarshal(request.ID, &responseID) == nil {
+				g.answerRequest(responseID, request.Result)
+			}
+
+			continue
 		}
 		id, _ := request.Params[nativeSessionIDKey].(string)
 		g.mu.Lock()
@@ -175,6 +214,11 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			g.mu.Unlock()
 			result = map[string]any{nativeSessionIDKey: id, "stored_session_id": session.id}
 		case "session.resume":
+			if hold := os.Getenv(fakeHermesEnvResumeHold); hold != "" {
+				_ = os.WriteFile(hold, []byte("held\n"), 0o600)
+
+				continue
+			}
 			bytes, err := os.ReadFile(filepath.Join(g.home, id+".json"))
 			if err != nil {
 				failure = "session not found"
@@ -204,6 +248,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			g.mu.Unlock()
 			result = map[string]any{"sessions": rows}
 		case "process.list":
+			failure = session.buildFailure()
 		case "model.options":
 			session.mu.Lock()
 			result = map[string]any{"provider": session.provider, "model": session.model, "providers": []any{map[string]any{"slug": "fake", fieldName: "Fake", "models": []string{"vision", "text-only"}}}}
@@ -234,7 +279,13 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			session.mu.Lock()
 			data, _ := request.Params["content_base64"].(string)
 			session.images = append(session.images, data)
+			held := session.holdAttach
 			session.mu.Unlock()
+			if held {
+				_ = os.WriteFile(filepath.Join(g.home, heldAttachMarker), nil, 0o600)
+
+				continue
+			}
 			result = map[string]any{"attached": true}
 		case "prompt.submit":
 			text, _ := request.Params[fieldText].(string)
@@ -248,7 +299,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 				result = map[string]any{"status": promptQueued}
 				emit(id, "message.start", map[string]any{})
 				emit(id, "message.delta", map[string]any{fieldText: "earlier"})
-				emit(id, "message.complete", map[string]any{fieldText: "earlier", "status": statusComplete})
+				emit(id, eventMessageComplete, map[string]any{fieldText: "earlier", "status": statusComplete})
 			}
 			send(map[string]any{"jsonrpc": "2.0", fieldID: request.ID, fieldResult: result})
 			go g.prompt(r.Context(), session, id, text, emit)
@@ -264,11 +315,6 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			session.mu.Unlock()
-		case "approval.respond":
-			choice, _ := request.Params["choice"].(string)
-			session.permission <- choice
-		case "clarify.respond":
-			session.answer <- request.Params["answer"]
 		default:
 			failure = "method not found"
 		}
@@ -302,7 +348,7 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 			return
 		}
 	case "QUESTION":
-		emit(live, eventClarifyRequest, map[string]any{"request_id": "question-1", "question": "Which color?"})
+		emit(live, eventClarifyRequest, map[string]any{"question": "Which color?"})
 		select {
 		case answer := <-s.answer:
 			text = fmt.Sprint(answer)
@@ -311,6 +357,10 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 		case <-ctx.Done():
 			return
 		}
+	case "NOISE":
+		fmt.Fprintln(os.Stderr, "chatter on stderr")
+		fmt.Println("not a json record at all")
+		text = "quiet"
 	case "ERROR":
 		status = stopReasonError
 		text = "provider unavailable"
@@ -320,6 +370,14 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 		s.mu.Lock()
 		text = strings.Join(s.images, ",")
 		s.images = nil
+		s.mu.Unlock()
+	case "HOLD":
+		s.mu.Lock()
+		s.holdAttach = true
+		s.mu.Unlock()
+	case "DIALOGS":
+		s.mu.Lock()
+		text = strings.Join(s.dialogs, ",")
 		s.mu.Unlock()
 	case "ENV":
 		text = os.Getenv("ACP_MARKER") + "|" + os.Getenv("PATH")
@@ -336,5 +394,43 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 	_ = os.WriteFile(path+".tmp", data, 0o600)
 	_ = os.Rename(path+".tmp", path)
 	s.mu.Unlock()
-	emit(live, "message.complete", map[string]any{fieldText: text, "status": status, "usage": map[string]any{"input": 5, "output": 2, "total": 7, "context_used": 7, "context_max": 1000}})
+	emit(live, eventMessageComplete, map[string]any{fieldText: text, "status": status, "usage": map[string]any{"input": 5, "output": 2, "total": 7, "context_used": 7, "context_max": 1000}})
+}
+
+func (s *fakeSession) buildFailure() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expected := os.Getenv("ACP_GO_HERMES_TEST_BUILD_MODEL"); expected != "" && s.provider+"/"+s.model != expected {
+		return "agent initialization used the wrong model"
+	}
+
+	return ""
+}
+
+func (g *fakeGateway) answerRequest(id string, result map[string]any) {
+	parts := strings.Split(id, "|")
+	if len(parts) < 2 {
+		return
+	}
+	g.mu.Lock()
+	session := g.sessions[parts[1]]
+	g.mu.Unlock()
+	if session == nil {
+		return
+	}
+	switch parts[0] {
+	case eventApprovalRequest:
+		choice, _ := result["choice"].(string)
+		session.permission <- choice
+	case eventClarifyRequest:
+		answer := result["answer"]
+		if answers, ok := result["answers"]; ok {
+			answer = answers
+		}
+		session.answer <- answer
+	default:
+		session.mu.Lock()
+		session.dialogs = append(session.dialogs, parts[0])
+		session.mu.Unlock()
+	}
 }

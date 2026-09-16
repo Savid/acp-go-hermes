@@ -22,6 +22,9 @@ const (
 	jsonrpcVersion = "2.0"
 	methodEvent    = "event"
 	fieldSessionID = "session_id"
+	fieldID        = "id"
+	fieldJSONRPC   = "jsonrpc"
+	fieldResult    = "result"
 
 	// readLimitBytes caps a single inbound gateway frame. It must comfortably
 	// exceed the advertised rawEvent maxBytes (64 KiB) so an oversize native
@@ -60,6 +63,7 @@ type Event struct {
 	Payload         json.RawMessage `json:"payload,omitempty"`
 	Raw             json.RawMessage `json:"-"`
 	InboundSequence uint64          `json:"-"`
+	RequestID       string          `json:"-"`
 }
 
 // GatewayDelivery is the gateway reader's single ordered output. A delivery
@@ -68,8 +72,6 @@ type GatewayDelivery struct {
 	Event *Event
 	Err   error
 }
-
-var ErrGatewayInputOverflow = errors.New("hermes gateway input overflow")
 
 type rpcResponse struct {
 	JSONRPC  string          `json:"jsonrpc"`
@@ -91,15 +93,15 @@ func decodeKnownRPCResponse(data []byte, sequence uint64) (rpcResponse, error) {
 	}
 
 	var response rpcResponse
-	if err := json.Unmarshal(object["jsonrpc"], &response.JSONRPC); err != nil || response.JSONRPC != jsonrpcVersion {
+	if err := json.Unmarshal(object[fieldJSONRPC], &response.JSONRPC); err != nil || response.JSONRPC != jsonrpcVersion {
 		return rpcResponse{}, errors.New("hermes JSON-RPC response has invalid version")
 	}
 
-	if err := json.Unmarshal(object["id"], &response.ID); err != nil {
+	if err := json.Unmarshal(object[fieldID], &response.ID); err != nil {
 		return rpcResponse{}, fmt.Errorf("decode Hermes JSON-RPC response id: %w", err)
 	}
 
-	result, hasResult := object["result"]
+	result, hasResult := object[fieldResult]
 	errorValue, hasError := object["error"]
 
 	if hasResult == hasError {
@@ -211,6 +213,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	_, err := c.call(ctx, method, params, out)
 
 	return err
+}
+
+// Reply answers a native server request with its original JSON-RPC identity.
+func (c *Client) Reply(ctx context.Context, id string, result map[string]any) error {
+	data, err := json.Marshal(map[string]any{fieldJSONRPC: jsonrpcVersion, fieldID: id, fieldResult: result})
+	if err != nil {
+		return err
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	return c.conn.Write(ctx, websocket.MessageText, data)
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, out any) (uint64, error) {
@@ -373,7 +388,7 @@ func (c *Client) readLoop() {
 		}
 
 		methodValue, hasMethod := object["method"]
-		idValue, hasID := object["id"]
+		idValue, hasID := object[fieldID]
 
 		if hasMethod {
 			var method string
@@ -384,20 +399,19 @@ func (c *Client) readLoop() {
 			}
 
 			params, hasParams := object["params"]
-			if method == methodEvent && !hasID && hasParams {
-				var event Event
-				if err := json.Unmarshal(params, &event); err != nil {
+			if (hasID && isServerRequest(method)) || (method == methodEvent && !hasID && hasParams) {
+				event, err := decodeGatewayEvent(method, idValue, params)
+				if err != nil {
 					c.publishTerminal(err)
 
 					return
 				}
 
-				event.Raw = append(event.Raw[:0], data...)
-
+				event.Raw = bytes.Clone(data)
 				event.InboundSequence = sequence
 
 				if len(c.deliveries) >= cap(c.deliveries)-1 {
-					c.publishTerminal(ErrGatewayInputOverflow)
+					c.publishTerminal(errors.New("hermes gateway input overflow"))
 
 					return
 				}
@@ -449,6 +463,41 @@ func (c *Client) readLoop() {
 		c.publishTerminal(errors.New("hermes gateway JSON-RPC frame has neither method nor id"))
 
 		return
+	}
+}
+
+func decodeGatewayEvent(method string, id, params json.RawMessage) (Event, error) {
+	var event Event
+	if method == methodEvent {
+		err := json.Unmarshal(params, &event)
+
+		return event, err
+	}
+
+	if err := json.Unmarshal(id, &event.RequestID); err != nil || event.RequestID == "" {
+		return Event{}, errors.New("hermes server request has invalid id")
+	}
+
+	var session struct {
+		ID string `json:"session_id"`
+	}
+
+	if err := json.Unmarshal(params, &session); err != nil || session.ID == "" {
+		return Event{}, errors.New("hermes server request has no session")
+	}
+
+	event.Type, event.SessionID = method, session.ID
+	event.Payload = bytes.Clone(params)
+
+	return event, nil
+}
+
+func isServerRequest(method string) bool {
+	switch method {
+	case "approval", "clarify", "sudo", "secret", "terminal.read":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -522,12 +571,6 @@ type ActiveListResult struct {
 type ActiveSession struct {
 	SessionID  string `json:"id"`
 	SessionKey string `json:"session_key"`
-	Title      string `json:"title"`
-	Cwd        string `json:"cwd"`
-	// Status is the gateway's own liveness word for the session. "starting"
-	// means its agent build has begun and has not finished; every other value
-	// means the build is no longer pending.
-	Status string `json:"status"`
 }
 
 type ModelOptionsResult struct {

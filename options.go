@@ -17,8 +17,8 @@ import (
 // Option configures the hermes ACP agent.
 type Option func(*Options)
 
-// Options configures the ACP agent process and the hermes RPC-mode sessions it
-// starts.
+// Options configures the ACP agent process and the hermes serve gateway
+// sessions it starts.
 type Options struct {
 	// AgentName is the protocol identifier advertised during ACP initialize.
 	AgentName string
@@ -35,8 +35,8 @@ type Options struct {
 	// session as HERMES_HOME. Empty leaves hermes to resolve its home from
 	// the inherited environment exactly as it would from a shell.
 	Home string
-	// ScratchDir is the parent directory for ephemeral adapter state. Empty
-	// means the system temp directory.
+	// ScratchDir is accepted and ignored. This adapter allocates no ephemeral
+	// state, so nothing is written under it.
 	ScratchDir string
 	// InputHandoffRoot is the absolute directory under which handoff-form
 	// prompt images are read. Empty rejects the handoff form.
@@ -125,8 +125,8 @@ func applyOptions(opts []Option) Options {
 		options.ImageLimits = ImageLimits{
 			MaxInputBytesPerImage:     limits.MaxInputBytesPerImage,
 			MaxInputBytesPerPrompt:    limits.MaxInputBytesPerPrompt,
-			MaxOutputBytesPerImage:    0,
-			MaxOutputBytesPerToolCall: 0,
+			MaxOutputBytesPerImage:    limits.MaxOutputBytesPerImage,
+			MaxOutputBytesPerToolCall: limits.MaxOutputBytesPerToolCall,
 		}
 	}
 
@@ -176,7 +176,8 @@ func WithHome(path string) Option {
 	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir sets the parent directory for ephemeral adapter state.
+// WithScratchDir accepts the configured parent for ephemeral adapter state.
+// This adapter allocates none.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) { options.ScratchDir = dir }
 }
@@ -200,7 +201,7 @@ func WithConfiguredModels(ids []string) Option {
 // WithEnv sets the static agent-scoped environment overlay applied to every
 // hermes process after the inherited environment and before the session env.
 func WithEnv(env map[string]string) Option {
-	return func(options *Options) { options.Env = cloneStringMap(env) }
+	return func(options *Options) { options.Env = maps.Clone(env) }
 }
 
 // WithTracerProvider configures the OpenTelemetry tracer provider.
@@ -251,13 +252,5 @@ func WithImageLimits(limits ImageLimits) Option {
 // WithSeedFiles registers files written into hermes's config root before each
 // launch. Keys are paths relative to that root; values are the contents.
 func WithSeedFiles(files map[string]string) Option {
-	return func(options *Options) { options.SeedFiles = cloneStringMap(files) }
-}
-
-func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-
-	return maps.Clone(values)
+	return func(options *Options) { options.SeedFiles = maps.Clone(files) }
 }

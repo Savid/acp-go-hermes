@@ -61,7 +61,7 @@ audit: fmt-check lint build coverage-check tidy vuln modernize-check
 
 ## clean: remove build artifacts
 clean:
-	rm -rf .tmp coverage.out coverage-summary.txt
+	rm -rf .tmp coverage.out
 
 ## help: show this help
 help:

@@ -27,10 +27,9 @@ const (
 	EnvAgentDir       = "HERMES_HOME"
 	InternalEnvPrefix = "ACP_GO_HERMES_INTERNAL_"
 	EnvSessionToken   = "HERMES_DASHBOARD_SESSION_TOKEN"
-	fieldTitle        = "title"
 	valText           = "text"
 	valReasoning      = "reasoning"
-	SnapshotLimit     = 64 << 20
+	snapshotLimit     = 64 << 20
 )
 
 // Endpoint is the authenticated loopback surface of one serve process.
@@ -147,12 +146,12 @@ func (e Endpoint) request(ctx context.Context, method, path string, body []byte)
 		return nil, response.StatusCode, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(response.Body, SnapshotLimit+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, snapshotLimit+1))
 	if err != nil {
 		return nil, response.StatusCode, err
 	}
 
-	if len(data) > SnapshotLimit {
+	if len(data) > snapshotLimit {
 		return nil, response.StatusCode, errors.New("native session export exceeds size limit")
 	}
 

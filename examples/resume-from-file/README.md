@@ -8,5 +8,5 @@ go run ./examples/resume-from-file "Remember the word pelican."
 go run ./examples/resume-from-file -session <id> "What word did I ask you to remember?"
 ```
 
-The store file is an example of the `acpcore.SessionStore` contract, not a
+The store file is an example implementation of `acpcore.SessionStore`, not a
 durable store. hermes's own session file is left in hermes's home either way.

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -75,7 +74,6 @@ func TestClientRendersUpdates(t *testing.T) {
 
 	_, err = c.CreateTerminal(context.Background(), acp.CreateTerminalRequest{})
 	require.Error(t, err)
-	require.True(t, errors.Is(err, err))
 }
 
 func TestRunRejectsBadFlags(t *testing.T) {

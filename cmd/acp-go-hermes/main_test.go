@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,22 +29,6 @@ func TestRunBadFlag(t *testing.T) {
 	code := run(context.Background(), []string{"-bogus"}, strings.NewReader(""), &stdout, &stderr)
 	require.Equal(t, 2, code)
 	require.Contains(t, stderr.String(), "flag provided but not defined")
-}
-
-func TestSeedFileFlag(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "settings.json")
-	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
-
-	flag := &seedFileFlag{}
-	require.Equal(t, "", flag.String())
-	require.NoError(t, flag.Set("settings.json="+path))
-	require.Equal(t, "settings.json", flag.String())
-	require.Equal(t, "{}", flag.files["settings.json"])
-	require.Error(t, flag.Set("nope"))
-	require.Error(t, flag.Set("=x"))
-	require.Error(t, flag.Set("a="+filepath.Join(t.TempDir(), "missing")))
 }
 
 func TestRunServesUntilPeerCloses(t *testing.T) {
