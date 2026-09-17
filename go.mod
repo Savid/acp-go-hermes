@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/coder/acp-go-sdk v0.13.5
-	github.com/savid/acp-go-core v0.0.0-00010101000000-000000000000
+	github.com/savid/acp-go-core v0.0.0-20260917043259-b53a3dd7b50e
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
@@ -70,7 +70,5 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/savid/acp-go-core => ../acp-go-core
 
 tool golang.org/x/vuln/cmd/govulncheck
