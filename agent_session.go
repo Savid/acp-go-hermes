@@ -497,7 +497,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		seen[s.id] = struct{}{}
 	}
 
-	listCtx, cancel := context.WithTimeout(ctx, a.options.SessionStoreLoadTimeout)
+	listCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
 	defer cancel()
 
 	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list")

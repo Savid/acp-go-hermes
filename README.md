@@ -23,7 +23,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-Requires `hermes` 0.21.3 or newer on `PATH` or named with `-path`.
+Verified against `hermes` 0.21.3, found on `PATH` or named with `-path`.
 
 ## Run
 
@@ -54,9 +54,8 @@ err := hermesacp.Serve(ctx, os.Stdin, os.Stdout,
 
 Options: `WithExecutablePath`, `WithHome`, `WithScratchDir`,
 `WithInputHandoffRoot`, `WithDefaultModel`, `WithConfiguredModels`, `WithEnv`,
-`WithSeedFiles`, `WithSessionStore`, `WithSessionStoreLoadTimeout`,
-`WithTurnTimeout`, `WithConcurrencyLimits`, `WithImageLimits`, `WithLogger`,
-`WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`,
+`WithSeedFiles`, `WithSessionStore`, `WithConcurrencyLimits`, `WithImageLimits`,
+`WithLogger`, `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator`,
 `WithAgentName`, `WithAgentTitle`, `WithAgentVersion`.
 
 ### Session options

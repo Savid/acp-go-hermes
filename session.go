@@ -91,7 +91,6 @@ type turn struct {
 	cancel      context.CancelFunc
 	accepted    bool
 	cancelled   bool
-	timedOut    bool
 	ended       turnEnd
 	settled     chan struct{}
 	settleOnce  sync.Once
@@ -199,8 +198,25 @@ ready:
 	rt := &runtime{proc: proc, client: client, endpoint: endpoint, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
 
 	s.mu.Lock()
-	s.runtime = rt
+	closing := s.closing
+
+	if !closing {
+		s.runtime = rt
+	}
 	s.mu.Unlock()
+
+	// A close that began during this launch has already sampled the runtime it
+	// stops, so a process bound now would outlive the session.
+	if closing {
+		_ = client.Close(websocket.StatusNormalClosure, "closing")
+
+		cancel()
+		s.reap(ctx, proc)
+
+		_ = proc.Close()
+
+		return nil, wire.UnknownSession()
+	}
 
 	go func() {
 		defer close(rt.controlsDone)
@@ -480,12 +496,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 }
 
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
-	defer cancel()
-
-	if err := rt.proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
-		_ = rt.proc.Kill()
-	}
+	s.reap(ctx, rt.proc)
 
 	s.mu.Lock()
 	if s.runtime != rt {
@@ -545,22 +556,30 @@ func (s *session) dropRuntime(rt *runtime) {
 }
 
 func (s *session) stopRuntime(ctx context.Context, rt *runtime) {
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
-	defer cancel()
-
 	_ = rt.client.Close(websocket.StatusNormalClosure, "closing")
 	rt.cancel()
+	s.reap(ctx, rt.proc)
 
-	if err := rt.proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
-		_ = rt.proc.Kill()
-	}
+	joinCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
+	defer cancel()
 
 	select {
 	case <-rt.done:
-	case <-shutdownCtx.Done():
+	case <-joinCtx.Done():
 	}
 
 	_ = rt.proc.Close()
+}
+
+// reap ends one hermes process: the group is signalled and the root is waited
+// for within the shutdown bound, killed when it does not stop in time.
+func (s *session) reap(ctx context.Context, proc *process.Process) {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
+	defer cancel()
+
+	if err := proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
+		_ = proc.Kill()
+	}
 }
 
 // abort interrupts the native run under a bounded context detached from the
@@ -581,7 +600,7 @@ func (s *session) cancel(ctx context.Context) {
 	t := s.turn
 	rt := s.runtime
 
-	if t == nil || t.cancelled || t.timedOut {
+	if t == nil || t.cancelled {
 		s.mu.Unlock()
 
 		return
@@ -597,37 +616,9 @@ func (s *session) cancel(ctx context.Context) {
 	}
 }
 
-// timeout ends a turn that exceeded the configured deadline.
-func (s *session) timeout(ctx context.Context, t *turn) {
-	s.mu.Lock()
-	rt := s.runtime
-
-	if s.turn != t || t.cancelled || t.timedOut {
-		s.mu.Unlock()
-
-		return
-	}
-
-	t.timedOut = true
-	s.mu.Unlock()
-	t.cancel()
-	s.cancelDialogs()
-
-	if rt != nil {
-		s.abort(ctx, rt)
-
-		select {
-		case <-t.settled:
-		case <-time.After(sessionAbortTimeout):
-			rt.cancel()
-			_ = rt.proc.Kill()
-		}
-	}
-}
-
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.runtime == nil || (s.turn != nil && (s.turn.cancelled || s.turn.timedOut)) {
+	if s.closing || s.runtime == nil || (s.turn != nil && s.turn.cancelled) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 

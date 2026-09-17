@@ -13,12 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
-	"os/exec"
 )
 
 const closeTimeout = 5 * time.Second
@@ -170,25 +167,6 @@ func AgentDir(explicit string, lookup func(string) (string, bool)) string {
 	home, _ := lookup("HOME")
 
 	return filepath.Join(home, ".hermes")
-}
-
-var nativeVersion = regexp.MustCompile(`\bv?(\d+\.\d+\.\d+)\b`)
-
-func ProbeVersion(ctx context.Context, executable string, env []string) (string, error) {
-	cmd := exec.CommandContext(ctx, executable, "--version")
-	cmd.Env = env
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", errors.New("hermes version probe failed")
-	}
-
-	match := nativeVersion.FindStringSubmatch(string(output))
-	if len(match) != 2 {
-		return "", errors.New("hermes version missing")
-	}
-
-	return match[1], nil
 }
 
 func (c *Client) Err() error { return c.terminalCause() }

@@ -164,11 +164,6 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		s.mu.Unlock()
 	}()
 
-	if timeout := s.agent.options.TurnTimeout; timeout > 0 {
-		timer := time.AfterFunc(timeout, func() { s.timeout(context.WithoutCancel(ctx), t) })
-		defer timer.Stop()
-	}
-
 	ready := sync.OnceFunc(func() { close(t.ready) })
 	defer ready()
 
@@ -358,7 +353,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	defer cancel()
 
 	s.mu.Lock()
-	cancelled, timedOut := t.cancelled, t.timedOut
+	cancelled := t.cancelled
 	// The generation that ran this turn decides the fence: a turn that reached
 	// its own terminal result never fences, so a gateway lost afterwards would
 	// otherwise leave the incarnation open for the next process.
@@ -370,8 +365,6 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	switch {
 	case cancelled:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
-	case timedOut:
-		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTimeout, Message: fmt.Sprintf("hermes turn exceeded %s", s.agent.options.TurnTimeout)})}
 	case t.ended == turnTransportEnded:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.transportFailure(settleCtx, rt, nil)}
 	default:

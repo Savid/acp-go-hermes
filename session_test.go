@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -130,15 +132,14 @@ func TestFailedSnapshotKeepsCommittedConversation(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestFailureAndTimeout(t *testing.T) {
+func TestFailure(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		prompt, cause string
-		timeout       time.Duration
-	}{{"ERROR", "provider", 0}, {"CRASH", "process_exit", 0}, {"SLOW", "timeout", 100 * time.Millisecond}} {
+	}{{"ERROR", "provider"}, {"CRASH", "process_exit"}} {
 		t.Run(tc.cause, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t, WithTurnTimeout(tc.timeout))
+			h := newHarness(t)
 			h.initialize()
 			session := h.newSession()
 			_, err := h.prompt(session.SessionId, tc.prompt, nil)
@@ -354,5 +355,66 @@ func TestConfiguredModelPrecedesNativeBuild(t *testing.T) {
 	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
 	require.NoError(t, err)
 	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest(session.SessionId, "HELLO"))
+	require.NoError(t, err)
+}
+
+// A close that lands while a relaunch is still waiting for the gateway stops
+// the process the relaunch started instead of binding it to a closed session.
+func TestCloseDuringRelaunchStopsTheUnboundProcess(t *testing.T) {
+	t.Parallel()
+
+	held := filepath.Join(t.TempDir(), "ready-held")
+	h := newHarness(t, WithEnv(map[string]string{fakeHermesEnv: "1", fakeHermesEnvReadyHold: held}))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "CRASH", promptMeta(1))
+	require.Equal(t, "process_exit", requestErrorData(t, err)["cause"])
+	require.NoError(t, os.WriteFile(held+".armed", nil, 0o600))
+
+	relaunched := make(chan error, 1)
+
+	go func() {
+		_, configErr := h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "fake/text-only"))
+		relaunched <- configErr
+	}()
+
+	var pid int
+
+	require.Eventually(t, func() bool {
+		data, readErr := os.ReadFile(held)
+		if readErr != nil {
+			return false
+		}
+
+		pid, _ = strconv.Atoi(string(data))
+
+		return pid > 0
+	}, testTimeout, time.Millisecond)
+
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(held))
+
+	err = <-relaunched
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"], "the relaunch answers for the session that closed under it")
+	require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, testTimeout, time.Millisecond, "the gateway the relaunch started is gone")
+
+	_, err = h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
+
+// An empty executable path resolves the hermes binary from the base PATH.
+func TestEmptyExecutablePathResolvesHermesFromPath(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	require.NoError(t, os.Symlink(os.Args[0], filepath.Join(base, "hermes")))
+
+	h := newHarness(t, WithExecutablePath(""), WithEnv(map[string]string{fakeHermesEnv: "1", "PATH": base}))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
 	require.NoError(t, err)
 }

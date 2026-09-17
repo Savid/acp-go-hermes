@@ -9,19 +9,25 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
 
 const fakeHermesEnv = "ACP_GO_HERMES_TEST_FAKE"
-const fakeHermesEnvVersion = "ACP_GO_HERMES_TEST_VERSION"
 
 // fakeHermesEnvResumeHold names a file the gateway creates when a
 // session.resume arrives that it will never answer, so a test can act while
 // the adapter is still relaunching.
 const fakeHermesEnvResumeHold = "ACP_GO_HERMES_TEST_RESUME_HOLD"
+
+// fakeHermesEnvReadyHold names a file the gateway creates, holding its own pid,
+// before it announces readiness, once a sibling ".armed" file exists; it stays
+// silent until the file is removed.
+const fakeHermesEnvReadyHold = "ACP_GO_HERMES_TEST_READY_HOLD"
 
 // heldAttachMarker is written into the home when the gateway takes an
 // attachment it will never answer, so a test knows the upload is in flight.
@@ -58,15 +64,6 @@ func fakeID() string {
 }
 
 func runFakeHermes(args []string) int {
-	if len(args) > 0 && args[0] == "--version" {
-		version := os.Getenv(fakeHermesEnvVersion)
-		if version == "" {
-			version = "0.21.3"
-		}
-		fmt.Println("Hermes v" + version)
-
-		return 0
-	}
 	port := ""
 	for index, arg := range args {
 		if arg == "--port" && index+1 < len(args) {
@@ -175,6 +172,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 		}
 		send(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{fieldType: kind, nativeSessionIDKey: id, "payload": payload}})
 	}
+	holdReady()
 	emit("", "gateway.ready", map[string]any{})
 	for {
 		_, data, err := conn.Read(r.Context())
@@ -432,5 +430,28 @@ func (g *fakeGateway) answerRequest(id string, result map[string]any) {
 		session.mu.Lock()
 		session.dialogs = append(session.dialogs, parts[0])
 		session.mu.Unlock()
+	}
+}
+
+// holdReady parks the gateway before readiness while an armed ready-hold file
+// exists, publishing its pid there for the test that released it.
+func holdReady() {
+	hold := os.Getenv(fakeHermesEnvReadyHold)
+	if hold == "" {
+		return
+	}
+
+	if _, err := os.Stat(hold + ".armed"); err != nil {
+		return
+	}
+
+	_ = os.WriteFile(hold, []byte(strconv.Itoa(os.Getpid())), 0o600)
+
+	for {
+		if _, err := os.Stat(hold); err != nil {
+			return
+		}
+
+		time.Sleep(time.Millisecond)
 	}
 }

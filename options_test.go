@@ -2,7 +2,6 @@ package hermesacp
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -20,12 +19,11 @@ func TestOptionDefaults(t *testing.T) {
 	}, options.ImageLimits, "every omitted image limit falls back to the default")
 	require.Equal(t, defaultMaxActiveSessions, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, defaultMaxConcurrentClientCalls, options.ConcurrencyLimits.MaxConcurrentClientCalls)
-	require.Equal(t, defaultSessionStoreLoadTimeout, options.SessionStoreLoadTimeout)
 
 	options = applyOptions([]Option{
 		WithAgentName("n"), WithAgentTitle("t"), WithAgentVersion("v"), WithExecutablePath("/p"), WithHome("/h"),
 		WithScratchDir("/s"), WithInputHandoffRoot("/r"), WithDefaultModel("a/b"), WithConfiguredModels([]string{"a/b"}),
-		WithEnv(map[string]string{"A": "1"}), WithSessionStoreLoadTimeout(time.Second), WithTurnTimeout(time.Minute),
+		WithEnv(map[string]string{"A": "1"}),
 		WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 2, MaxConcurrentClientCalls: 3}),
 		WithImageLimits(ImageLimits{}), WithSeedFiles(map[string]string{"a": "b"}),
 		WithTracerProvider(nil), WithMeterProvider(nil), WithTextMapPropagator(nil), WithLogger(nil), WithSessionStore(nil),
@@ -40,8 +38,6 @@ func TestOptionDefaults(t *testing.T) {
 	require.Equal(t, "a/b", options.DefaultModel)
 	require.Equal(t, []string{"a/b"}, options.ConfiguredModels)
 	require.Equal(t, map[string]string{"A": "1"}, options.Env)
-	require.Equal(t, time.Second, options.SessionStoreLoadTimeout)
-	require.Equal(t, time.Minute, options.TurnTimeout)
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, int64(0), options.ImageLimits.MaxInputBytesPerImage)
 	require.Equal(t, map[string]string{"a": "b"}, options.SeedFiles)
