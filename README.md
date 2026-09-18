@@ -131,3 +131,17 @@ make test-integration-live    # spends model tokens
 
 Unit tests run the test binary as a scripted fake hermes and need no installed
 hermes, credentials, or network.
+
+## Account usage
+
+`AccountUsageMethod` (`_hermes/accountUsage`) accepts `sessionId` and
+`providerId` (`opencode-go`, `openrouter`, `openai-codex`, or `anthropic`).
+It requires the native gateway's `session.provider_access` method. That method
+resolves effective credentials, routes, and headers inside the addressed
+session's profile without starting a model turn. The adapter holds the
+foreground gate, verifies the official route, and revalidates the binding after
+reading usage. Credentials never enter ACP output.
+
+Shared `github.com/savid/acp-go-core/usage` readers return subscription windows,
+reported monetary spending and balances, and request limits. OpenAI API keys
+and ordinary Anthropic API keys do not establish a subscription allowance.

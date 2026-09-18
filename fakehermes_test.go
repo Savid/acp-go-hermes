@@ -158,20 +158,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(value)
 		_ = conn.Write(r.Context(), websocket.MessageText, data)
 	}
-	emit := func(id, kind string, payload any) {
-		switch kind {
-		case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
-			params, ok := payload.(map[string]any)
-			if !ok {
-				panic("native control fixture requires object params")
-			}
-			params[nativeSessionIDKey] = id
-			send(map[string]any{"jsonrpc": "2.0", "id": kind + "|" + id + "|" + fakeID(), "method": kind, "params": params})
-
-			return
-		}
-		send(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{fieldType: kind, nativeSessionIDKey: id, "payload": payload}})
-	}
+	emit := fakeEmitter(send)
 	holdReady()
 	emit("", "gateway.ready", map[string]any{})
 	for {
@@ -247,6 +234,8 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			result = map[string]any{"sessions": rows}
 		case "process.list":
 			failure = session.buildFailure()
+		case "session.provider_access":
+			result = fakeUsageAccess()
 		case "model.options":
 			session.mu.Lock()
 			result = map[string]any{"provider": session.provider, "model": session.model, "providers": []any{map[string]any{"slug": "fake", fieldName: "Fake", "models": []string{"vision", "text-only"}}}}
@@ -453,5 +442,31 @@ func holdReady() {
 		}
 
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func fakeUsageAccess() any {
+	data, err := os.ReadFile(os.Getenv("ACP_GO_HERMES_TEST_USAGE_ACCESS"))
+	if err != nil {
+		return map[string]any{"configured": false}
+	}
+
+	return json.RawMessage(data)
+}
+
+func fakeEmitter(send func(any)) func(string, string, any) {
+	return func(id, kind string, payload any) {
+		switch kind {
+		case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
+			params, ok := payload.(map[string]any)
+			if !ok {
+				panic("native control fixture requires object params")
+			}
+			params[nativeSessionIDKey] = id
+			send(map[string]any{"jsonrpc": "2.0", "id": kind + "|" + id + "|" + fakeID(), "method": kind, "params": params})
+
+			return
+		}
+		send(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{fieldType: kind, nativeSessionIDKey: id, "payload": payload}})
 	}
 }

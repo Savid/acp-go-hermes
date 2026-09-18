@@ -41,8 +41,8 @@ github.com/prometheus/otlptranslator v1.0.0 h1:s0LJW/iN9dkIH+EnhiD3BlkkP5QVIUVEo
 github.com/prometheus/otlptranslator v1.0.0/go.mod h1:vRYWnXvI6aWGpsdY/mOT/cbeVRBlPWtBNDb7kGR3uKM=
 github.com/prometheus/procfs v0.20.1 h1:XwbrGOIplXW/AU3YhIhLODXMJYyC1isLFfYCsTEycfc=
 github.com/prometheus/procfs v0.20.1/go.mod h1:o9EMBZGRyvDrSPH1RqdxhojkuXstoe4UlK79eF5TGGo=
-github.com/savid/acp-go-core v0.0.0-20260918070815-f63e98d3f200 h1:T4F4r97NOq2d6QTXDvOpHRBouGDeivA1dz9TI9v+ndc=
-github.com/savid/acp-go-core v0.0.0-20260918070815-f63e98d3f200/go.mod h1:lg+vTpgKlitUUGr41NtpwA5+uLbHRRt83kJq6PPGa40=
+github.com/savid/acp-go-core v0.0.0-20260918140635-f4a1d9b4c725 h1:DMyTAP1CbcUajMitbPdd/3mcpkCERzrDOC2SHbuqAt0=
+github.com/savid/acp-go-core v0.0.0-20260918140635-f4a1d9b4c725/go.mod h1:lg+vTpgKlitUUGr41NtpwA5+uLbHRRt83kJq6PPGa40=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
