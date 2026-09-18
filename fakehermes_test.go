@@ -234,8 +234,6 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			result = map[string]any{"sessions": rows}
 		case "process.list":
 			failure = session.buildFailure()
-		case "session.provider_access":
-			result = fakeUsageAccess()
 		case "model.options":
 			session.mu.Lock()
 			result = map[string]any{"provider": session.provider, "model": session.model, "providers": []any{map[string]any{"slug": "fake", fieldName: "Fake", "models": []string{"vision", "text-only"}}}}
@@ -443,15 +441,6 @@ func holdReady() {
 
 		time.Sleep(time.Millisecond)
 	}
-}
-
-func fakeUsageAccess() any {
-	data, err := os.ReadFile(os.Getenv("ACP_GO_HERMES_TEST_USAGE_ACCESS"))
-	if err != nil {
-		return map[string]any{"configured": false}
-	}
-
-	return json.RawMessage(data)
 }
 
 func fakeEmitter(send func(any)) func(string, string, any) {

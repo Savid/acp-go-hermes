@@ -8,26 +8,15 @@ import (
 	hermesacp "github.com/savid/acp-go-hermes"
 )
 
-// telemetry is the configured bundle plus the agent options it maps onto.
-type telemetry struct {
-	logger   *slog.Logger
-	options  []hermesacp.Option
-	shutdown func(context.Context) error
-}
-
-// configureTelemetry reads the standard OTEL_* environment and maps each
-// configured provider onto an agent option.
-func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version string) (telemetry, error) {
+// configureTelemetry builds the exporters the OTEL_* environment enables and
+// maps the configured providers onto the agent's options.
+func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version string) (exporters.Bundle, []hermesacp.Option, error) {
 	bundle, err := exporters.Configure(ctx, exporters.Config{Vendor: "hermes", Version: version, Logger: baseLogger})
 	if err != nil {
-		return telemetry{}, err
+		return exporters.Bundle{}, nil, err
 	}
 
-	options := []hermesacp.Option{}
-	if bundle.Propagator != nil {
-		options = append(options, hermesacp.WithTextMapPropagator(bundle.Propagator))
-	}
-
+	options := []hermesacp.Option{hermesacp.WithTextMapPropagator(bundle.Propagator)}
 	if bundle.TracerProvider != nil {
 		options = append(options, hermesacp.WithTracerProvider(bundle.TracerProvider))
 	}
@@ -36,5 +25,5 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 		options = append(options, hermesacp.WithMeterProvider(bundle.MeterProvider))
 	}
 
-	return telemetry{logger: bundle.Logger, options: options, shutdown: bundle.Shutdown}, nil
+	return bundle, options, nil
 }

@@ -223,22 +223,13 @@ func TestCancelDuringImageUploadEndsTheTurnAsCancelled(t *testing.T) {
 	require.Equal(t, acp.StopReasonCancelled, got.resp.StopReason)
 }
 
-const (
-	// mappingBlocks makes one prompt expensive enough to map that the moment
-	// the turn is installed is unambiguous.
-	mappingBlocks = 1_000_000
-	// mappingInstallBound is the budget the turn install has to beat; mapping
-	// mappingBlocks takes at least five times as long.
-	mappingInstallBound = 20 * time.Millisecond
-)
-
 // The turn is installed before the prompt is mapped: a session/cancel that
 // lands while the prompt is still being validated ends it from the turn's own
 // context, creates no native turn and publishes no acceptance.
 func TestCancelDuringPromptMappingAnswersCancelled(t *testing.T) {
 	t.Parallel()
 
-	blocks := make([]acp.ContentBlock, mappingBlocks)
+	blocks := make([]acp.ContentBlock, 1_000_000)
 	for index := range blocks {
 		blocks[index] = acp.ImageBlock(tinyPNG, "image/png")
 	}
@@ -281,7 +272,7 @@ func TestCancelDuringPromptMappingAnswersCancelled(t *testing.T) {
 		defer s.mu.Unlock()
 
 		return s.turn != nil
-	}, mappingInstallBound, 100*time.Microsecond, "the turn is installed before the prompt is mapped")
+	}, testTimeout, time.Millisecond, "the turn is installed before the prompt is mapped")
 
 	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
 

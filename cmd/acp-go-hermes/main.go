@@ -23,7 +23,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	flags := flag.NewFlagSet("acp-go-hermes", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	nativePath := flags.String("path", "", "hermes executable; a bare name is searched on PATH")
+	executablePath := flags.String("path", "", "hermes executable; a bare name is searched on PATH")
 	home := flags.String("home", "", "hermes config root passed as HERMES_HOME; empty inherits hermes's own resolution")
 	scratchDir := flags.String("scratch-dir", "", "accepted and ignored; this adapter allocates no ephemeral state")
 	model := flags.String("model", "", "default model for new sessions as provider/id")
@@ -49,21 +49,21 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
 
-	telemetry, err := configureTelemetry(ctx, logger, version())
+	telemetry, telemetryOptions, err := configureTelemetry(ctx, logger, version())
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: configure OpenTelemetry: %v\n", err)
 
 		return 1
 	}
 
-	logger = telemetry.logger
+	logger = telemetry.Logger
 
 	ctx, stop := signal.NotifyContext(ctx, forwardedSignals()...)
 	defer stop()
 
 	options := []hermesacp.Option{
 		hermesacp.WithAgentVersion(version()),
-		hermesacp.WithExecutablePath(*nativePath),
+		hermesacp.WithExecutablePath(*executablePath),
 		hermesacp.WithHome(*home),
 		hermesacp.WithScratchDir(*scratchDir),
 		hermesacp.WithDefaultModel(*model),
@@ -73,10 +73,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		options = append(options, hermesacp.WithSeedFiles(seedFiles.Files))
 	}
 
-	options = append(options, telemetry.options...)
+	options = append(options, telemetryOptions...)
 
 	serveErr := hermesacp.Serve(ctx, stdin, stdout, options...)
-	shutdownErr := telemetry.shutdown(context.Background())
+	shutdownErr := telemetry.Shutdown(context.Background())
 
 	if serveErr != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(stderr, "acp-go-hermes: %v\n", serveErr)

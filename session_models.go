@@ -40,34 +40,14 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	models := acp.SessionConfigSelectOptionsUngrouped{}
-	seen := make(map[string]bool)
-	add := func(id, name string, native bool) {
-		if id == "" || seen[id] {
-			return
-		}
-
-		seen[id] = true
-
-		option := acp.SessionConfigSelectOption{Value: acp.SessionConfigValueId(id), Name: name}
-		if native {
-			option.Meta = map[string]any{vendor: map[string]any{"modelId": id}}
-		}
-
-		models = append(models, option)
-	}
-
+	rows := make([]wire.ModelRow, 0, len(s.models.Providers))
 	for _, provider := range s.models.Providers {
 		for _, model := range provider.Models {
-			add(provider.Slug+"/"+model, provider.Name+" / "+model, true)
+			rows = append(rows, wire.ModelRow{ID: provider.Slug + "/" + model, Name: provider.Name + " / " + model})
 		}
 	}
 
-	for _, id := range s.agent.options.ConfiguredModels {
-		add(id, id, false)
-	}
-
-	add(s.model, s.model, false)
+	models := wire.ModelSelectOptions(vendor, s.model, rows, s.agent.options.ConfiguredModels)
 
 	options := make([]acp.SessionConfigOption, 0, 2)
 	if s.model != "" {
@@ -140,5 +120,8 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, wire.InternalFailure(vendor, "")
 	}
 
-	return s.configOptions(), nil
+	options := s.configOptions()
+	_ = s.emit(ctx, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}})
+
+	return options, nil
 }

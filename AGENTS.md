@@ -62,5 +62,4 @@ changing anything hermes-facing.
   dialog or fail open on a denied or cancelled answer.
 - Do not log prompts, tool input or output, or raw native event bodies by
   default.
-- The ACP extension request is `_hermes/accountUsage`; all other extension
-  methods are refused. Credentials remain inside the adapter.
+- ACP extension requests are refused.

@@ -9,7 +9,7 @@ import (
 // WithSessionHermesOptions merges hermes-specific options into
 // _meta.hermes.options of a session lifecycle request.
 func WithSessionHermesOptions(options HermesOptions) wire.SessionRequestOption {
-	return wire.WithSessionMetaValue(options.clone().Meta())
+	return wire.WithSessionMetaValue(options.Meta())
 }
 
 // WithSessionRawEvents toggles raw hermes event emission for the session.
