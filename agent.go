@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -21,6 +22,10 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
@@ -29,6 +34,9 @@ const (
 	// RawEventMethod is the notification carrying one raw hermes event when a
 	// session opted in through _meta.hermes.rawEvent.enabled.
 	RawEventMethod = "_hermes/rawEvent"
+	// AccountUsageMethod reads a provider's account usage through the gateways
+	// hermes's config routes to.
+	AccountUsageMethod = "_hermes/accountUsage"
 	// SessionStoreFormat identifies the store layout this package writes: native
 	// per-conversation JSON exports under main plus the adapter's session
 	// record under the config subpath.
@@ -50,10 +58,12 @@ type client interface {
 
 // Agent exposes the hermes coding agent through ACP.
 type Agent struct {
-	options   Options
-	log       *slog.Logger
-	observe   *observer.Observer
-	optionErr *acp.RequestError
+	// usageTransport carries shared provider usage reads; nil uses the default.
+	usageTransport http.RoundTripper
+	options        Options
+	log            *slog.Logger
+	observe        *observer.Observer
+	optionErr      *acp.RequestError
 	// processEnv is the adapter's own environment, read once at construction.
 	processEnv []string
 	store      acpcore.SessionStore
@@ -308,7 +318,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.hermes.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
-			"sessionStore": map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeAgent, anthropic.ProviderID, openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID),
 		},
 		wire.MediaEnvelopeKey: image.MediaEnvelope(a.options.ImageLimits.core(), image.Envelope{DocumentFormats: []string{}}),
 	}
@@ -390,11 +401,15 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-// HandleExtensionMethod answers every extension method with method-not-found.
-// The only extension surface is the outbound RawEventMethod notification.
-func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+// HandleExtensionMethod serves the account-usage read; every other extension
+// method is method-not-found.
+func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if openErr := a.ensureOpen(); openErr != nil {
 		return nil, openErr
+	}
+
+	if method == AccountUsageMethod {
+		return a.accountUsage(ctx, params)
 	}
 
 	var envelope struct {

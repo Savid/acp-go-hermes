@@ -119,6 +119,16 @@ The native binding identifies the durable Hermes conversation. Transient gateway
 IDs stay internal. Native compression that changes the durable ID poisons the session
 instead of storing a different conversation under the original ID.
 
+### Account usage
+
+`_hermes/accountUsage` with `{"providerId": "<id>"}` reads one provider's
+allowance through the gateways `config.yaml` routes it to: `anthropic`,
+`openai-codex`, `opencode-go`, or `openrouter`. Hermes exposes no provider
+credentials natively, so a provider no configured gateway reports answers
+`{"available": false, "reason": "not_authenticated"}`. Initialize advertises
+the read under `_meta.hermes.accountUsage` as
+`{"method": "_hermes/accountUsage", "scope": "agent", "providers": [...]}`.
+
 ## Development
 
 ```sh
