@@ -1,9 +1,0 @@
-{
-  "name": "duplicate-session",
-  "raw": "{\"sessionId\":\"a\",\"sessionId\":\"a\"}",
-  "expect": {
-    "valid": false,
-    "error": "unsupported",
-    "field": "sessionId"
-  }
-}

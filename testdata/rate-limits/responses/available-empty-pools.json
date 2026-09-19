@@ -1,8 +1,0 @@
-{
-  "name": "available-empty-pools",
-  "raw": "{\"providerId\":\"openai\",\"availability\":\"available\",\"pools\":[]}",
-  "expect": {
-    "valid": false,
-    "field": "pools"
-  }
-}

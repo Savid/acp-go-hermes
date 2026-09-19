@@ -1,9 +1,0 @@
-{
-  "name": "malformed-json",
-  "raw": "{\"providerId\":",
-  "expect": {
-    "valid": false,
-    "error": "unsupported",
-    "field": "params"
-  }
-}

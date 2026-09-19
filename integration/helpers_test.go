@@ -4,400 +4,269 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
-	"maps"
+	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
 	hermesacp "github.com/savid/acp-go-hermes"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-// envLiveKeyEnv names the environment variable the selected provider reads its
-// key from. Hermes resolves a provider by finding that variable in its own
-// environment, so the tier forwards exactly that one name and nothing else.
-const envLiveKeyEnv = "ACP_GO_HERMES_LIVE_KEY_ENV"
+const testTimeout = 120 * time.Second
+const permissionOptionAllow acp.PermissionOptionId = "once"
 
-const (
-	defaultLiveProvider = "openrouter"
-	defaultLiveModel    = "openrouter/free"
-	defaultLiveKeyEnv   = "OPENROUTER_API_KEY"
+// harnessPath is the installed hermes the tier drives. ACP_GO_HERMES_HARNESS_PATH
+// points it at a build outside PATH; an absent binary skips the tier.
+func harnessPath(t *testing.T) string {
+	t.Helper()
+
+	selector := os.Getenv("ACP_GO_HERMES_HARNESS_PATH")
+	if selector == "" {
+		selector = "hermes"
+	}
+
+	resolved, err := exec.LookPath(selector)
+	if err != nil {
+		t.Skipf("hermes not installed: %v", err)
+	}
+
+	return resolved
+}
+
+// recorder is the ACP client the tests observe the agent through.
+type recorder struct {
+	mu          sync.Mutex
+	updates     []acp.SessionNotification
+	raw         []json.RawMessage
+	permissions []acp.RequestPermissionRequest
+	answer      func(acp.RequestPermissionRequest) acp.RequestPermissionResponse
+	elicit      func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	changed     chan struct{}
+}
+
+var (
+	_ acp.Client                 = (*recorder)(nil)
+	_ acp.ExtensionMethodHandler = (*recorder)(nil)
 )
 
-// liveTokenModelSelection reports the provider and native model id the
-// token-spending tier seeds Hermes with. ACP_GO_HERMES_MODEL is the same
-// provider-qualified selection the -model flag takes, so the seeded config and
-// the flag can never name different routing. The provider is the first segment
-// because a native model id may itself carry slashes.
-func liveTokenModelSelection() (string, string) {
-	provider, model := defaultLiveProvider, defaultLiveModel
-	if selection := os.Getenv("ACP_GO_HERMES_MODEL"); selection != "" {
-		if named, native, ok := strings.Cut(selection, "/"); ok && named != "" && native != "" {
-			provider, model = named, native
-		}
-	}
-
-	return provider, model
-}
-
-// liveTokenHermesConfig caps only token-spending integration sessions through
-// Hermes' native isolated config and routes them at the selected provider.
-func liveTokenHermesConfig() string {
-	return liveHermesConfig(1024, "")
-}
-
-// liveToolTokenHermesConfig is the same routing with the room a tool-driven
-// turn needs and manual approvals. Manual mode is what keeps a
-// dangerous-classified terminal command routed to the host approval callback
-// rather than auto-classified by Hermes' default risk classifier; nothing here
-// auto-grants an approval.
-func liveToolTokenHermesConfig() string {
-	return liveHermesConfig(4096, "approvals:\n  mode: manual\n")
-}
-
-func liveHermesConfig(maxTokens int, extra string) string {
-	provider, model := liveTokenModelSelection()
-
-	return "model:\n" +
-		"  provider: " + provider + "\n" +
-		"  default: " + model + "\n" +
-		"  max_tokens: " + strconv.Itoa(maxTokens) + "\n" +
-		extra
-}
-
-// liveTokenEnv adds the selected provider's credential to a launch environment.
-// The key travels as an explicit env entry, which is the only door an ordinary
-// launch leaves open for one, and never into a seeded file. A tier running
-// without the variable set gets the caller's entries unchanged, so the native
-// gateway reports the missing provider rather than the test inventing one.
-func liveTokenEnv(extra map[string]string) map[string]string {
-	env := make(map[string]string, len(extra)+1)
-	maps.Copy(env, extra)
-
-	name := envOrDefault(envLiveKeyEnv, defaultLiveKeyEnv)
-	if value := os.Getenv(name); value != "" {
-		env[name] = value
-	}
-
-	return env
-}
-
-// liveTokenSessionOptions carries the provider credential into a session driven
-// through the wrapper CLI, which advertises no agent-wide environment flag.
-func liveTokenSessionOptions() []hermesacp.SessionRequestOption {
-	return []hermesacp.SessionRequestOption{
-		hermesacp.WithSessionHermesOptions(hermesacp.HermesOptions{Env: liveTokenEnv(nil)}),
+func newRecorder() *recorder {
+	return &recorder{
+		changed: make(chan struct{}, 1),
+		answer: func(acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionOptionAllow)}
+		},
 	}
 }
 
-// inProcessAgent runs Serve over in-process pipes. It is how a test drives the
-// public ACP surface while still holding the options it passed — a session
-// store above all. A directly constructed Agent has no client connection to
-// stream a turn's updates to, so a prompt through one cannot complete; Serve
-// owns that connection.
-type inProcessAgent struct {
-	conn   *acp.ClientSideConnection
-	client *recordingClient
-	stop   func() error
-}
-
-func startInProcessAgent(t *testing.T, ctx context.Context, opts ...hermesacp.Option) *inProcessAgent {
-	t.Helper()
-
-	clientReader, agentWriter := io.Pipe()
-	agentReader, clientWriter := io.Pipe()
-
-	client := newRecordingClient()
-	agent := &inProcessAgent{
-		conn:   acp.NewClientSideConnection(client, clientWriter, clientReader),
-		client: client,
+func (r *recorder) signal() {
+	select {
+	case r.changed <- struct{}{}:
+	default:
 	}
-
-	served := make(chan error, 1)
-
-	go func() { served <- hermesacp.Serve(ctx, agentReader, agentWriter, opts...) }()
-
-	stopped := false
-	agent.stop = func() error {
-		if stopped {
-			return nil
-		}
-
-		stopped = true
-
-		_ = clientWriter.Close()
-		err := <-served
-		_ = agentWriter.Close()
-
-		return err
-	}
-	t.Cleanup(func() { _ = agent.stop() })
-
-	if _, err := agent.conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}); err != nil {
-		t.Fatalf("initialize in-process agent: %v", err)
-	}
-
-	return agent
 }
 
-// liveAgent holds a launched acp-go-hermes subprocess and its stdio pipes.
-//
-// Each launch passes a caller-provided `-scratch-dir` temp root so the
-// subprocess owns an isolated HERMES_HOME. Tests that need durable credentials
-// use an explicit disposable shared HERMES_HOME.
-type liveAgent struct{ *integrationProcess }
-
-// integrationAgentArgs builds the launch args every wrapper subprocess in this
-// tier shares.
-func integrationAgentArgs(hermesPath string, home string, extraArgs ...string) []string {
-	args := make([]string, 0, 4+len(extraArgs))
-	args = append(args,
-		"-path", hermesPath,
-		"-scratch-dir", home,
-	)
-
-	return append(args, extraArgs...)
-}
-
-func startLiveAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
-	t.Helper()
-	cmd := agentCommand(t, ctx, integrationAgentArgs(integrationHermesPath(t), home, extraArgs...)...)
-
-	return &liveAgent{startIntegrationProcess(t, cmd)}
-}
-
-// startLiveTokenAgent caps only token-spending integration sessions through
-// Hermes' native isolated config. Production defaults remain untouched.
-func startLiveTokenAgent(t *testing.T, ctx context.Context, home string, extraArgs ...string) *liveAgent {
-	t.Helper()
-
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte(liveTokenHermesConfig()), 0o600); err != nil {
-		t.Fatalf("write live-test Hermes config: %v", err)
-	}
-
-	args := append([]string(nil), extraArgs...)
-	args = append(args, "-seed-file", "config.yaml="+configPath)
-
-	return startLiveAgent(t, ctx, home, args...)
-}
-
-func liveTokenSeedFiles() map[string]string {
-	return map[string]string{"config.yaml": liveTokenHermesConfig()}
-}
-
-func (a *liveAgent) stderrString() string {
-	return a.stderr.String()
-}
-
-type recordingClient struct {
-	mu           sync.Mutex
-	permissions  []acp.RequestPermissionRequest
-	elicitations []acp.UnstableCreateElicitationRequest
-	updates      []acp.SessionNotification
-}
-
-var _ acp.Client = (*recordingClient)(nil)
-
-func newRecordingClient() *recordingClient {
-	return &recordingClient{}
-}
-
-func (*recordingClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, nil
-}
-func (*recordingClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, nil
-}
-func (c *recordingClient) RequestPermission(_ context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	c.mu.Lock()
-	c.permissions = append(c.permissions, req)
-	c.mu.Unlock()
-
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("once")}, nil
-}
-func (c *recordingClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
-	c.mu.Lock()
-	c.updates = append(c.updates, notification)
-	c.mu.Unlock()
+func (r *recorder) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, params)
+	r.mu.Unlock()
+	r.signal()
 
 	return nil
 }
-func (*recordingClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{TerminalId: "terminal-1"}, nil
-}
-func (*recordingClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, nil
-}
-func (*recordingClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, nil
-}
-func (*recordingClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, nil
-}
-func (*recordingClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, nil
+
+func (r *recorder) RequestPermission(_ context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	r.mu.Lock()
+	r.permissions = append(r.permissions, params)
+	answer := r.answer
+	r.mu.Unlock()
+	r.signal()
+
+	return answer(params), nil
 }
 
-func (c *recordingClient) UnstableCreateElicitation(_ context.Context, req acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
-	c.mu.Lock()
-	c.elicitations = append(c.elicitations, req)
-	c.mu.Unlock()
-	content := map[string]any{"question_1": "Yes"}
-	if req.Form != nil {
-		for _, key := range req.Form.RequestedSchema.Required {
-			content[key] = "Yes"
-		}
+func (r *recorder) UnstableCreateElicitation(_ context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	r.mu.Lock()
+	elicit := r.elicit
+	r.mu.Unlock()
+
+	if elicit == nil {
+		return acp.UnstableCreateElicitationResponse{}, errors.New("no elicitation handler")
 	}
 
-	return acp.UnstableCreateElicitationResponse{
-		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: content},
-	}, nil
+	return elicit(params)
 }
 
-func (c *recordingClient) permissionCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.permissions)
-}
-
-func (c *recordingClient) elicitationCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.elicitations)
-}
-
-func (c *recordingClient) updatesSummary() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var out strings.Builder
-	for _, notification := range c.updates {
-		u := notification.Update
-		switch {
-		case u.ToolCall != nil:
-			out.WriteString("toolCall title=" + u.ToolCall.Title + " kind=" + string(u.ToolCall.Kind) + " status=" + string(u.ToolCall.Status) + "\n")
-		case u.ToolCallUpdate != nil:
-			title := ""
-			if u.ToolCallUpdate.Title != nil {
-				title = *u.ToolCallUpdate.Title
-			}
-			status := ""
-			if u.ToolCallUpdate.Status != nil {
-				status = string(*u.ToolCallUpdate.Status)
-			}
-			out.WriteString("toolCallUpdate title=" + title + " status=" + status + "\n")
-		case u.AgentMessageChunk != nil && u.AgentMessageChunk.Content.Text != nil:
-			out.WriteString("agentText " + u.AgentMessageChunk.Content.Text.Text + "\n")
-		case u.AgentThoughtChunk != nil:
-			out.WriteString("agentThought\n")
-		case u.Plan != nil:
-			out.WriteString("plan\n")
-		}
+func (r *recorder) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if method == hermesacp.RawEventMethod {
+		r.mu.Lock()
+		r.raw = append(r.raw, append(json.RawMessage(nil), params...))
+		r.mu.Unlock()
+		r.signal()
 	}
 
-	return out.String()
+	return map[string]any{}, nil
 }
 
-func (c *recordingClient) agentText() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (*recorder) NotifyExtension(context.Context, string, any) error { return nil }
 
-	var out strings.Builder
-	for _, notification := range c.updates {
-		chunk := notification.Update.AgentMessageChunk
-		if chunk != nil && chunk.Content.Text != nil {
-			out.WriteString(chunk.Content.Text.Text)
-		}
-	}
-
-	return out.String()
+func (*recorder) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
 }
 
-func envOrDefault(name string, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
-	}
-
-	return fallback
+func (*recorder) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
 }
 
-// smokePlaceholderProviderKey satisfies the native gateway's
-// "some inference provider is configured" precondition for tiers that make no
-// provider request. It is a fixed non-credential string, never a real key.
-const smokePlaceholderProviderKey = "acp-go-hermes-smoke-placeholder-not-a-credential"
+func (*recorder) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
+}
 
-func TestIntegrationHarnessPrerequisites(t *testing.T) {
-	if os.Args[len(os.Args)-1] == "harness-prerequisite-child" {
-		path := integrationHermesPath(t)
-		t.Log("resolved harness " + path)
+func (*recorder) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("unsupported")
+}
 
-		return
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name, integration, tier, value, outcome string
-		available                               bool
-	}{
-		{name: "ungated", outcome: "SKIP"},
-		{name: "disabled", integration: "0", outcome: "SKIP"},
-		{name: "invalid_gate", integration: "true", outcome: "SKIP"},
-		{name: "missing_smoke", integration: "1", outcome: "SKIP"},
-		{name: "disabled_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "0", outcome: "SKIP"},
-		{name: "missing_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "1", outcome: "FAIL"},
-		{name: "missing_attended", integration: "1", tier: "RUN_ATTENDED", value: "1", outcome: "FAIL"},
-		{name: "missing_keystore", integration: "1", tier: "RUN_KEYSTORE", value: "1", outcome: "FAIL"},
-		{name: "fake_path", integration: "1", outcome: "PASS", available: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, suffix := range []string{"RUN_INTEGRATION", "RUN_LIVE_TOKENS", "RUN_ATTENDED", "RUN_KEYSTORE"} {
-				t.Setenv("ACP_GO_HERMES_"+suffix, "0")
-			}
-			t.Setenv("ACP_GO_HERMES_RUN_INTEGRATION", tc.integration)
-			if tc.tier != "" {
-				t.Setenv("ACP_GO_HERMES_"+tc.tier, tc.value)
-			}
-			dir := t.TempDir()
-			harness := filepath.Join(dir, "hermes")
-			if runtime.GOOS == "windows" {
-				harness += ".exe"
-			}
-			if tc.available {
-				// Resolution only: this file is never executed.
-				if err := os.WriteFile(harness, []byte("fake harness path"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("ACP_GO_HERMES_HARNESS_PATH", harness)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestIntegrationHarnessPrerequisites$", "-test.v", "--", "harness-prerequisite-child")
-			cmd.WaitDelay = time.Second
-			output, runErr := cmd.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatal(ctx.Err())
-			}
-			if (runErr != nil) != (tc.outcome == "FAIL") {
-				t.Fatalf("unexpected child result: %v\n%s", runErr, output)
-			}
-			if !strings.Contains(string(output), "--- "+tc.outcome+": TestIntegrationHarnessPrerequisites") {
-				t.Fatalf("want child %s:\n%s", tc.outcome, output)
-			}
-			if tc.available && !strings.Contains(string(output), "resolved harness "+harness) {
-				t.Fatalf("fake harness selection was lost:\n%s", output)
+func (*recorder) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("unsupported")
+}
+
+// snapshot returns the notifications recorded so far.
+func (r *recorder) snapshot() []acp.SessionNotification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]acp.SessionNotification(nil), r.updates...)
+}
+
+// harness serves an agent over pipes to a recording client.
+type harness struct {
+	t        *testing.T
+	conn     *acp.ClientSideConnection
+	rec      *recorder
+	stopOnce sync.Once
+	stop     func()
+}
+
+func newHarness(t *testing.T, extra ...hermesacp.Option) *harness {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	rec := newRecorder()
+	served := make(chan error, 1)
+
+	opts := append([]hermesacp.Option{hermesacp.WithExecutablePath(harnessPath(t))}, extra...)
+
+	go func() { served <- hermesacp.Serve(ctx, agentReader, agentWriter, opts...) }()
+
+	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	h := &harness{t: t, conn: conn, rec: rec}
+
+	h.stop = func() {
+		h.stopOnce.Do(func() {
+			cancel()
+			_ = clientWriter.Close()
+			select {
+			case <-served:
+			case <-time.After(testTimeout):
+				t.Error("hermesacp.Serve did not return")
 			}
 		})
 	}
+	t.Cleanup(h.stop)
+
+	return h
+}
+
+func (h *harness) ctx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	h.t.Cleanup(cancel)
+
+	return ctx
+}
+
+func (h *harness) initialize(opts ...func(*acp.InitializeRequest)) acp.InitializeResponse {
+	h.t.Helper()
+
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	for _, opt := range opts {
+		opt(&request)
+	}
+
+	resp, err := h.conn.Initialize(h.ctx(), request)
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func withLifecycle() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.Meta = map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}
+	}
+}
+
+func withFormElicitation() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	}
+}
+
+func (h *harness) newSession(opts ...wire.SessionRequestOption) acp.NewSessionResponse {
+	h.t.Helper()
+
+	resp, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(h.t.TempDir(), opts...))
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
+	h.t.Helper()
+
+	request := wire.TextPromptRequest(sessionID, text)
+	request.Meta = meta
+
+	return h.conn.Prompt(h.ctx(), request)
+}
+
+// promptMeta stamps the lifecycle prompt correlation.
+func promptMeta(n int) map[string]any {
+	return map[string]any{wire.LifecycleKey: map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": fmt.Sprintf("sub-%d", n), "clientNonce": fmt.Sprintf("non-%d", n)},
+	}}
+}
+
+// agentText concatenates streamed agent message text.
+func agentText(updates []acp.SessionNotification) string {
+	var text strings.Builder
+
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			text.WriteString(chunk.Content.Text.Text)
+		}
+	}
+
+	return text.String()
 }

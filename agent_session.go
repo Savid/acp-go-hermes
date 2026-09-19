@@ -1,1956 +1,798 @@
-//nolint:wsl_v5 // Session lifecycle code keeps fail-closed acquisitions adjacent.
 package hermesacp
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log/slog"
-	"os"
+	"maps"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	nativehermes "github.com/savid/acp-go-hermes/internal/hermes"
-
 	"github.com/coder/acp-go-sdk"
+
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-var createHermesGeneration = nativehermes.CreateGenerationXDGDirs
-var redactSharedHermesMCPServers = nativehermes.RedactedMCPServers
+const (
+	limitActiveSessions = "active_sessions"
+	limitSessionRestore = "session_restore"
+)
 
-type sharedSessionSetLease interface {
-	Release() error
+// sessionStart carries the validated inputs of one session-establishing
+// request.
+type sessionStart struct {
+	cwd                   string
+	additionalDirectories []string
+	meta                  sessionMeta
 }
 
-var acquireSharedSessionSetLock = func(
-	ctx context.Context,
-	home string,
-	mode nativehermes.SharedSessionSetLockMode,
-) (sharedSessionSetLease, error) {
-	return nativehermes.AcquireSharedSessionSetLock(ctx, home, mode)
-}
+func (a *Agent) validateStart(params sessionStart, mcpServers []acp.McpServer, meta map[string]any) (sessionStart, error) {
+	if a.optionErr != nil {
+		return sessionStart{}, a.optionErr
+	}
 
-func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (_ acp.NewSessionResponse, returnErr error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.NewSessionResponse{}, err
+	parsed, err := parseSessionMeta(meta)
+	if err != nil {
+		return sessionStart{}, err
+	}
+
+	if !filepath.IsAbs(params.cwd) {
+		return sessionStart{}, wire.Unsupported(fieldCwd)
+	}
+
+	for index, dir := range params.additionalDirectories {
+		if !filepath.IsAbs(dir) {
+			return sessionStart{}, wire.Unsupported("additionalDirectories[" + strconv.Itoa(index) + "]")
+		}
+	}
+
+	if len(mcpServers) > 0 {
+		return sessionStart{}, wire.Unsupported("mcpServers")
 	}
 
 	if err := a.ensureOpen(); err != nil {
-		return acp.NewSessionResponse{}, err
+		return sessionStart{}, err
 	}
 
-	if err := a.rejectInvalidConfiguration(); err != nil {
-		return acp.NewSessionResponse{}, err
+	params.meta = parsed
+
+	return params, nil
+}
+
+// newSession builds the session value for one establishing request; the
+// native identity arrives once hermes reports it.
+func (a *Agent) newSession(start sessionStart) *session {
+	s := &session{
+		agent:                 a,
+		cwd:                   start.cwd,
+		additionalDirectories: slices.Clone(start.additionalDirectories),
+		options:               start.meta.options.clone(),
+		gate:                  make(chan struct{}, 1),
 	}
 
-	ctx = a.observe.Extract(ctx, params.Meta)
+	// A malformed environment is reported when launch builds it again; the
+	// agent directory only needs whatever resolved here.
+	env, _ := a.environment(s.options.Env, nil).Build()
+	s.agentDir = hermes.AgentDir(a.options.Home, func(key string) (string, bool) { return process.Lookup(env, key) })
 
-	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
-		return acp.NewSessionResponse{}, err
+	if !filepath.IsAbs(s.agentDir) {
+		s.agentDir = filepath.Join(s.cwd, s.agentDir)
 	}
 
-	if err := validateMCPServers(params.McpServers); err != nil {
-		return acp.NewSessionResponse{}, err
+	return s
+}
+
+// install publishes a configured session under its ACP id.
+func (a *Agent) install(ctx context.Context, s *session) error {
+	a.mu.Lock()
+
+	var refusal error
+
+	switch {
+	case a.closed:
+		refusal = wire.AgentClosed()
+	case a.deleted[s.id]:
+		refusal = wire.UnknownSession()
+	case a.sessions[s.id] != nil:
+		refusal = wire.InternalFailure(vendor, internalClassNativeStart)
+	case len(a.sessions) >= a.options.ConcurrencyLimits.MaxActiveSessions:
+		refusal = wire.Backpressure(limitActiveSessions)
 	}
 
-	meta, err := a.sessionMetaFromLifecycle(params.Meta)
-	if err != nil {
-		return acp.NewSessionResponse{}, err
+	if refusal == nil {
+		a.sessions[s.id] = s
+	}
+	a.mu.Unlock()
+
+	if refusal != nil {
+		return refusal
 	}
 
-	if meta.Model == "" {
-		meta.Model = a.options.DefaultModel
-	}
+	a.observe.AddActiveSession(ctx, 1)
 
-	idValue, err := newSessionID()
-	if err != nil {
-		return acp.NewSessionResponse{}, err
-	}
+	return nil
+}
 
-	id := acp.SessionId(idValue)
-	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
-	if constructionErr != nil {
-		return acp.NewSessionResponse{}, constructionErr
-	}
-	defer finishConstruction()
-	ctx = constructionCtx
+// scheduleOpen defers the opening publication behind the establishing
+// response on a served connection, and runs it inline for an embedded host.
+func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
 
-	client, err := a.newHermesClient(ctx, id, params.Cwd, meta, nativehermes.XDGDirs{}, params.McpServers)
-	if err != nil {
-		return acp.NewSessionResponse{}, err
-	}
+	if t := a.transportRef(); t != nil {
+		return t.RegisterHook(ctx, s.id, func(hookCtx context.Context) {
+			// Establishment has committed; the gate keeps failure cleanup on its source.
+			release := wire.HoldSessionGate(s.gate)
+			defer release()
 
-	finalTitle := "acp-go-hermes " + string(id)
-	var journal *sessionOperationJournal
-	var sessionSetLock sharedSessionSetLease
-	sessionPublished := false
-	if a.options.SharedHermesHome != "" {
-		operationHome := a.options.SharedHermesHome
-		sessionSetLock, err = acquireSharedSessionSetLock(ctx, operationHome, nativehermes.SharedSessionSetLockExclusive)
-		if err != nil {
-			return acp.NewSessionResponse{}, errors.Join(err, closeHermesClientAfterStartupFailure(client))
-		}
-		defer func() {
-			releaseErr := sessionSetLock.Release()
-			if sessionPublished && releaseErr != nil {
-				a.log.DebugContext(ctx, "release committed Hermes session-set lock", slog.String(jsonFieldError, releaseErr.Error()))
+			if err := s.openStream(hookCtx, rt); err != nil {
+				s.mu.Lock()
+				current := !s.closing && s.runtime == rt
+				s.mu.Unlock()
 
-				return
+				if current {
+					_ = s.close(context.WithoutCancel(hookCtx))
+					a.detach(hookCtx, s)
+				}
+
+				a.log.ErrorContext(hookCtx, "publish session open failed",
+					slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 			}
-			returnErr = errors.Join(returnErr, releaseErr)
-		}()
-		if recoveryErr := a.recoverPendingSharedSessionOperations(ctx, operationHome, client); recoveryErr != nil {
-			return acp.NewSessionResponse{}, errors.Join(recoveryErr, closeHermesClientAfterStartupFailure(client))
-		}
-		persisted, listErr := client.PersistedSessions(ctx)
-		if listErr != nil {
-			return acp.NewSessionResponse{}, errors.Join(fmt.Errorf("list Hermes sessions before create: %w", listErr), closeHermesClientAfterStartupFailure(client))
-		}
-		baseline := make([]string, 0, len(persisted))
-		for index := range persisted {
-			baseline = append(baseline, persisted[index].ID)
-		}
-
-		operationID, idErr := newSessionOperationID()
-		if idErr != nil {
-			return acp.NewSessionResponse{}, errors.Join(idErr, closeHermesClientAfterStartupFailure(client))
-		}
-		journal, err = beginSessionOperationJournal(operationHome, sessionOperationJournalFields{
-			OperationID: operationID, Kind: sessionOperationKindNew, Mode: sessionOperationModeShared,
-			LogicalSessionID: string(id), TargetRoot: client.XDGDirs().Root,
-			Marker: operationID, FinalTitle: finalTitle, BaselineNativeSessionIDs: baseline,
 		})
-		if err != nil {
-			return acp.NewSessionResponse{}, errors.Join(err, closeHermesClientAfterStartupFailure(client))
-		}
-		mutating := sessionOperationPhaseMutating
-		if updateErr := journal.update(sessionOperationJournalPatch{Phase: &mutating}); updateErr != nil {
-			return acp.NewSessionResponse{}, errors.Join(updateErr, closeHermesClientAfterStartupFailure(client))
-		}
 	}
 
-	sessionStarted := time.Now()
-	var native nativehermes.Session
-	if journal != nil {
-		native, err = client.CreateSessionWithDraft(ctx, finalTitle, func(draft nativehermes.SessionDraft) error {
-			identified := sessionOperationPhaseNativeIdentified
-
-			return journal.update(sessionOperationJournalPatch{
-				Phase: &identified, NativeSessionID: &draft.StoredSessionID, LiveSessionID: &draft.LiveSessionID,
-			})
-		})
-	} else {
-		native, err = client.CreateSession(ctx, finalTitle)
-	}
-	a.observe.ObserveNativeStartup(ctx, "session", "session", time.Since(sessionStarted), err)
-
-	if err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.NewSessionResponse{}, errors.Join(err, closeErr)
-	}
-	if bindErr := a.claimAndBindNativeSession(ctx, client, id, native.ID, &meta); bindErr != nil {
-		return acp.NewSessionResponse{}, bindErr
-	}
-
-	idmap := idmapRecord{
-		SessionID:       string(id),
-		NativeSessionID: native.ID,
-		Format:          SessionStoreFormat,
-	}
-
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, params.McpServers, native, client, meta, idmap)
-	session.operationJournal = journal
-	if streamErr := session.openLifecycleStream(); streamErr != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.NewSessionResponse{}, errors.Join(streamErr, closeErr)
-	}
-	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		if errors.Is(err, errSessionStoreCommitUnknown) {
-			closeErr := session.Close(context.Background())
-			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-			return acp.NewSessionResponse{}, errors.Join(err, closeErr)
-		}
-		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
-
-		return acp.NewSessionResponse{}, errors.Join(err, cleanupErr)
-	}
-	if _, err := a.storeStartedSessionWithOpening(ctx, session); err != nil {
-		// The exact store bundle is already committed. Close only the live
-		// runtime; deleting native state here would invalidate durable metadata
-		// that another Agent can safely load.
-		return acp.NewSessionResponse{}, a.refuseStartedSession(ctx, session, err)
-	}
-	sessionPublished = true
-	session.operationJournal = nil
-	if journal != nil {
-		if err := journal.removeCommitted(); err != nil {
-			a.log.DebugContext(ctx, "retain committed Hermes session-operation journal for cleanup", slog.String(jsonFieldError, err.Error()))
-		}
-	}
-
-	return acp.NewSessionResponse{
-		SessionId:     id,
-		Meta:          lifecycleResponseMeta(session.snapshot()),
-		ConfigOptions: session.configOptions(ctx),
-	}, nil
+	return s.openStream(ctx, rt)
 }
 
-// cleanupFailedStartedSession removes a registered session whose durable
-// snapshot never committed: it deregisters the session so it is neither active
-// nor listable, deletes and closes the native Hermes session, and removes the
-// XDG root and lease. The store is the durability boundary, so a failed initial
-// or fork Replace must leave no orphan process or listable session behind.
-func (a *Agent) cleanupFailedStartedSession(ctx context.Context, session *session) error {
-	if a.removeSessionIf(session.id, session) {
-		a.observe.AddActiveSession(ctx, -1)
+// NewSession creates and starts a hermes session.
+func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.NewSessionResponse{}, openErr
 	}
 
-	record := a.deleteCleanupRecord(session.id, session)
-	closeCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-	err := session.DeleteNativeAndClose(closeCtx)
+	if transport := a.transportRef(); transport != nil {
+		ctx = transport.RequestContext(ctx, params.Meta)
+	}
 
-	cancel()
-	a.recordIncompleteContainment(err, session.id, record.XDGRoot)
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionNew)
+	defer func() { finish(err) }()
 
+	start, err := a.validateStart(sessionStart{cwd: params.Cwd, additionalDirectories: params.AdditionalDirectories}, params.McpServers, params.Meta)
 	if err != nil {
-		session.lifecycleStream().fence()
-		a.rememberDeleteCleanup(record)
-
-		return err
+		return acp.NewSessionResponse{}, err
 	}
 
-	err = a.cleanupDeletedSession(record)
+	s := a.newSession(start)
+
+	rt, err := s.launch(ctx)
 	if err != nil {
-		a.rememberDeleteCleanup(record)
-		a.log.DebugContext(ctx, "clean up Hermes session after failed snapshot", slog.String(jsonFieldError, err.Error()))
+		return acp.NewSessionResponse{}, err
 	}
 
-	return err
+	model := s.options.Model
+	if model == "" {
+		model = a.options.DefaultModel
+	}
+
+	if err := s.configureRuntime(ctx, rt, model, ""); err != nil {
+		s.stopRuntime(context.WithoutCancel(ctx), rt)
+
+		return acp.NewSessionResponse{}, err
+	}
+
+	s.rawEvents = wire.NewRawEvents(vendor, string(s.id), vendor, start.meta.rawEvents)
+
+	release := wire.HoldSessionGate(s.gate)
+	defer release()
+
+	if err := a.install(ctx, s); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+
+		return acp.NewSessionResponse{}, err
+	}
+
+	if err := s.commitMirror(ctx, rt); err != nil {
+		a.log.ErrorContext(ctx, "initial mirror commit failed",
+			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+		a.detach(ctx, s)
+
+		return acp.NewSessionResponse{}, wire.InternalFailure(vendor, "")
+	}
+
+	if err := a.scheduleOpen(ctx, s); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+		a.detach(ctx, s)
+
+		return acp.NewSessionResponse{}, err
+	}
+
+	return acp.NewSessionResponse{Meta: wire.NativeSessionMeta(vendor, s.nativeID), SessionId: s.id, ConfigOptions: s.configOptions()}, nil
 }
 
-func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta, true)
+// LoadSession restores a session and replays its history.
+func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LoadSessionResponse{}, openErr
+	}
+
+	if transport := a.transportRef(); transport != nil {
+		ctx = transport.RequestContext(ctx, params.Meta)
+	}
+
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionLoad)
+	defer func() { finish(err) }()
+
+	s, release, err := a.restore(ctx, params.SessionId, sessionStart{cwd: params.Cwd, additionalDirectories: params.AdditionalDirectories}, params.McpServers, params.Meta, true)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
 
-	return acp.LoadSessionResponse{
-		Meta:          lifecycleResponseMeta(session.snapshot()),
-		ConfigOptions: session.configOptions(ctx),
-	}, nil
+	defer release()
+
+	return acp.LoadSessionResponse{Meta: wire.NativeSessionMeta(vendor, s.nativeID), ConfigOptions: s.configOptions()}, nil
 }
 
-func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	if err := validateMCPServers(params.McpServers); err != nil {
-		return acp.ResumeSessionResponse{}, err
+// ResumeSession restores a session without replaying its history.
+func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ResumeSessionResponse{}, openErr
 	}
 
-	session, err := a.loadOrResumeSession(ctx, params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, params.Meta, false)
+	if transport := a.transportRef(); transport != nil {
+		ctx = transport.RequestContext(ctx, params.Meta)
+	}
+
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionResume)
+	defer func() { finish(err) }()
+
+	s, release, err := a.restore(ctx, params.SessionId, sessionStart{cwd: params.Cwd, additionalDirectories: params.AdditionalDirectories}, params.McpServers, params.Meta, false)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	return acp.ResumeSessionResponse{
-		Meta:          lifecycleResponseMeta(session.snapshot()),
-		ConfigOptions: session.configOptions(ctx),
-	}, nil
+	defer release()
+
+	return acp.ResumeSessionResponse{Meta: wire.NativeSessionMeta(vendor, s.nativeID), ConfigOptions: s.configOptions()}, nil
 }
 
-//nolint:gocyclo // Load/resume is one ordered hydration, ownership, launch, and publication transaction.
-func (a *Agent) loadOrResumeSession(
+// restore is the shared load and resume path. A live session whose carrier
+// matches is reused; a changed carrier closes it and re-prepares from the
+// store; a cold session is hydrated from the store and started.
+func (a *Agent) restore(
 	ctx context.Context,
-	id acp.SessionId,
-	cwd string,
-	additionalDirectories []string,
+	sessionID acp.SessionId,
+	params sessionStart,
 	mcpServers []acp.McpServer,
-	metaMap map[string]any,
+	meta map[string]any,
 	replay bool,
-) (_ *session, returnErr error) {
-	if err := rejectLifecycleMeta(metaMap); err != nil {
-		return nil, err
+) (*session, func(), error) {
+	if sessionID == "" {
+		return nil, nil, wire.UnknownSession()
 	}
 
-	if err := a.ensureOpen(); err != nil {
-		return nil, err
-	}
-
-	if err := a.rejectInvalidConfiguration(); err != nil {
-		return nil, err
-	}
-
-	ctx = a.observe.Extract(ctx, metaMap)
-
-	if id == "" {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
-	}
-	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, id)
-	if lifecycleErr != nil {
-		return nil, lifecycleErr
-	}
-	defer releaseLifecycle()
-	ctx = lifecycleCtx
-
-	if a.isDeleted(id) {
-		_ = a.retryDeletedSessionCleanup(ctx)
-
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
-	}
-
-	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
-			slog.String("classification", "deleted_session_cleanup_failed"))
-	}
-
-	if err := validateSessionStartPaths(cwd, additionalDirectories); err != nil {
-		return nil, err
-	}
-
-	if err := validateMCPServers(mcpServers); err != nil {
-		return nil, err
-	}
-
-	meta, err := a.sessionMetaFromLifecycle(metaMap)
+	start, err := a.validateStart(params, mcpServers, meta)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// X1: validate the full request first (done above), then reuse an
-	// already-active session instead of starting a second `hermes serve`.
-	// session/load replays on the reused session (LoadSession calls
-	// replayMessages); session/resume returns without replay.
-	existing, reuseCtx, releaseReuse, reuseErr := a.beginActiveReuse(ctx, id)
-	if reuseErr != nil {
-		return nil, reuseErr
-	}
-	if existing != nil {
-		rebind, applyErr := applyAdmittedActiveLifecycleRequest(
-			reuseCtx, existing, cwd, additionalDirectories, mcpServers, &meta,
-		)
-		if applyErr != nil {
-			releaseReuse()
-
-			return nil, applyErr
-		}
-		if !rebind {
-			// The session reuse reservation orders this incarnation from here,
-			// including any replay deferred until after the response.
-			releaseLifecycle()
-		}
-		if hook, ok := ctx.Value(activeReuseAdmissionHookKey{}).(func(context.Context)); ok {
-			hook(reuseCtx)
-		}
-		if rebind {
-			if rebindErr := a.closeActiveSessionForRebind(ctx, id, existing, releaseReuse); rebindErr != nil {
-				return nil, rebindErr
-			}
-		} else {
-			identity, orderedResponse := ctx.Value(lifecycleRequestIdentityKey{}).(lifecycleRequestIdentity)
-			orderedResponse = orderedResponse && identity.token != "" && existing.lifecycleStream() != nil
-			if replay && !orderedResponse {
-				if replayErr := existing.replayMessages(reuseCtx); replayErr != nil {
-					releaseReuse()
-
-					return nil, replayErr
-				}
-			}
-			if _, openErr := a.completeActiveReuse(reuseCtx, id, existing, replay, releaseReuse); openErr != nil {
-				releaseReuse()
-
-				return nil, openErr
-			}
-			if !orderedResponse {
-				releaseReuse()
-			}
-
-			return existing, nil
+	if transport := a.transportRef(); transport != nil {
+		if awaitErr := transport.AwaitSession(ctx, sessionID); awaitErr != nil {
+			return nil, nil, awaitErr
 		}
 	}
-	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
-	if constructionErr != nil {
-		return nil, constructionErr
+
+	releaseRestore, err := a.restores.Acquire(sessionID)
+	if err != nil {
+		return nil, nil, err
 	}
-	defer finishConstruction()
-	ctx = constructionCtx
+	defer releaseRestore()
 
-	if incompleteErr := a.rejectIncompleteHermesSession(id); incompleteErr != nil {
-		return nil, incompleteErr
+	a.mu.Lock()
+	deleted := a.deleted[sessionID]
+	active := a.sessions[sessionID]
+	a.mu.Unlock()
+
+	if deleted {
+		return nil, nil, wire.UnknownSession()
 	}
 
-	scratchRelease := func() {}
+	if active != nil {
+		release, gateErr := active.acquireGate(limitSessionRestore)
+		if gateErr != nil {
+			return nil, nil, gateErr
+		}
 
-	keepScratch := false
+		if sameCarrier(active, start) {
+			return a.restoreActive(ctx, active, replay, release)
+		}
 
-	var xdg nativehermes.XDGDirs
+		release()
 
+		closeErr := active.close(ctx)
+
+		a.detach(ctx, active)
+
+		if closeErr != nil {
+			return nil, nil, wire.RestoreFailed(vendor)
+		}
+	}
+
+	stored, err := a.loadStored(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if !stored.found {
+		return nil, nil, wire.UnknownSession()
+	}
+
+	start.meta.options = inheritCarrier(start.meta, stored.record)
+	if start.additionalDirectories == nil {
+		start.additionalDirectories = slices.Clone(stored.record.AdditionalDirectories)
+	}
+
+	s := a.newSession(start)
+	s.id = sessionID
+	s.nativeID = stored.record.NativeSessionID
+	s.rawEvents = wire.NewRawEvents(vendor, string(sessionID), vendor, start.meta.rawEvents)
+	s.title = storedTitle(stored.record.NativeSessionID, stored.rows)
+
+	rt, err := s.launch(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := s.hydrate(ctx, rt, stored)
+	if err != nil {
+		s.stopRuntime(context.WithoutCancel(ctx), rt)
+
+		return nil, nil, err
+	}
+
+	if err := s.configureRuntime(ctx, rt, s.options.Model, s.nativeID); err != nil {
+		s.stopRuntime(context.WithoutCancel(ctx), rt)
+
+		return nil, nil, err
+	}
+
+	release := wire.HoldSessionGate(s.gate)
+
+	transferred := false
 	defer func() {
-		if !keepScratch {
-			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
+		if !transferred {
+			release()
 		}
 	}()
 
-	parent, err := a.ensureScratchParent()
-	if err != nil {
-		return nil, err
-	}
-	xdg, err = createHermesGeneration(parent)
-	if err != nil {
-		return nil, err
-	}
+	if err := a.install(ctx, s); err != nil {
+		release()
 
-	storeCtx, cancel := a.sessionStoreContext(ctx)
-	hydrate := hydrateStateFromStore
-	if a.options.SharedHermesHome != "" {
-		hydrate = hydrateStateFromStoreWithoutNativeArchive
-	}
-	idmap, snapshot, ok, err := hydrate(storeCtx, a.sessionStore(), string(id), xdg)
+		_ = s.close(context.WithoutCancel(ctx))
 
-	cancel()
-
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if !ok {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: valUnknownSession, jsonFieldField: jsonFieldSessionID})
+	if err := s.commitMirror(ctx, rt); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+		a.detach(ctx, s)
+
+		return nil, nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
-		return nil, acp.NewInvalidParams(map[string]any{jsonFieldError: "cwd_mismatch", jsonFieldField: jsonFieldCwd})
-	}
-
-	if !meta.EnvSet {
-		meta.Env = cloneStringMap(snapshot.Session.Env)
-	}
-
-	if !meta.ExtraPathDirsSet {
-		meta.ExtraPathDirs = slices.Clone(snapshot.Session.ExtraPathDirs)
-	}
-
-	nativeOwner, err := a.acquireSharedNativeSessionOwner(idmap.NativeSessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	client, err := a.newHermesClientWithScratchOwner(ctx, id, cwd, meta, xdg, scratchRelease, nativeOwner, mcpServers)
-	if err != nil {
-		if nativeOwner != nil {
-			err = errors.Join(err, nativeOwner.Release())
-		}
-		if a.retainFailedHermesGeneration(id, xdg.Root, err) {
-			keepScratch = true
-		}
-
-		return nil, err
-	}
-	keepScratch = true
-
-	native, err := client.GetSession(ctx, idmap.NativeSessionID)
-	if err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return nil, errors.Join(err, closeErr)
-	}
-
-	if meta.Model == "" {
-		meta.Model = modelSelectionValue(snapshot.Session.Model.ProviderID, snapshot.Session.Model.ModelID)
-	}
-
-	if meta.Effort == "" {
-		meta.Effort = snapshot.Session.Effort
-	}
-
-	if meta.Effort != "" {
-		applied, effortErr := applyNativeEffort(ctx, client, idmap.NativeSessionID, meta.Effort)
-		if effortErr != nil {
-			closeErr := closeHermesClientAfterStartupFailure(client)
-			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-			return nil, errors.Join(fmt.Errorf("bind Hermes session effort: %w", effortErr), closeErr)
-		}
-
-		meta.Effort = applied
-	}
-
-	session := newSession(a, id, cwd, additionalDirectories, mcpServers, native, client, meta, idmap)
-
-	session.committed = committedStateFromSnapshot(snapshot)
-	if streamErr := session.openLifecycleStream(); streamErr != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return nil, errors.Join(streamErr, closeErr)
-	}
-
-	var replayCtx context.Context
-	releaseReplay := func() {}
 	if replay {
-		replayCtx, releaseReplay = session.beginInitialReuse(ctx)
-	}
+		if err := s.replay(ctx, rows); err != nil {
+			release()
 
-	owed, err := a.storeStartedSessionWithOpening(ctx, session)
-	if err != nil {
-		releaseReplay()
+			_ = s.close(context.WithoutCancel(ctx))
+			a.detach(ctx, s)
 
-		return nil, a.refuseStartedSession(ctx, session, err)
-	}
-	if replay {
-		replayErr := session.replayMessages(replayCtx)
-		releaseReplay()
-		if replayErr != nil {
-			a.abandonStreamOpen(owed)
-			cleanupErr := a.cleanupFailedLoadedSession(session)
-
-			return nil, errors.Join(replayErr, cleanupErr)
+			return nil, nil, err
 		}
 	}
 
-	return session, nil
+	if err := a.scheduleOpen(ctx, s); err != nil {
+		release()
+
+		_ = s.close(context.WithoutCancel(ctx))
+		a.detach(ctx, s)
+
+		return nil, nil, err
+	}
+
+	transferred = true
+
+	return s, release, nil
 }
 
-// cleanupFailedLoadedSession retracts a cold load that failed after publication.
-// The durable session remains resumable, but this incarnation is fenced,
-// deregistered, drained, and contained before the failed request returns.
-func (a *Agent) cleanupFailedLoadedSession(session *session) error {
-	if a.removeSessionIf(session.id, session) {
-		a.observe.AddActiveSession(context.Background(), -1)
+// restoreActive answers a load or resume from a session that is already
+// live, holding its foreground for the replay.
+func (a *Agent) restoreActive(ctx context.Context, s *session, replay bool, release func()) (*session, func(), error) {
+	if err := s.admissionError(); err != nil {
+		release()
+
+		return nil, nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), sessionSettlementTimeout)
-	closeErr := session.closeWithoutSnapshot(ctx)
-	cancel()
+	if !replay {
+		return s, release, nil
+	}
 
-	a.recordIncompleteContainment(closeErr, session.id, hermesServerRoot(session.client))
+	stored, err := a.loadStored(ctx, s.id)
+	if err != nil {
+		release()
 
-	return closeErr
+		return nil, nil, err
+	}
+
+	if err := s.replay(ctx, stored.rows); err != nil {
+		release()
+
+		return nil, nil, err
+	}
+
+	return s, release, nil
 }
 
-// failReuseAfterResponse contains an active session whose post-response replay
-// failed. The response has already crossed the wire, so the only truthful
-// recovery is to fence and retract that incarnation.
-func (s *session) failReuseAfterResponse(replayErr error) {
-	s.lifecycleStream().fence()
-	s.prepareClose()
-	ctx, cancel := context.WithTimeout(context.Background(), sessionSettlementTimeout)
-	waitErr := s.awaitSettlement(ctx)
-
-	s.lifecycleMu.Lock()
-	closeErr := s.closeLocked(ctx, false)
-	s.lifecycleMu.Unlock()
-	cancel()
-
-	if s.agent.removeSessionIf(s.id, s) {
-		s.agent.observe.AddActiveSession(context.Background(), -1)
-	}
-	s.agent.recordIncompleteContainment(closeErr, s.id, hermesServerRoot(s.client))
-	s.agent.log.DebugContext(context.Background(), "contain Hermes session after replay failure",
-		slog.String("classification", "session_replay_failed"),
-		slog.Bool("replay_failure", replayErr != nil),
-		slog.Bool("settlement_failure", waitErr != nil),
-		slog.Bool("containment_failure", closeErr != nil),
-	)
-}
-
-// resumeRuntimeForTurnLocked rebuilds a fenced session runtime from the last
-// committed store snapshot. toolMu and cancelMu are held by the caller, so the
-// old prompt has fully released the per-session token and Close cannot cross
-// installation of the replacement runtime.
-//
-//nolint:gocyclo // Runtime replacement keeps every fail-closed identity, hydration, ownership, and publication branch in one transaction.
-func (s *session) resumeRuntimeForTurnLocked(ctx context.Context) (returnErr error) {
-	s.mu.Lock()
-	needsResume := s.runtimeNeedsResume
-	resumeWait := s.runtimeResumeWait
-	resumeErr := s.runtimeResumeErr
-	closed := s.closed || s.lifecycleClosing
-	poisonErr := s.poisonedErrorLocked()
-	id := s.id
-	cwd := s.cwd
-	mcpServers := cloneMCPServers(s.mcpServers)
-	wantIDMap := s.idmap
-	meta := sessionMeta{
-		Model:         modelSelectionValue(s.providerID, s.modelID),
-		Env:           cloneStringMap(s.env),
-		ExtraPathDirs: slices.Clone(s.extraPathDirs),
-		RawMessages:   s.rawMessages,
-	}
-	previousClient := s.client
-	s.mu.Unlock()
-
-	if needsResume && resumeWait != nil {
-		select {
-		case <-resumeWait:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		s.mu.Lock()
-		resumeErr = s.runtimeResumeErr
-		poisonErr = s.poisonedErrorLocked()
-		closed = s.closed || s.lifecycleClosing
-		s.mu.Unlock()
-	}
-
-	if poisonErr != nil {
-		return poisonErr
-	}
-
-	if closed {
-		return acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
-	}
-
-	if !needsResume {
-		return nil
-	}
-	if resumeErr != nil {
-		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, resumeErr)
-	}
-	if err := s.agent.rejectIncompleteHermesSession(id); err != nil {
-		return s.poisonWithCause(ctx, poisonContainmentIncomplete, err)
-	}
-	if managed, ok := previousClient.(*managedHermesServer); ok && managed.managed {
-		if err := managed.finishReclaimedSnapshot(); err != nil {
-			return err
-		}
-	}
-
-	scratchRelease := func() {}
-
-	keepScratch := false
-
-	var xdg nativehermes.XDGDirs
-
-	defer func() {
-		if !keepScratch {
-			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
-		}
-	}()
-
-	parent, err := s.agent.ensureScratchParent()
-	if err != nil {
-		return err
-	}
-	xdg, err = createHermesGeneration(parent)
-	if err != nil {
-		return err
-	}
-
-	storeCtx, cancel := s.agent.sessionStoreContext(ctx)
-	hydrate := hydrateStateFromStore
-	if s.agent.options.SharedHermesHome != "" {
-		hydrate = hydrateStateFromStoreWithoutNativeArchive
-	}
-	idmap, snapshot, ok, err := hydrate(storeCtx, s.agent.sessionStore(), string(id), xdg)
-
-	cancel()
-
-	if err != nil {
-		return err
-	}
-
-	if !ok {
-		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, errors.New("last committed Hermes session state is missing"))
-	}
-
-	if idmap.SessionID != wantIDMap.SessionID || idmap.NativeSessionID != wantIDMap.NativeSessionID {
-		return s.poisonWithCause(ctx, poisonNativeSessionIDDrift, fmt.Errorf(
-			"stored session identity drift: expected %q/%q, got %q/%q",
-			wantIDMap.SessionID,
-			wantIDMap.NativeSessionID,
-			idmap.SessionID,
-			idmap.NativeSessionID,
-		))
-	}
-
-	if snapshot.Session.Cwd != "" && snapshot.Session.Cwd != cwd {
-		return s.poisonWithCause(ctx, poisonRuntimeResumeFailed, fmt.Errorf(
-			"stored cwd drift: expected %q, got %q",
-			cwd,
-			snapshot.Session.Cwd,
-		))
-	}
-
-	nativeOwner, err := s.agent.acquireSharedNativeSessionOwner(wantIDMap.NativeSessionID)
-	if err != nil {
-		return err
-	}
-
-	client, err := s.agent.newHermesClientWithScratchOwner(ctx, id, cwd, meta, xdg, scratchRelease, nativeOwner, mcpServers)
-	if err != nil {
-		if nativeOwner != nil {
-			err = errors.Join(err, nativeOwner.Release())
-		}
-		if s.agent.retainFailedHermesGeneration(id, xdg.Root, err) {
-			keepScratch = true
-		}
-		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
-			return s.poisonWithCause(ctx, poisonContainmentIncomplete, err)
-		}
-
-		return err
-	}
-	keepScratch = true
-
-	native, err := client.GetSession(ctx, wantIDMap.NativeSessionID)
-	if err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return errors.Join(err, closeErr)
-	}
-
-	if native.ID != wantIDMap.NativeSessionID {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-		driftErr := s.poisonNativeSessionDrift(ctx, "runtime resume", native.ID)
-
-		return errors.Join(driftErr, closeErr)
-	}
-
-	// Build the replacement lifecycle identity while it is still private. Its
-	// snapshot and native projection remain gated until the predecessor pump is
-	// joined and the complete successor tuple is installed.
-	replacementStream, err := s.prepareLifecycleStream(false)
-	if err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return errors.Join(err, closeErr)
-	}
-	if err := s.detachPumpContext(ctx); err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return errors.Join(err, closeErr)
-	}
-	s.resetProjectionGate()
-
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		s.agent.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return errors.Join(acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed}), closeErr)
-	}
-
-	s.client = client
-	s.committed = committedStateFromSnapshot(snapshot)
-	s.mcpReloadComplete = false
-	s.startPump(client)
-	s.runtimeNeedsResume = false
-	s.runtimeResumeWait = nil
-	s.runtimeResumeErr = nil
-	// Publish the stream last. Any reader that can observe it therefore also
-	// observes the already-installed client, committed snapshot, pump, and
-	// cleared resume latch; projection is still gated until publishProjection.
-	s.streamMu.Lock()
-	s.stream = replacementStream
-	s.streamMu.Unlock()
-	s.mu.Unlock()
-
-	if err := replacementStream.ensureLifecycleOpened(ctx); err != nil {
-		replacementStream.fence()
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		pumpCtx, pumpCancel := context.WithTimeout(context.Background(), closeTimeout)
-		pumpErr := s.detachPumpContext(pumpCtx)
-		pumpCancel()
-		failure := errors.Join(err, closeErr, pumpErr)
-		s.agent.recordIncompleteContainment(failure, id, hermesServerRoot(client))
-
-		s.mu.Lock()
-		if s.client == client {
-			s.runtimeNeedsResume = true
-			s.runtimeResumeWait = nil
-			s.runtimeResumeErr = failure
-		}
-		s.mu.Unlock()
-
-		return failure
-	}
-
-	replacementStream.publishProjection()
-
-	return nil
-}
-
-// applyActiveLifecycleRequest resolves omitted carriers from the live session
-// and reports whether an explicitly changed carrier requires a new native
-// incarnation. Equal carriers can reuse the active incarnation; changed ones
-// cannot be mutated into a running hermes serve process.
-func applyActiveLifecycleRequest(
-	ctx context.Context,
-	existing *session,
-	cwd string,
-	additionalDirectories []string,
-	mcpServers []acp.McpServer,
-	meta *sessionMeta,
-) (bool, error) {
-	snapshot := existing.snapshot()
-	if snapshot.cwd != "" && snapshot.cwd != cwd {
-		return false, lifecycleMismatch(jsonFieldCwd)
-	}
-
-	if !stringSetEqual(snapshot.additionalDirectories, additionalDirectories) {
-		return false, lifecycleMismatch("additionalDirectories")
-	}
-
-	if !mcpServerSetEqual(snapshot.mcpServers, mcpServers) {
-		return false, lifecycleMismatch("mcpServers")
-	}
-
-	if !meta.EnvSet {
-		meta.Env = cloneStringMap(snapshot.env)
-	}
-
-	if !meta.ExtraPathDirsSet {
-		meta.ExtraPathDirs = slices.Clone(snapshot.extraPathDirs)
-	}
-
-	rebind := !stringMapsEqual(snapshot.env, meta.Env) || !slices.Equal(snapshot.extraPathDirs, meta.ExtraPathDirs)
-
-	// A shape refusal, not a value gate. The gate this door used to carry asked
-	// a value question — is this the model already bound? — and answered no for
-	// every model Hermes would have taken. This asks only whether the string can
-	// name a selection at all, and it has to: an active resume sends nothing to
-	// Hermes, so the value survives as this session's provider and model and
-	// nothing else. An unqualified one splits into no provider, leaves a nil
-	// selector, and lets the next prompt run on the previously bound model while
-	// the config option echoes back what the host asked for — a silent wrong
-	// answer where the config door, reading the same predicate before its own
-	// native call, refuses. Session creation refuses nothing here: session.create
-	// carries model and provider as separate fields, so an unqualified value is
-	// representable there and Hermes resolves it itself.
-	if meta.Model != "" && nativehermes.ModelSelectionShapeError(meta.Model) != nil {
-		return false, unsupportedField(hermesModelOptionPath)
-	}
-
-	if rebind {
-		return true, nil
-	}
-
-	existing.mu.Lock()
-	if meta.Model != "" {
-		existing.providerID, existing.modelID = splitModelValue(meta.Model, "", "")
-	}
-	existing.rawMessages = meta.RawMessages
-	existing.mu.Unlock()
-
-	// A model selection rides the next prompt, but nothing carries an effort
-	// there, so a requested level is bound on the live session now.
-	if meta.Effort != "" {
-		current := existing.snapshot()
-
-		applied, err := applyNativeEffort(ctx, current.client, current.idmap.NativeSessionID, meta.Effort)
-		if err != nil {
-			return false, err
-		}
-
-		existing.setEffort(applied)
-	}
-
-	return false, nil
-}
-
-// closeActiveSessionForRebind spends the old incarnation's ordinary close
-// boundary before its replacement can be prepared or published. The active
-// reuse reservation keeps prompts out until prepareClose permanently shuts the
-// old object; releasing it then lets settlement join without deadlocking on the
-// request that initiated the rebind.
-func (a *Agent) closeActiveSessionForRebind(
-	ctx context.Context,
-	id acp.SessionId,
-	existing *session,
-	releaseReuse func(),
-) error {
-	existing.prepareClose()
-	releaseReuse()
-
-	waitErr := existing.awaitSettlement(ctx)
-
-	existing.lifecycleMu.Lock()
-	closeErr := existing.settleClosedSession(ctx)
-	existing.lifecycleMu.Unlock()
-	a.recordIncompleteContainment(closeErr, id, hermesServerRoot(existing.client))
-
-	if err := errors.Join(waitErr, closeErr); err != nil {
-		return err
-	}
-
-	if !a.removeSessionIf(id, existing) {
-		return unknownSessionError()
-	}
-	a.observe.AddActiveSession(ctx, -1)
-
-	return nil
-}
-
-func applyAdmittedActiveLifecycleRequest(
-	reuseCtx context.Context,
-	existing *session,
-	cwd string,
-	additionalDirectories []string,
-	mcpServers []acp.McpServer,
-	meta *sessionMeta,
-) (bool, error) {
-	if context.Cause(reuseCtx) != nil {
-		return false, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
-	}
-
-	return applyActiveLifecycleRequest(reuseCtx, existing, cwd, additionalDirectories, mcpServers, meta)
-}
-
-func lifecycleMismatch(field string) error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: "mismatch", jsonFieldField: field})
-}
-
-func stringMapsEqual(left map[string]string, right map[string]string) bool {
-	if len(left) != len(right) {
+// sameCarrier reports whether a restore names the configuration the live
+// session already runs under. A field the request omits inherits.
+func sameCarrier(s *session, start sessionStart) bool {
+	record := s.record()
+	if record.Cwd != start.cwd {
 		return false
 	}
 
-	for key, leftValue := range left {
-		if right[key] != leftValue {
-			return false
-		}
-	}
-
-	return true
-}
-
-func stringSetEqual(left []string, right []string) bool {
-	if len(left) != len(right) {
+	if start.additionalDirectories != nil && !slices.Equal(record.AdditionalDirectories, start.additionalDirectories) {
 		return false
 	}
 
-	leftCopy := append([]string(nil), left...)
-	rightCopy := append([]string(nil), right...)
+	current := inheritCarrier(sessionMeta{}, record)
+	requested := inheritCarrier(start.meta, record)
 
-	slices.Sort(leftCopy)
-	slices.Sort(rightCopy)
-
-	return slices.Equal(leftCopy, rightCopy)
+	return reflect.DeepEqual(current.Meta(), requested.Meta())
 }
 
-func mcpServerSetEqual(left []acp.McpServer, right []acp.McpServer) bool {
-	return slices.Equal(canonicalMCPServers(left), canonicalMCPServers(right))
+// inheritCarrier fills the fields a restore omitted from the stored record.
+func inheritCarrier(meta sessionMeta, record sessionRecord) HermesOptions {
+	options := meta.options.clone()
+
+	if !meta.presentEnv {
+		options.Env = maps.Clone(record.Env)
+	}
+
+	if !meta.presentExtraPathDirs {
+		options.ExtraPathDirs = slices.Clone(record.ExtraPathDirs)
+	}
+
+	if options.Model == "" {
+		options.Model = record.Model
+	}
+
+	if options.Effort == "" {
+		options.Effort = record.Effort
+	}
+
+	return options
 }
 
-func canonicalMCPServers(servers []acp.McpServer) []string {
-	out := make([]string, len(servers))
-	for index, server := range servers {
-		data, _ := json.Marshal(server)
-		out[index] = string(data)
+// ListSessions lists live sessions and stored sessions, newest first.
+func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.ListSessionsResponse{}, openErr
 	}
 
-	slices.Sort(out)
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionList)
+	defer func() { finish(err) }()
 
-	return out
-}
-
-func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.ListSessionsResponse{}, err
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.ListSessionsResponse{}, wire.ParamRefusal(refusal)
 	}
 
-	if err := a.ensureOpen(); err != nil {
-		return acp.ListSessionsResponse{}, err
+	filter := ""
+	if params.Cwd != nil {
+		filter = strings.TrimSpace(*params.Cwd)
 	}
 
-	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
-			slog.String("classification", "deleted_session_cleanup_failed"))
-	}
-
-	if err := validateOptionalAbsolutePath(jsonFieldCwd, params.Cwd); err != nil {
-		return acp.ListSessionsResponse{}, err
+	if filter != "" && !filepath.IsAbs(filter) {
+		return acp.ListSessionsResponse{}, wire.Unsupported(fieldCwd)
 	}
 
 	a.mu.Lock()
-
 	active := make([]*session, 0, len(a.sessions))
-	for _, session := range a.sessions {
-		if params.Cwd != nil && session.cwd != *params.Cwd {
-			continue
-		}
 
-		active = append(active, session)
+	for id, s := range a.sessions {
+		if !a.deleted[id] && (filter == "" || filter == s.cwd) {
+			active = append(active, s)
+		}
 	}
 	a.mu.Unlock()
 
-	infos := make([]acp.SessionInfo, 0, len(active))
-	seen := map[acp.SessionId]struct{}{}
+	sessions := make([]acp.SessionInfo, 0, len(active))
+	seen := make(map[acp.SessionId]struct{}, len(active))
 
-	for _, session := range active {
-		info := session.info()
-		infos = append(infos, info)
-		seen[info.SessionId] = struct{}{}
+	for _, s := range active {
+		sessions = append(sessions, s.sessionInfo())
+		seen[s.id] = struct{}{}
 	}
 
-	storeCtx, cancel := a.sessionStoreContext(ctx)
-	stored, err := a.sessionStore().ListSessions(storeCtx)
+	listCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
+	defer cancel()
 
-	cancel()
+	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list")
+	summaries, err := a.store.ListSessions(listCtx)
+	finishList(err)
 
 	if err != nil {
-		return acp.ListSessionsResponse{}, err
+		return acp.ListSessionsResponse{}, wire.InternalFailure(vendor, "")
 	}
 
-	for _, summary := range stored {
+	for _, summary := range summaries {
 		id := acp.SessionId(summary.SessionID)
-		if _, ok := seen[id]; ok || a.isDeleted(id) {
+		if _, ok := seen[id]; ok || a.deletedSession(id) {
 			continue
 		}
 
-		if params.Cwd != nil && summary.Cwd != "" && summary.Cwd != *params.Cwd {
+		stored, loadErr := a.loadStored(ctx, id)
+		if loadErr != nil {
+			return acp.ListSessionsResponse{}, wire.InternalFailure(vendor, "")
+		}
+
+		cwd := stored.record.Cwd
+
+		if filter != "" && cwd != filter {
 			continue
 		}
 
-		title := summary.Title
-		updated := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
-		infos = append(infos, acp.SessionInfo{
-			SessionId: id,
-			Cwd:       summary.Cwd,
-			Title:     &title,
-			UpdatedAt: &updated,
-			Meta:      summary.Meta,
+		title := storedTitle(stored.record.NativeSessionID, stored.rows)
+		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
+
+		sessions = append(sessions, acp.SessionInfo{
+			Meta:                  wire.NativeSessionMeta(vendor, stored.record.NativeSessionID),
+			SessionId:             id,
+			Cwd:                   cwd,
+			AdditionalDirectories: slices.Clone(stored.record.AdditionalDirectories),
+			Title:                 &title,
+			UpdatedAt:             &updatedAt,
 		})
+		seen[id] = struct{}{}
 	}
 
-	slices.SortFunc(infos, func(left, right acp.SessionInfo) int {
-		l := ""
-		r := ""
-
-		if left.UpdatedAt != nil {
-			l = *left.UpdatedAt
-		}
-
-		if right.UpdatedAt != nil {
-			r = *right.UpdatedAt
-		}
-
-		if r != l {
-			return strings.Compare(r, l)
-		}
-
-		return strings.Compare(string(left.SessionId), string(right.SessionId))
-	})
-
-	paged, next, err := paginateSessionInfos(infos, params.Cursor)
+	page, next, err := wire.PaginateSessions(sessions, params.Cursor)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
 
-	return acp.ListSessionsResponse{Sessions: paged, NextCursor: next}, nil
+	return acp.ListSessionsResponse{Sessions: page, NextCursor: next}, nil
 }
 
-func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.CloseSessionResponse{}, err
+// Prompt sends one turn to hermes and streams updates until it settles.
+func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.PromptResponse{}, openErr
 	}
 
-	// Close is a mandatory settlement boundary once accepted. Caller
-	// cancellation must not skip the keyed ordering gate any more than it may
-	// skip containment or the lifecycle facts that follow it; Agent.Close still
-	// cancels the registered lifecycle operation explicitly.
-	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(context.WithoutCancel(ctx), params.SessionId)
-	if lifecycleErr != nil {
-		return acp.CloseSessionResponse{}, lifecycleErr
+	s, err := a.session(ctx, params.SessionId)
+	if err != nil {
+		return acp.PromptResponse{}, err
 	}
-	defer releaseLifecycle()
-	ctx = lifecycleCtx
 
-	session, err := a.session(params.SessionId)
+	var raw json.RawMessage
+	if t := a.transportRef(); t != nil {
+		raw = t.TakeRawPrompt(params.SessionId, params.Meta)
+	}
+
+	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, s.currentModel())
+	defer func() { finish(observer.PromptResultFrom(resp, err, s.currentModel(), "")) }()
+
+	return s.prompt(ctx, params, raw)
+}
+
+func (s *session) currentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.model
+}
+
+// Cancel interrupts the session's in-flight turn. It is wire-silent on an
+// unknown session or with no turn in flight.
+func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return openErr
+	}
+
+	_, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionCancel)
+	defer func() { finish(err) }()
+
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return wire.ParamRefusal(refusal)
+	}
+
+	s, err := a.session(ctx, params.SessionId)
+	if err != nil {
+		return nil
+	}
+
+	s.cancel(ctx)
+
+	return nil
+}
+
+// CloseSession runs the shutdown ladder for one session.
+func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.CloseSessionResponse{}, openErr
+	}
+
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionClose)
+	defer func() { finish(err) }()
+
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.CloseSessionResponse{}, wire.ParamRefusal(refusal)
+	}
+
+	s, err := a.session(ctx, params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
 
-	// Close stops admitting prompts, then waits for the turn in flight to settle
-	// wholly. Later quiescence belongs to the retained settlement owner, so close
-	// joins its completion and reports failures after the foreground response.
-	session.prepareClose()
-	waitErr := session.awaitSettlement(ctx)
+	// The ladder has already run either way, so the slot is released before
+	// the verdict: a failed close must not keep the session installed.
+	closeErr := s.close(ctx)
+	a.detach(ctx, s)
 
-	session.lifecycleMu.Lock()
-	closeErr := session.settleClosedSession(ctx)
-	session.lifecycleMu.Unlock()
-	a.recordIncompleteContainment(closeErr, params.SessionId, session.client.XDGDirs().Root)
-
-	// The id is detached only by a close that completed its boundary. A close
-	// that failed one — a tree it could not prove contained, a commit the store
-	// refused — has left work owed on this session, and dropping the id would
-	// leave that work with no name to reach it by: the host would be answered
-	// unknown_session on the very retry the failure asks for. The session stays
-	// addressable, admits no further prompt, and a later close runs the boundary
-	// again.
-	if err := errors.Join(waitErr, closeErr); err != nil {
-		return acp.CloseSessionResponse{}, err
-	}
-
-	if a.removeSessionIf(params.SessionId, session) {
-		a.observe.AddActiveSession(ctx, -1)
+	if closeErr != nil {
+		return acp.CloseSessionResponse{}, wire.InternalFailure(vendor, "")
 	}
 
 	return acp.CloseSessionResponse{}, nil
 }
 
-func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
+// UnstableDeleteSession tombstones the session first, then closes any live
+// session with the same id. Native state stays in hermes's home.
+func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (resp acp.UnstableDeleteSessionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, openErr
 	}
 
-	ctx = a.observe.Extract(ctx, params.Meta)
+	ctx, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodSessionDelete)
+	defer func() { finish(err) }()
 
-	if params.SessionId == "" {
-		return acp.UnstableDeleteSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldSessionID: validationRequired})
-	}
-	lifecycleCtx, releaseLifecycle, lifecycleErr := a.acquireSessionLifecycle(ctx, params.SessionId)
-	if lifecycleErr != nil {
-		return acp.UnstableDeleteSessionResponse{}, lifecycleErr
-	}
-	defer releaseLifecycle()
-	ctx = lifecycleCtx
-
-	if err := a.retryDeletedSessionCleanup(ctx); err != nil {
-		a.log.DebugContext(ctx, "retry deleted Hermes session cleanup failed",
-			slog.String("classification", "deleted_session_cleanup_failed"))
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.UnstableDeleteSessionResponse{}, wire.ParamRefusal(refusal)
 	}
 
-	a.mu.Lock()
-	session := a.sessions[params.SessionId]
-	a.mu.Unlock()
-
-	record := a.deleteCleanupRecord(params.SessionId, session)
-	if session == nil {
-		a.mu.Lock()
-		if pending, ok := a.deleteCleanup[params.SessionId]; ok {
-			record = pending
-		}
-		a.mu.Unlock()
-	}
-
-	// The tombstone is the first thing this delete does. An active turn is
-	// something delete cancels and settles, never a ground to refuse on, so
-	// nothing about the session's state is inspected ahead of the durable write
-	// that makes the id unaddressable.
-	installed, err := a.tombstoneSession(ctx, params.SessionId, session)
-	if err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
-	}
-
-	if record.SessionID != "" {
-		a.rememberDeleteCleanup(record)
-	}
-
-	var settleErr error
-
-	if session != nil {
-		settleErr, err = a.closeDeletedSession(ctx, params.SessionId, session, record.XDGRoot)
-	}
-
-	if installed != nil && installed != session {
-		// A load or resume that passed its own tombstone check installed in the
-		// window between the map read above and this tombstone. The id names
-		// nothing now, so nothing else will ever reach that runtime: this delete
-		// owns its teardown exactly as it owns the one it read.
-		lateSettleErr, lateErr := a.closeDeletedSession(ctx, params.SessionId, installed, hermesServerRoot(installed.client))
-		settleErr = errors.Join(settleErr, lateSettleErr)
-		err = errors.Join(err, lateErr)
-	}
-
-	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrNativeTreeBusy) {
-		return acp.UnstableDeleteSessionResponse{}, err
-	}
-
-	cleanupErr := a.cleanupDeletedSession(record)
-	if cleanupErr == nil {
-		a.forgetDeleteCleanupIfDone(record.SessionID)
-	}
-
-	return acp.UnstableDeleteSessionResponse{}, errors.Join(settleErr, err, cleanupErr)
-}
-
-// tombstoneSession makes one delete durable and hides the id with it, before
-// the delete cancels anything or tears anything down. The whole step runs under
-// the session's lifecycle barrier, which is the same barrier every durable
-// commit holds: a settlement already publishing finishes first and the tombstone
-// removes what it wrote, and a settlement that has not started yet finds the id
-// tombstoned and publishes nothing. Neither order lets a late write recreate a
-// row the tombstone cleared.
-//
-// A store that refuses the write leaves the session fully addressable. There is
-// no tombstone, so there is nothing to hide behind, and the delete's idempotence
-// is what makes a retry the right answer.
-//
-// The session the id actually named at that instant is returned, which is not
-// always the one the delete read: an install that won the race to the lock is
-// still live, and nothing but this delete can reach it once the marker is set.
-func (a *Agent) tombstoneSession(ctx context.Context, id acp.SessionId, session *session) (*session, error) {
-	if session != nil {
-		session.lifecycleMu.Lock()
-		defer session.lifecycleMu.Unlock()
-	}
-
-	storeCtx, cancel := sessionStoreWriteContext(ctx)
-	err := a.sessionStore().Delete(storeCtx, SessionKey{SessionID: string(id)})
-
-	cancel()
-
-	if err != nil {
-		return nil, err
-	}
-
-	a.mu.Lock()
-	installed := a.sessions[id]
-
-	delete(a.sessions, id)
-
-	a.deleted[id] = struct{}{}
-	a.mu.Unlock()
-
-	return installed, nil
-}
-
-// closeDeletedSession runs the shutdown ladder one deleted session owes. Delete
-// serializes after settlement: admission closes, the turn in flight is
-// cancelled, and the settlement it owes completes before the teardown touches
-// the runtime that settlement is still writing through. The commit that
-// settlement makes lands on a tombstoned id, so it publishes nothing and cannot
-// recreate the row this delete removed.
-func (a *Agent) closeDeletedSession(
-	ctx context.Context,
-	id acp.SessionId,
-	session *session,
-	root string,
-) (settleErr error, closeErr error) {
-	session.prepareDelete()
-
-	settleErr = session.awaitSettlement(ctx)
-
-	session.lifecycleMu.Lock()
-
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-	closeErr = session.closeLocked(closeCtx, true)
-
-	closeCancel()
-	// A deleted session has no resumable snapshot to commit, so it states no
-	// quiescence fact: the row this delete tombstoned is exactly the state a fact
-	// would have to stand on. The incarnation still ends here.
-	session.lifecycleStream().fence()
-	session.lifecycleMu.Unlock()
-	a.recordIncompleteContainment(closeErr, id, root)
-	a.observe.AddActiveSession(ctx, -1)
-
-	return settleErr, closeErr
-}
-
-//nolint:gocyclo // Fork is one ordered parent/branch/journal/store publication transaction.
-func (a *Agent) forkSession(ctx context.Context, params acp.UnstableForkSessionRequest) (_ acp.UnstableForkSessionResponse, returnErr error) {
-	if err := a.rejectInvalidConfiguration(); err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	ctx = a.observe.Extract(ctx, params.Meta)
-
-	if err := validateSessionStartPaths(params.Cwd, params.AdditionalDirectories); err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	if err := validateUnstableMCPServers(params.McpServers); err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	meta, err := a.sessionMetaFromLifecycle(params.Meta)
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-	constructionCtx, finishConstruction, constructionErr := a.beginSessionConstruction(ctx)
-	if constructionErr != nil {
-		return acp.UnstableForkSessionResponse{}, constructionErr
-	}
-	defer finishConstruction()
-	ctx = constructionCtx
-
-	parent, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	idValue, err := newSessionID()
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	id := acp.SessionId(idValue)
-
-	if incompleteErr := a.rejectIncompleteHermesSession(id); incompleteErr != nil {
-		return acp.UnstableForkSessionResponse{}, incompleteErr
-	}
-	servers := stableMCPServersFromUnstable(params.McpServers)
-	if admissionErr := a.admitSharedHermesConfig(servers); admissionErr != nil {
-		return acp.UnstableForkSessionResponse{}, admissionErr
-	}
-
-	scratchRelease := func() {}
-
-	keepScratch := false
-
-	var xdg nativehermes.XDGDirs
-
-	defer func() {
-		if !keepScratch {
-			returnErr = errors.Join(returnErr, deleteHermesScratchRoot(xdg.Root, scratchRelease))
-		}
-	}()
-
-	parentRoot, err := a.ensureScratchParent()
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-	xdg, err = createHermesGeneration(parentRoot)
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	parent.lifecycleMu.Lock()
-	defer parent.lifecycleMu.Unlock()
-	if parent.lifetimeEnded() {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidRequest(map[string]any{jsonFieldError: valSessionClosed})
-	}
-	parent.toolMu.Lock()
-	parent.cancelMu.Lock()
-	resumeErr := parent.resumeRuntimeForTurnLocked(ctx)
-	parent.cancelMu.Unlock()
-	parent.toolMu.Unlock()
-	if resumeErr != nil {
-		return acp.UnstableForkSessionResponse{}, resumeErr
-	}
-	if reason := parent.snapshotBlockedReason(); reason != "" {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidRequest(map[string]any{jsonFieldError: "session cannot be forked", "reason": reason})
-	}
-	parentSnapshot := parent.snapshot()
-	if meta.Model == "" {
-		meta.Model = modelSelectionValue(parentSnapshot.providerID, parentSnapshot.modelID)
-	}
-	if !meta.EnvSet {
-		meta.Env = cloneStringMap(parentSnapshot.env)
-	}
-	if !meta.ExtraPathDirsSet {
-		meta.ExtraPathDirs = slices.Clone(parentSnapshot.extraPathDirs)
-	}
-
-	var journal *sessionOperationJournal
-	var sessionSetLock sharedSessionSetLease
-	sessionPublished := false
-	baseline := []string{}
-	marker := ""
-	if a.options.SharedHermesHome != "" {
-		operationHome := a.options.SharedHermesHome
-		sessionSetLock, err = acquireSharedSessionSetLock(ctx, operationHome, nativehermes.SharedSessionSetLockExclusive)
-		if err != nil {
-			return acp.UnstableForkSessionResponse{}, err
-		}
-		defer func() {
-			releaseErr := sessionSetLock.Release()
-			if sessionPublished && releaseErr != nil {
-				a.log.DebugContext(ctx, "release committed Hermes fork session-set lock", slog.String(jsonFieldError, releaseErr.Error()))
-
-				return
-			}
-			returnErr = errors.Join(returnErr, releaseErr)
-		}()
-		if recoveryErr := a.recoverPendingSharedSessionOperations(ctx, operationHome, parentSnapshot.client); recoveryErr != nil {
-			return acp.UnstableForkSessionResponse{}, recoveryErr
-		}
-
-		lister, ok := parentSnapshot.client.(nativehermes.PersistedSessionLister)
-		if !ok {
-			return acp.UnstableForkSessionResponse{}, errors.New("shared Hermes fork requires persisted session inventory")
-		}
-		persisted, listErr := lister.PersistedSessions(ctx)
-		if listErr != nil {
-			return acp.UnstableForkSessionResponse{}, fmt.Errorf("list Hermes sessions before fork: %w", listErr)
-		}
-		baseline = make([]string, 0, len(persisted))
-		for index := range persisted {
-			baseline = append(baseline, persisted[index].ID)
-		}
-		operationID, idErr := newSessionOperationID()
-		if idErr != nil {
-			return acp.UnstableForkSessionResponse{}, idErr
-		}
-		marker = "acp-go-hermes fork " + operationID
-		journal, err = beginSessionOperationJournal(operationHome, sessionOperationJournalFields{
-			OperationID: operationID, Kind: sessionOperationKindFork, Mode: sessionOperationModeShared,
-			LogicalSessionID: string(id), ParentLogicalSessionID: string(params.SessionId),
-			ParentNativeSessionID: parentSnapshot.idmap.NativeSessionID,
-			SourceRoot:            parentSnapshot.client.XDGDirs().Root, TargetRoot: xdg.Root,
-			Marker: marker, FinalTitle: marker, BaselineNativeSessionIDs: baseline,
-		})
-		if err != nil {
-			return acp.UnstableForkSessionResponse{}, err
-		}
-		mutating := sessionOperationPhaseMutating
-		if updateErr := journal.update(sessionOperationJournalPatch{Phase: &mutating}); updateErr != nil {
-			return acp.UnstableForkSessionResponse{}, updateErr
-		}
-	}
-
-	var nativeChild nativehermes.Session
-	if forker, ok := parentSnapshot.client.(nativehermes.RecoverableSessionForker); ok && journal != nil {
-		nativeChild, err = forker.ForkWithBaseline(ctx, parentSnapshot.idmap.NativeSessionID, marker, baseline)
-	} else {
-		nativeChild, err = parentSnapshot.client.Fork(ctx, parentSnapshot.idmap.NativeSessionID, marker)
-	}
-	if err != nil {
-		if journal != nil {
-			if lister, ok := parentSnapshot.client.(nativehermes.PersistedSessionLister); ok {
-				persisted, listErr := lister.PersistedSessions(context.WithoutCancel(ctx))
-				current := make([]string, 0, len(persisted))
-				for index := range persisted {
-					current = append(current, persisted[index].ID)
-				}
-				_, found, deltaErr := sessionOperationBaselineDelta(baseline, current)
-				if listErr == nil && deltaErr == nil && !found {
-					return acp.UnstableForkSessionResponse{}, errors.Join(err, journal.removeRecovered())
-				}
-			}
-		}
-
-		return acp.UnstableForkSessionResponse{}, err
-	}
-	if journal != nil {
-		identified := sessionOperationPhaseLiveFenced
-		if updateErr := journal.update(sessionOperationJournalPatch{Phase: &identified, NativeSessionID: &nativeChild.ID}); updateErr != nil {
-			return acp.UnstableForkSessionResponse{}, updateErr
-		}
-	}
-	cleanupNativeChild := true
-	defer func() {
-		if !cleanupNativeChild {
-			return
-		}
-		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), closeTimeout)
-		deleteErr := parentSnapshot.client.DeleteSession(deleteCtx, nativeChild.ID)
-		deleteCancel()
-		returnErr = errors.Join(returnErr, deleteErr)
-	}()
-	if a.options.SharedHermesHome == "" {
-		// The official branch commits its child row and copied history into the
-		// parent's state.db. Isolated mode must snapshot that authoritative DB
-		// only after Branch returns and its parent-side live child is detached.
-		var cloneErr error
-		if a.options.HostAuthority != nil {
-			cloneErr = parent.withReclaimedManagedState(ctx, parentSnapshot.client, func(root string) error {
-				return cloneHermesStateDBRoot(a.scratchDirectory(), root, xdg)
-			})
-			parent.mu.Lock()
-			parentReclaimed := parent.runtimeNeedsResume
-			parent.mu.Unlock()
-			if parentReclaimed {
-				cleanupNativeChild = false
-			}
-		} else {
-			cloneErr = cloneHermesStateDB(a.scratchDirectory(), parentSnapshot.client.XDGDirs(), xdg)
-		}
-		if cloneErr != nil {
-			return acp.UnstableForkSessionResponse{}, cloneErr
-		}
-	}
-
-	nativeOwner, err := a.acquireSharedNativeSessionOwner(nativeChild.ID)
-	if err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	client, err := a.newHermesClientWithScratchOwner(ctx, id, params.Cwd, meta, xdg, scratchRelease, nativeOwner, servers)
-	if err != nil {
-		if nativeOwner != nil {
-			err = errors.Join(err, nativeOwner.Release())
-		}
-		if a.retainFailedHermesGeneration(id, xdg.Root, err) {
-			cleanupNativeChild = false
-			keepScratch = true
-		}
-
-		return acp.UnstableForkSessionResponse{}, err
-	}
-	keepScratch = true
-
-	native, err := client.GetSession(ctx, nativeChild.ID)
-	if err != nil {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		if errors.Is(closeErr, ErrContainmentIncomplete) {
-			cleanupNativeChild = false
-		}
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
-	}
-	if native.ID != nativeChild.ID {
-		closeErr := closeHermesClientAfterStartupFailure(client)
-		if errors.Is(closeErr, ErrContainmentIncomplete) {
-			cleanupNativeChild = false
-		}
-		a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("hermes fork native session drift: got %q want %q", native.ID, nativeChild.ID), closeErr)
-	}
-	// The child server may start with a process-wide default that differs from
-	// the parent's current (or explicitly requested) model. Bind the resolved
-	// selection natively before the child can be snapshotted or published, so
-	// its response, durable state, and first prompt all describe one model.
-	if meta.Model != "" {
-		if err := client.SetModel(ctx, nativeChild.ID, meta.Model); err != nil {
-			closeErr := closeHermesClientAfterStartupFailure(client)
-			if errors.Is(closeErr, ErrContainmentIncomplete) {
-				cleanupNativeChild = false
-			}
-			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-			return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("bind Hermes fork model: %w", err), closeErr)
-		}
-	}
-	// The child starts on the config default effort; a fork keeps the parent's
-	// level unless the request names one.
-	if effort := firstNonEmpty(meta.Effort, parentSnapshot.effort); effort != "" {
-		applied, err := applyNativeEffort(ctx, client, nativeChild.ID, effort)
-		if err != nil {
-			closeErr := closeHermesClientAfterStartupFailure(client)
-			if errors.Is(closeErr, ErrContainmentIncomplete) {
-				cleanupNativeChild = false
-			}
-			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-			return acp.UnstableForkSessionResponse{}, errors.Join(fmt.Errorf("bind Hermes fork effort: %w", err), closeErr)
-		}
-
-		meta.Effort = applied
-	}
-
-	idmap := idmapRecord{
-		SessionID:             string(id),
-		NativeSessionID:       native.ID,
-		ParentSessionID:       string(params.SessionId),
-		NativeParentSessionID: parentSnapshot.idmap.NativeSessionID,
-		Format:                SessionStoreFormat,
-	}
-
-	session := newSession(a, id, params.Cwd, params.AdditionalDirectories, servers, native, client, meta, idmap)
-	session.operationJournal = journal
-	if err := session.openLifecycleStream(); err != nil {
-		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
-		if errors.Is(cleanupErr, ErrContainmentIncomplete) {
-			cleanupNativeChild = false
-		}
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(err, cleanupErr)
-	}
-
-	if err := session.snapshotToStore(context.WithoutCancel(ctx)); err != nil {
-		if errors.Is(err, errSessionStoreCommitUnknown) {
-			cleanupNativeChild = false
-			closeErr := session.Close(context.Background())
-			a.recordIncompleteContainment(closeErr, id, hermesServerRoot(client))
-
-			return acp.UnstableForkSessionResponse{}, errors.Join(err, closeErr)
-		}
-		cleanupErr := a.cleanupFailedStartedSession(ctx, session)
-		if errors.Is(cleanupErr, ErrContainmentIncomplete) {
-			cleanupNativeChild = false
-		}
-
-		return acp.UnstableForkSessionResponse{}, errors.Join(err, cleanupErr)
-	}
-	cleanupNativeChild = false
-	if _, err := a.storeStartedSessionWithOpening(ctx, session); err != nil {
-		return acp.UnstableForkSessionResponse{}, a.refuseStartedSession(ctx, session, err)
-	}
-	sessionPublished = true
-	session.operationJournal = nil
-	if journal != nil {
-		if err := journal.removeCommitted(); err != nil {
-			a.log.DebugContext(ctx, "retain committed Hermes fork journal for cleanup", slog.String(jsonFieldError, err.Error()))
-		}
-	}
-
-	return acp.UnstableForkSessionResponse{
-		SessionId:     id,
-		Meta:          lifecycleResponseMeta(session.snapshot()),
-		ConfigOptions: unstableConfigOptions(session.configOptions(ctx)),
-	}, nil
-}
-
-func (a *Agent) newHermesClient(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, mcpServers ...[]acp.McpServer) (*managedHermesServer, error) {
-	if err := a.rejectIncompleteHermesSession(id); err != nil {
-		return nil, err
-	}
-	scratchRelease := func() {}
-	if existing.Root == "" {
-		parent, parentErr := a.ensureScratchParent()
-		if parentErr != nil {
-			scratchRelease()
-
-			return nil, parentErr
-		}
-
-		var err error
-		existing, err = createHermesGeneration(parent)
-		if err != nil {
-			scratchRelease()
-
-			return nil, err
-		}
-	}
-	root := existing.Root
-
-	client, err := a.newHermesClientWithScratch(ctx, id, cwd, meta, existing, scratchRelease, mcpServers...)
-	if err != nil {
-		if a.retainFailedHermesGeneration(id, root, err) {
-			return nil, err
-		}
-
-		return nil, errors.Join(err, deleteHermesScratchRoot(root, scratchRelease))
-	}
-
-	return client, nil
-}
-
-func closeHermesClientAfterStartupFailure(client nativehermes.Server) error {
-	closeCtx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	deleteCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
 	defer cancel()
 
-	return client.Close(closeCtx)
+	if err := a.store.Delete(deleteCtx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
+	}
+
+	a.mu.Lock()
+	a.deleted[params.SessionId] = true
+	s := a.sessions[params.SessionId]
+	a.mu.Unlock()
+
+	if s == nil {
+		return acp.UnstableDeleteSessionResponse{}, nil
+	}
+
+	closeErr := s.close(ctx)
+	a.detach(ctx, s)
+
+	if closeErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
+	}
+
+	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
-func (a *Agent) newHermesClientWithScratch(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, scratchRelease func(), mcpServers ...[]acp.McpServer) (*managedHermesServer, error) {
-	return a.newHermesClientWithScratchOwner(ctx, id, cwd, meta, existing, scratchRelease, nil, mcpServers...)
+// SetSessionConfigOption applies one select value.
+func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (resp acp.SetSessionConfigOptionResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.SetSessionConfigOptionResponse{}, openErr
+	}
+
+	var meta map[string]any
+
+	switch {
+	case params.ValueId != nil:
+		meta = params.ValueId.Meta
+	case params.Boolean != nil:
+		meta = params.Boolean.Meta
+	}
+
+	ctx, finish := a.observe.StartACP(ctx, meta, acp.AgentMethodSessionSetConfigOption)
+	defer func() { finish(err) }()
+
+	if refusal := lifecycle.RejectKey(meta); refusal != nil {
+		return acp.SetSessionConfigOptionResponse{}, wire.ParamRefusal(refusal)
+	}
+
+	if params.ValueId == nil {
+		return acp.SetSessionConfigOptionResponse{}, wire.Unsupported(fieldType)
+	}
+
+	s, err := a.session(ctx, params.ValueId.SessionId)
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+
+	options, err := s.setConfigOption(ctx, params.ValueId.ConfigId, string(params.ValueId.Value))
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+
+	return acp.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
 }
 
-func (a *Agent) newHermesClientWithScratchOwner(ctx context.Context, id acp.SessionId, cwd string, meta sessionMeta, existing nativehermes.XDGDirs, scratchRelease func(), nativeOwner *nativehermes.SharedSessionOwner, mcpServers ...[]acp.McpServer) (*managedHermesServer, error) {
-	factory := a.options.clientFactory
-	if factory == nil {
-		factory = nativehermes.StartServer
-	}
+// session resolves an addressed id to its live session. A deleted id is
+// indistinguishable from one that never existed.
+func (a *Agent) session(ctx context.Context, sessionID acp.SessionId) (*session, error) {
+	a.mu.Lock()
 
-	baseEnv := cloneStringMap(a.options.Env)
-
-	sessionEnv := cloneStringMap(meta.Env)
-	sessionEnv = a.observe.InjectTraceEnv(ctx, sessionEnv)
-
-	var servers []acp.McpServer
-	if len(mcpServers) > 0 {
-		servers = cloneMCPServers(mcpServers[0])
-	}
-	if err := a.admitSharedHermesConfig(servers); err != nil {
-		return nil, err
-	}
-
-	parent, err := a.ensureScratchParent()
-	if err != nil {
-		return nil, err
-	}
-
-	start := nativehermes.StartOptions{
-		ACPSessionID:       nativehermes.ACPSessionIDString(id),
-		ScratchParent:      parent,
-		Cwd:                cwd,
-		ExecutablePath:     a.options.ExecutablePath,
-		DefaultModel:       firstNonEmpty(meta.Model, a.options.DefaultModel),
-		SharedHermesHome:   a.options.SharedHermesHome,
-		Env:                baseEnv,
-		SessionEnv:         sessionEnv,
-		ExtraPathDirs:      slices.Clone(meta.ExtraPathDirs),
-		AmbientEnvironment: cloneStringMap(a.ambientEnv),
-		Logger:             a.log,
-		ExistingXDG:        existing,
-		MCPServers:         servers,
-		SeedFiles:          cloneStringMap(a.options.SeedFiles),
-	}
-	a.configureHostAuthority(&start)
-	if start.RetainNativeTree != nil {
-		retainNativeTree := start.RetainNativeTree
-		start.RetainNativeTree = func(root string, err error) bool {
-			if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
-				a.retainIncompleteHermesRoot(id, root)
-
-				return true
-			}
-
-			return retainNativeTree(root, err)
-		}
-	}
-
-	finishNativeGeneration, err := a.beginManagedNativeGeneration(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer finishNativeGeneration()
-
-	a.observe.RecordHermesProcessStart(ctx)
-
-	client, err := factory(ctx, start)
-	if err != nil {
-		return nil, err
-	}
-
-	root := existing.Root
-
-	managed := &managedHermesServer{
-		Server: client, root: root, sessionID: id, scratchRelease: scratchRelease,
-		managed: a.options.HostAuthority != nil, retainIncomplete: a.recordIncompleteContainment, nativeSessionOwner: nativeOwner,
-	}
-
-	return managed, nil
-}
-
-func (a *Agent) retainFailedHermesGeneration(id acp.SessionId, root string, err error) bool {
-	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
-		a.mu.Lock()
-		roots := a.incompleteRoots[id]
-		_, retained := roots[root]
-		hasExactRoot := len(roots) != 0
+	if a.closed {
 		a.mu.Unlock()
-		if retained {
-			return true
-		}
-		if hasExactRoot {
-			return false
-		}
 
-		a.retainIncompleteHermesRoot(id, root)
-
-		return true
+		return nil, wire.AgentClosed()
 	}
 
-	return a.ownsRetiredNativeRoot(root)
-}
-
-func (a *Agent) admitSharedHermesConfig(servers []acp.McpServer) error {
-	if a.options.SharedHermesHome == "" {
-		return nil
-	}
-	redacted, err := redactSharedHermesMCPServers(servers)
-	if err != nil {
-		return err
-	}
-
-	a.sharedConfigMu.Lock()
-	defer a.sharedConfigMu.Unlock()
-
-	if !a.sharedConfigInitialized {
-		a.sharedConfigInitialized = true
-		a.sharedMCPServers = cloneMCPServers(redacted)
-
-		return nil
-	}
-	if !reflect.DeepEqual(a.sharedMCPServers, redacted) {
-		return errors.New("shared Hermes home requires one stable MCP configuration")
-	}
-
-	return nil
-}
-
-type deleteCleanupRecord struct {
-	SessionID acp.SessionId
-	XDGRoot   string
-	Server    *managedHermesServer
-	Session   *session
-}
-
-// deleteCleanupRecord names what a delete still owes the filesystem. The root
-// is the one the session's own runtime holds: a generation root is minted per
-// incarnation under the scratch parent and is not derivable from the session
-// id, so a session with no live client leaves nothing to remove.
-func (a *Agent) deleteCleanupRecord(id acp.SessionId, session *session) deleteCleanupRecord {
-	record := deleteCleanupRecord{SessionID: id}
-	if session == nil {
-		return record
-	}
-	record.Session = session
-
-	snapshot := session.snapshot()
-
-	if snapshot.client != nil {
-		if xdg := snapshot.client.XDGDirs(); xdg.Root != "" {
-			record.XDGRoot = xdg.Root
-		}
-		record.Server, _ = snapshot.client.(*managedHermesServer)
-	}
-
-	return record
-}
-
-func (a *Agent) rememberDeleteCleanup(record deleteCleanupRecord) {
-	if record.SessionID == "" {
-		return
-	}
-
-	a.mu.Lock()
-	a.deleteCleanup[record.SessionID] = record
-	a.mu.Unlock()
-}
-
-func (a *Agent) forgetDeleteCleanupIfDone(id acp.SessionId) {
-	if id == "" {
-		return
-	}
-
-	a.mu.Lock()
-	delete(a.deleteCleanup, id)
-	a.mu.Unlock()
-}
-
-func (a *Agent) retryDeletedSessionCleanup(ctx context.Context) error {
-	a.mu.Lock()
-
-	records := make([]deleteCleanupRecord, 0, len(a.deleteCleanup))
-	for _, record := range a.deleteCleanup {
-		records = append(records, record)
-	}
-	a.mu.Unlock()
-
-	var err error
-
-	for _, record := range records {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return errors.Join(err, ctxErr)
-		}
-
-		cleanupErr := a.cleanupDeletedSession(record)
-		if cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-
-			continue
-		}
-
-		a.mu.Lock()
-		delete(a.deleteCleanup, record.SessionID)
+	s := a.sessions[sessionID]
+	if s == nil || a.deleted[sessionID] {
 		a.mu.Unlock()
+
+		return nil, wire.UnknownSession()
 	}
 
-	return err
-}
+	a.mu.Unlock()
 
-func (a *Agent) cleanupDeletedSession(record deleteCleanupRecord) error {
-	if record.Session != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err := record.Session.closeWithoutSnapshot(ctx)
-		cancel()
-		if err != nil {
-			return err
+	if transport := a.transportRef(); transport != nil {
+		if err := transport.AwaitSession(ctx, sessionID); err != nil {
+			return nil, err
 		}
 	}
 
-	if record.SessionID == "" || record.XDGRoot == "" {
-		return nil
-	}
-	if record.Server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
-		err := record.Server.Close(ctx)
-		cancel()
-
-		if err != nil || record.Server.managed {
-			return err
-		}
-	}
-
-	return errors.Join(os.RemoveAll(record.XDGRoot), os.RemoveAll(nativehermes.ControlDirForXDG(record.XDGRoot)))
+	return s, nil
 }
 
-// rejectInvalidConfiguration fails session establishment on agent configuration
-// no session may run under: an option that failed validation at construction
-// or a configured Home value. The
-// handshake reports the option failures too, but an embedded host can open a
-// session and prompt without ever calling initialize, so options that never
-// validated must not reach a gateway process.
-func (a *Agent) rejectInvalidConfiguration() error {
-	if err := a.optionsError(); err != nil {
-		return err
-	}
+func (a *Agent) deletedSession(id acp.SessionId) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if a.options.Home != "" {
-		return unsupportedField(optionFieldHome)
-	}
-
-	return nil
+	return a.deleted[id]
 }
 
-// validateUnstableMCPServers applies the same acceptance rules as
-// validateMCPServers to the unstable fork variant: reject unsupported
-// transports and require a non-empty, request-unique name on every accepted
-// (stdio or http) declaration. Indices are preserved by the conversion, so the
-// offending-field paths match the wire request.
-func validateUnstableMCPServers(servers []acp.UnstableMcpServer) error {
-	return validateMCPServers(stableMCPServersFromUnstable(servers))
-}
+// detach removes a session from the active map while it still resolves to
+// this exact session.
+func (a *Agent) detach(ctx context.Context, s *session) {
+	a.mu.Lock()
 
-func cloneHermesStateDB(scratchDir string, source nativehermes.XDGDirs, target nativehermes.XDGDirs) error {
-	return cloneHermesStateDBRoot(scratchDir, source.Root, target)
-}
-
-func cloneHermesStateDBRoot(scratchDir string, sourceRoot string, target nativehermes.XDGDirs) error {
-	data, _, ok, err := encodeHermesStateDBArchive(scratchDir, sourceRoot)
-	if err != nil {
-		return err
+	current := a.sessions[s.id] == s
+	if current {
+		delete(a.sessions, s.id)
 	}
+	a.mu.Unlock()
 
-	if !ok {
-		return nil
+	if current {
+		a.observe.AddActiveSession(ctx, -1)
 	}
-
-	return decodeXDGArchive(data, target.Root)
-}
-
-func paginateSessionInfos(infos []acp.SessionInfo, cursor *string) ([]acp.SessionInfo, *string, error) {
-	offset, err := decodeListCursor(cursor)
-	if err != nil {
-		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "invalid cursor"})
-	}
-
-	if offset > len(infos) {
-		return nil, nil, acp.NewInvalidParams(map[string]any{"cursor": "cursor is past end"})
-	}
-
-	end := offset + listSessionsPageSize
-	if end >= len(infos) {
-		return infos[offset:], nil, nil
-	}
-
-	next := encodeListCursor(end)
-
-	return infos[offset:end], &next, nil
-}
-
-func decodeListCursor(cursor *string) (int, error) {
-	if cursor == nil || *cursor == "" {
-		return 0, nil
-	}
-
-	data, err := base64.RawURLEncoding.DecodeString(*cursor)
-	if err != nil {
-		return 0, err
-	}
-
-	offset, err := strconv.Atoi(string(data))
-	if err != nil || offset < 0 {
-		return 0, strconv.ErrSyntax
-	}
-
-	return offset, nil
-}
-
-func encodeListCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
