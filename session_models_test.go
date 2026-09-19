@@ -118,3 +118,30 @@ func TestSetConfigOptionRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestReasoningSelectionSurvivesRuntimeRelaunch(t *testing.T) {
+	t.Parallel()
+
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir(), WithSessionHermesOptions(NewHermesOptions(WithHermesEffort("high")))))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	_, err = s.setConfigOption(t.Context(), configEffort, "low")
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	selected := s.effort
+	s.mu.Unlock()
+	require.Equal(t, "low", selected)
+	s.stopRuntime(t.Context(), rt)
+	_, err = s.ensureRuntime(t.Context())
+	require.NoError(t, err)
+	s.mu.Lock()
+	selected = s.effort
+	s.mu.Unlock()
+	require.Equal(t, "low", selected, "successful reasoning change reverted on relaunch")
+}

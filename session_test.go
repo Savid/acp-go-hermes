@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -14,9 +17,9 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
-
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
-	"github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -218,11 +221,13 @@ func (s *backgroundFaultStore) Replace(ctx context.Context, key acpcore.SessionK
 
 	return s.SessionStore.Replace(ctx, key, replacements)
 }
+
 func TestBackgroundCommitFailureFencesStream(t *testing.T) {
 	store := &backgroundFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
 	a := NewAgent(testOptions(t, WithSessionStore(store))...)
 	t.Cleanup(func() { _ = a.Close() })
-	a.attach(newRecorder(), nil)
+	rec := newRecorder()
+	a.attach(rec, nil)
 	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
 	require.NoError(t, err)
 	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
@@ -233,14 +238,22 @@ func TestBackgroundCommitFailureFencesStream(t *testing.T) {
 	s.mu.Lock()
 	rt := s.runtime
 	s.mu.Unlock()
-	s.handleEvent(t.Context(), rt, hermes.Event{Type: eventMessageComplete, Payload: []byte(`{"text":"background","status":"complete"}`)})
-	require.False(t, s.lc.Active(), "a failed background commit fences the lifecycle stream")
+	result, _, _, err := rt.client.SubmitPromptWatermark(t.Context(), rt.liveID, "HELLO")
+	require.NoError(t, err)
+	require.Equal(t, promptStreaming, result.Status)
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
 		return s.runtime == nil
 	}, testTimeout, time.Millisecond, "a failed background commit drops the gateway binding")
+	require.False(t, s.lc.Active(), "a failed background commit fences the lifecycle stream")
+	for _, event := range lifecycleEvents(rec.snapshot()) {
+		if event["type"] == "state_update" {
+			require.NotEqual(t, "idle", event["state"], "failed mirror publication cannot assert a durable terminal state")
+		}
+	}
+
 	store.fail = false
 	request := wire.TextPromptRequest(created.SessionId, "HELLO")
 	request.Meta = promptMeta(1)
@@ -417,4 +430,262 @@ func TestEmptyExecutablePathResolvesHermesFromPath(t *testing.T) {
 
 	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
 	require.NoError(t, err)
+}
+
+func TestCloseJoinsFirstMirrorAndFencesOpening(t *testing.T) {
+	t.Parallel()
+	for _, agentClose := range []bool{false, true} {
+		name := "close_session"
+		if agentClose {
+			name = "close_agent"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := &commitBarrier{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan acpcore.SessionKey, 1), release: make(chan struct{})}
+			release := sync.OnceFunc(func() { close(store.release) })
+			t.Cleanup(release)
+			store.block.Store(true)
+			a := NewAgent(testOptions(t, WithSessionStore(store))...)
+			t.Cleanup(func() { _ = a.Close() })
+			rec := newRecorder()
+			a.attach(rec, nil)
+			request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+			withLifecycle()(&request)
+			_, err := a.Initialize(t.Context(), request)
+			require.NoError(t, err)
+			cwd := t.TempDir()
+			created := make(chan error, 1)
+			go func() {
+				_, createErr := a.NewSession(t.Context(), wire.NewSessionRequest(cwd))
+				created <- createErr
+			}()
+			var key acpcore.SessionKey
+			select {
+			case key = <-store.entered:
+			case <-time.After(testTimeout):
+				t.Fatal("creation did not reach its first mirror")
+			}
+			s, err := a.session(t.Context(), acp.SessionId(key.SessionID))
+			require.NoError(t, err)
+			s.mu.Lock()
+			rt := s.runtime
+			s.mu.Unlock()
+			closed := make(chan error, 1)
+			go func() {
+				if agentClose {
+					closed <- a.Close()
+
+					return
+				}
+				_, err := a.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: acp.SessionId(key.SessionID)})
+				closed <- err
+			}()
+			require.Eventually(t, func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+
+				return s.closing
+			}, testTimeout, time.Millisecond)
+			select {
+			case err := <-closed:
+				t.Fatalf("close returned while the first mirror was blocked: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			release()
+			select {
+			case err := <-closed:
+				require.NoError(t, err)
+			case <-time.After(testTimeout):
+				t.Fatal("close did not join creation")
+			}
+			select {
+			case err := <-created:
+				require.Error(t, err, "a closing session must refuse its opening publication")
+			case <-time.After(testTimeout):
+				t.Fatal("creation did not release its gate before cleanup")
+			}
+			require.False(t, s.lc.Active())
+			before := len(rec.snapshot())
+			require.Error(t, s.openStream(t.Context(), rt))
+			require.Len(t, rec.snapshot(), before, "closed session published commands or a lifecycle snapshot")
+			require.False(t, s.lc.Active())
+		})
+	}
+}
+
+func TestOpeningRejectsReplacedNativeGeneration(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	stale := s.runtime
+	s.mu.Unlock()
+	transport, meta := prepareOpeningResponse(t)
+	a.attach(rec, transport)
+	require.NoError(t, a.scheduleOpen(transport.RequestContext(t.Context(), meta), s))
+	s.stopRuntime(t.Context(), stale)
+	require.False(t, s.lc.Active())
+	fresh, err := s.ensureRuntime(t.Context())
+	require.NoError(t, err)
+	require.NotSame(t, stale, fresh)
+	require.True(t, s.lc.Active())
+	before := len(rec.snapshot())
+	require.Error(t, s.openStream(t.Context(), stale))
+	require.Len(t, rec.snapshot(), before, "stale deferred opening published on the replacement generation")
+	require.True(t, s.lc.Active(), "stale opening fenced the replacement stream")
+	finishOpeningResponse(t, transport, s.id)
+	require.Len(t, rec.snapshot(), before, "stale hook published on the replacement generation")
+	current, err := a.session(t.Context(), s.id)
+	require.NoError(t, err)
+	require.Same(t, s, current)
+	require.True(t, s.lc.Active(), "stale hook closed the replacement stream")
+}
+
+// openingCallbackClient exercises a synchronous embedded callback into admission.
+type openingCallbackClient struct {
+	*recorder
+	agent *Agent
+}
+
+func (c *openingCallbackClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if err := c.agent.Cancel(ctx, acp.CancelNotification{SessionId: notification.SessionId}); err != nil {
+		return err
+	}
+
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestOpeningAllowsSynchronousSessionCallback(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(&openingCallbackClient{recorder: rec, agent: a}, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	_, err = a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.NotEmpty(t, rec.snapshot())
+}
+
+func prepareOpeningResponse(t *testing.T) (*wire.Transport, map[string]any) {
+	t.Helper()
+	transport := wire.NewTransport(strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\",\"params\":{}}\n"), io.Discard)
+	t.Cleanup(transport.Close)
+	transport.Start()
+	inbound, err := io.ReadAll(transport.Reader())
+	require.NoError(t, err)
+
+	var frame struct {
+		Params acp.NewSessionRequest `json:"params"`
+	}
+
+	require.NoError(t, json.Unmarshal(inbound, &frame))
+
+	return transport, frame.Params.Meta
+}
+
+func finishOpeningResponse(t *testing.T, transport *wire.Transport, id acp.SessionId) {
+	t.Helper()
+	_, err := transport.Writer().Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n"))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	require.NoError(t, transport.AwaitSession(ctx, id))
+}
+
+func TestDeferredOpeningFailureDetachesSession(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
+	t.Cleanup(func() { _ = a.Close() })
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	transport, meta := prepareOpeningResponse(t)
+	a.attach(&firstOpenFailureClient{recorder: newRecorder()}, transport)
+	newRequest := wire.NewSessionRequest(t.TempDir())
+	newRequest.Meta = meta
+	created, err := a.NewSession(t.Context(), newRequest)
+	require.NoError(t, err)
+	a.mu.Lock()
+	s := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.NotNil(t, s)
+	finishOpeningResponse(t, transport, created.SessionId)
+	require.False(t, s.lc.Active())
+	a.mu.Lock()
+	_, installed := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.False(t, installed, "failed deferred publication retained the active slot")
+	s.mu.Lock()
+	closed := s.closing
+	s.mu.Unlock()
+	require.True(t, closed)
+}
+
+func TestRuntimeDrainCompletesBeforeReplacement(t *testing.T) {
+	t.Parallel()
+	proc, err := process.Start(t.Context(), process.Request{Executable: "/usr/bin/true"})
+	require.NoError(t, err)
+	defer proc.Close()
+	old := &runtime{proc: proc, done: make(chan struct{})}
+	old.controls = make(chan func())
+	old.controlsDone = make(chan struct{})
+	close(old.controlsDone)
+	s := &session{runtime: old}
+	var streams []string
+	deliver := func(_ context.Context, envelope map[string]any) error {
+		streamID, ok := envelope["streamId"].(string)
+		require.True(t, ok)
+		streams = append(streams, streamID)
+
+		return nil
+	}
+	negotiated := lifecycle.Negotiated{Version: 1, UpdatesOutsidePrompt: true}
+	require.NoError(t, s.lc.Open(t.Context(), "old", negotiated, deliver))
+	callbackCtx, cancelCallback := context.WithCancelCause(t.Context())
+	defer cancelCallback(nil)
+	release := s.registerDialog("pending", cancelCallback)
+	defer release()
+	go func() { s.runtimeEnded(t.Context(), old); close(old.done) }()
+	select {
+	case <-callbackCtx.Done():
+	case <-time.After(testTimeout):
+		t.Fatal("runtime did not cancel its pending callback")
+	}
+	s.mu.Lock()
+	bound := s.runtime
+	s.mu.Unlock()
+	if bound != old {
+		release()
+		<-old.done
+		t.Fatal("runtime released its binding before its callback drained")
+	}
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	cancelRequest()
+	returned, requestErr := s.ensureRuntime(requestCtx)
+	release()
+	select {
+	case <-old.done:
+	case <-time.After(testTimeout):
+		t.Fatal("runtime did not finish teardown")
+	}
+	require.Nil(t, returned, "an operation cannot acquire the runtime being drained")
+	require.ErrorIs(t, requestErr, context.Canceled)
+	require.NoError(t, s.lc.Open(t.Context(), "replacement", negotiated, deliver))
+	require.True(t, s.lc.Active())
+	require.Equal(t, []string{"old", "replacement"}, streams)
 }

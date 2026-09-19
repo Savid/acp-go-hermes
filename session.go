@@ -41,9 +41,8 @@ type session struct {
 	models                hermes.ModelOptionsResult
 	title                 string
 	updatedAt             string
-	// installed records that the agent published the session under its id,
-	// so close owes the store its final generation.
-	installed bool
+	// persisted marks a successfully committed mirror.
+	persisted bool
 	closing   bool
 	closeDone chan struct{}
 	closeErr  error
@@ -52,6 +51,7 @@ type session struct {
 	cycle     *cycle
 	dialogs   map[string]*dialog
 	callbacks sync.WaitGroup
+	openMu    sync.Mutex
 	mirrorMu  sync.Mutex
 	lcMu      sync.Mutex
 	lc        lifecycle.Publisher
@@ -59,6 +59,8 @@ type session struct {
 
 // runtime binds one gateway connection to its native live-session identity.
 type runtime struct {
+	// ending prevents another operation from using this runtime during teardown.
+	ending       bool
 	proc         *process.Process
 	client       *hermes.Client
 	endpoint     hermes.Endpoint
@@ -317,7 +319,17 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
 	rt := s.runtime
+	ending := rt != nil && rt.ending
 	s.mu.Unlock()
+
+	if ending {
+		select {
+		case <-rt.done:
+			return s.ensureRuntime(ctx)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 
 	if rt != nil {
 		return rt, nil
@@ -349,7 +361,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	if err := s.publishOpen(ctx); err != nil {
+	if err := s.openStream(ctx, rt); err != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return nil, err
@@ -483,7 +495,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 
 		if err := s.commitMirror(settleCtx, rt); err != nil {
 			s.recordFailure(c, s.mirrorFailure(err))
-			s.lc.Fence()
+			s.fenceStream()
 			s.dropRuntime(rt)
 		}
 
@@ -508,7 +520,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		return
 	}
 
-	s.runtime = nil
+	rt.ending = true
 	t, c, closing := s.turn, s.cycle, s.closing
 	s.cycle = nil
 	s.mu.Unlock()
@@ -525,6 +537,12 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		select {
 		case <-t.settled:
 		default:
+			s.mu.Lock()
+			if s.runtime == rt {
+				s.runtime = nil
+			}
+			s.mu.Unlock()
+
 			t.settle(turnTransportEnded)
 
 			_ = rt.proc.Close()
@@ -543,9 +561,17 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		close(c.done)
 	}
 
-	if !closing {
-		s.lc.Fence()
+	s.openMu.Lock()
+	s.mu.Lock()
+	if s.runtime == rt {
+		if !s.closing {
+			s.lc.Fence()
+		}
+
+		s.runtime = nil
 	}
+	s.mu.Unlock()
+	s.openMu.Unlock()
 
 	_ = rt.proc.Close()
 }
@@ -722,8 +748,8 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
+	joinEstablishment := !s.persisted
 	s.closeDone = make(chan struct{})
-	installed := s.installed
 
 	t, rt, closingCycle := s.turn, s.runtime, s.cycle
 	if t != nil {
@@ -759,13 +785,23 @@ func (s *session) close(ctx context.Context) error {
 		}
 	}
 
+	// An initial mirror may not have started yet; its establishment owns the gate.
+	if joinEstablishment {
+		s.gate <- struct{}{}
+		defer func() { <-s.gate }()
+	}
+
+	s.mu.Lock()
+	persisted := s.persisted
+	s.mu.Unlock()
+
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
 	var errs []error
 
 	if rt != nil {
-		if installed {
+		if persisted {
 			if err := s.commitMirror(commitCtx, rt); err != nil {
 				errs = append(errs, err)
 			}
@@ -774,7 +810,7 @@ func (s *session) close(ctx context.Context) error {
 		s.stopRuntime(commitCtx, rt)
 	}
 
-	s.lc.Fence()
+	s.fenceStream()
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)
 	close(s.closeDone)

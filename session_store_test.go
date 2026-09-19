@@ -302,3 +302,61 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, record.NativeSessionID, after.NativeSessionID)
 	require.Equal(t, string(id), after.SessionID)
 }
+
+type firstMirrorFailureStore struct {
+	acpcore.SessionStore
+	calls atomic.Int32
+}
+
+func (s *firstMirrorFailureStore) Replace(ctx context.Context, key acpcore.SessionKey, rows []acpcore.SessionStoreReplacement) error {
+	if s.calls.Add(1) == 1 {
+		return errors.New("initial mirror unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, key, rows)
+}
+
+func TestFailedNewSessionDoesNotPersistDuringCleanup(t *testing.T) {
+	t.Parallel()
+	store := &firstMirrorFailureStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	response, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Empty(t, response.SessionId)
+	rows, err := store.ListSessions(h.ctx())
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, listed.Sessions)
+}
+
+type firstOpenFailureClient struct {
+	*recorder
+	failed atomic.Bool
+}
+
+func (c *firstOpenFailureClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if c.failed.CompareAndSwap(false, true) {
+		return errors.New("initial publication unavailable")
+	}
+
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestFailedSessionOpenReleasesActiveSlot(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(&firstOpenFailureClient{recorder: newRecorder()}, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	first, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Empty(t, first.SessionId)
+	_, err = a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+}

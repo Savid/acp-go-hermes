@@ -15,6 +15,8 @@ import (
 
 const (
 	eventMessageComplete = "message.complete"
+	eventMessageDelta    = "message.delta"
+	eventMessageInterim  = "message.interim"
 	statusComplete       = "complete"
 	fieldSource          = "source"
 	promptStreaming      = "streaming"
@@ -61,7 +63,8 @@ type cycleState struct {
 // outside a prompt is answered only if it opens an agent-origin cycle first.
 func bearsWork(event hermes.Event) bool {
 	switch event.Type {
-	case "message.start", "message.delta", eventMessageComplete, "thinking.delta",
+	case "message.start", eventMessageDelta, eventMessageComplete, "thinking.delta",
+		eventMessageInterim,
 		eventToolStart, eventToolComplete, eventApprovalRequest, eventClarifyRequest,
 		eventSudoRequest, eventSecretRequest, eventTerminalReadRequest, stopReasonError:
 		return true
@@ -75,7 +78,7 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 	state := &c.state
 
 	switch event.Type {
-	case "message.delta":
+	case eventMessageDelta:
 		text := hermes.String(event.Payload, fieldText)
 		state.text.WriteString(text)
 
@@ -85,6 +88,28 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		state.thought.WriteString(text)
 
 		return false, s.emit(ctx, acp.UpdateAgentThoughtText(text))
+	case eventMessageInterim:
+		//nolint:tagliatelle // Hermes uses already_streamed on the wire.
+		var interim struct {
+			Text            string `json:"text"`
+			AlreadyStreamed bool   `json:"already_streamed"`
+		}
+		if err := json.Unmarshal(event.Payload, &interim); err != nil {
+			return false, err
+		}
+
+		text := interim.Text
+		if interim.AlreadyStreamed {
+			text = wire.UnstreamedSuffix(state.text.String(), text)
+		}
+
+		state.text.Reset()
+
+		if text != "" {
+			return false, s.emit(ctx, acp.UpdateAgentMessageText(text))
+		}
+
+		return false, nil
 	case eventMessageComplete:
 		var result struct {
 			Text      string          `json:"text"`
@@ -108,7 +133,7 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		state.contextUsed = hermes.Number(result.Usage, "context_used")
 
 		var errs []error
-		if text := completionSuffix(result.Text, state.text.String()); text != "" {
+		if text := wire.UnstreamedSuffix(state.text.String(), result.Text); text != "" {
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentMessageText(text)))
 		}
 
@@ -123,6 +148,10 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 
 		return true, nil
 	case eventToolStart, eventToolComplete:
+		if event.Type == eventToolStart {
+			state.text.Reset()
+		}
+
 		return false, s.emitTool(ctx, state, event)
 	case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
 		s.handleControl(ctx, rt, c, event)

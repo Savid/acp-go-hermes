@@ -350,7 +350,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 		if err := s.commitMirror(settleCtx, rt); err != nil {
 			s.stopRuntime(settleCtx, rt)
-			s.lc.Fence()
+			s.fenceStream()
 			verdict.failure = s.mirrorFailure(err)
 			verdict.outcome = lifecycle.OutcomeFailed
 		}
@@ -361,7 +361,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	}
 
 	if t.ended == turnTransportEnded || generationLost {
-		s.lc.Fence()
+		s.fenceStream()
 	}
 
 	if verdict.failure != nil {

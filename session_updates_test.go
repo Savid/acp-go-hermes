@@ -3,7 +3,6 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -18,13 +17,9 @@ import (
 type nativeFixtureStore struct {
 	acpcore.SessionStore
 	trace *[]string
-	fail  bool
 }
 
 func (s *nativeFixtureStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
-	if s.fail {
-		return errors.New("fixture mirror failure")
-	}
 	if err := s.SessionStore.Replace(ctx, key, replacements); err != nil {
 		return err
 	}
@@ -53,65 +48,48 @@ func (r *nativeFixtureRecorder) SessionUpdate(ctx context.Context, notification 
 }
 
 func TestCapturedNativeAgentOrigin(t *testing.T) {
-	for _, failCommit := range []bool{false, true} {
-		name := "committed"
-		if failCommit {
-			name = "failed commit"
+	var trace []string
+	store := &nativeFixtureStore{SessionStore: acpcore.NewInMemorySessionStore(), trace: &trace}
+	rec := &nativeFixtureRecorder{recorder: newRecorder(), trace: &trace}
+	a := NewAgent(testOptions(t, WithSessionStore(store))...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(rec, nil)
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	require.Nil(t, s.turn)
+	s.mu.Unlock()
+	data, err := os.ReadFile("testdata/native/agent-origin.json")
+	require.NoError(t, err)
+	data = []byte(strings.ReplaceAll(string(data), "fixture-session", rt.liveID))
+	var frames []json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &frames))
+	trace = nil
+	for _, frame := range frames {
+		var envelope struct {
+			Params hermes.Event `json:"params"`
 		}
-		t.Run(name, func(t *testing.T) {
-			var trace []string
-			store := &nativeFixtureStore{SessionStore: acpcore.NewInMemorySessionStore(), trace: &trace}
-			rec := &nativeFixtureRecorder{recorder: newRecorder(), trace: &trace}
-			a := NewAgent(testOptions(t, WithSessionStore(store))...)
-			t.Cleanup(func() { _ = a.Close() })
-			a.attach(rec, nil)
-			_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}})
-			require.NoError(t, err)
-			created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
-			require.NoError(t, err)
-			s, err := a.session(t.Context(), created.SessionId)
-			require.NoError(t, err)
-			s.mu.Lock()
-			rt := s.runtime
-			require.Nil(t, s.turn)
-			s.mu.Unlock()
-			data, err := os.ReadFile("testdata/native/agent-origin.json")
-			require.NoError(t, err)
-			data = []byte(strings.ReplaceAll(string(data), "fixture-session", rt.liveID))
-			var frames []json.RawMessage
-			require.NoError(t, json.Unmarshal(data, &frames))
-			trace = nil
-			store.fail = failCommit
-			for _, frame := range frames {
-				var envelope struct {
-					Params hermes.Event `json:"params"`
-				}
-				require.NoError(t, json.Unmarshal(frame, &envelope))
-				s.handleEvent(t.Context(), rt, envelope.Params)
-			}
-			require.NotEmpty(t, trace)
-			require.Equal(t, "running", trace[0])
-			for _, event := range lifecycleEvents(rec.snapshot()) {
-				if event["type"] == "state_update" {
-					require.Equal(t, "activity", event["cause"])
-				}
-				require.NotEqual(t, "prompt_accepted", event["type"])
-			}
-			require.Contains(t, trace, "message")
-			s.mu.Lock()
-			require.Nil(t, s.cycle)
-			s.mu.Unlock()
-			if failCommit {
-				require.NotContains(t, trace, "idle")
-				s.lcMu.Lock()
-				active := s.lc.Active()
-				s.lcMu.Unlock()
-				require.False(t, active)
-			} else {
-				require.Equal(t, []string{"commit", "idle"}, trace[len(trace)-2:])
-			}
-		})
+		require.NoError(t, json.Unmarshal(frame, &envelope))
+		s.handleEvent(t.Context(), rt, envelope.Params)
 	}
+	require.NotEmpty(t, trace)
+	require.Equal(t, "running", trace[0])
+	for _, event := range lifecycleEvents(rec.snapshot()) {
+		if event["type"] == "state_update" {
+			require.Equal(t, "activity", event["cause"])
+		}
+		require.NotEqual(t, "prompt_accepted", event["type"])
+	}
+	require.Contains(t, trace, "message")
+	s.mu.Lock()
+	require.Nil(t, s.cycle)
+	s.mu.Unlock()
+	require.Equal(t, []string{"commit", "idle"}, trace[len(trace)-2:])
 }
 
 // TestOutOfPromptNativeDialogsAreAnswered drives the four record kinds that
@@ -222,4 +200,75 @@ func TestNativeRequestCancellationTargetsMatchingDialog(t *testing.T) {
 	require.ErrorIs(t, context.Cause(first), errDialogCancelled)
 	require.NoError(t, second.Err())
 	require.Nil(t, s.cycle, "request cancellation must not open native work")
+}
+
+func TestInterimAndFinalAssistantText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		events []hermes.Event
+		want   string
+	}{
+		{
+			name: "unstreamed interim",
+			events: []hermes.Event{
+				{Type: eventMessageInterim, Payload: json.RawMessage(`{"text":"Checking files.","already_streamed":false}`)},
+				{Type: eventMessageComplete, Payload: json.RawMessage(`{"text":"Done.","status":"complete"}`)},
+			},
+			want: "Checking files.Done.",
+		},
+		{
+			name: "terminal footer after commentary",
+			events: []hermes.Event{
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Checking files."}`)},
+				{Type: eventMessageInterim, Payload: json.RawMessage(`{"text":"Checking files.","already_streamed":true}`)},
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Done."}`)},
+				{Type: eventMessageComplete, Payload: json.RawMessage(`{"text":"Done.\n\nSome edits failed.","status":"complete"}`)},
+			},
+			want: "Checking files.Done.\n\nSome edits failed.",
+		},
+		{
+			name: "tool boundary without interim events",
+			events: []hermes.Event{
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Checking files."}`)},
+				{Type: eventToolStart, Payload: json.RawMessage(`{"tool_id":"read-1","name":"read"}`)},
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Done."}`)},
+				{Type: eventMessageComplete, Payload: json.RawMessage(`{"text":"Done.\n\nSome edits failed.","status":"complete"}`)},
+			},
+			want: "Checking files.Done.\n\nSome edits failed.",
+		},
+		{
+			name: "interim completes a partial delta",
+			events: []hermes.Event{
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Checking"}`)},
+				{Type: eventMessageInterim, Payload: json.RawMessage(`{"text":"Checking files.","already_streamed":true}`)},
+				{Type: eventMessageComplete, Payload: json.RawMessage(`{"text":"Done.","status":"complete"}`)},
+			},
+			want: "Checking files.Done.",
+		},
+		{
+			name: "distinct messages have identical text",
+			events: []hermes.Event{
+				{Type: eventMessageDelta, Payload: json.RawMessage(`{"text":"Done."}`)},
+				{Type: eventMessageInterim, Payload: json.RawMessage(`{"text":"Done.","already_streamed":true}`)},
+				{Type: eventMessageComplete, Payload: json.RawMessage(`{"text":"Done.","status":"complete"}`)},
+			},
+			want: "Done.Done.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := NewAgent()
+			rec := newRecorder()
+			a.attach(rec, nil)
+			s := &session{agent: a, id: "text"}
+			c := &cycle{}
+			for _, event := range tc.events {
+				_, err := s.projectEvent(t.Context(), nil, c, event)
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.want, agentText(rec.snapshot()))
+		})
+	}
 }

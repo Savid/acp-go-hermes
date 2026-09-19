@@ -116,6 +116,10 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, s.startFailure(ctx, err)
 	}
 
+	s.mu.Lock()
+	s.options.Effort = s.effort
+	s.mu.Unlock()
+
 	if err := s.commitMirror(ctx, rt); err != nil {
 		return nil, wire.InternalFailure(vendor, "")
 	}
