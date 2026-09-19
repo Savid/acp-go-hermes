@@ -241,8 +241,8 @@ func launchFailure(proc *process.Process, err error) error {
 	select {
 	case <-proc.Done():
 		reason := "hermes exited before the gateway was ready"
-		if line := proc.StderrLastLine(); line != "" {
-			reason += ": " + line
+		if tail := proc.StderrTail(); tail != "" {
+			reason += ": " + tail
 		}
 
 		return errors.New(reason)
