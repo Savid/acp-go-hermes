@@ -56,7 +56,7 @@ func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	response, err := read(map[string]any{"providerId": "anthropic"})
 	require.NoError(t, err)
 	require.True(t, response.Available)
-	require.Equal(t, "5h", response.Limits[0].ID)
+	require.Equal(t, "session", response.Limits[0].ID)
 	require.Equal(t, []string{"gateway.example/v1/usage Bearer gateway-key"}, asked)
 
 	response, err = read(map[string]any{"providerId": "openrouter"})
