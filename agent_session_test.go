@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
@@ -124,6 +125,85 @@ func TestFailedRestoreCloseReleasesSlot(t *testing.T) {
 			require.Equal(t, before, after, "failed teardown must retain the durable generation")
 			_, err = h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 			require.NoError(t, err, "a failed restore-close leaked its active-session slot")
+		})
+	}
+}
+
+// blockedOpeningClient keeps the first publication in progress until released.
+type blockedOpeningClient struct {
+	*recorder
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockedOpeningClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	c.once.Do(func() {
+		close(c.entered)
+		<-c.release
+	})
+
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestRestoreWaitsForPreviousOpening(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{acp.AgentMethodSessionLoad, acp.AgentMethodSessionResume} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			a := NewAgent(testOptions(t)...)
+			t.Cleanup(func() { _ = a.Close() })
+			client := &blockedOpeningClient{recorder: newRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+			release := sync.OnceFunc(func() { close(client.release) })
+			t.Cleanup(release)
+			transport, meta := prepareOpeningResponse(t)
+			a.attach(client, transport)
+			initialize := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+			withLifecycle()(&initialize)
+			_, err := a.Initialize(t.Context(), initialize)
+			require.NoError(t, err)
+			cwd := t.TempDir()
+			request := wire.NewSessionRequest(cwd)
+			request.Meta = meta
+			created, err := a.NewSession(t.Context(), request)
+			require.NoError(t, err)
+			_, err = transport.Writer().Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n"))
+			require.NoError(t, err)
+			select {
+			case <-client.entered:
+			case <-time.After(testTimeout):
+				t.Fatal("initial opening did not reach the client")
+			}
+
+			restored := make(chan error, 1)
+			go func() {
+				if method == acp.AgentMethodSessionLoad {
+					_, restoreErr := a.LoadSession(t.Context(), wire.LoadSessionRequest(created.SessionId, cwd))
+					restored <- restoreErr
+
+					return
+				}
+
+				_, restoreErr := a.ResumeSession(t.Context(), wire.ResumeSessionRequest(created.SessionId, cwd))
+				restored <- restoreErr
+			}()
+
+			select {
+			case restoreErr := <-restored:
+				t.Fatalf("restore completed before the previous opening: %v", restoreErr)
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			release()
+			select {
+			case restoreErr := <-restored:
+				require.NoError(t, restoreErr, "completed opening must release restore admission")
+			case <-time.After(testTimeout):
+				t.Fatal("restore did not continue after the previous opening")
+			}
+			s, err := a.session(t.Context(), created.SessionId)
+			require.NoError(t, err)
+			require.True(t, s.lc.Active())
 		})
 	}
 }

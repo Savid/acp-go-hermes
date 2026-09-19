@@ -292,6 +292,12 @@ func (a *Agent) restore(
 		return nil, nil, err
 	}
 
+	if transport := a.transportRef(); transport != nil {
+		if awaitErr := transport.AwaitSession(ctx, sessionID); awaitErr != nil {
+			return nil, nil, awaitErr
+		}
+	}
+
 	releaseRestore, err := a.restores.Acquire(sessionID)
 	if err != nil {
 		return nil, nil, err
