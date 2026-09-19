@@ -317,6 +317,10 @@ func TestActiveSessionLimit(t *testing.T) {
 	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "backpressure", requestErrorData(t, err)[stopReasonError])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
+
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
 }
 
 func TestClosedAgentRefusesRequests(t *testing.T) {
@@ -326,8 +330,117 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 	require.NoError(t, agent.Close())
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
-	require.Equal(t, -32600, requestErrorCode(t, err))
+	t.Run("Initialize", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Authenticate", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Authenticate(t.Context(), acp.AuthenticateRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Logout", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("NewSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.NewSession(t.Context(), acp.NewSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("LoadSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.LoadSession(t.Context(), acp.LoadSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ResumeSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ResumeSession(t.Context(), acp.ResumeSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ListSessions", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ListSessions(t.Context(), acp.ListSessionsRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Prompt", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Prompt(t.Context(), acp.PromptRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("CloseSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("UnstableDeleteSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionConfigOption", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionMode", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionMode(t.Context(), acp.SetSessionModeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("extension", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.HandleExtensionMethod(t.Context(), "_unknown/read", json.RawMessage(`{}`))
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		t.Parallel()
+
+		err := agent.Cancel(t.Context(), acp.CancelNotification{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
 }
 
 func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {

@@ -41,17 +41,20 @@ type session struct {
 	models                hermes.ModelOptionsResult
 	title                 string
 	updatedAt             string
-	closing               bool
-	closeDone             chan struct{}
-	closeErr              error
-	poison                string
-	turn                  *turn
-	cycle                 *cycle
-	dialogs               map[string]*dialog
-	callbacks             sync.WaitGroup
-	mirrorMu              sync.Mutex
-	lcMu                  sync.Mutex
-	lc                    lifecycle.Publisher
+	// installed records that the agent published the session under its id,
+	// so close owes the store its final generation.
+	installed bool
+	closing   bool
+	closeDone chan struct{}
+	closeErr  error
+	poison    string
+	turn      *turn
+	cycle     *cycle
+	dialogs   map[string]*dialog
+	callbacks sync.WaitGroup
+	mirrorMu  sync.Mutex
+	lcMu      sync.Mutex
+	lc        lifecycle.Publisher
 }
 
 // runtime binds one gateway connection to its native live-session identity.
@@ -247,7 +250,7 @@ func launchFailure(proc *process.Process, err error) error {
 }
 
 func (s *session) startFailure(ctx context.Context, err error) error {
-	s.agent.log.ErrorContext(ctx, "Hermes session start failed", slog.String("reason", err.Error()))
+	s.agent.log.ErrorContext(ctx, "hermes session start failed", slog.String("reason", err.Error()))
 
 	return wire.InternalFailure(vendor, internalClassNativeStart)
 }
@@ -589,7 +592,7 @@ func (s *session) abort(ctx context.Context, rt *runtime) {
 	defer cancel()
 
 	if err := rt.client.Interrupt(abortCtx, rt.liveID); err != nil {
-		s.agent.log.DebugContext(abortCtx, "hermes abort failed", slog.String(nativeSessionIDKey, string(s.id)))
+		s.agent.log.DebugContext(abortCtx, "hermes abort failed", slog.String("session_id", string(s.id)))
 	}
 }
 
@@ -691,7 +694,7 @@ func (s *session) poisonSession(ctx context.Context, cause string) {
 	}
 
 	s.agent.log.ErrorContext(ctx, "hermes session poisoned",
-		slog.String(nativeSessionIDKey, string(s.id)), slog.String("cause", cause))
+		slog.String("session_id", string(s.id)), slog.String("cause", cause))
 }
 
 // acquireGate admits one foreground operation. limit names the backpressure
@@ -720,6 +723,7 @@ func (s *session) close(ctx context.Context) error {
 
 	s.closing = true
 	s.closeDone = make(chan struct{})
+	installed := s.installed
 
 	t, rt, closingCycle := s.turn, s.runtime, s.cycle
 	if t != nil {
@@ -761,8 +765,10 @@ func (s *session) close(ctx context.Context) error {
 	var errs []error
 
 	if rt != nil {
-		if err := s.commitMirror(commitCtx, rt); err != nil {
-			errs = append(errs, err)
+		if installed {
+			if err := s.commitMirror(commitCtx, rt); err != nil {
+				errs = append(errs, err)
+			}
 		}
 
 		s.stopRuntime(commitCtx, rt)

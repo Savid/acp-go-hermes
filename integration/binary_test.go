@@ -93,7 +93,7 @@ func TestNativeContinuation(t *testing.T) {
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 	h.stop()
-	command := exec.CommandContext(h.ctx(), "hermes", "chat", "--cli", "--quiet", "--resume", nativeSessionID(t, session.Meta), "--query", "Remember the release label cobalt-lantern. Reply with the project slug and release label, and nothing else. Do not use tools.")
+	command := exec.CommandContext(h.ctx(), harnessPath(t), "chat", "--cli", "--quiet", "--resume", nativeSessionID(t, session.Meta), "--query", "Remember the release label cobalt-lantern. Reply with the project slug and release label, and nothing else. Do not use tools.")
 	command.Dir = cwd
 	command.Env = append(os.Environ(), "HERMES_HOME="+home)
 	data, err := command.Output()
@@ -129,7 +129,7 @@ func TestNativeCallbacksPathAndCancellation(t *testing.T) {
 		t.Skip("live token gate")
 	}
 	home, cwd := nativeHome(t), t.TempDir()
-	configure := exec.CommandContext(t.Context(), "hermes", "config", "set", "approvals.mode", "manual")
+	configure := exec.CommandContext(t.Context(), harnessPath(t), "config", "set", "approvals.mode", "manual")
 	configure.Env = append(os.Environ(), "HERMES_HOME="+home)
 	require.NoError(t, configure.Run())
 	directories := []string{t.TempDir(), t.TempDir()}

@@ -202,7 +202,12 @@ func (s *session) emitTool(ctx context.Context, state *cycleState, event hermes.
 		content = append(content, acp.ToolContent(acp.TextBlock(tool.Summary)))
 	}
 
-	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(tool.ID), acp.WithUpdateStatus(status), acp.WithUpdateContent(content), acp.WithUpdateRawOutput(tool.Result)))
+	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status), acp.WithUpdateRawOutput(tool.Result)}
+	if len(content) > 0 {
+		opts = append(opts, acp.WithUpdateContent(content))
+	}
+
+	return s.emit(ctx, acp.UpdateToolCall(acp.ToolCallId(tool.ID), opts...))
 }
 
 func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error {
@@ -225,7 +230,7 @@ func (s *session) emitUsage(ctx context.Context, state *cycleState) {
 }
 
 func (s *session) emitRawEvent(ctx context.Context, event hermes.Event) {
-	if s.rawEvents == nil || !s.rawEvents.Enabled() {
+	if !s.rawEvents.Enabled() {
 		return
 	}
 

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +26,24 @@ import (
 
 const testTimeout = 120 * time.Second
 const permissionOptionAllow acp.PermissionOptionId = "once"
+
+// harnessPath is the installed hermes the tier drives. ACP_GO_HERMES_HARNESS_PATH
+// points it at a build outside PATH; an absent binary skips the tier.
+func harnessPath(t *testing.T) string {
+	t.Helper()
+
+	selector := os.Getenv("ACP_GO_HERMES_HARNESS_PATH")
+	if selector == "" {
+		selector = "hermes"
+	}
+
+	resolved, err := exec.LookPath(selector)
+	if err != nil {
+		t.Skipf("hermes not installed: %v", err)
+	}
+
+	return resolved
+}
 
 // recorder is the ACP client the tests observe the agent through.
 type recorder struct {
@@ -155,7 +175,9 @@ func newHarness(t *testing.T, extra ...hermesacp.Option) *harness {
 	rec := newRecorder()
 	served := make(chan error, 1)
 
-	go func() { served <- hermesacp.Serve(ctx, agentReader, agentWriter, extra...) }()
+	opts := append([]hermesacp.Option{hermesacp.WithExecutablePath(harnessPath(t))}, extra...)
+
+	go func() { served <- hermesacp.Serve(ctx, agentReader, agentWriter, opts...) }()
 
 	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
 	conn.SetLogger(slog.New(slog.DiscardHandler))

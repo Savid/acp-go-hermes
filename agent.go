@@ -68,7 +68,7 @@ type Agent struct {
 	lifecycle    lifecycle.Negotiated
 	restores     wire.SessionRequests
 	sessions     map[acp.SessionId]*session
-	deleted      map[acp.SessionId]struct{}
+	deleted      map[acp.SessionId]bool
 	clientCalls  chan struct{}
 	incarnations uint64
 }
@@ -108,7 +108,7 @@ func NewAgent(opts ...Option) *Agent {
 		processEnv:  os.Environ(),
 		store:       store,
 		sessions:    make(map[acp.SessionId]*session),
-		deleted:     make(map[acp.SessionId]struct{}),
+		deleted:     make(map[acp.SessionId]bool),
 		clientCalls: make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
 	}
 	agent.optionErr = agent.validateOptions()
@@ -131,7 +131,7 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		{"defaultModel", validateOptionalModel(options.DefaultModel)},
 		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
 		{metaEnvKey, process.ValidateNames(options.Env)},
-		{"concurrencyLimits", validateConcurrencyLimits(options.ConcurrencyLimits)},
+		{"concurrencyLimits", wire.ValidateConcurrencyLimits(options.ConcurrencyLimits.MaxActiveSessions, options.ConcurrencyLimits.MaxConcurrentClientCalls)},
 		{"imageLimits", options.ImageLimits.core().Validate()},
 	}
 
@@ -169,14 +169,6 @@ func validateConfiguredModels(ids []string) error {
 		}
 
 		seen[id] = struct{}{}
-	}
-
-	return nil
-}
-
-func validateConcurrencyLimits(limits ConcurrencyLimits) error {
-	if limits.MaxActiveSessions < 0 || limits.MaxConcurrentClientCalls < 0 {
-		return errors.New("concurrency limits must not be negative")
 	}
 
 	return nil
@@ -274,6 +266,10 @@ func (a *Agent) ensureOpen() error {
 
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.InitializeResponse{}, openErr
+	}
+
 	_, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodInitialize)
 	defer func() { finish(err) }()
 
@@ -356,6 +352,10 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 // Authenticate exists because the SDK interface requires it. The harness
 // authenticates itself in its own home, outside ACP.
 func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.AuthenticateResponse{}, openErr
+	}
+
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
 		return acp.AuthenticateResponse{}, wire.ParamRefusal(refusal)
 	}
@@ -365,6 +365,10 @@ func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) 
 
 // Logout exists because the SDK interface requires it.
 func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LogoutResponse{}, openErr
+	}
+
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
 		return acp.LogoutResponse{}, wire.ParamRefusal(refusal)
 	}
@@ -375,6 +379,10 @@ func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutR
 // SetSessionMode exists because the SDK interface requires it. Native modes
 // are config options, never ACP session modes.
 func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.SetSessionModeResponse{}, openErr
+	}
+
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
 		return acp.SetSessionModeResponse{}, wire.ParamRefusal(refusal)
 	}
@@ -382,8 +390,13 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-// HandleExtensionMethod refuses unadvertised extensions.
+// HandleExtensionMethod answers every extension method with method-not-found.
+// The only extension surface is the outbound RawEventMethod notification.
 func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+
 	var envelope struct {
 		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP reserves this wire spelling.
 	}
@@ -476,6 +489,6 @@ func (a *Agent) environment(sessionEnv map[string]string, owned map[string]strin
 	}
 }
 
-// internalClassNativeStart is the one documented hermes_internal_failure class: a
-// native hermes process that could not be started or configured for a session.
+// internalClassNativeStart is the hermes_internal_failure class of a native
+// hermes process that could not be started or configured for a session.
 const internalClassNativeStart = "native_start"

@@ -233,7 +233,7 @@ func messageContent(message map[string]any) map[string]any {
 }
 
 func (a *Agent) restoreRefused(ctx context.Context, id acp.SessionId, err error) error {
-	a.log.ErrorContext(ctx, "Hermes session restore failed", slog.String(nativeSessionIDKey, string(id)), slog.String("reason", err.Error()))
+	a.log.ErrorContext(ctx, "hermes session restore failed", slog.String("session_id", string(id)), slog.String("reason", err.Error()))
 
 	return wire.RestoreFailed(vendor)
 }
