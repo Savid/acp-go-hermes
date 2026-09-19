@@ -320,6 +320,8 @@ func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
 // usage and session info, the durable mirror commit, the terminal idle, and
 // only then the response or error.
 func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params acp.PromptRequest) (acp.PromptResponse, error) {
+	s.beginSettlement(&t.cycle)
+
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
@@ -332,6 +334,8 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	s.mu.Unlock()
 
 	var verdict cycleVerdict
+
+	commitFailed := false
 
 	switch {
 	case cancelled:
@@ -351,9 +355,15 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		if err := s.commitMirror(settleCtx, rt); err != nil {
 			s.stopRuntime(settleCtx, rt)
 			s.fenceStream()
+
+			commitFailed = true
 			verdict.failure = s.mirrorFailure(err)
 			verdict.outcome = lifecycle.OutcomeFailed
 		}
+	}
+
+	if s.claimCancellation(&t.cycle) && !commitFailed {
+		verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
 	}
 
 	if err := s.lc.Idle(settleCtx, t.Cycle, verdict.stopReason, verdict.outcome); err != nil && verdict.failure == nil {

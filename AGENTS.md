@@ -62,4 +62,5 @@ changing anything hermes-facing.
   dialog or fail open on a denied or cancelled answer.
 - Do not log prompts, tool input or output, or raw native event bodies by
   default.
-- ACP extension requests are refused.
+- `_hermes/accountUsage` reads the configured gateways at agent scope; other
+  ACP extension requests are refused.

@@ -25,10 +25,10 @@ const gatewayReport = `{"generatedAt":1,"reports":[{"provider":"anthropic","fetc
 // natively.
 func TestAccountUsageReadsThroughConfiguredGateway(t *testing.T) {
 	t.Parallel()
-	a := NewAgent(testOptions(t, WithEnv(map[string]string{fakeHermesEnv: "1", "OMP_GATEWAY_KEY": "gateway-key"}))...)
+	a := NewAgent(testOptions(t, WithEnv(map[string]string{fakeHermesEnv: "1", "GATEWAY_GATEWAY_KEY": "gateway-key"}))...)
 	t.Cleanup(func() { require.NoError(t, a.Close()) })
 	require.NoError(t, os.MkdirAll(a.options.Home, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(a.options.Home, "config.yaml"), []byte("providers:\n  omp:\n    api: https://gateway.example/v1\n    key_env: OMP_GATEWAY_KEY\n    default_model: m\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(a.options.Home, "config.yaml"), []byte("providers:\n  gateway:\n    api: https://gateway.example/v1\n    key_env: GATEWAY_GATEWAY_KEY\n    default_model: m\n"), 0o600))
 	var asked []string
 	a.usageTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
 		asked = append(asked, r.URL.Host+r.URL.Path+" "+r.Header.Get("Authorization"))

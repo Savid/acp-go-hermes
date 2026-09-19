@@ -16,10 +16,6 @@ import (
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-// internalClassAccountUsage is the hermes_internal_failure class of an
-// account-usage read that failed.
-const internalClassAccountUsage = "account_usage"
-
 // accountUsage answers _hermes/accountUsage. Hermes exposes no provider
 // credentials natively, so a provider is read only through the gateways its
 // config routes to. A sessionId, when given, must name a live session but
@@ -48,21 +44,19 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (respo
 		}
 	}
 
-	env, err := a.environment(nil, nil).Build()
-	if err != nil {
-		return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
-	}
+	readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
+	defer cancel()
 
-	lookup := func(key string) (string, bool) { return process.Lookup(env, key) }
+	response, err = gateway.ReadRoutes(readCtx, a.usageTransport, func(context.Context) ([]gateway.Route, error) {
+		env, envErr := a.environment(nil, nil).Build()
+		if envErr != nil {
+			return nil, envErr
+		}
 
-	routes, err := hermes.GatewayRoutes(hermes.AgentDir(a.options.Home, lookup), lookup)
-	if err == nil {
-		readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
-		defer cancel()
+		lookup := func(key string) (string, bool) { return process.Lookup(env, key) }
 
-		response, err = gateway.ReadRoutes(readCtx, a.usageTransport, routes, request.ProviderID, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated))
-	}
-
+		return hermes.GatewayRoutes(hermes.AgentDir(a.options.Home, lookup), lookup)
+	}, request.ProviderID, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated))
 	if err != nil {
 		a.log.ErrorContext(ctx, "hermes account usage read failed", slog.String("reason", err.Error()))
 

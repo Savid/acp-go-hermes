@@ -282,7 +282,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			result = map[string]any{"status": promptStreaming}
 			if text == "QUEUED" {
 				result = map[string]any{"status": promptQueued}
-				emit(id, "message.start", map[string]any{})
+				emit(id, eventMessageStart, map[string]any{})
 				emit(id, "message.delta", map[string]any{fieldText: "earlier"})
 				emit(id, eventMessageComplete, map[string]any{fieldText: "earlier", "status": statusComplete})
 			}
@@ -312,7 +312,7 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt string, emit func(string, string, any)) {
-	emit(live, "message.start", map[string]any{})
+	emit(live, eventMessageStart, map[string]any{})
 	text, status := "Hello world", statusComplete
 	switch prompt {
 	case "SLOW":

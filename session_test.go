@@ -20,6 +20,7 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -688,4 +689,344 @@ func TestRuntimeDrainCompletesBeforeReplacement(t *testing.T) {
 	require.NoError(t, s.lc.Open(t.Context(), "replacement", negotiated, deliver))
 	require.True(t, s.lc.Active())
 	require.Equal(t, []string{"old", "replacement"}, streams)
+}
+
+type cancellingBackgroundClient struct {
+	*recorder
+	agent          *Agent
+	terminalOnly   bool
+	terminalCalled bool
+}
+
+func (c *cancellingBackgroundClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if c.terminalOnly {
+		envelope, _ := notification.Meta[wire.LifecycleKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["state"] != "idle" {
+			return c.recorder.SessionUpdate(ctx, notification)
+		}
+		c.terminalCalled = true
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.agent.Cancel(ctx, wire.CancelRequest(notification.SessionId)) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Second):
+		return context.DeadlineExceeded
+	}
+}
+
+func TestBackgroundPublicationAllowsCancelCallback(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	a.attach(&cancellingBackgroundClient{recorder: rec, agent: a}, nil)
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	a.attach(rec, nil)
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	require.NoError(t, s.cycleFailure(c))
+	require.True(t, s.cycleCancelled(c))
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+}
+
+func TestCancelAgentOriginResolvesDialogsAndSettlesCancelled(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	dialogCtx, cancelDialog := context.WithCancelCause(t.Context())
+	defer cancelDialog(nil)
+	unregister := s.registerDialog("permission", cancelDialog)
+	require.NoError(t, s.lc.ActionPending(t.Context(), c.Cycle, "permission", lifecycle.ActionPermission))
+	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
+	require.ErrorIs(t, context.Cause(dialogCtx), errDialogCancelled)
+	unregister()
+	lateCtx, cancelLate := context.WithCancelCause(t.Context())
+	defer cancelLate(nil)
+	release := s.registerDialog("late", cancelLate)
+	release()
+	require.ErrorIs(t, context.Cause(lateCtx), errDialogCancelled)
+	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
+	prompt := wire.TextPromptRequest(created.SessionId, "HELLO")
+	prompt.Meta = promptMeta(1)
+	_, err = a.Prompt(t.Context(), prompt)
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.mu.Lock()
+	active := s.cycle
+	s.mu.Unlock()
+	require.Nil(t, active)
+	cancelled := false
+	for _, notification := range rec.snapshot() {
+		envelope, _ := notification.Meta[wire.LifecycleKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["type"] == "state_update" && event["state"] == "idle" && event["outcome"] == "cancelled" {
+			cancelled = true
+		}
+	}
+	require.True(t, cancelled)
+}
+
+type backgroundPublicationBarrier struct {
+	*recorder
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *backgroundPublicationBarrier) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	close(c.entered)
+	<-c.release
+
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestBackgroundReservationRefusesConcurrentPrompt(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	barrier := &backgroundPublicationBarrier{recorder: rec, entered: make(chan struct{}), release: make(chan struct{})}
+	a.attach(barrier, nil)
+	release := sync.OnceFunc(func() { close(barrier.release) })
+	defer release()
+	done := make(chan struct{})
+	go func() {
+		s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageStart})
+		close(done)
+	}()
+	select {
+	case <-barrier.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("background publication did not start")
+	}
+	prompt := wire.TextPromptRequest(created.SessionId, "HELLO")
+	prompt.Meta = promptMeta(1)
+	promptDone := make(chan error, 1)
+	go func() { _, promptErr := a.Prompt(t.Context(), prompt); promptDone <- promptErr }()
+	select {
+	case err := <-promptDone:
+		require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	case <-time.After(testTimeout):
+		t.Fatal("prompt waited on background publication")
+	}
+	release()
+	<-done
+	a.attach(rec, nil)
+	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+}
+
+func TestQueuedRequestWaitsWhilePriorNativeWorkDrains(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	queuedCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	pending := &turn{cancel: cancel, disposition: promptQueued, watermark: 40, ready: make(chan struct{}), finished: make(chan struct{}), settled: make(chan struct{})}
+	close(pending.ready)
+	close(pending.finished)
+	s.mu.Lock()
+	s.turn = pending
+	rt := s.runtime
+	s.mu.Unlock()
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	require.False(t, pending.accepted)
+	require.Equal(t, "prior work", agentText(rec.snapshot()))
+	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
+	require.ErrorIs(t, queuedCtx.Err(), context.Canceled)
+	require.True(t, s.cycleCancelled(&pending.cycle))
+	require.True(t, s.cycleCancelled(c))
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	require.False(t, pending.accepted)
+	s.mu.Lock()
+	s.turn = nil
+	s.mu.Unlock()
+}
+
+func TestRuntimeLossSettlesBackgroundBeforeQueuedRequest(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	_, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	pending := &turn{cancel: cancel, disposition: promptQueued, watermark: 40, ready: make(chan struct{}), finished: make(chan struct{}), settled: make(chan struct{})}
+	close(pending.ready)
+	close(pending.finished)
+	s.mu.Lock()
+	s.turn = pending
+	rt := s.runtime
+	s.mu.Unlock()
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	s.dropRuntime(rt)
+	select {
+	case <-rt.done:
+	case <-time.After(testTimeout):
+		t.Fatal("runtime loss did not settle")
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("background cycle remained open after runtime loss")
+	}
+	select {
+	case <-pending.settled:
+	default:
+		t.Fatal("queued request remained open after runtime loss")
+	}
+	require.Equal(t, turnTransportEnded, pending.ended)
+	require.False(t, pending.accepted)
+	failed := false
+	for _, notification := range rec.snapshot() {
+		envelope, _ := notification.Meta[wire.LifecycleKey].(map[string]any)
+		event, _ := envelope["event"].(map[string]any)
+		if event["type"] == "state_update" && event["state"] == "idle" && event["outcome"] == "failed" {
+			failed = true
+		}
+	}
+	require.True(t, failed)
+	s.mu.Lock()
+	s.turn = nil
+	s.mu.Unlock()
+}
+
+func TestTerminalPublicationCannotInterruptNextCycle(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	terminalClient := &cancellingBackgroundClient{recorder: rec, agent: a, terminalOnly: true}
+	a.attach(terminalClient, nil)
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	require.NoError(t, s.cycleFailure(c))
+	require.False(t, s.cycleCancelled(c))
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	require.False(t, s.cycleCancelled(c))
+	require.True(t, terminalClient.terminalCalled)
+	s.callbacks.Wait()
+	a.attach(rec, nil)
+}
+
+func TestTerminalCancelStillCancelsQueuedRequest(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	queuedCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	pending := &turn{cancel: cancel, disposition: promptQueued, watermark: 40, ready: make(chan struct{}), finished: make(chan struct{}), settled: make(chan struct{})}
+	close(pending.ready)
+	close(pending.finished)
+	s.mu.Lock()
+	s.turn = pending
+	rt := s.runtime
+	s.mu.Unlock()
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.mu.Lock()
+	c := s.cycle
+	s.mu.Unlock()
+	require.NotNil(t, c)
+	require.False(t, pending.accepted)
+	require.Equal(t, "prior work", agentText(rec.snapshot()))
+	a.attach(&cancellingBackgroundClient{recorder: rec, agent: a, terminalOnly: true}, nil)
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	require.ErrorIs(t, queuedCtx.Err(), context.Canceled)
+	require.True(t, s.cycleCancelled(&pending.cycle))
+	require.False(t, s.cycleCancelled(c))
+	a.attach(rec, nil)
+	require.False(t, pending.accepted)
+	s.mu.Lock()
+	s.turn = nil
+	s.mu.Unlock()
 }

@@ -56,7 +56,14 @@ modernize-check:
 	go fix -diff ./...
 
 ## audit: run local checks
-audit: fmt-check lint build coverage-check tidy vuln modernize-check
+audit:
+	$(MAKE) fmt-check
+	$(MAKE) lint
+	$(MAKE) build
+	$(MAKE) coverage-check
+	$(MAKE) tidy
+	$(MAKE) vuln
+	$(MAKE) modernize-check
 	go mod verify
 
 ## clean: remove build artifacts

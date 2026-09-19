@@ -15,6 +15,7 @@ import (
 
 const (
 	eventMessageComplete = "message.complete"
+	eventMessageStart    = "message.start"
 	eventMessageDelta    = "message.delta"
 	eventMessageInterim  = "message.interim"
 	statusComplete       = "complete"
@@ -63,7 +64,7 @@ type cycleState struct {
 // outside a prompt is answered only if it opens an agent-origin cycle first.
 func bearsWork(event hermes.Event) bool {
 	switch event.Type {
-	case "message.start", eventMessageDelta, eventMessageComplete, "thinking.delta",
+	case eventMessageStart, eventMessageDelta, eventMessageComplete, "thinking.delta",
 		eventMessageInterim,
 		eventToolStart, eventToolComplete, eventApprovalRequest, eventClarifyRequest,
 		eventSudoRequest, eventSecretRequest, eventTerminalReadRequest, stopReasonError:
@@ -75,6 +76,15 @@ func bearsWork(event hermes.Event) bool {
 
 // projectEvent translates one ordered gateway event into ACP updates.
 func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event hermes.Event) (bool, error) {
+	if s.cycleCancelled(c) {
+		switch event.Type {
+		case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
+			s.handleControl(ctx, rt, c, event)
+		}
+
+		return event.Type == eventMessageComplete || event.Type == stopReasonError, nil
+	}
+
 	state := &c.state
 
 	switch event.Type {

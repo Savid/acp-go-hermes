@@ -75,9 +75,12 @@ type runtime struct {
 
 type cycle struct {
 	lifecycle.Cycle
-	state   cycleState
-	failure error
-	done    chan struct{}
+	cancelled bool
+	settling  bool
+	terminal  bool
+	state     cycleState
+	failure   error
+	done      chan struct{}
 }
 
 type turnEnd int
@@ -95,7 +98,6 @@ type turn struct {
 	// call it, so a peer prompt's refusal cannot end a live turn.
 	cancel      context.CancelFunc
 	accepted    bool
-	cancelled   bool
 	ended       turnEnd
 	settled     chan struct{}
 	settleOnce  sync.Once
@@ -406,6 +408,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 	s.emitRawEvent(ctx, event)
 	s.mu.Lock()
 	t, c, closing := s.turn, s.cycle, s.closing
+	pending := t
 	current := s.runtime == rt
 	s.mu.Unlock()
 
@@ -438,7 +441,14 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 			t.ownsEvents = true
 		}
 
-		if t.disposition == promptQueued && event.Type == "message.start" && event.InboundSequence > t.watermark {
+		if t.disposition == promptQueued && event.Type == eventMessageStart && event.InboundSequence > t.watermark {
+			if c != nil {
+				s.recordFailure(c, wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: "queued prompt started before the active cycle settled"}))
+				s.dropRuntime(rt)
+
+				return
+			}
+
 			t.ownsEvents = true
 		}
 
@@ -456,8 +466,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		s.recordFailure(&t.cycle, err)
 
 		if settled {
-			s.cancelDialogs()
-			s.callbacks.Wait()
+			s.beginSettlement(&t.cycle)
 			t.settle(turnSettled)
 
 			select {
@@ -470,12 +479,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 	}
 
 	if c == nil && bearsWork(event) {
-		c = &cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseActivity}, done: make(chan struct{})}
-		s.recordFailure(c, s.lc.OpenAgentCycle(ctx, &c.Cycle))
-
-		s.mu.Lock()
-		s.cycle = c
-		s.mu.Unlock()
+		c = s.openAgentCycle(ctx, rt, pending)
 	}
 
 	if c == nil {
@@ -489,8 +493,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 		defer cancel()
 
-		s.cancelDialogs()
-		s.callbacks.Wait()
+		s.beginSettlement(c)
 		s.emitUsage(settleCtx, &c.state)
 
 		if err := s.commitMirror(settleCtx, rt); err != nil {
@@ -499,7 +502,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 			s.dropRuntime(rt)
 		}
 
-		verdict := s.judgeCycle(c, false)
+		verdict := s.judgeCycle(c, s.claimCancellation(c))
 		_ = s.lc.Idle(settleCtx, c.Cycle, verdict.stopReason, verdict.outcome)
 		close(c.done)
 		s.mu.Lock()
@@ -508,6 +511,32 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		}
 		s.mu.Unlock()
 	}
+}
+
+// openAgentCycle reserves native work while a queued request, if any, waits
+// for its own start. A newly installed prompt cannot share that reservation.
+func (s *session) openAgentCycle(ctx context.Context, rt *runtime, pending *turn) *cycle {
+	c := &cycle{Cycle: s.lc.NewAgentCycle(), done: make(chan struct{})}
+	s.mu.Lock()
+
+	waiting := pending != nil && s.turn == pending && pending.disposition == promptQueued && !pending.accepted && !pending.ownsEvents
+	if (s.turn != nil && !waiting) || s.cycle != nil || s.closing || s.runtime != rt {
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	s.cycle = c
+	s.mu.Unlock()
+	s.recordFailure(c, s.lc.OpenAgentCycle(ctx, c.Cycle))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.runtime != rt || s.cycle != c || s.closing {
+		return nil
+	}
+
+	return c
 }
 
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
@@ -529,6 +558,16 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	<-rt.controlsDone
 	s.callbacks.Wait()
 
+	if c != nil {
+		verdict := cycleVerdict{outcome: lifecycle.OutcomeFailed}
+		if closing {
+			verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
+		}
+
+		_ = s.lc.Idle(ctx, c.Cycle, verdict.stopReason, verdict.outcome)
+		close(c.done)
+	}
+
 	// A turn still running settles as transport-ended and fences the stream
 	// itself once it has published its terminal idle. A turn that already
 	// reached its terminal result publishes nothing more, so the generation is
@@ -549,16 +588,6 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 
 			return
 		}
-	}
-
-	if c != nil {
-		verdict := cycleVerdict{outcome: lifecycle.OutcomeFailed}
-		if closing {
-			verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
-		}
-
-		_ = s.lc.Idle(ctx, c.Cycle, verdict.stopReason, verdict.outcome)
-		close(c.done)
 	}
 
 	s.openMu.Lock()
@@ -622,32 +651,85 @@ func (s *session) abort(ctx context.Context, rt *runtime) {
 	}
 }
 
-// cancel implements session/cancel: it cancels the in-flight turn, resolves
-// its pending dialogs, and interrupts hermes. It is a silent no-op with no turn.
+// cancel marks the foreground cancelled, ends its dialogs, and interrupts
+// native work. The interrupt is joined by the session's shutdown ladder.
 func (s *session) cancel(ctx context.Context) {
 	s.mu.Lock()
-	t := s.turn
+	t, c := s.turn, s.cycle
 	rt := s.runtime
 
-	if t == nil || t.cancelled {
+	if t != nil {
+		if c == nil {
+			c = &t.cycle
+		} else {
+			t.cancelled = true
+		}
+	}
+
+	if c == nil || c.cancelled || c.terminal {
 		s.mu.Unlock()
+
+		if t != nil && c != &t.cycle {
+			t.cancel()
+		}
 
 		return
 	}
 
-	t.cancelled = true
+	c.cancelled = true
+
+	interrupt := !c.settling && rt != nil && !s.closing && !rt.ending
+	if interrupt {
+		s.callbacks.Add(1)
+	}
 	s.mu.Unlock()
-	t.cancel()
+
+	if t != nil {
+		t.cancel()
+	}
+
 	s.cancelDialogs()
 
-	if rt != nil {
-		s.abort(ctx, rt)
+	if interrupt {
+		go func() {
+			defer s.callbacks.Done()
+
+			s.abort(ctx, rt)
+		}()
 	}
+}
+
+// beginSettlement closes callback admission before joining native interrupts
+// and dialogs, so none can reach a later foreground on this runtime.
+func (s *session) beginSettlement(c *cycle) {
+	s.mu.Lock()
+	c.settling = true
+	s.mu.Unlock()
+	s.cancelDialogs()
+	s.callbacks.Wait()
+}
+
+// claimCancellation fixes the cancellation verdict before terminal delivery.
+func (s *session) claimCancellation(c *cycle) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c.terminal = true
+
+	return c.cancelled
+}
+
+// cycleCancelled reads cancellation under the foreground admission lock.
+func (s *session) cycleCancelled(c *cycle) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return c.cancelled
 }
 
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.runtime == nil || (s.turn != nil && s.turn.cancelled) {
+	if s.closing || s.runtime == nil || ((s.turn != nil && (s.turn.cancelled || s.turn.settling)) || (s.cycle != nil && (s.cycle.cancelled || s.cycle.settling))) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 
