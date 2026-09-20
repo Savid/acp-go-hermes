@@ -253,10 +253,11 @@ func (a *Agent) Close() error {
 		if err := s.close(context.Background()); err != nil {
 			errs = append(errs, err)
 		}
+
+		a.detach(context.Background(), s)
 	}
 
 	a.mu.Lock()
-	clear(a.sessions)
 	a.conn = nil
 	a.mu.Unlock()
 
