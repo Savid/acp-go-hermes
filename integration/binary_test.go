@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,7 +69,13 @@ func TestNativeSmoke(t *testing.T) {
 	session := h.newSession()
 	require.NotEmpty(t, session.SessionId)
 	require.NotEmpty(t, session.ConfigOptions)
-	_, err := h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	raw, err := h.conn.CallExtension(h.ctx(), hermesacp.AccountUsageMethod, map[string]any{"providerId": "openrouter"})
+	require.NoError(t, err)
+	var usage wire.AccountUsageResponse
+	require.NoError(t, json.Unmarshal(raw, &usage))
+	require.NoError(t, usage.Validate())
+	require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated), usage, "an isolated home declares no gateway route for the provider")
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 }
 

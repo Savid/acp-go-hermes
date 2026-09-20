@@ -11,6 +11,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/coder/websocket"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
@@ -62,6 +63,7 @@ type runtime struct {
 	// ending prevents another operation from using this runtime during teardown.
 	ending       bool
 	proc         *process.Process
+	observe      *observer.Observer
 	client       *hermes.Client
 	endpoint     hermes.Endpoint
 	liveID       string
@@ -202,7 +204,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 ready:
 	readCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
-	rt := &runtime{proc: proc, client: client, endpoint: endpoint, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
+	rt := &runtime{proc: proc, observe: s.agent.observe, client: client, endpoint: endpoint, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
 
 	s.mu.Lock()
 	closing := s.closing
@@ -218,7 +220,7 @@ ready:
 		_ = client.Close(websocket.StatusNormalClosure, "closing")
 
 		cancel()
-		s.reap(ctx, proc)
+		s.reap(ctx, proc, s.agent.observe)
 
 		_ = proc.Close()
 
@@ -540,7 +542,7 @@ func (s *session) openAgentCycle(ctx context.Context, rt *runtime, pending *turn
 }
 
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
-	s.reap(ctx, rt.proc)
+	s.reap(ctx, rt.proc, rt.observe)
 
 	s.mu.Lock()
 	if s.runtime != rt {
@@ -616,7 +618,7 @@ func (s *session) dropRuntime(rt *runtime) {
 func (s *session) stopRuntime(ctx context.Context, rt *runtime) {
 	_ = rt.client.Close(websocket.StatusNormalClosure, "closing")
 	rt.cancel()
-	s.reap(ctx, rt.proc)
+	s.reap(ctx, rt.proc, rt.observe)
 
 	joinCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
 	defer cancel()
@@ -631,13 +633,16 @@ func (s *session) stopRuntime(ctx context.Context, rt *runtime) {
 
 // reap ends one hermes process: the group is signalled and the root is waited
 // for within the shutdown bound, killed when it does not stop in time.
-func (s *session) reap(ctx context.Context, proc *process.Process) {
+func (s *session) reap(ctx context.Context, proc *process.Process, observe *observer.Observer) {
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
 	defer cancel()
 
 	if err := proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
 		_ = proc.Kill()
 	}
+
+	_, waitErr := proc.Wait(shutdownCtx)
+	observe.RecordProcessExit(ctx, "exited", waitErr)
 }
 
 // abort interrupts the native run under a bounded context detached from the

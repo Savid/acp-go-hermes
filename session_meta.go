@@ -196,7 +196,7 @@ func parseHermesOptions(values map[string]any) (HermesOptions, *acp.RequestError
 		switch key {
 		case metaModelKey:
 			model, ok := item.(string)
-			if !ok {
+			if !ok || model == "" {
 				return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
