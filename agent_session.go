@@ -304,6 +304,10 @@ func (a *Agent) restore(
 	}
 	defer releaseRestore()
 
+	if refusal := wire.CheckSessionID(sessionID); refusal != nil {
+		return nil, nil, refusal
+	}
+
 	a.mu.Lock()
 	deleted := a.deleted[sessionID]
 	active := a.sessions[sessionID]
@@ -683,6 +687,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	deleteCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
 	defer cancel()
 
+	if refusal := wire.CheckSessionID(params.SessionId); refusal != nil {
+		return acp.UnstableDeleteSessionResponse{}, refusal
+	}
+
 	if err := a.store.Delete(deleteCtx, acpcore.SessionKey{SessionID: string(params.SessionId)}); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, wire.InternalFailure(vendor, "")
 	}
@@ -748,6 +756,10 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 // session resolves an addressed id to its live session. A deleted id is
 // indistinguishable from one that never existed.
 func (a *Agent) session(ctx context.Context, sessionID acp.SessionId) (*session, error) {
+	if refusal := wire.CheckSessionID(sessionID); refusal != nil {
+		return nil, refusal
+	}
+
 	a.mu.Lock()
 
 	if a.closed {

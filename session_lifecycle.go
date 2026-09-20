@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -95,7 +94,7 @@ func (s *session) cycleFailure(c *cycle) error {
 
 func (s *session) deliverLifecycle(ctx context.Context, envelope map[string]any) error {
 	if conn := s.agent.connection(); conn != nil {
-		return conn.SessionUpdate(ctx, acp.SessionNotification{Meta: map[string]any{wire.LifecycleKey: envelope}, SessionId: s.id, Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}}})
+		return conn.SessionUpdate(ctx, wire.LifecycleCarrier(s.id, envelope))
 	}
 
 	return nil
