@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/coder/acp-go-sdk v0.13.5
-	github.com/savid/acp-go-core v0.0.0-20260920142726-8cd30cc9cd41
+	github.com/savid/acp-go-core v0.0.0-20260920152008-38b7f538471f
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
