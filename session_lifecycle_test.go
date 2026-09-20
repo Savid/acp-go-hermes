@@ -2,11 +2,12 @@ package hermesacp
 
 import (
 	"encoding/json"
+	"testing"
+
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 // negotiatedAnswer decodes the lifecycle answer the initialize response carries.
