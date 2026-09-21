@@ -1,406 +1,387 @@
 package hermesacp
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/sessionlog"
+	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-const (
-	SessionStoreMainSubpath = ""
-	SessionStoreFormat      = "hermes-state-db-v1"
-)
-
-type SessionStoreEntry = json.RawMessage
-
-type SessionKey struct {
-	SessionID string
-	Subpath   string
+// sessionRecord carries the accepted session configuration beside its native export.
+type sessionRecord struct {
+	SessionID             string            `json:"sessionId"`
+	NativeSessionID       string            `json:"nativeSessionId"`
+	Cwd                   string            `json:"cwd"`
+	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
+	Env                   map[string]string `json:"env,omitempty"`
+	ExtraPathDirs         []string          `json:"extraPathDirs,omitempty"`
+	Model                 string            `json:"model,omitempty"`
+	Effort                string            `json:"effort,omitempty"`
+	UpdatedAtUnixMilli    int64             `json:"updatedAtUnixMilli"`
 }
 
-type SessionSummary struct {
-	SessionID          string
-	UpdatedAtUnixMilli int64
-	Cwd                string
-	Title              string
-	Meta               map[string]any
+func (s *session) record() sessionRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, UpdatedAtUnixMilli: time.Now().UnixMilli()}
 }
 
-type SessionStoreReplacement struct {
-	Key     SessionKey
-	Entries []SessionStoreEntry
-}
-
-type SessionStore interface {
-	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
-	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
-	Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
-	Delete(ctx context.Context, key SessionKey) error
-	ListSessions(ctx context.Context) ([]SessionSummary, error)
-	ListSubkeys(ctx context.Context, key SessionKey) ([]string, error)
-}
-
-type InMemorySessionStore struct {
-	mu         sync.Mutex
-	entries    map[SessionKey][]SessionStoreEntry
-	updatedAt  map[SessionKey]int64
-	tombstones map[SessionKey]int64
-}
-
-var _ SessionStore = (*InMemorySessionStore)(nil)
-
-func NewInMemorySessionStore() *InMemorySessionStore {
-	return &InMemorySessionStore{
-		entries:    make(map[SessionKey][]SessionStoreEntry),
-		updatedAt:  make(map[SessionKey]int64),
-		tombstones: make(map[SessionKey]int64),
+func (r sessionRecord) validate(id string) error {
+	if r.NativeSessionID == "" || r.SessionID != id || !filepath.IsAbs(r.Cwd) || r.UpdatedAtUnixMilli <= 0 {
+		return errors.New("invalid session record")
 	}
-}
 
-func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
-	if err := ctx.Err(); err != nil {
+	for _, dir := range r.AdditionalDirectories {
+		if !filepath.IsAbs(dir) {
+			return errors.New("invalid additional directory")
+		}
+	}
+
+	_, err := parseSessionMeta(inheritCarrier(sessionMeta{}, r).Meta())
+	if err != nil {
 		return err
-	}
-
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	if len(entries) == 0 {
-		return nil
-	}
-
-	if key.SessionID == "" {
-		return fmt.Errorf("session id is required")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.ensureLocked()
-
-	if s.isTombstonedLocked(key) {
-		return nil
-	}
-
-	for _, entry := range entries {
-		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))
-	}
-
-	s.updatedAt[key] = time.Now().UnixMilli()
-
-	return nil
-}
-
-func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.isTombstonedLocked(key) {
-		return nil, nil
-	}
-
-	return cloneStoreEntries(s.entries[key]), nil
-}
-
-func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.ensureLocked()
-
-	if main.SessionID == "" {
-		return fmt.Errorf("session id is required")
-	}
-
-	if main.Subpath != SessionStoreMainSubpath {
-		return fmt.Errorf("main subpath must be %q", SessionStoreMainSubpath)
-	}
-
-	// Every replacement is checked before anything is written, so a refused
-	// generation leaves the store exactly as it found it: the caller sees one
-	// error and no partial write to reason about.
-	mainCount := 0
-	listed := make(map[SessionKey]struct{}, len(replacements))
-
-	for _, replacement := range replacements {
-		// One Replace is one session's. A key naming another session would put
-		// a second session's content inside this session's atomic generation and
-		// under this session's tombstone sweep, so it is refused rather than
-		// written to the session it names.
-		if replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement key %s names another session: this Replace states %s",
-				storeKeyName(replacement.Key), storeKeyName(main))
-		}
-
-		// One Replace states each key's whole content exactly once. A key listed
-		// twice states two contents for it, and nothing in the call says which one
-		// the caller meant, so the write is refused rather than settled by
-		// position: silently keeping the last one would commit a generation the
-		// caller never asked for.
-		if _, duplicate := listed[replacement.Key]; duplicate {
-			return fmt.Errorf("replacement key %s is listed more than once", storeKeyName(replacement.Key))
-		}
-
-		listed[replacement.Key] = struct{}{}
-
-		if replacement.Key.Subpath == SessionStoreMainSubpath {
-			mainCount++
-		}
-	}
-
-	if mainCount != 1 {
-		return fmt.Errorf("replacements must include the main key exactly once")
-	}
-
-	// A tombstone is final, and the store is where that finality lives: an
-	// adapter-level deletion marker is one process's memory, while the deleted
-	// state is the answer every reader of this store is owed. A generation
-	// addressed to a session `Delete` removed writes nothing, clears nothing, and
-	// succeeds — the same terms `Append` already answers on.
-	if s.isTombstonedLocked(main) {
-		return nil
-	}
-
-	now := time.Now().UnixMilli()
-
-	for candidate := range s.entries {
-		if candidate.SessionID == main.SessionID {
-			delete(s.entries, candidate)
-			delete(s.updatedAt, candidate)
-			s.tombstones[candidate] = now
-		}
-	}
-
-	for _, replacement := range replacements {
-		// A listed key survives even when its entries are empty: exactly the
-		// listed keys stay live (present in Load/ListSessions/ListSubkeys).
-		s.entries[replacement.Key] = cloneStoreEntries(replacement.Entries)
-		s.updatedAt[replacement.Key] = now
-		delete(s.tombstones, replacement.Key)
 	}
 
 	return nil
 }
 
-// storeKeyName spells one key for a refusal. A store error names the offending
-// key in full — both members — because a caller building a generation for one
-// session needs to see which replacement to fix, and a subpath alone does not
-// identify a key that was refused for naming the wrong session.
-func storeKeyName(key SessionKey) string {
-	return fmt.Sprintf("{sessionId:%q, subpath:%q}", key.SessionID, key.Subpath)
-}
-
-func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	// Deleting a key without a session id is a pure no-op: it never plants a
-	// tombstone that would silently swallow later writes.
-	if key.SessionID == "" {
+// commitMirror replaces only a complete native snapshot and its matching
+// carrier. The runtime the caller dispatched on reads the snapshot, so a
+// commit that cannot be attempted fails instead of reporting success.
+func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
+	if s.ephemeral {
 		return nil
 	}
 
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	rows, err := s.snapshotRows(ctx, rt)
+	if err != nil {
+		return err
+	}
+
+	ctx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
+	err = sessionlog.Commit(ctx, s.agent.store, string(s.id), rows, s.record())
+	finish(err)
+
+	if err == nil {
+		s.mu.Lock()
+		s.persisted = true
+		s.mu.Unlock()
+	}
+
+	return err
+}
+
+func (s *session) snapshotRows(ctx context.Context, rt *runtime) ([][]byte, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	id := s.nativeID
+	s.mu.Unlock()
 
-	s.ensureLocked()
+	if rt == nil || id == "" {
+		return nil, errors.New("native session binding missing")
+	}
 
-	now := time.Now().UnixMilli()
-	matched := false
+	var active hermes.ActiveListResult
+	if err := rt.client.Call(ctx, "session.active_list", map[string]any{}, &active); err != nil {
+		return nil, err
+	}
 
-	for candidate := range s.entries {
-		if candidate.SessionID != key.SessionID {
+	found := false
+
+	for _, native := range active.Sessions {
+		if native.SessionID != rt.liveID {
 			continue
 		}
 
-		if key.Subpath != SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
-			continue
+		found = true
+
+		if native.SessionKey != id {
+			s.poisonSession(ctx, "native_session_identity_drift")
+
+			return nil, errors.New("native session identity changed")
+		}
+	}
+
+	if !found {
+		return nil, errors.New("native session binding missing")
+	}
+
+	snapshot, err := rt.endpoint.Export(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(snapshot) == 0 {
+		return nil, errors.New("native conversation missing")
+	}
+
+	return [][]byte{snapshot}, nil
+}
+
+type storedSession struct {
+	rows   [][]byte
+	record sessionRecord
+	found  bool
+}
+
+func (a *Agent) loadStored(ctx context.Context, id acp.SessionId) (storedSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
+	defer cancel()
+
+	ctx, finish := a.observe.StartSessionStore(ctx, "load")
+
+	var record sessionRecord
+
+	rows, found, err := sessionlog.Load(ctx, a.store, string(id), &record)
+	if err == nil && found {
+		err = record.validate(string(id))
+	}
+
+	// One native conversation export is the whole main record. A generation
+	// with any other row count is not a hermes conversation.
+	if err == nil && found && len(rows) != 1 {
+		err = errors.New("invalid native snapshot count")
+	}
+
+	if err == nil && found {
+		_, err = decodeSnapshot(rows[0], record.NativeSessionID)
+	}
+
+	finish(err)
+
+	if err != nil {
+		return storedSession{}, a.restoreRefused(ctx, id, err)
+	}
+
+	return storedSession{rows: rows, record: record, found: found}, nil
+}
+
+type nativeSnapshot struct {
+	ID       string           `json:"id"`
+	Messages []map[string]any `json:"messages"`
+}
+
+func decodeSnapshot(data []byte, id string) (nativeSnapshot, error) {
+	var snapshot nativeSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return snapshot, err
+	}
+
+	if snapshot.ID != id || snapshot.Messages == nil {
+		return snapshot, errors.New("invalid native snapshot identity or messages")
+	}
+
+	return snapshot, nil
+}
+
+// hydrate imports a missing native conversation. An existing conversation wins
+// only when its history contains every stored message in order.
+func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession) ([][]byte, error) {
+	if len(stored.rows) != 1 {
+		return nil, s.agent.restoreRefused(ctx, s.id, errors.New("invalid native snapshot count"))
+	}
+
+	native, err := rt.endpoint.Export(ctx, s.nativeID)
+	if err != nil {
+		return nil, s.agent.restoreRefused(ctx, s.id, err)
+	}
+
+	if len(native) == 0 {
+		if importErr := rt.endpoint.Import(ctx, stored.rows[0]); importErr != nil {
+			return nil, s.agent.restoreRefused(ctx, s.id, importErr)
 		}
 
-		delete(s.entries, candidate)
-		delete(s.updatedAt, candidate)
-		s.tombstones[candidate] = now
-		matched = true
+		return stored.rows, nil
 	}
 
-	if !matched {
-		s.tombstones[key] = now
+	want, err := decodeSnapshot(stored.rows[0], s.nativeID)
+	if err != nil {
+		return nil, s.agent.restoreRefused(ctx, s.id, err)
 	}
 
-	if key.Subpath == SessionStoreMainSubpath {
-		s.tombstones[mainSessionKey(key.SessionID)] = now
+	have, err := decodeSnapshot(native, s.nativeID)
+	if err != nil {
+		return nil, s.agent.restoreRefused(ctx, s.id, err)
+	}
+
+	if len(have.Messages) < len(want.Messages) {
+		return nil, s.agent.restoreRefused(ctx, s.id, errors.New("native conversation is shorter than its mirror"))
+	}
+
+	for index, message := range want.Messages {
+		if !reflect.DeepEqual(messageContent(message), messageContent(have.Messages[index])) {
+			return nil, s.agent.restoreRefused(ctx, s.id, fmt.Errorf("native message %d conflicts with the mirror", index))
+		}
+	}
+
+	return [][]byte{native}, nil
+}
+
+// Native import assigns new row ids. They do not identify message content.
+func messageContent(message map[string]any) map[string]any {
+	cloned := wire.CloneMap(message)
+	delete(cloned, fieldID)
+	delete(cloned, nativeSessionIDKey)
+
+	return cloned
+}
+
+func (a *Agent) restoreRefused(ctx context.Context, id acp.SessionId, err error) error {
+	a.log.ErrorContext(ctx, "hermes session restore failed", slog.String("session_id", string(id)), slog.String("reason", err.Error()))
+
+	return wire.RestoreFailed(vendor)
+}
+
+func storedTitle(id string, rows [][]byte) string {
+	if len(rows) != 1 {
+		return id
+	}
+
+	snapshot, err := decodeSnapshot(rows[0], id)
+	if err != nil {
+		return id
+	}
+
+	for _, message := range snapshot.Messages {
+		if message["role"] == roleUser {
+			if text, ok := message["content"].(string); ok && wire.NormalizeTitle(text) != "" {
+				return wire.NormalizeTitle(text)
+			}
+		}
+	}
+
+	return id
+}
+
+func (s *session) replay(ctx context.Context, rows [][]byte) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	snapshot, err := decodeSnapshot(rows[0], s.nativeID)
+	if err != nil {
+		return err
+	}
+
+	state := &cycleState{}
+
+	for _, message := range snapshot.Messages {
+		role, _ := message["role"].(string)
+		for _, text := range nativeText(message["content"]) {
+			switch role {
+			case roleUser:
+				err = s.emit(ctx, acp.UpdateUserMessageText(text))
+			case roleAssistant:
+				err = s.emit(ctx, acp.UpdateAgentMessageText(text))
+			}
+
+			if err != nil {
+				return err
+			}
+		}
+
+		if role == roleAssistant {
+			if thought, ok := message["reasoning"].(string); ok && thought != "" {
+				if err := s.emit(ctx, acp.UpdateAgentThoughtText(thought)); err != nil {
+					return err
+				}
+			}
+
+			calls, _ := message["tool_calls"].([]any)
+			for _, raw := range calls {
+				call, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+
+				function, _ := call["function"].(map[string]any)
+
+				args := function["arguments"]
+				if text, ok := args.(string); ok {
+					var decoded any
+					if json.Unmarshal([]byte(text), &decoded) == nil {
+						args = decoded
+					}
+				}
+
+				payload, marshalErr := json.Marshal(map[string]any{"tool_id": call[fieldID], fieldName: function[fieldName], "args": args})
+				if marshalErr != nil {
+					return marshalErr
+				}
+
+				if err := s.emitTool(ctx, state, hermes.Event{Type: eventToolStart, Payload: payload}); err != nil {
+					return err
+				}
+			}
+		}
+
+		if role == "tool" {
+			payload, marshalErr := json.Marshal(map[string]any{"tool_id": message["tool_call_id"], fieldName: message["tool_name"], fieldResult: message["content"], "summary": strings.Join(nativeText(message["content"]), "\n")})
+			if marshalErr != nil {
+				return marshalErr
+			}
+
+			if err := s.emitTool(ctx, state, hermes.Event{Type: eventToolComplete, Payload: payload}); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
 }
 
-func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSummary, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	summaries := make([]SessionSummary, 0)
-
-	for key, entries := range s.entries {
-		if key.SessionID == "" || key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
-			continue
+// nativeText projects text parts without turning image payloads into visible text.
+func nativeText(content any) []string {
+	if text, ok := content.(string); ok {
+		if text == "" {
+			return nil
 		}
 
-		summary := SessionSummary{
-			SessionID:          key.SessionID,
-			UpdatedAtUnixMilli: s.updatedAt[key],
+		return []string{text}
+	}
+
+	parts, _ := content.([]any)
+
+	var text []string
+
+	for _, part := range parts {
+		if object, ok := part.(map[string]any); ok && object[fieldType] == fieldText {
+			if value, ok := object[fieldText].(string); ok && value != "" {
+				text = append(text, value)
+			}
 		}
-		if len(entries) > 0 {
-			summary = summaryFromStoreEntry(summary, entries[len(entries)-1])
-		}
-
-		summaries = append(summaries, summary)
 	}
 
-	slices.SortFunc(summaries, func(left, right SessionSummary) int {
-		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
-			return byTime
-		}
-
-		return strings.Compare(left.SessionID, right.SessionID)
-	})
-
-	return summaries, nil
+	return text
 }
 
-func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// persistDraft gives an empty native conversation a durable row before NewSession returns.
+func (s *session) persistDraft(ctx context.Context, rt *runtime) error {
+	snapshot, err := rt.endpoint.Export(ctx, s.nativeID)
+	if err != nil || len(snapshot) != 0 {
+		return err
 	}
 
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
+	draft, err := json.Marshal(map[string]any{fieldID: s.nativeID, fieldSource: nativeSource, fieldCwd: s.cwd, "started_at": time.Now().Unix(), "messages": []any{}})
+	if err != nil {
+		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	subpaths := make([]string, 0)
-
-	for candidate := range s.entries {
-		if candidate.SessionID != key.SessionID || candidate.Subpath == SessionStoreMainSubpath || s.isTombstonedLocked(candidate) {
-			continue
-		}
-
-		subpaths = append(subpaths, candidate.Subpath)
-	}
-
-	slices.Sort(subpaths)
-
-	return subpaths, nil
-}
-
-func (s *InMemorySessionStore) ensureLocked() {
-	if s.entries == nil {
-		s.entries = make(map[SessionKey][]SessionStoreEntry)
-	}
-
-	if s.updatedAt == nil {
-		s.updatedAt = make(map[SessionKey]int64)
-	}
-
-	if s.tombstones == nil {
-		s.tombstones = make(map[SessionKey]int64)
-	}
-}
-
-func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
-	if s.tombstones == nil {
-		return false
-	}
-
-	if _, ok := s.tombstones[key]; ok {
-		return true
-	}
-
-	if key.Subpath != SessionStoreMainSubpath {
-		_, ok := s.tombstones[mainSessionKey(key.SessionID)]
-
-		return ok
-	}
-
-	return false
-}
-
-func cloneStoreEntry(entry SessionStoreEntry) SessionStoreEntry {
-	return append(SessionStoreEntry(nil), entry...)
-}
-
-func cloneStoreEntries(entries []SessionStoreEntry) []SessionStoreEntry {
-	if len(entries) == 0 {
-		return nil
-	}
-
-	clone := make([]SessionStoreEntry, 0, len(entries))
-	for _, entry := range entries {
-		clone = append(clone, cloneStoreEntry(entry))
-	}
-
-	return clone
-}
-
-func mainSessionKey(sessionID string) SessionKey {
-	return SessionKey{SessionID: sessionID, Subpath: SessionStoreMainSubpath}
-}
-
-func summaryFromStoreEntry(summary SessionSummary, entry SessionStoreEntry) SessionSummary {
-	var snapshot stateSnapshot
-	if err := json.Unmarshal(entry, &snapshot); err != nil {
-		return summary
-	}
-
-	if snapshot.CapturedAtUnixMilli > 0 {
-		summary.UpdatedAtUnixMilli = snapshot.CapturedAtUnixMilli
-	}
-
-	summary.Cwd = snapshot.Session.Cwd
-	summary.Title = snapshot.Session.Title
-	summary.Meta = map[string]any{
-		hermesMetaKey: map[string]any{
-			hermesNativeIDMetaKey: snapshot.Session.NativeSessionID,
-			"stored":              true,
-			keySource:             "hermes-state",
-		},
-	}
-
-	return summary
+	return rt.endpoint.Import(ctx, draft)
 }

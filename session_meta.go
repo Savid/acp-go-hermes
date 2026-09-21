@@ -1,326 +1,245 @@
 package hermesacp
 
 import (
-	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const (
-	hermesEnvOptionPath           = "_meta.hermes.options." + metaEnvKey
-	hermesExtraPathDirsOptionPath = "_meta.hermes.options." + metaExtraPathDirsKey
-	hermesModelOptionPath         = "_meta.hermes.options." + metaModelKey
-	hermesEffortOptionPath        = "_meta.hermes.options." + metaEffortKey
+	metaOptionsKey       = "options"
+	metaRawEventKey      = "rawEvent"
+	metaModelKey         = "model"
+	metaEnvKey           = "env"
+	metaExtraPathDirsKey = "extraPathDirs"
+	metaEffortKey        = "effort"
+	metaEnabledKey       = "enabled"
 )
 
-type sessionMeta struct {
-	Model            string
-	Effort           string
-	Env              map[string]string
-	EnvSet           bool
-	ExtraPathDirs    []string
-	ExtraPathDirsSet bool
-	OutputSchema     any
-	RawMessages      rawMessageConfig
+// HermesOptions is the per-session options struct carried at _meta.hermes.options.
+type HermesOptions struct {
+	// Model selects the hermes model for this session as "provider/id".
+	Model string `json:"model,omitempty"`
+	// Env overlays the session's hermes process environment.
+	Env map[string]string `json:"env,omitempty"`
+	// ExtraPathDirs are absolute directories prepended, in order, to the PATH
+	// of this session's hermes process.
+	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
+	// Effort is a reasoning-level value passed unchanged to hermes.
+	Effort string `json:"effort,omitempty"`
 }
 
-func (a *Agent) sessionMetaFromLifecycle(meta map[string]any) (sessionMeta, error) {
-	if err := validateLifecycleMeta(meta); err != nil {
-		return sessionMeta{}, err
+// HermesOption configures HermesOptions values.
+type HermesOption func(*HermesOptions)
+
+// NewHermesOptions constructs HermesOptions from functional options.
+func NewHermesOptions(opts ...HermesOption) HermesOptions {
+	options := HermesOptions{}
+	for _, opt := range opts {
+		opt(&options)
 	}
 
-	options, err := hermesOptionsFromMeta(meta)
+	return options.clone()
+}
+
+// WithHermesModel configures the session model as "provider/id".
+func WithHermesModel(model string) HermesOption {
+	return func(options *HermesOptions) { options.Model = model }
+}
+
+// WithHermesEnv configures the session environment overlay.
+func WithHermesEnv(env map[string]string) HermesOption {
+	cloned := maps.Clone(env)
+
+	return func(options *HermesOptions) { options.Env = maps.Clone(cloned) }
+}
+
+// WithHermesExtraPathDirs configures the directories prepended to the session PATH.
+func WithHermesExtraPathDirs(dirs ...string) HermesOption {
+	cloned := slices.Clone(dirs)
+
+	return func(options *HermesOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
+}
+
+// WithHermesEffort configures the reasoning level passed to hermes.
+func WithHermesEffort(level string) HermesOption {
+	return func(options *HermesOptions) { options.Effort = level }
+}
+
+// Meta returns exactly {"hermes": {"options": {...}}} with the selected fields.
+func (options HermesOptions) Meta() map[string]any {
+	values := map[string]any{}
+
+	if options.Model != "" {
+		values[metaModelKey] = options.Model
+	}
+
+	if options.Env != nil {
+		values[metaEnvKey] = maps.Clone(options.Env)
+	}
+
+	if options.ExtraPathDirs != nil {
+		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
+	}
+
+	if options.Effort != "" {
+		values[metaEffortKey] = options.Effort
+	}
+
+	return map[string]any{vendor: map[string]any{metaOptionsKey: values}}
+}
+
+func (options HermesOptions) clone() HermesOptions {
+	cloned := options
+	cloned.Env = maps.Clone(options.Env)
+	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
+
+	return cloned
+}
+
+// ValidateHermesSessionMeta runs the owned-namespace parsing of a session
+// lifecycle request's _meta without an Agent and returns the same refusal.
+func ValidateHermesSessionMeta(meta map[string]any) error {
+	_, err := parseSessionMeta(meta)
 	if err != nil {
-		return sessionMeta{}, err
-	}
-
-	return sessionMeta{
-		Model:            options.Model,
-		Effort:           options.Effort,
-		Env:              cloneStringMap(options.Env),
-		EnvSet:           options.EnvSet,
-		ExtraPathDirs:    slices.Clone(options.ExtraPathDirs),
-		ExtraPathDirsSet: options.ExtraPathDirsSet,
-		RawMessages:      rawMessageConfigFromMeta(meta),
-	}, nil
-}
-
-type hermesMetaOptions struct {
-	Model            string
-	Effort           string
-	Env              map[string]string
-	EnvSet           bool
-	ExtraPathDirs    []string
-	ExtraPathDirsSet bool
-}
-
-func hermesOptionsFromMeta(meta map[string]any) (hermesMetaOptions, error) {
-	hermesMeta, _ := meta[hermesMetaKey].(map[string]any)
-
-	optionsMap, _ := hermesMeta[metaOptionsKey].(map[string]any)
-	if optionsMap == nil {
-		return hermesMetaOptions{}, nil
-	}
-
-	options := hermesMetaOptions{}
-	if model, _ := optionsMap[metaModelKey].(string); model != "" {
-		options.Model = model
-	}
-
-	if effort, _ := optionsMap[metaEffortKey].(string); effort != "" {
-		options.Effort = effort
-	}
-
-	if rawEnv, ok := optionsMap[metaEnvKey]; ok {
-		env, err := stringMapFromMeta(rawEnv)
-		if err != nil {
-			return hermesMetaOptions{}, err
-		}
-
-		options.Env = env
-		options.EnvSet = true
-	}
-
-	if rawDirs, ok := optionsMap[metaExtraPathDirsKey]; ok {
-		dirs, err := extraPathDirsFromMeta(rawDirs)
-		if err != nil {
-			return hermesMetaOptions{}, err
-		}
-
-		options.ExtraPathDirs = dirs
-		options.ExtraPathDirsSet = true
-	}
-
-	return options, nil
-}
-
-func validateLifecycleMeta(meta map[string]any) error {
-	if len(meta) == 0 {
-		return nil
-	}
-
-	hermesMeta, ok := meta[hermesMetaKey].(map[string]any)
-	if !ok {
-		if _, exists := meta[hermesMetaKey]; exists {
-			return unsupportedField("_meta.hermes")
-		}
-
-		return nil
-	}
-
-	for key, value := range hermesMeta {
-		switch key {
-		case metaOptionsKey:
-			optionsMap, ok := value.(map[string]any)
-			if !ok {
-				return unsupportedField("_meta.hermes.options")
-			}
-
-			for optionKey, optionValue := range optionsMap {
-				switch optionKey {
-				case metaModelKey:
-					if _, ok := optionValue.(string); !ok {
-						return unsupportedField(hermesModelOptionPath)
-					}
-				case metaEffortKey:
-					effort, ok := optionValue.(string)
-					if !ok || (effort != "" && !hermesEffortLevel(effort)) {
-						return unsupportedField(hermesEffortOptionPath)
-					}
-				case metaEnvKey, metaExtraPathDirsKey:
-				case metaOutputSchemaKey:
-					return unsupportedField("_meta.hermes.options.outputSchema")
-				default:
-					return unsupportedField("_meta.hermes.options." + optionKey)
-				}
-			}
-		case rawEventKey:
-			rawEvent, ok := value.(map[string]any)
-			if !ok {
-				return unsupportedField("_meta.hermes.rawEvent")
-			}
-
-			for rawKey, rawValue := range rawEvent {
-				switch rawKey {
-				case rawEventEnabledKey:
-					if _, ok := rawValue.(bool); !ok {
-						return unsupportedField("_meta.hermes.rawEvent.enabled")
-					}
-				default:
-					return unsupportedField("_meta.hermes.rawEvent." + rawKey)
-				}
-			}
-		default:
-			return unsupportedField("_meta.hermes." + key)
-		}
+		return err
 	}
 
 	return nil
 }
 
-func unsupportedField(path string) error {
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: path,
-	})
+// sessionMeta is what one session lifecycle request's _meta.hermes carried.
+type sessionMeta struct {
+	options   HermesOptions
+	rawEvents bool
+	// present records which carrier fields the request named, so a load or
+	// resume inherits the stored value only for fields it left out.
+	presentEnv           bool
+	presentExtraPathDirs bool
 }
 
-func stringMapFromMeta(value any) (map[string]string, error) {
-	var env map[string]string
+// parseSessionMeta validates the owned _meta.hermes namespace of one session
+// lifecycle request. Unknown own-namespace keys fail closed; foreign
+// namespaces are ignored; the lifecycle literal is refused by name.
+func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
+	if refusal := lifecycle.RejectKey(meta); refusal != nil {
+		return sessionMeta{}, wire.ParamRefusal(refusal)
+	}
 
-	switch typed := value.(type) {
-	case map[string]string:
-		env = cloneStringMap(typed)
-	case map[string]any:
-		env = make(map[string]string, len(typed))
-		for key, raw := range typed {
-			str, ok := raw.(string)
-			if !ok {
-				return nil, unsupportedField(hermesEnvOptionPath + "." + key)
+	raw, exists := meta[vendor]
+	if !exists {
+		return sessionMeta{}, nil
+	}
+
+	vendorMeta, ok := raw.(map[string]any)
+	if !ok {
+		return sessionMeta{}, wire.Unsupported("_meta." + vendor)
+	}
+
+	parsed := sessionMeta{}
+
+	for key := range vendorMeta {
+		switch key {
+		case metaOptionsKey, metaRawEventKey:
+		default:
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + key)
+		}
+	}
+
+	if rawEvent, ok := vendorMeta[metaRawEventKey]; ok {
+		values, ok := rawEvent.(map[string]any)
+		if !ok {
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey)
+		}
+
+		for key, item := range values {
+			enabled, ok := item.(bool)
+			if key != metaEnabledKey || !ok {
+				return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey + "." + key)
 			}
 
-			env[key] = str
+			parsed.rawEvents = enabled
 		}
-	default:
-		return nil, unsupportedField(hermesEnvOptionPath)
 	}
 
-	if err := validateSessionEnv(env, hermesEnvOptionPath); err != nil {
-		return nil, err
+	rawOptions, hasOptions := vendorMeta[metaOptionsKey]
+	if !hasOptions {
+		return parsed, nil
 	}
 
-	return env, nil
+	values, isObject := rawOptions.(map[string]any)
+	if !isObject {
+		return sessionMeta{}, wire.Unsupported(wire.MetaOptionPath(vendor, ""))
+	}
+
+	options, err := parseHermesOptions(values)
+	if err != nil {
+		return sessionMeta{}, err
+	}
+
+	parsed.options = options
+	_, parsed.presentEnv = values[metaEnvKey]
+	_, parsed.presentExtraPathDirs = values[metaExtraPathDirsKey]
+
+	return parsed, nil
 }
 
-// extraPathDirsFromMeta accepts both the direct Go builder slice and the
-// []any shape produced by JSON decoding. Every error names the exact element
-// whose value could not be installed as one PATH component.
-func extraPathDirsFromMeta(value any) ([]string, error) {
-	var raw []any
+func parseHermesOptions(values map[string]any) (HermesOptions, *acp.RequestError) {
+	options := HermesOptions{}
 
-	switch typed := value.(type) {
-	case []string:
-		raw = make([]any, len(typed))
-		for index, dir := range typed {
-			raw[index] = dir
+	for key, item := range values {
+		switch key {
+		case metaModelKey:
+			model, ok := item.(string)
+			if !ok || model == "" {
+				return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
+			}
+
+			options.Model = model
+		case metaEnvKey:
+			env, err := wire.StringMapOption(item, wire.MetaOptionPath(vendor, key))
+			if err != nil {
+				return HermesOptions{}, err
+			}
+
+			options.Env = env
+		case metaExtraPathDirsKey:
+			dirs, err := wire.StringSliceOption(item, wire.MetaOptionPath(vendor, key))
+			if err != nil {
+				return HermesOptions{}, err
+			}
+
+			options.ExtraPathDirs = dirs
+		case metaEffortKey:
+			level, ok := item.(string)
+			if !ok || level == "" {
+				return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
+			}
+
+			options.Effort = level
+		default:
+			return HermesOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 		}
-	case []any:
-		raw = slices.Clone(typed)
-	default:
-		return nil, unsupportedField(hermesExtraPathDirsOptionPath)
 	}
 
-	dirs := make([]string, 0, len(raw))
-	for index, entry := range raw {
-		field := fmt.Sprintf("%s[%d]", hermesExtraPathDirsOptionPath, index)
+	return options, validateHermesOptions(options)
+}
 
-		dir, ok := entry.(string)
-		if !ok {
-			return nil, unsupportedField(field)
+func validateHermesOptions(options HermesOptions) *acp.RequestError {
+	if options.Model != "" {
+		if err := hermes.ModelSelectionShapeError(options.Model); err != nil {
+			return wire.Unsupported(wire.MetaOptionPath(vendor, metaModelKey))
 		}
-
-		if dir == "" {
-			return nil, invalidExtraPathDir(field, "must not be empty")
-		}
-
-		if !filepath.IsAbs(dir) {
-			return nil, invalidExtraPathDir(field, "must be an absolute path")
-		}
-
-		if strings.ContainsRune(dir, os.PathListSeparator) {
-			return nil, invalidExtraPathDir(field, "must not contain the path list separator")
-		}
-
-		dirs = append(dirs, dir)
 	}
 
-	return dirs, nil
-}
-
-func invalidExtraPathDir(field string, reason string) error {
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: "session extra path dir " + reason,
-		jsonFieldField: field,
-	})
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if values == nil {
-		return nil
+	if options.Effort != "" && !slices.Contains(effortLevels(), options.Effort) {
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaEffortKey))
 	}
 
-	cloned := make(map[string]any, len(values))
-	for key, value := range values {
-		cloned[key] = cloneAny(value)
-	}
-
-	return cloned
-}
-
-func cloneAnySlice(values []any) []any {
-	if values == nil {
-		return nil
-	}
-
-	cloned := make([]any, len(values))
-	for i, value := range values {
-		cloned[i] = cloneAny(value)
-	}
-
-	return cloned
-}
-
-func cloneAny(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case map[string]string:
-		return cloneStringMap(typed)
-	case []any:
-		return cloneAnySlice(typed)
-	case []string:
-		return slices.Clone(typed)
-	default:
-		return value
-	}
-}
-
-func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-
-	cloned := make(map[string]string, len(values))
-	maps.Copy(cloned, values)
-
-	return cloned
-}
-
-func sessionResponseMeta(snapshot sessionSnapshot) map[string]any {
-	hermesMeta := map[string]any{
-		hermesNativeIDMetaKey: snapshot.idmap.NativeSessionID,
-	}
-	if model := modelSelectionValue(snapshot.providerID, snapshot.modelID); model != "" {
-		hermesMeta["model"] = model
-		hermesMeta["modelId"] = model
-	}
-
-	return map[string]any{hermesMetaKey: hermesMeta}
-}
-
-func lifecycleResponseMeta(snapshot sessionSnapshot) map[string]any {
-	return sessionResponseMeta(snapshot)
-}
-
-func sessionInfoMeta(snapshot sessionSnapshot) map[string]any {
-	hermesMeta, _ := sessionResponseMeta(snapshot)[hermesMetaKey].(map[string]any)
-
-	return map[string]any{
-		hermesMetaKey: cloneAnyMap(hermesMeta),
-	}
+	return wire.ValidateSessionEnvironment(options.Env, options.ExtraPathDirs, wire.MetaOptionPath(vendor, ""))
 }

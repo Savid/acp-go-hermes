@@ -41,6 +41,3 @@ bin/
 # Personal agent overrides (per-developer, not shared)
 *.local.md
 .claude/settings.local.json
-
-# Mintlify local cache
-.mint/

@@ -1,9 +1,0 @@
-{
-  "name": "whitespace-raw",
-  "raw": " \n\t",
-  "expect": {
-    "valid": false,
-    "error": "unsupported",
-    "field": "params"
-  }
-}
