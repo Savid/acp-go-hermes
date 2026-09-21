@@ -609,32 +609,44 @@ func finishOpeningResponse(t *testing.T, transport *wire.Transport, id acp.Sessi
 
 func TestDeferredOpeningFailureDetachesSession(t *testing.T) {
 	t.Parallel()
-	a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
-	t.Cleanup(func() { _ = a.Close() })
-	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
-	withLifecycle()(&request)
-	_, err := a.Initialize(t.Context(), request)
-	require.NoError(t, err)
-	transport, meta := prepareOpeningResponse(t)
-	a.attach(&firstOpenFailureClient{recorder: newRecorder()}, transport)
-	newRequest := wire.NewSessionRequest(t.TempDir())
-	newRequest.Meta = meta
-	created, err := a.NewSession(t.Context(), newRequest)
-	require.NoError(t, err)
-	a.mu.Lock()
-	s := a.sessions[created.SessionId]
-	a.mu.Unlock()
-	require.NotNil(t, s)
-	finishOpeningResponse(t, transport, created.SessionId)
-	require.False(t, s.lc.Active())
-	a.mu.Lock()
-	_, installed := a.sessions[created.SessionId]
-	a.mu.Unlock()
-	require.False(t, installed, "failed deferred publication retained the active slot")
-	s.mu.Lock()
-	closed := s.closing
-	s.mu.Unlock()
-	require.True(t, closed)
+	for _, ephemeral := range []bool{false, true} {
+		name := "stored"
+		if ephemeral {
+			name = "ephemeral"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
+			t.Cleanup(func() { _ = a.Close() })
+			request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+			withLifecycle()(&request)
+			_, err := a.Initialize(t.Context(), request)
+			require.NoError(t, err)
+			transport, meta := prepareOpeningResponse(t)
+			a.attach(&firstOpenFailureClient{recorder: newRecorder()}, transport)
+			newRequest := wire.NewSessionRequest(t.TempDir())
+			newRequest.Meta = meta
+			if ephemeral {
+				newRequest.Meta = wire.SessionMeta{Ephemeral: true}.Apply(meta)
+			}
+			created, err := a.NewSession(t.Context(), newRequest)
+			require.NoError(t, err)
+			a.mu.Lock()
+			s := a.sessions[created.SessionId]
+			a.mu.Unlock()
+			require.NotNil(t, s)
+			finishOpeningResponse(t, transport, created.SessionId)
+			require.False(t, s.lc.Active())
+			a.mu.Lock()
+			_, installed := a.sessions[created.SessionId]
+			a.mu.Unlock()
+			require.False(t, installed, "failed deferred publication retained the active slot")
+			s.mu.Lock()
+			closed := s.closing
+			s.mu.Unlock()
+			require.True(t, closed)
+		})
+	}
 }
 
 func TestRuntimeDrainCompletesBeforeReplacement(t *testing.T) {
@@ -1029,4 +1041,54 @@ func TestTerminalCancelStillCancelsQueuedRequest(t *testing.T) {
 	s.mu.Lock()
 	s.turn = nil
 	s.mu.Unlock()
+}
+
+// A delete that arrives while the opening publication is still queued behind
+// the establishing response waits for that publication: the stream opens with
+// its snapshot, then the close fences it, and nothing answers unknown session.
+func TestDeleteAwaitsDeferredOpening(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	transport, meta := prepareOpeningResponse(t)
+	rec := newRecorder()
+	a.attach(rec, transport)
+	newRequest := wire.NewSessionRequest(t.TempDir())
+	newRequest.Meta = wire.SessionMeta{Ephemeral: true}.Apply(meta)
+	created, err := a.NewSession(t.Context(), newRequest)
+	require.NoError(t, err)
+	a.mu.Lock()
+	s := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.NotNil(t, s)
+	deleted := make(chan error, 1)
+	go func() {
+		_, deleteErr := a.UnstableDeleteSession(t.Context(), wire.DeleteSessionRequest(created.SessionId))
+		deleted <- deleteErr
+	}()
+	select {
+	case err := <-deleted:
+		t.Fatalf("delete returned before the establishing response was written: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.Empty(t, rec.snapshot(), "publication preceded the establishing response")
+	finishOpeningResponse(t, transport, created.SessionId)
+	select {
+	case err := <-deleted:
+		require.NoError(t, err)
+	case <-time.After(testTimeout):
+		t.Fatal("delete did not complete after the opening publication")
+	}
+	types := eventTypes(lifecycleEvents(rec.snapshot()))
+	require.NotEmpty(t, types, "delete fenced the stream before its opening publication")
+	require.Equal(t, "lifecycle_snapshot", types[0], "stream did not open with its snapshot")
+	require.False(t, s.lc.Active())
+	a.mu.Lock()
+	_, installed := a.sessions[created.SessionId]
+	a.mu.Unlock()
+	require.False(t, installed)
 }

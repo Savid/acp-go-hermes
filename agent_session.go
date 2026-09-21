@@ -3,6 +3,7 @@ package hermesacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"path/filepath"
@@ -143,23 +144,37 @@ func (a *Agent) scheduleOpen(ctx context.Context, s *session) error {
 			release := wire.HoldSessionGate(s.gate)
 			defer release()
 
-			if err := s.openStream(hookCtx, rt); err != nil {
-				s.mu.Lock()
-				current := !s.closing && s.runtime == rt
-				s.mu.Unlock()
-
-				if current {
-					_ = s.close(context.WithoutCancel(hookCtx))
-					a.detach(hookCtx, s)
-				}
-
-				a.log.ErrorContext(hookCtx, "publish session open failed",
-					slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+			err := s.openStream(hookCtx, rt)
+			if err == nil || errors.Is(err, errSessionClosing) {
+				return
 			}
+
+			s.mu.Lock()
+			current := !s.closing && s.runtime == rt
+			s.mu.Unlock()
+
+			if current {
+				// close joins the gate, so the hold ends before the ladder runs.
+				release()
+
+				_ = s.close(context.WithoutCancel(hookCtx))
+				a.detach(hookCtx, s)
+			}
+
+			a.log.ErrorContext(hookCtx, "publish session open failed",
+				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 		})
 	}
 
-	return s.openStream(ctx, rt)
+	if err := s.openStream(ctx, rt); err != nil {
+		if errors.Is(err, errSessionClosing) {
+			return s.closingRefusal()
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // NewSession creates and starts a hermes session.
@@ -708,6 +723,13 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 
 	if refusal := wire.CheckSessionID(params.SessionId); refusal != nil {
 		return acp.UnstableDeleteSessionResponse{}, refusal
+	}
+
+	// The opening publication precedes the close that fences it.
+	if transport := a.transportRef(); transport != nil {
+		if err := transport.AwaitSession(ctx, params.SessionId); err != nil {
+			return acp.UnstableDeleteSessionResponse{}, err
+		}
 	}
 
 	a.mu.Lock()

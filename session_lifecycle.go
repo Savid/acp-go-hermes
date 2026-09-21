@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/savid/acp-go-core/lifecycle"
@@ -9,6 +10,21 @@ import (
 )
 
 func (s *session) lifecycleNegotiated() lifecycle.Negotiated { return s.agent.lifecycleNegotiated() }
+
+// errSessionClosing refuses an opening publication because the session began
+// closing. It never reaches the wire: a deferred publication ends silently and
+// an inline one answers closingRefusal.
+var errSessionClosing = errors.New("session closing")
+
+// closingRefusal answers work that reached a closing session: the agent's own
+// closure when that is the cause, otherwise the session is gone.
+func (s *session) closingRefusal() error {
+	if err := s.agent.ensureOpen(); err != nil {
+		return err
+	}
+
+	return wire.UnknownSession()
+}
 
 func (s *session) openStream(ctx context.Context, rt *runtime) error {
 	s.openMu.Lock()
@@ -19,7 +35,7 @@ func (s *session) openStream(ctx context.Context, rt *runtime) error {
 	if s.closing {
 		s.mu.Unlock()
 
-		return wire.UnknownSession()
+		return errSessionClosing
 	}
 
 	if rt == nil || s.runtime != rt || rt.ending {
