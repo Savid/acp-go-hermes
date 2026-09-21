@@ -34,14 +34,17 @@ type session struct {
 	options               HermesOptions
 	rawEvents             *wire.RawEvents
 	agentDir              string
-	gate                  chan struct{}
-	mu                    sync.Mutex
-	runtime               *runtime
-	model                 string
-	effort                string
-	models                hermes.ModelOptionsResult
-	title                 string
-	updatedAt             string
+	// ephemeral marks a session the host deletes without needing it back: it
+	// is never written to the store and never listed.
+	ephemeral bool
+	gate      chan struct{}
+	mu        sync.Mutex
+	runtime   *runtime
+	model     string
+	effort    string
+	models    hermes.ModelOptionsResult
+	title     string
+	updatedAt string
 	// persisted marks a successfully committed mirror.
 	persisted bool
 	closing   bool

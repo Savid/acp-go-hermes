@@ -63,6 +63,10 @@ func (r sessionRecord) validate(id string) error {
 // carrier. The runtime the caller dispatched on reads the snapshot, so a
 // commit that cannot be attempted fails instead of reporting success.
 func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
+	if s.ephemeral {
+		return nil
+	}
+
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 

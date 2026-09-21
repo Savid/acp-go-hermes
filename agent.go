@@ -75,10 +75,13 @@ type Agent struct {
 	clientCapabilities acp.ClientCapabilities
 	// lifecycle is the answer this connection gave at initialize. An absent
 	// answer leaves the extension dormant for every session on it.
-	lifecycle    lifecycle.Negotiated
-	restores     wire.SessionRequests
-	sessions     map[acp.SessionId]*session
-	deleted      map[acp.SessionId]bool
+	lifecycle lifecycle.Negotiated
+	restores  wire.SessionRequests
+	sessions  map[acp.SessionId]*session
+	deleted   map[acp.SessionId]bool
+	// ephemeral holds the ids the host opened as ephemeral, kept past close so
+	// their delete never touches the store.
+	ephemeral    map[acp.SessionId]bool
 	clientCalls  chan struct{}
 	incarnations uint64
 }
@@ -119,6 +122,7 @@ func NewAgent(opts ...Option) *Agent {
 		store:       store,
 		sessions:    make(map[acp.SessionId]*session),
 		deleted:     make(map[acp.SessionId]bool),
+		ephemeral:   make(map[acp.SessionId]bool),
 		clientCalls: make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
 	}
 	agent.optionErr = agent.validateOptions()
