@@ -81,9 +81,8 @@ type Agent struct {
 	deleted   map[acp.SessionId]bool
 	// ephemeral holds the ids the host opened as ephemeral, kept past close so
 	// their delete never touches the store.
-	ephemeral    map[acp.SessionId]bool
-	clientCalls  chan struct{}
-	incarnations uint64
+	ephemeral   map[acp.SessionId]bool
+	clientCalls chan struct{}
 }
 
 var (
@@ -449,17 +448,6 @@ func (a *Agent) clientSupportsFormElicitation() bool {
 	defer a.mu.Unlock()
 
 	return a.clientCapabilities.Elicitation != nil && a.clientCapabilities.Elicitation.Form != nil
-}
-
-// nextIncarnation mints a stream identity no earlier incarnation of any
-// session on this agent used.
-func (a *Agent) nextIncarnation() uint64 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.incarnations++
-
-	return a.incarnations
 }
 
 // acquireClientCall takes one slot of the server-to-client call budget
