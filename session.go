@@ -267,7 +267,19 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 // configureRuntime binds the stored identity and applies session-scoped native options.
 func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expectID string) error {
 	if expectID == "" {
-		created, err := rt.client.CreateSession(ctx, map[string]any{fieldCwd: s.cwd, fieldSource: nativeSource, "close_on_disconnect": true})
+		params := map[string]any{fieldCwd: s.cwd, fieldSource: nativeSource, "close_on_disconnect": true}
+
+		if model != "" {
+			provider, name, err := hermes.ModelSelection(model)
+			if err != nil {
+				return wire.Unsupported(wire.MetaOptionPath(vendor, metaModelKey))
+			}
+			// Hermes may build the agent as soon as the session exists; only a
+			// create-time selection is guaranteed to reach that build.
+			params["provider"], params["model"] = provider, name
+		}
+
+		created, err := rt.client.CreateSession(ctx, params)
 		if err != nil {
 			return s.startFailure(ctx, err)
 		}
@@ -304,7 +316,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 		return s.startFailure(ctx, errors.New("native session identity missing"))
 	}
 
-	if model != "" {
+	if model != "" && expectID != "" {
 		if err := rt.client.SetModel(ctx, rt.liveID, model); err != nil {
 			return wire.Unsupported(wire.MetaOptionPath(vendor, metaModelKey))
 		}
