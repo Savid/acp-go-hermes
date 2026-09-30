@@ -44,6 +44,7 @@ type fakeSession struct {
 	mu         sync.Mutex
 	id         string
 	model      string
+	built      string
 	provider   string
 	effort     string
 	cwd        string
@@ -193,6 +194,13 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 		case "session.create":
 			cwd, _ := request.Params[fieldCwd].(string)
 			session = &fakeSession{id: fakeID(), cwd: cwd, model: "vision", provider: "fake", effort: effortMedium, messages: []map[string]any{}}
+			if model, _ := request.Params["model"].(string); model != "" {
+				session.provider, _ = request.Params["provider"].(string)
+				session.model = model
+			}
+			// Like Hermes, a created session builds its agent immediately; a
+			// later model switch cannot change what that build used.
+			session.built = session.provider + "/" + session.model
 			id = "live-" + fakeID()
 			g.mu.Lock()
 			g.sessions[id] = session
@@ -385,7 +393,11 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 func (s *fakeSession) buildFailure() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if expected := os.Getenv("ACP_GO_HERMES_TEST_BUILD_MODEL"); expected != "" && s.provider+"/"+s.model != expected {
+	built := s.built
+	if built == "" {
+		built = s.provider + "/" + s.model
+	}
+	if expected := os.Getenv("ACP_GO_HERMES_TEST_BUILD_MODEL"); expected != "" && built != expected {
 		return "agent initialization used the wrong model"
 	}
 

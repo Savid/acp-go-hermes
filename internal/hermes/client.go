@@ -794,6 +794,18 @@ func ModelSelectionShapeError(value string) error {
 	return err
 }
 
+// ModelSelection splits a provider-qualified selection into Hermes's provider
+// and model.
+func ModelSelection(value string) (string, string, error) {
+	if err := ModelSelectionShapeError(value); err != nil {
+		return "", "", err
+	}
+
+	provider, model, _ := strings.Cut(value, "/")
+
+	return provider, model, nil
+}
+
 func modelSwitchCommand(value string) (string, string, error) {
 	provider, rawModel, ok := strings.Cut(value, "/")
 
