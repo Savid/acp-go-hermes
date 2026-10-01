@@ -64,7 +64,8 @@ const fakeContextWindow = 1000
 
 // fakeUsage keeps a session's usage as Hermes's agent does: cumulative token
 // counters, and the prompt tokens of the last response with usage as its
-// context, -1 from a compaction until a response follows it.
+// context, -1 from a compaction until a response follows it and 0 after a
+// response whose usage was all zero.
 type fakeUsage struct {
 	prompt, completion, total, calls, compressions, context int64
 	unsized                                                 bool
@@ -81,6 +82,14 @@ func (u *fakeUsage) respond(prompt, completion int64) {
 
 // interrupted records a provider attempt that ended without usage.
 func (u *fakeUsage) interrupted() { u.calls++ }
+
+// replay records a response a gateway answered from its response cache, with
+// every usage token zero: Hermes counts the call, its token counters do not
+// move, and it no longer states a context.
+func (u *fakeUsage) replay() {
+	u.calls++
+	u.context = 0
+}
 
 // compact replaces the context with a summary whose size no response has
 // reported yet.
@@ -428,6 +437,20 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 		final = func(u *fakeUsage) { u.compact() }
 	case "UNSIZED":
 		s.record(func(u *fakeUsage) { u.unsized = true })
+	case "COVERED":
+		// A tick records the run's last response before the run ends.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		final = func(*fakeUsage) {}
+	case "REPLAY":
+		// The response after a tool call is replayed from a response cache.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		toolStep(live, "replay-0", emit)
+		s.usageEvent(live, emit)
+		final = (*fakeUsage).replay
+	case "REPLAYED":
+		// The run's only response is replayed from a response cache.
+		final = (*fakeUsage).replay
 	case "STEPSLOW":
 		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
 		s.usageEvent(live, emit)
@@ -468,7 +491,7 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 			return
 		}
 		status = statusInterrupted
-	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "STEPSLOW":
+	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW":
 		var running bool
 		if final, status, running = s.usageScript(ctx, live, prompt, emit); !running {
 			return

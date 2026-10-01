@@ -21,3 +21,12 @@ both through an OpenAI-compatible gateway in `chat_completions` mode. Each
 the capture recorded; the final text is replaced and other members are
 dropped. The test proves per-response context and summed consumption for
 those shapes, not provider behavior or tick timing.
+
+`replayed` holds the closing frames of three one-response turns in one
+session, captured from the same Hermes on 2026-10-01 against a local
+OpenAI-compatible stub in `chat_completions` mode. The stub answered the
+second turn with all-zero usage, as a gateway does when it replays a response
+from its response cache, and the other turns with cached and uncached input.
+Hermes counted the replayed call, left its token counters unchanged, and
+dropped the context. The test proves such a turn reports nothing and the next
+response reports again.

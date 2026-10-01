@@ -299,7 +299,9 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 // usage reading recorded: the prompt tokens of the latest, which Hermes
 // compacts against. A reading that recorded no response with usage, or that
 // carries no context because Hermes compacted since or does not know the
-// model's window, has no usable figure.
+// model's window, has no usable figure. A response whose usage is all zero,
+// as a gateway's response-cache replay reports, moves no counter and makes
+// Hermes drop the context, so it never reports 0.
 func contextTokens(reading usageReading) (int, bool) {
 	if reading.consumed.Prompt == 0 || reading.current.ContextUsed <= 0 {
 		return 0, false

@@ -294,6 +294,7 @@ func TestUsageFollowsEachResponse(t *testing.T) {
 		"responses between ticks": {"BURST", []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
 		}, &acp.Usage{InputTokens: 3320, OutputTokens: 60, TotalTokens: 3380}},
+		"last response ticked": {"COVERED", []acp.SessionUsageUpdate{{Size: 1000, Used: 1000}}, &acp.Usage{InputTokens: 1000, OutputTokens: 20, TotalTokens: 1020}},
 		"redirected mid-turn": {"REDIRECT", []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 1000}, {Size: 1000, Used: 900}, {Size: 1000, Used: 950},
 		}, &acp.Usage{InputTokens: 2850, OutputTokens: 40, TotalTokens: 2890}},
@@ -311,6 +312,95 @@ func TestUsageFollowsEachResponse(t *testing.T) {
 			require.Equal(t, tc.usage, resp.Usage)
 		})
 	}
+}
+
+// TestLastResponseReportsInsideTurn proves the response that ends a prompt
+// turn, which no tick records because Hermes stops its ticks before
+// message.complete, reports once from the closing frame while the turn still
+// runs.
+func TestLastResponseReportsInsideTurn(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	initResponse := h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "MULTI", promptMeta(1))
+	require.NoError(t, err)
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 1000}, {Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
+	}, usageUpdates(h.rec.snapshot()))
+	require.NoError(t, lifecycle.CheckAttribution(negotiatedAnswer(t, initResponse), sessionFrames(t, h.rec.snapshot(), session.SessionId)))
+}
+
+// TestEmptyUsageIsUnknown proves a response a gateway replays from its
+// response cache, whose usage is all zero, reports nothing: Hermes counts the
+// call without moving a token counter and stops stating the context, so no
+// update says 0 and the next response reports again.
+func TestEmptyUsageIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	for _, step := range []struct {
+		prompt string
+		usage  *acp.Usage
+	}{
+		{"HELLO", &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
+		{"REPLAYED", nil},
+		{"REPLAY", &acp.Usage{InputTokens: 1000, OutputTokens: 20, TotalTokens: 1020}},
+		{"HELLO", &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
+	} {
+		resp, err := h.prompt(session.SessionId, step.prompt, nil)
+		require.NoError(t, err)
+		require.Equal(t, step.usage, resp.Usage, step.prompt)
+	}
+
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 10}, {Size: 1000, Used: 1000}, {Size: 1000, Used: 10},
+	}, usageUpdates(h.rec.snapshot()))
+}
+
+// TestUsageOfCapturedReplay replays the closing frames of three turns whose
+// second response Hermes received with all-zero usage: that turn reports
+// nothing and sums nothing, and the next response reports its own context.
+func TestUsageOfCapturedReplay(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/usage-routes.json")
+	require.NoError(t, err)
+
+	var routes map[string][]hermes.Event
+	require.NoError(t, json.Unmarshal(data, &routes))
+
+	frames := routes["replayed"]
+	require.Len(t, frames, 3)
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: "replayed"}
+	rt := &runtime{}
+
+	consumed := make([]*acp.Usage, 0, len(frames))
+
+	for _, event := range frames {
+		c := &cycle{}
+		settled, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		require.NoError(t, err)
+		require.True(t, settled)
+
+		consumed = append(consumed, promptUsage(c.state.usage))
+	}
+
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 200000, Used: 1201}, {Size: 200000, Used: 1204}}, usageUpdates(rec.snapshot()))
+	require.Equal(t, []*acp.Usage{
+		{InputTokens: 1201, OutputTokens: 7, ThoughtTokens: new(2), TotalTokens: 1208},
+		nil,
+		{InputTokens: 1204, OutputTokens: 7, ThoughtTokens: new(2), TotalTokens: 1211},
+	}, consumed)
 }
 
 // TestUnusableResponsesReportNoUsage proves a turn whose responses carry no
@@ -495,6 +585,7 @@ func TestContextTokens(t *testing.T) {
 		"new response":                      {usageReading{current: hermes.Usage{Prompt: 300, ContextUsed: 120, ContextMax: 1000}, consumed: hermes.Usage{Prompt: 120}}, 120, true},
 		"no response since":                 {usageReading{current: hermes.Usage{Prompt: 300, ContextUsed: 120, ContextMax: 1000}}, 0, false},
 		"compacted since or window unknown": {usageReading{current: hermes.Usage{Prompt: 300}, consumed: hermes.Usage{Prompt: 120}}, 0, false},
+		"all-zero response":                 {usageReading{current: hermes.Usage{Prompt: 300}}, 0, false},
 		"no reading":                        {usageReading{}, 0, false},
 	} {
 		t.Run(name, func(t *testing.T) {

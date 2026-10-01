@@ -6,8 +6,9 @@ import "encoding/json"
 // token counters are cumulative over the gateway agent's lifetime and restart
 // at zero when Hermes builds a new agent. ContextUsed is the prompt tokens of
 // the agent's last provider response, the figure Hermes compacts against; it
-// is absent before a response reports usage, after a compaction until the
-// next response does, and while the context window is unknown.
+// is absent before a response reports usage, after a compaction or a
+// response whose usage was all zero until the next response reports some, and
+// while the context window is unknown.
 //
 //nolint:tagliatelle // Hermes uses context_used and context_max on the wire.
 type Usage struct {
