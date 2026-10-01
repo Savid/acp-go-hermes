@@ -108,7 +108,7 @@ responses it last recorded (`used`) against the model's context window
 gateway events and persisted messages carry neither the id the model gateway
 returned for a response nor a per-response token breakdown, so message and
 thought chunks carry no `messageId` and usage updates carry no
-`acp-go.dev/callUsage`.
+`acp-go-core` `wire.CallUsage` breakdown.
 
 ### Session store
 
