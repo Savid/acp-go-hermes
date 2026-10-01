@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/coder/websocket v1.8.15
-	github.com/savid/acp-go-core v0.0.0-20260923051553-28ae73ab94ec
+	github.com/savid/acp-go-core v0.0.0-20261001053907-2cd3102af23c
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
