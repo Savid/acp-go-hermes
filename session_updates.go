@@ -18,6 +18,7 @@ const (
 	eventMessageStart    = "message.start"
 	eventMessageDelta    = "message.delta"
 	eventMessageInterim  = "message.interim"
+	eventSessionUsage    = "session.usage"
 	statusComplete       = "complete"
 	fieldSource          = "source"
 	promptStreaming      = "streaming"
@@ -25,6 +26,7 @@ const (
 	fieldName            = "name"
 	fieldResult          = "result"
 	eventToolComplete    = "tool.complete"
+	fieldToolID          = "tool_id"
 	fieldID              = "id"
 	nativeSource         = "desktop"
 	approvalOnce         = "once"
@@ -49,14 +51,42 @@ const (
 )
 
 type cycleState struct {
-	text          strings.Builder
-	thought       strings.Builder
-	tools         map[string]bool
-	terminalTools map[string]bool
-	stopReason    string
-	errorMessage  string
-	contextUsed   int64
-	contextMax    int64
+	text    strings.Builder
+	thought strings.Builder
+	// openTools holds the tool calls started and not yet complete; a
+	// completed call leaves it, since Hermes completes each call once.
+	openTools    map[string]struct{}
+	stopReason   string
+	errorMessage string
+	// usage sums the tokens of every provider response the cycle's usage
+	// readings recorded.
+	usage hermes.Usage
+}
+
+// usageReading is what one session.usage or message.complete reports: the
+// gateway's current usage and the consumption since its previous reading.
+type usageReading struct {
+	current  hermes.Usage
+	consumed hermes.Usage
+}
+
+// readUsage records the usage a gateway event carries against the runtime's
+// previous reading. Every reading on the runtime is recorded, owned by a cycle
+// or not, so a cycle sums only the consumption that happened while it ran.
+func (rt *runtime) readUsage(event hermes.Event) usageReading {
+	if event.Type != eventSessionUsage && event.Type != eventMessageComplete {
+		return usageReading{}
+	}
+
+	current, ok := hermes.DecodeUsage(event.Payload)
+	if !ok {
+		return usageReading{}
+	}
+
+	reading := usageReading{current: current, consumed: current.Since(rt.usage)}
+	rt.usage = current
+
+	return reading
 }
 
 // bearsWork reports whether an event is native work a lifecycle cycle must
@@ -74,8 +104,13 @@ func bearsWork(event hermes.Event) bool {
 	}
 }
 
-// projectEvent translates one ordered gateway event into ACP updates.
-func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event hermes.Event) (bool, error) {
+// projectEvent translates one ordered gateway event, with the usage reading
+// it carries, into ACP updates.
+func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event hermes.Event, reading usageReading) (bool, error) {
+	// Responses that finish after a cancel still count toward the cycle's
+	// consumption, though the cycle reports nothing more.
+	c.state.usage = c.state.usage.Add(reading.consumed)
+
 	if s.cycleCancelled(c) {
 		switch event.Type {
 		case eventApprovalRequest, eventClarifyRequest, eventSudoRequest, eventSecretRequest, eventTerminalReadRequest:
@@ -122,11 +157,10 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		return false, nil
 	case eventMessageComplete:
 		var result struct {
-			Text      string          `json:"text"`
-			Status    string          `json:"status"`
-			Error     string          `json:"error"`
-			Reasoning string          `json:"reasoning"`
-			Usage     json.RawMessage `json:"usage"`
+			Text      string `json:"text"`
+			Status    string `json:"status"`
+			Error     string `json:"error"`
+			Reasoning string `json:"reasoning"`
 		}
 		if err := json.Unmarshal(event.Payload, &result); err != nil {
 			return true, err
@@ -139,9 +173,6 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 			state.errorMessage = result.Text
 		}
 
-		state.contextMax = hermes.Number(result.Usage, "context_max")
-		state.contextUsed = hermes.Number(result.Usage, "context_used")
-
 		var errs []error
 		if text := wire.UnstreamedSuffix(state.text.String(), result.Text); text != "" {
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentMessageText(text)))
@@ -151,7 +182,11 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentThoughtText(thought)))
 		}
 
+		errs = append(errs, s.emitResponseUsage(ctx, reading))
+
 		return true, errors.Join(errs...)
+	case eventSessionUsage:
+		return false, s.emitResponseUsage(ctx, reading)
 	case stopReasonError:
 		state.stopReason = stopReasonError
 		state.errorMessage = hermes.String(event.Payload, "message")
@@ -199,28 +234,24 @@ func (s *session) emitTool(ctx context.Context, state *cycleState, event hermes.
 		return errors.New("native tool identity missing")
 	}
 
-	if state.tools == nil {
-		state.tools = make(map[string]bool)
-		state.terminalTools = make(map[string]bool)
+	if state.openTools == nil {
+		state.openTools = make(map[string]struct{})
 	}
 
-	if state.terminalTools[tool.ID] {
-		return nil
-	}
-
-	if !state.tools[tool.ID] {
+	if _, open := state.openTools[tool.ID]; !open {
 		if err := s.emit(ctx, acp.StartToolCall(acp.ToolCallId(tool.ID), tool.Name, acp.WithStartStatus(acp.ToolCallStatusInProgress), acp.WithStartRawInput(tool.Args))); err != nil {
 			return err
 		}
 
-		state.tools[tool.ID] = true
+		state.openTools[tool.ID] = struct{}{}
 	}
 
 	if event.Type == eventToolStart {
 		return nil
 	}
 
-	state.terminalTools[tool.ID] = true
+	delete(state.openTools, tool.ID)
+
 	status := acp.ToolCallStatusCompleted
 
 	if result, ok := tool.Result.(map[string]any); ok {
@@ -264,8 +295,44 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 	return nil
 }
 
-func (s *session) emitUsage(ctx context.Context, state *cycleState) {
-	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: int(state.contextMax), Used: int(state.contextUsed)}})
+// contextTokens is the context Hermes counts after the provider responses a
+// usage reading recorded: the prompt tokens of the latest, which Hermes
+// compacts against. A reading that recorded no response with usage, or that
+// carries no context because Hermes compacted since or does not know the
+// model's window, has no usable figure.
+func contextTokens(reading usageReading) (int, bool) {
+	if reading.consumed.Prompt == 0 || reading.current.ContextUsed <= 0 {
+		return 0, false
+	}
+
+	return int(reading.current.ContextUsed), true
+}
+
+// emitResponseUsage reports the context the responses a usage reading
+// recorded leave occupied. size is the context window the same reading
+// states, which Hermes sends whenever it sends the context.
+func (s *session) emitResponseUsage(ctx context.Context, reading usageReading) error {
+	used, ok := contextTokens(reading)
+	if !ok {
+		return nil
+	}
+
+	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: int(reading.current.ContextMax), Used: used}})
+}
+
+// promptUsage is a turn's summed consumption: the prompt tokens of every
+// provider response, cached ones included, and their completion tokens.
+func promptUsage(consumed hermes.Usage) *acp.Usage {
+	if consumed == (hermes.Usage{}) {
+		return nil
+	}
+
+	usage := &acp.Usage{InputTokens: int(consumed.Prompt), OutputTokens: int(consumed.Completion), TotalTokens: int(consumed.Total)}
+	if consumed.Reasoning > 0 {
+		usage.ThoughtTokens = new(int(consumed.Reasoning))
+	}
+
+	return usage
 }
 
 func (s *session) emitRawEvent(ctx context.Context, event hermes.Event) {

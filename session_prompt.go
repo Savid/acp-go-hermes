@@ -317,7 +317,7 @@ func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
 }
 
 // settleTurn is the one settlement point every accepted prompt reaches:
-// usage and session info, the durable mirror commit, the terminal idle, and
+// session info, the durable mirror commit, the terminal idle, and
 // only then the response or error.
 func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params acp.PromptRequest) (acp.PromptResponse, error) {
 	s.beginSettlement(&t.cycle)
@@ -348,7 +348,6 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	if t.ended == turnSettled {
 		if !cancelled {
-			s.emitUsage(settleCtx, &t.state)
 			s.emitSessionInfo(settleCtx, params.Prompt)
 		}
 
@@ -380,6 +379,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	return acp.PromptResponse{
 		StopReason:    acp.StopReason(verdict.stopReason),
+		Usage:         promptUsage(t.state.usage),
 		UserMessageId: params.MessageId,
 	}, nil
 }

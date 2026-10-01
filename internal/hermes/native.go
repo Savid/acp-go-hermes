@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -182,15 +181,4 @@ func String(payload json.RawMessage, key string) string {
 	_ = json.Unmarshal(object[key], &value)
 
 	return value
-}
-
-func Number(payload json.RawMessage, key string) int64 {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(payload, &object) != nil {
-		return 0
-	}
-
-	value, _ := strconv.ParseFloat(string(object[key]), 64)
-
-	return int64(value)
 }

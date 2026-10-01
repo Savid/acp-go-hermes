@@ -1,0 +1,19 @@
+{
+  "openrouter": [
+    {"type": "session.usage", "payload": {"usage": {"calls": 1, "input": 13229, "output": 762, "reasoning": 734, "prompt": 13485, "completion": 762, "total": 14247, "compressions": 0, "context_used": 13485, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 2}}},
+    {"type": "session.usage", "payload": {"usage": {"calls": 2, "input": 14199, "output": 808, "reasoning": 750, "prompt": 27767, "completion": 808, "total": 28575, "compressions": 0, "context_used": 14282, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 49}}},
+    {"type": "message.complete", "payload": {"text": "done", "status": "complete", "usage": {"calls": 3, "input": 14483, "output": 1017, "reasoning": 936, "prompt": 42131, "completion": 1017, "total": 43148, "compressions": 0, "context_used": 14364, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 66}}}
+  ],
+  "gateway": [
+    {"type": "session.usage", "payload": {"usage": {"calls": 1, "input": 13922, "output": 485, "reasoning": 370, "prompt": 14178, "completion": 485, "total": 14663, "compressions": 0, "context_used": 14178, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 2}}},
+    {"type": "session.usage", "payload": {"usage": {"calls": 2, "input": 14190, "output": 563, "reasoning": 395, "prompt": 28526, "completion": 563, "total": 29089, "compressions": 0, "context_used": 14348, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 50}}},
+    {"type": "session.usage", "payload": {"usage": {"calls": 3, "input": 14293, "output": 810, "reasoning": 525, "prompt": 42965, "completion": 810, "total": 43775, "compressions": 0, "context_used": 14439, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 67}}},
+    {"type": "session.usage", "payload": {"usage": {"calls": 4, "input": 14568, "output": 868, "reasoning": 528, "prompt": 57576, "completion": 868, "total": 58444, "compressions": 0, "context_used": 14611, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 75}}},
+    {"type": "message.complete", "payload": {"text": "done", "status": "complete", "usage": {"calls": 5, "input": 14681, "output": 1191, "reasoning": 814, "prompt": 72281, "completion": 1191, "total": 73472, "compressions": 0, "context_used": 14705, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 80}}}
+  ],
+  "gateway-anthropic": [
+    {"type": "session.usage", "payload": {"usage": {"calls": 1, "input": 18649, "output": 49, "reasoning": 0, "prompt": 18649, "completion": 49, "total": 18698, "compressions": 0, "context_used": 18649, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false}}},
+    {"type": "session.usage", "payload": {"usage": {"calls": 2, "input": 18732, "output": 103, "reasoning": 0, "prompt": 37377, "completion": 103, "total": 37480, "compressions": 0, "context_used": 18728, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 50}}},
+    {"type": "message.complete", "payload": {"text": "done", "status": "complete", "usage": {"calls": 3, "input": 18821, "output": 137, "reasoning": 0, "prompt": 56192, "completion": 137, "total": 56329, "compressions": 0, "context_used": 18815, "context_max": 1000000, "context_source": "provider_usage", "context_estimated": false, "cache_hit_pct": 67}}}
+  ]
+}
