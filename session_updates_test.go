@@ -542,6 +542,66 @@ func TestUsageOfCapturedRoutes(t *testing.T) {
 	}
 }
 
+// TestCapturedResponseCarriesNoResponseID projects a captured one-response
+// turn live and replays its captured export. Hermes states the id its gateway
+// returned for a response in neither the gateway frames nor the persisted
+// messages, so no chunk carries a messageId; it reports no per-response token
+// breakdown, so no usage update carries a call usage report.
+func TestCapturedResponseCarriesNoResponseID(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/response-turn.json")
+	require.NoError(t, err)
+
+	var fixture struct {
+		Live   []hermes.Event  `json:"live"`
+		Export json.RawMessage `json:"export"`
+	}
+	require.NoError(t, json.Unmarshal(data, &fixture))
+
+	var exported struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(fixture.Export, &exported))
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: acp.SessionId(exported.ID), nativeID: exported.ID}
+	rt := &runtime{}
+	c := &cycle{}
+
+	for _, event := range fixture.Live {
+		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		require.NoError(t, err)
+	}
+
+	live := len(rec.snapshot())
+	require.NoError(t, s.replay(t.Context(), [][]byte{fixture.Export}))
+
+	updates := rec.snapshot()
+	for name, part := range map[string][]acp.SessionNotification{"live": updates[:live], "replay": updates[live:]} {
+		var messages, thoughts int
+
+		for _, n := range part {
+			if chunk := n.Update.AgentMessageChunk; chunk != nil {
+				messages++
+				require.Nil(t, chunk.MessageId, name)
+			}
+			if chunk := n.Update.AgentThoughtChunk; chunk != nil {
+				thoughts++
+				require.Nil(t, chunk.MessageId, name)
+			}
+		}
+
+		require.Positive(t, messages, name)
+		require.Positive(t, thoughts, name)
+	}
+
+	require.Equal(t, "Hi! What can I help you with today?Hi! What can I help you with today?", agentText(updates))
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 1000000, Used: 13774}}, usageUpdates(updates))
+}
+
 // TestCompletedToolLeavesCycleState proves a completed tool call holds no
 // state for the rest of a long cycle, and an id Hermes uses again starts a new
 // call.

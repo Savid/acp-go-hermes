@@ -30,3 +30,13 @@ from its response cache, and the other turns with cached and uncached input.
 Hermes counted the replayed call, left its token counters unchanged, and
 dropped the context. The test proves such a turn reports nothing and the next
 response reports again.
+
+`response-turn.json` holds one turn captured from the same Hermes on
+2026-10-02 under `hermes serve` in a temporary home, using
+`qwen/qwen3.8-flash` on OpenRouter in `chat_completions` mode through a
+logging reverse proxy. `live` keeps every gateway event from `message.start`
+through `message.complete` in delivery order with its payload unchanged;
+`export` keeps the `id` and `messages` of the session's HTTP export. The proxy
+recorded the response's `gen-` id; no frame or exported message contains it,
+and Hermes wrote it only to its agent log text. The test proves chunks carry
+no `messageId` and usage updates no call usage report, live and replayed.

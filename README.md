@@ -100,6 +100,16 @@ or prompt dispatch. User-only text excluded from native input does not affect
 ordering. An image blob's URI is provenance and is not sent as prompt text.
 Image output is not advertised.
 
+### Usage
+
+Each `usage_update` reports the context Hermes counts after the provider
+responses it last recorded (`used`) against the model's context window
+(`size`); the prompt result's `usage` sums the turn's responses. Hermes's
+gateway events and persisted messages carry neither the id the model gateway
+returned for a response nor a per-response token breakdown, so message and
+thought chunks carry no `messageId` and usage updates carry no
+`acp-go.dev/callUsage`.
+
 ### Session store
 
 `WithSessionStore` commits the native per-conversation JSON export under the main
