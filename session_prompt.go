@@ -129,7 +129,8 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	defer cancelTurn()
 
 	t := &turn{
-		cycle:      cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseSubmission}, state: cycleState{}},
+		Origin:     lifecycle.CauseSubmission,
+		state:      cycleState{},
 		submission: submission,
 		cancel:     cancelTurn,
 		settled:    make(chan struct{}),
@@ -256,8 +257,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 // rejection carries its text as a provider failure, a dead child is a
 // process exit, and everything else is transport.
 func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) error {
-	var commandErr *hermes.RPCError
-	if errors.As(err, &commandErr) {
+	if commandErr, ok := errors.AsType[*hermes.RPCError](err); ok {
 		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: commandErr.Message})
 	}
 
