@@ -35,9 +35,12 @@ func nativeHome(t *testing.T) string {
 			require.NoError(t, os.WriteFile(filepath.Join(home, name), data, 0o600))
 		}
 		// Hermes selects its dependency environment through the home's install
-		// state, which a fresh home lacks.
-		if installs := filepath.Join(source, "installs"); isDir(installs) {
-			require.NoError(t, os.Symlink(installs, filepath.Join(home, "installs")))
+		// state and finds its managed tools in the home's store, both of which
+		// a fresh home lacks.
+		for _, name := range []string{"installs", "tools"} {
+			if shared := filepath.Join(source, name); isDir(shared) {
+				require.NoError(t, os.Symlink(shared, filepath.Join(home, name)))
+			}
 		}
 	}
 

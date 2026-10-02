@@ -10,12 +10,13 @@ import (
 )
 
 // TestPluginChecks runs the plugin against stand-ins for the Hermes and
-// OpenAI modules it imports.
+// OpenAI modules it imports. CI always runs it.
 func TestPluginChecks(t *testing.T) {
 	t.Parallel()
 
 	python, err := exec.LookPath("python3")
 	if err != nil {
+		require.Empty(t, os.Getenv("CI"), "CI needs python3 for the plugin checks")
 		t.Skip("python3 is not installed")
 	}
 
