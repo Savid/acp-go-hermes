@@ -76,9 +76,15 @@ type runtime struct {
 	done         chan struct{}
 	controls     chan func()
 	controlsDone chan struct{}
-	// usage is the gateway's latest usage reading, read and written only by
-	// the event pump.
-	usage hermes.Usage
+	// nativeID is the durable conversation key the plugin's call reports name.
+	nativeID string
+	// usage is the gateway's latest usage reading, window the latest context
+	// window a reading stated, and reported the prompt tokens of the calls the
+	// plugin reported that no reading has recorded yet; only the event pump
+	// reads and writes them.
+	usage    hermes.Usage
+	window   int64
+	reported int64
 }
 
 type cycle struct {
@@ -153,6 +159,10 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		return nil, s.startFailure(ctx, seedErr)
 	}
 
+	if publishErr := hermes.PublishPlugin(s.agentDir); publishErr != nil {
+		return nil, s.startFailure(ctx, publishErr)
+	}
+
 	proc, err := process.Start(ctx, process.Request{Executable: executable, Args: endpoint.Args(), Env: env, Dir: s.cwd})
 	if err != nil {
 		return nil, s.startFailure(ctx, err)
@@ -208,6 +218,8 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 	}
 
 ready:
+	s.enablePlugin(readyCtx, client)
+
 	readCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	rt := &runtime{proc: proc, observe: s.agent.observe, client: client, endpoint: endpoint, cancel: cancel, bound: make(chan struct{}), done: make(chan struct{}), controls: make(chan func(), 256), controlsDone: make(chan struct{})}
@@ -243,6 +255,25 @@ ready:
 	go s.pump(readCtx, rt)
 
 	return rt, nil
+}
+
+// enablePlugin has the gateway enable the adapter's plugin when config.yaml
+// does not list it yet, before any session exists on the gateway. A home that
+// disables it, or a gateway that cannot enable it, runs without call reports:
+// usage readings then report each response's context alone.
+func (s *session) enablePlugin(ctx context.Context, client *hermes.Client) {
+	state, err := hermes.ReadPluginState(s.agentDir)
+	if err == nil && state != hermes.PluginUnlisted {
+		return
+	}
+
+	if err == nil {
+		err = client.EnablePlugin(ctx)
+	}
+
+	if err != nil {
+		s.agent.log.WarnContext(ctx, "hermes call reports unavailable", slog.String("reason", err.Error()))
+	}
 }
 
 // launchFailure names the real reason a startup ended: a child that is already
@@ -287,7 +318,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 			return s.startFailure(ctx, err)
 		}
 
-		rt.liveID = created.SessionID
+		rt.liveID, rt.nativeID = created.SessionID, created.StoredSessionID
 
 		s.nativeID = created.StoredSessionID
 
@@ -309,7 +340,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 			return s.agent.restoreRefused(ctx, s.id, errors.New("native session identity changed"))
 		}
 
-		rt.liveID = restored.SessionID
+		rt.liveID, rt.nativeID = restored.SessionID, expectID
 		if err := rt.client.Call(ctx, "session.cwd.set", map[string]any{nativeSessionIDKey: rt.liveID, fieldCwd: s.cwd}, nil); err != nil {
 			return s.startFailure(ctx, err)
 		}
@@ -396,6 +427,19 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	return rt, nil
 }
 
+// owns reports whether a gateway event belongs to the runtime's conversation.
+// Session events name its live id; the plugin's call reports, which Hermes
+// broadcasts without a session, name its native id in their payload.
+func (rt *runtime) owns(event hermes.Event) bool {
+	if event.Type == hermes.CallEvent {
+		call, ok := hermes.DecodeCall(event.Payload)
+
+		return ok && call.SessionID == rt.nativeID
+	}
+
+	return event.SessionID == rt.liveID
+}
+
 // pump preserves gateway order and drops records for every unbound live identity.
 func (s *session) pump(ctx context.Context, rt *runtime) {
 	defer close(rt.done)
@@ -417,7 +461,7 @@ func (s *session) pump(ctx context.Context, rt *runtime) {
 				return
 			}
 
-			if delivery.Event != nil && delivery.Event.SessionID == rt.liveID {
+			if delivery.Event != nil && rt.owns(*delivery.Event) {
 				s.handleEvent(ctx, rt, *delivery.Event)
 			}
 		case <-ctx.Done():

@@ -545,8 +545,8 @@ func TestUsageOfCapturedRoutes(t *testing.T) {
 // TestCapturedResponseCarriesNoResponseID projects a captured one-response
 // turn live and replays its captured export. Hermes states the id its gateway
 // returned for a response in neither the gateway frames nor the persisted
-// messages, so no chunk carries a messageId; it reports no per-response token
-// breakdown, so no usage update carries a call usage report.
+// messages, so no chunk carries a messageId; without the plugin's call
+// reports no usage update carries a call usage report.
 func TestCapturedResponseCarriesNoResponseID(t *testing.T) {
 	t.Parallel()
 

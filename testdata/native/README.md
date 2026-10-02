@@ -40,3 +40,14 @@ through `message.complete` in delivery order with its payload unchanged;
 recorded the response's `gen-` id; no frame or exported message contains it,
 and Hermes wrote it only to its agent log text. The test proves chunks carry
 no `messageId` and usage updates no call usage report, live and replayed.
+
+`call-usage.json` holds one tool turn captured from Hermes `git.e05b163`
+(0.21.5) on 2026-10-02 under `hermes serve` with the adapter's plugin, using
+`qwen/qwen3.8-flash` on OpenRouter in `chat_completions` mode through a
+recording reverse proxy. `live` keeps every gateway event from `message.start`
+through `message.complete` in delivery order with its payload unchanged; the
+live session id is normalized to `fixture-session` and the native session id
+to `fixture-native`. `gateway` keeps the id and usage block of each main-call
+response the proxy recorded. The test proves each call report precedes the
+native events that follow from its response, and that each response reports
+once with its gateway's id and usage.

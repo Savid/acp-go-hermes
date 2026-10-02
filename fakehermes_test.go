@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
 const fakeHermesEnv = "ACP_GO_HERMES_TEST_FAKE"
@@ -29,6 +31,10 @@ const fakeHermesEnvResumeHold = "ACP_GO_HERMES_TEST_RESUME_HOLD"
 // before it announces readiness, once a sibling ".armed" file exists; it stays
 // silent until the file is removed.
 const fakeHermesEnvReadyHold = "ACP_GO_HERMES_TEST_READY_HOLD"
+
+// fakePluginToggles records, one key per line, each plugin the gateway was
+// asked to enable.
+const fakePluginToggles = "plugin-toggles"
 
 // heldAttachMarker is written into the home when the gateway takes an
 // attachment it will never answer, so a test knows the upload is in flight.
@@ -299,6 +305,8 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 			}
 			g.mu.Unlock()
 			result = map[string]any{"sessions": rows}
+		case "plugins.manage":
+			result, failure = g.togglePlugin(request.Params)
 		case "process.list":
 			failure = session.buildFailure()
 		case "model.options":
@@ -378,6 +386,23 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// togglePlugin enables the adapter's plugin as Hermes does, recording each
+// enable in the home.
+func (g *fakeGateway) togglePlugin(params map[string]any) (any, string) {
+	key, _ := params["key"].(string)
+	if params["action"] != "toggle" || key != hermes.PluginName || params["enable"] != true {
+		return nil, "invalid plugin toggle"
+	}
+	toggles, err := os.OpenFile(filepath.Join(g.home, fakePluginToggles), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, "config write failed"
+	}
+	_, _ = toggles.WriteString(key + "\n")
+	_ = toggles.Close()
+
+	return map[string]any{"ok": true, "name": key}, ""
+}
+
 // usageEvent is a session.usage tick with the session's current usage.
 func (s *fakeSession) usageEvent(live string, emit func(string, string, any)) {
 	s.mu.Lock()
@@ -451,6 +476,60 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 	case "REPLAYED":
 		// The run's only response is replayed from a response cache.
 		final = (*fakeUsage).replay
+	case "CALLS":
+		// Each response is reported as it returns, before its tool runs and
+		// before Hermes records it; the last one before the run ends.
+		for index, call := range []struct {
+			id                    string
+			prompt, cached, write int64
+		}{{"gen-1", 1000, 0, -1}, {"gen-2", 1120, 1000, 0}} {
+			s.report(emit, call.id, chatUsage(call.prompt, call.cached, call.write, 20))
+			toolStep(live, fmt.Sprintf("calls-%d", index), emit)
+			s.record(func(u *fakeUsage) { u.respond(call.prompt, 20) })
+			s.usageEvent(live, emit)
+		}
+		s.report(emit, "", chatUsage(1200, 1100, 50, 10))
+		final = func(u *fakeUsage) { u.respond(1200, 10) }
+	case "CALLRACE":
+		// A tick lands after a response was reported and before Hermes
+		// recorded it, so it records only the response before.
+		s.report(emit, "gen-1", chatUsage(1000, 0, 0, 20))
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.report(emit, "gen-2", chatUsage(1120, 1000, 0, 20))
+		s.usageEvent(live, emit)
+		s.report(emit, "gen-3", chatUsage(1200, 1100, 0, 10))
+		s.record(func(u *fakeUsage) { u.respond(1120, 20) })
+		final = func(u *fakeUsage) { u.respond(1200, 10) }
+	case "CALLRETRY":
+		// Hermes rejects the first response and retries the request; each
+		// attempt is its own call, and only the accepted one moves a counter.
+		s.report(emit, "gen-rejected", chatUsage(1000, 0, 0, 0))
+		s.report(emit, "gen-accepted", chatUsage(1000, 900, 0, 20))
+		final = func(u *fakeUsage) { u.respond(1000, 20) }
+	case "CALLFOREIGN":
+		// A review fork or delegated child shares the process but not the
+		// conversation; its reports name another session.
+		emit("", hermes.CallEvent, map[string]any{nativeSessionIDKey: "fork", "response_id": "gen-fork", "usage": chatUsage(5000, 0, 0, 50)})
+		s.report(emit, "gen-own", chatUsage(10, 0, 0, 5))
+	case "CALLEMPTY":
+		// A gateway answering from its response cache reports zero tokens.
+		s.report(emit, "gen-replayed", chatUsage(0, 0, 0, 0))
+		final = (*fakeUsage).replay
+	case "CALLSLOW":
+		s.report(emit, "gen-1", chatUsage(1000, 0, 0, 20))
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		select {
+		case <-s.interrupt:
+		case <-ctx.Done():
+			return nil, "", false
+		}
+		// The responses in flight at the interrupt still report.
+		s.report(emit, "gen-2", chatUsage(1120, 1000, 0, 20))
+		s.report(emit, "gen-3", chatUsage(1200, 1100, 0, 5))
+		s.record(func(u *fakeUsage) { u.respond(1120, 20); u.respond(1200, 5) })
+		s.usageEvent(live, emit)
+		status = statusInterrupted
 	case "STEPSLOW":
 		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
 		s.usageEvent(live, emit)
@@ -466,6 +545,33 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 	}
 
 	return final, status, true
+}
+
+// report broadcasts the plugin's report of one response as Hermes sends it:
+// without a session, naming the conversation in its payload. An empty id is a
+// response whose gateway sent none.
+func (s *fakeSession) report(emit func(string, string, any), id string, usage map[string]any) {
+	s.mu.Lock()
+	payload := map[string]any{nativeSessionIDKey: s.id, "usage": usage}
+	s.mu.Unlock()
+	if id != "" {
+		payload["response_id"] = id
+	}
+	emit("", hermes.CallEvent, payload)
+}
+
+// chatUsage is a Chat Completions usage block; a negative cache figure is
+// one the gateway did not send.
+func chatUsage(prompt, cached, written, completion int64) map[string]any {
+	details := map[string]any{"audio_tokens": 0}
+	if cached >= 0 {
+		details["cached_tokens"] = cached
+	}
+	if written >= 0 {
+		details["cache_write_tokens"] = written
+	}
+
+	return map[string]any{"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion, "prompt_tokens_details": details, "cost": 0.001}
 }
 
 // toolStep is one tool call the model requested in a response.
@@ -491,7 +597,8 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 			return
 		}
 		status = statusInterrupted
-	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW":
+	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW",
+		"CALLS", "CALLRACE", "CALLRETRY", "CALLFOREIGN", "CALLEMPTY", "CALLSLOW":
 		var running bool
 		if final, status, running = s.usageScript(ctx, live, prompt, emit); !running {
 			return

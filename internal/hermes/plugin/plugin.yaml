@@ -1,0 +1,5 @@
+name: acp-go-hermes
+version: 1.0.0
+description: "Reports each model response of the session's own conversation, its gateway response id and raw token usage, to the acp-go-hermes adapter."
+author: acp-go-hermes
+kind: standalone

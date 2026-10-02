@@ -34,9 +34,20 @@ func nativeHome(t *testing.T) string {
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(home, name), data, 0o600))
 		}
+		// Hermes selects its dependency environment through the home's install
+		// state, which a fresh home lacks.
+		if installs := filepath.Join(source, "installs"); isDir(installs) {
+			require.NoError(t, os.Symlink(installs, filepath.Join(home, "installs")))
+		}
 	}
 
 	return home
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+
+	return err == nil && info.IsDir()
 }
 
 func TestNativeSmoke(t *testing.T) {

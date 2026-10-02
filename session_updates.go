@@ -61,20 +61,52 @@ type cycleState struct {
 	// usage sums the tokens of every provider response the cycle's usage
 	// readings recorded.
 	usage hermes.Usage
+	// heldCalls are call reports that arrived before the runtime learned the
+	// model's context window; the next usage reading states it.
+	heldCalls []callReport
 }
 
-// usageReading is what one session.usage or message.complete reports: the
-// gateway's current usage and the consumption since its previous reading.
+// callReport is one model response the plugin reported: its breakdown and
+// the context it was sent with, which is the context Hermes counts after it.
+type callReport struct {
+	usage wire.CallUsage
+	used  int
+}
+
+// usageReading is what one event reports about usage. A session.usage or
+// message.complete carries the gateway's current usage and the consumption
+// since its previous reading, and covered marks a reading whose responses
+// call reports already reported. A call report carries call. Both carry the
+// context window the runtime last learned.
 type usageReading struct {
 	current  hermes.Usage
 	consumed hermes.Usage
+	covered  bool
+	call     *callReport
+	window   int
 }
 
 // readUsage records the usage a gateway event carries against the runtime's
 // previous reading. Every reading on the runtime is recorded, owned by a cycle
 // or not, so a cycle sums only the consumption that happened while it ran.
 func (rt *runtime) readUsage(event hermes.Event) usageReading {
-	if event.Type != eventSessionUsage && event.Type != eventMessageComplete {
+	switch event.Type {
+	case hermes.CallEvent:
+		call, ok := hermes.DecodeCall(event.Payload)
+		if !ok {
+			return usageReading{}
+		}
+
+		report, ok := reportCall(call.Usage, call.ResponseID)
+		if !ok {
+			return usageReading{}
+		}
+
+		rt.reported += int64(report.used)
+
+		return usageReading{call: &report, window: int(rt.window)}
+	case eventSessionUsage, eventMessageComplete:
+	default:
 		return usageReading{}
 	}
 
@@ -83,10 +115,61 @@ func (rt *runtime) readUsage(event hermes.Event) usageReading {
 		return usageReading{}
 	}
 
-	reading := usageReading{current: current, consumed: current.Since(rt.usage)}
+	if current.ContextMax > 0 {
+		rt.window = current.ContextMax
+	}
+
+	reading := usageReading{current: current, consumed: current.Since(rt.usage), window: int(rt.window)}
 	rt.usage = current
 
+	// Hermes counts a response's prompt tokens when it records the response,
+	// after the plugin reported it, so the reported tokens cover a reading's
+	// consumption until the readings have recorded them.
+	reading.covered = reading.consumed.Prompt > 0 && rt.reported >= reading.consumed.Prompt
+	rt.reported = max(rt.reported-reading.consumed.Prompt, 0)
+
 	return reading
+}
+
+// reportCall is a response's call report from the Chat Completions usage its
+// gateway sent. The prompt tokens include those read from and written to a
+// prompt cache, so the uncached input is what remains of them once the cache
+// reads are known, less the cache writes where the gateway states them; the
+// completion tokens include reasoning. Hermes counts the prompt tokens as the
+// context the response leaves. A report stating no token, or no prompt, is no
+// usable report.
+func reportCall(usage hermes.ChatUsage, responseID string) (callReport, bool) {
+	figure := func(value *int64) *int {
+		if value == nil {
+			return nil
+		}
+
+		return new(int(*value))
+	}
+
+	report := callReport{usage: wire.CallUsage{ResponseID: responseID, OutputTokens: figure(usage.CompletionTokens)}}
+
+	if details := usage.PromptTokensDetails; details != nil {
+		report.usage.CachedReadTokens = figure(details.CachedTokens)
+		report.usage.CachedWriteTokens = figure(details.CacheWriteTokens)
+
+		if usage.PromptTokens != nil && details.CachedTokens != nil {
+			uncached := *usage.PromptTokens - *details.CachedTokens
+			if details.CacheWriteTokens != nil {
+				uncached -= *details.CacheWriteTokens
+			}
+
+			if uncached >= 0 {
+				report.usage.InputTokens = new(int(uncached))
+			}
+		}
+	}
+
+	if usage.PromptTokens != nil {
+		report.used = int(*usage.PromptTokens)
+	}
+
+	return report, report.used > 0 && report.usage.Known()
 }
 
 // bearsWork reports whether an event is native work a lifecycle cycle must
@@ -182,11 +265,23 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentThoughtText(thought)))
 		}
 
-		errs = append(errs, s.emitResponseUsage(ctx, reading))
+		errs = append(errs, s.emitResponseUsage(ctx, state, reading))
 
 		return true, errors.Join(errs...)
 	case eventSessionUsage:
-		return false, s.emitResponseUsage(ctx, reading)
+		return false, s.emitResponseUsage(ctx, state, reading)
+	case hermes.CallEvent:
+		if reading.call == nil {
+			return false, nil
+		}
+
+		if reading.window == 0 {
+			state.heldCalls = append(state.heldCalls, *reading.call)
+
+			return false, nil
+		}
+
+		return false, s.emitCall(ctx, *reading.call, reading.window)
 	case stopReasonError:
 		state.stopReason = stopReasonError
 		state.errorMessage = hermes.String(event.Payload, "message")
@@ -310,16 +405,31 @@ func contextTokens(reading usageReading) (int, bool) {
 	return int(reading.current.ContextUsed), true
 }
 
-// emitResponseUsage reports the context the responses a usage reading
-// recorded leave occupied. size is the context window the same reading
-// states, which Hermes sends whenever it sends the context.
-func (s *session) emitResponseUsage(ctx context.Context, reading usageReading) error {
+// emitResponseUsage reports the calls held for a context window, then the
+// context the responses a usage reading recorded leave occupied, unless call
+// reports already reported those responses. size is the context window the
+// same reading states, which Hermes sends whenever it sends the context.
+func (s *session) emitResponseUsage(ctx context.Context, state *cycleState, reading usageReading) error {
+	held := state.heldCalls
+	state.heldCalls = nil
+
+	for _, call := range held {
+		if err := s.emitCall(ctx, call, reading.window); err != nil {
+			return err
+		}
+	}
+
 	used, ok := contextTokens(reading)
-	if !ok {
+	if !ok || reading.covered {
 		return nil
 	}
 
 	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: int(reading.current.ContextMax), Used: used}})
+}
+
+// emitCall reports one model response with its breakdown.
+func (s *session) emitCall(ctx context.Context, call callReport, size int) error {
+	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: size, Used: call.used, Meta: call.usage.Apply(nil)}})
 }
 
 // promptUsage is a turn's summed consumption: the prompt tokens of every

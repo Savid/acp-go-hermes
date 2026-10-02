@@ -16,7 +16,9 @@ started over ACP can be continued natively with `hermes chat --cli --resume NATI
   prompt turns, permissions and elicitation, lifecycle stream, store mirror,
   replay, config options, and image input.
 - `internal/hermes`: WebSocket JSON-RPC client, HTTP session import/export,
-  and launch arguments.
+  launch arguments, and the embedded Hermes plugin (`plugin/`) that reports
+  each model call; `testdata/plugin_check.py` checks it against stand-in
+  Hermes modules.
 - `integration`: gated tests against the installed hermes.
 
 ## Commands
