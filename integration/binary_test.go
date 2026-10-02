@@ -22,9 +22,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func nativeHome(t *testing.T) string {
+// TestMain keeps every hermes the tests start from installing anything into
+// the install state and tools the test homes share.
+func TestMain(m *testing.M) {
+	if err := os.Setenv("HERMES_DISABLE_LAZY_INSTALLS", "1"); err != nil {
+		panic(err)
+	}
+
+	os.Exit(m.Run())
+}
+
+// testHome is an empty native home. Hermes selects its dependency environment
+// through the home's install state and finds its managed tools in the home's
+// store, so both are linked from ACP_GO_HERMES_HOME, else from ~/.hermes.
+func testHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
+	source := os.Getenv("ACP_GO_HERMES_HOME")
+	if source == "" {
+		user, err := os.UserHomeDir()
+		require.NoError(t, err)
+		source = filepath.Join(user, ".hermes")
+	}
+	for _, name := range []string{"installs", "tools"} {
+		if shared := filepath.Join(source, name); isDir(shared) {
+			require.NoError(t, os.Symlink(shared, filepath.Join(home, name)))
+		}
+	}
+
+	return home
+}
+
+// nativeHome is a test home holding the configuration and credentials of
+// ACP_GO_HERMES_HOME.
+func nativeHome(t *testing.T) string {
+	t.Helper()
+	home := testHome(t)
 	if source := os.Getenv("ACP_GO_HERMES_HOME"); source != "" {
 		for _, name := range []string{"config.yaml", "auth.json", ".env"} {
 			data, err := os.ReadFile(filepath.Join(source, name))
@@ -33,14 +66,6 @@ func nativeHome(t *testing.T) string {
 			}
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(home, name), data, 0o600))
-		}
-		// Hermes selects its dependency environment through the home's install
-		// state and finds its managed tools in the home's store, both of which
-		// a fresh home lacks.
-		for _, name := range []string{"installs", "tools"} {
-			if shared := filepath.Join(source, name); isDir(shared) {
-				require.NoError(t, os.Symlink(shared, filepath.Join(home, name)))
-			}
 		}
 	}
 
@@ -73,7 +98,7 @@ func TestNativeSmoke(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"acpgogo-smoke","context_length":128000}]}`))
 	}))
 	t.Cleanup(provider.Close)
-	home := t.TempDir()
+	home := testHome(t)
 	config := "model:\n  provider: custom\n  default: acpgogo-smoke\n  base_url: " + provider.URL + "/v1\n  context_length: 128000\n"
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0o600))
 	h := newHarness(t, hermesacp.WithHome(home), hermesacp.WithEnv(map[string]string{

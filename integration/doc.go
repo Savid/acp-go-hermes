@@ -6,8 +6,10 @@
 //
 // ACP_GO_HERMES_HARNESS_PATH selects the harness binary, which otherwise comes
 // from PATH; an absent binary skips.
-// ACP_GO_HERMES_HOME supplies native configuration and credentials copied into
-// a temporary home, with the install state and managed tools linked into it.
+// Each test runs hermes in a temporary home linked to the install state and
+// managed tools of ACP_GO_HERMES_HOME, else ~/.hermes, with lazy installs
+// disabled. ACP_GO_HERMES_HOME also supplies the native configuration and
+// credentials the live tests copy into their home.
 // ACP_GO_HERMES_MODEL selects the model for live tests. The call usage test
 // sends qwen/qwen3.8-flash to OpenRouter with OPENROUTER_API_KEY through a
 // local recording proxy.

@@ -1,8 +1,10 @@
 # acp-go-hermes
 
 `acp-go-hermes` exposes the [Hermes](https://github.com/NousResearch/hermes-agent) as an [Agent Client Protocol](https://agentclientprotocol.com) agent.
-It launches one `hermes serve` process per ACP session, connects to its
+It launches one `hermes serve --isolated` process per ACP session, connects to its
 authenticated loopback WebSocket, and streams ACP session updates back to the client.
+`--isolated` starts each session's backend beside any `hermes serve` the user
+already runs instead of attaching to it.
 
 hermes inherits the adapter's environment and keeps sessions in its own home. A
 session started over ACP can be continued natively:
@@ -23,8 +25,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-`hermes` is found on `PATH` or named with `-path`. Per-call usage needs
-0.21.5 or later.
+`hermes` 0.21.5 or later is required, found on `PATH` or named with `-path`.
 
 ## Run
 

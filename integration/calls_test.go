@@ -213,10 +213,8 @@ func TestNativeCallUsage(t *testing.T) {
 	config := "model:\n  provider: acpgo-gateway\n  default: " + callUsageModel + "\nproviders:\n  acpgo-gateway:\n    name: acpgo-gateway\n    api: " + server.URL + "/v1\n    api_mode: chat_completions\n    key_env: OPENROUTER_API_KEY\n"
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0o600))
 
-	// A launch that finishes a pending source update in a fresh home rewrites
-	// the install's shared launchers to that home's interpreter.
 	h := newHarness(t, hermesacp.WithHome(home), hermesacp.WithEnv(map[string]string{
-		"OPENROUTER_API_KEY": key, "HERMES_YOLO_MODE": "1", "HERMES_DISABLE_LAZY_INSTALLS": "1",
+		"OPENROUTER_API_KEY": key, "HERMES_YOLO_MODE": "1",
 	}))
 	h.initialize(withLifecycle())
 	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, hermesacp.WithSessionRawEvents(true)))
