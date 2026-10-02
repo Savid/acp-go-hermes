@@ -1,8 +1,10 @@
 # acp-go-hermes
 
 `acp-go-hermes` exposes the [Hermes](https://github.com/NousResearch/hermes-agent) as an [Agent Client Protocol](https://agentclientprotocol.com) agent.
-It launches one `hermes serve` process per ACP session, connects to its
+It launches one `hermes serve --isolated` process per ACP session, connects to its
 authenticated loopback WebSocket, and streams ACP session updates back to the client.
+`--isolated` starts each session's backend beside any `hermes serve` the user
+already runs instead of attaching to it.
 
 hermes inherits the adapter's environment and keeps sessions in its own home. A
 session started over ACP can be continued natively:
@@ -23,7 +25,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-Verified against `hermes` 0.21.3, found on `PATH` or named with `-path`.
+`hermes` 0.21.5 or later is required, found on `PATH` or named with `-path`.
 
 ## Run
 
@@ -102,13 +104,63 @@ Image output is not advertised.
 
 ### Usage
 
-Each `usage_update` reports the context Hermes counts after the provider
-responses it last recorded (`used`) against the model's context window
-(`size`); the prompt result's `usage` sums the turn's responses. Hermes's
-gateway events and persisted messages carry neither the id the model gateway
-returned for a response nor a per-response token breakdown, so message and
-thought chunks carry no `messageId` and usage updates carry no
-`acp-go-core` `wire.CallUsage` breakdown.
+Each launch asks `hermes config path` which home Hermes uses, the active
+profile's when one is set, and writes the adapter's Hermes plugin there as
+`plugins/acp-go-hermes/`. When that home's `config.yaml` neither enables nor
+disables the plugin, the gateway enables it through Hermes's plugin manager,
+which records it in `plugins.enabled`; listing it in `plugins.disabled` turns
+it off. The first enable in a home also has Hermes's plugin manager record its
+plugin selection and nudge a running `hermes gateway` to rediscover its
+plugins. Every Hermes process using the home then loads the plugin, but it
+registers only where `ACP_GO_HERMES_CALL_REPORTS=1`, which the adapter sets for
+the `hermes serve` it starts, and reports only from a process whose gateway
+server is running. A launch that cannot resolve the home or write the plugin
+logs a warning and runs without call reports.
+
+The plugin wraps Hermes's `llm_execution` middleware. For each Chat Completions
+response of the session's own conversation, it sends the gateway's response id
+and the usage members the gateway returned over the session's gateway
+connection, ahead of the native events that follow from that response. Each
+such response yields one `usage_update`. `used` is the context Hermes counts
+after it, and `size` is the context window of the model that served it. Its
+`_meta["acp-go.dev/callUsage"]` carries the `acp-go-core` `wire.CallUsage`
+breakdown, with only the members the gateway sent. Each figure is read from
+the members Hermes's usage normalization reads, the first non-zero one, else a
+reported zero:
+
+- prompt: `prompt_tokens`, then `input_tokens`.
+- `cachedReadTokens`: `prompt_tokens_details.cached_tokens`, then
+  `cache_read_input_tokens`, `prompt_cache_hit_tokens`, `cached_tokens`.
+- `cachedWriteTokens`: `prompt_tokens_details.cache_write_tokens`, then
+  `prompt_tokens_details.cache_creation_input_tokens`,
+  `cache_creation_input_tokens`, `cache_write_tokens`.
+- `outputTokens`: `completion_tokens`, then `output_tokens`, reasoning included.
+- `inputTokens` is the prompt less the cache reads, and less the cache writes
+  where sent, when the gateway sent both the prompt and the cache reads and the
+  difference is not negative.
+- `used` is the prompt, or the cache tokens when they exceed it, as Hermes
+  counts the uncached input plus both cache buckets.
+- `responseId` is the gateway's id. It is absent when the gateway sent none,
+  so Hermes's own `stream-…` and partial-stream ids are never reported.
+
+Every attempt of a retried request is its own call. A response that arrives
+before a usage reading has stated its model's context window waits for the
+first reading that does; one whose window no reading of its cycle states
+reports nothing. An empty report, or a response after a cancel, reports
+nothing.
+
+Covered calls are the session conversation's main model calls on the Chat
+Completions wire. Auxiliary calls (title generation, compression summaries,
+vision and other side tasks), background review forks and delegated subagents
+are not reported. Neither are responses on other wires or ones whose usage a
+native adapter assembled. A `session.usage` or `message.complete` reading
+whose `prompt` counter moved by exactly the prompts of a run of consecutive
+reported calls reports nothing more; any other reading that moved the counter
+reports its context without a breakdown, so a response no call report covers
+still reports. The prompt result's `usage` sums Hermes's counters for the turn.
+
+Message and thought chunks carry no `messageId`: the id reaches the plugin only
+once the response has finished streaming.
 
 ### Session store
 

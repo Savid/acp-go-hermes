@@ -16,7 +16,9 @@ started over ACP can be continued natively with `hermes chat --cli --resume NATI
   prompt turns, permissions and elicitation, lifecycle stream, store mirror,
   replay, config options, and image input.
 - `internal/hermes`: WebSocket JSON-RPC client, HTTP session import/export,
-  and launch arguments.
+  launch arguments, and the embedded Hermes plugin (`plugin/`) that reports
+  each model call; `testdata/plugin_check.py` checks it against stand-in
+  Hermes modules.
 - `integration`: gated tests against the installed hermes.
 
 ## Commands
@@ -42,8 +44,9 @@ spends model tokens and requires explicit operator intent.
 - Shared family behavior comes from `github.com/savid/acp-go-core`; never copy
   it here.
 - The adapter does no isolation: hermes inherits the process environment, the
-  agent overlay, then the session env, then the adapter-owned home and
-  gateway token. Only `ACP_GO_HERMES_INTERNAL_*` markers are dropped.
+  agent overlay, then the session env, then the adapter-owned home, gateway
+  token and `ACP_GO_HERMES_CALL_REPORTS`. Only `ACP_GO_HERMES_INTERNAL_*`
+  markers are dropped.
 - Native state is never deleted. The session store is the durability
   boundary; Hermes's own database is the native copy.
 - Unit tests never require an installed hermes: the test binary doubles as a

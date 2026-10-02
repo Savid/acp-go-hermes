@@ -53,10 +53,13 @@ func NewEndpoint() (Endpoint, error) {
 	return Endpoint{URL: "http://" + address, Token: hex.EncodeToString(secret[:])}, nil
 }
 
+// Args starts the session's own serve process on the endpoint's port.
+// --isolated keeps it from attaching to, or being refused by, the backend
+// another hermes serve already runs for this user.
 func (e Endpoint) Args() []string {
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(e.URL, "http://"))
 
-	return []string{"serve", "--host", "127.0.0.1", "--port", port}
+	return []string{"serve", "--isolated", "--host", "127.0.0.1", "--port", port}
 }
 
 // Connect retries only the startup connection; the caller bounds readiness.

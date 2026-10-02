@@ -746,7 +746,7 @@ func TestBackgroundPublicationAllowsCancelCallback(t *testing.T) {
 	rt := s.runtime
 	s.mu.Unlock()
 	a.attach(&cancellingBackgroundClient{recorder: rec, agent: a}, nil)
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)}, nil)
 	a.attach(rec, nil)
 	s.mu.Lock()
 	c := s.cycle
@@ -754,7 +754,7 @@ func TestBackgroundPublicationAllowsCancelCallback(t *testing.T) {
 	require.NotNil(t, c)
 	require.NoError(t, s.cycleFailure(c))
 	require.True(t, s.cycleCancelled(c))
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 }
 
 func TestCancelAgentOriginResolvesDialogsAndSettlesCancelled(t *testing.T) {
@@ -773,7 +773,7 @@ func TestCancelAgentOriginResolvesDialogsAndSettlesCancelled(t *testing.T) {
 	s.mu.Lock()
 	rt := s.runtime
 	s.mu.Unlock()
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)}, nil)
 	s.mu.Lock()
 	c := s.cycle
 	s.mu.Unlock()
@@ -795,7 +795,7 @@ func TestCancelAgentOriginResolvesDialogsAndSettlesCancelled(t *testing.T) {
 	prompt.Meta = promptMeta(1)
 	_, err = a.Prompt(t.Context(), prompt)
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 	s.mu.Lock()
 	active := s.cycle
 	s.mu.Unlock()
@@ -846,7 +846,7 @@ func TestBackgroundReservationRefusesConcurrentPrompt(t *testing.T) {
 	defer release()
 	done := make(chan struct{})
 	go func() {
-		s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageStart})
+		s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageStart}, nil)
 		close(done)
 	}()
 	select {
@@ -868,7 +868,7 @@ func TestBackgroundReservationRefusesConcurrentPrompt(t *testing.T) {
 	<-done
 	a.attach(rec, nil)
 	require.NoError(t, a.Cancel(t.Context(), wire.CancelRequest(created.SessionId)))
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 }
 
 func TestQueuedRequestWaitsWhilePriorNativeWorkDrains(t *testing.T) {
@@ -893,7 +893,7 @@ func TestQueuedRequestWaitsWhilePriorNativeWorkDrains(t *testing.T) {
 	s.turn = pending
 	rt := s.runtime
 	s.mu.Unlock()
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)}, nil)
 	s.mu.Lock()
 	c := s.cycle
 	s.mu.Unlock()
@@ -904,7 +904,7 @@ func TestQueuedRequestWaitsWhilePriorNativeWorkDrains(t *testing.T) {
 	require.ErrorIs(t, queuedCtx.Err(), context.Canceled)
 	require.True(t, s.cycleCancelled(&pending.cycle))
 	require.True(t, s.cycleCancelled(c))
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 	require.False(t, pending.accepted)
 	s.mu.Lock()
 	s.turn = nil
@@ -933,7 +933,7 @@ func TestRuntimeLossSettlesBackgroundBeforeQueuedRequest(t *testing.T) {
 	s.turn = pending
 	rt := s.runtime
 	s.mu.Unlock()
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)}, nil)
 	s.mu.Lock()
 	c := s.cycle
 	s.mu.Unlock()
@@ -988,14 +988,14 @@ func TestTerminalPublicationCannotInterruptNextCycle(t *testing.T) {
 	s.mu.Unlock()
 	terminalClient := &cancellingBackgroundClient{recorder: rec, agent: a, terminalOnly: true}
 	a.attach(terminalClient, nil)
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: "message.delta", Payload: json.RawMessage(`{"text":"background"}`)}, nil)
 	s.mu.Lock()
 	c := s.cycle
 	s.mu.Unlock()
 	require.NotNil(t, c)
 	require.NoError(t, s.cycleFailure(c))
 	require.False(t, s.cycleCancelled(c))
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 	require.False(t, s.cycleCancelled(c))
 	require.True(t, terminalClient.terminalCalled)
 	s.callbacks.Wait()
@@ -1024,7 +1024,7 @@ func TestTerminalCancelStillCancelsQueuedRequest(t *testing.T) {
 	s.turn = pending
 	rt := s.runtime
 	s.mu.Unlock()
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 41, Type: "message.delta", Payload: json.RawMessage(`{"text":"prior work"}`)}, nil)
 	s.mu.Lock()
 	c := s.cycle
 	s.mu.Unlock()
@@ -1032,7 +1032,7 @@ func TestTerminalCancelStillCancelsQueuedRequest(t *testing.T) {
 	require.False(t, pending.accepted)
 	require.Equal(t, "prior work", agentText(rec.snapshot()))
 	a.attach(&cancellingBackgroundClient{recorder: rec, agent: a, terminalOnly: true}, nil)
-	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{SessionID: rt.liveID, InboundSequence: 42, Type: eventMessageComplete, Payload: json.RawMessage(`{"status":"complete"}`)}, nil)
 	require.ErrorIs(t, queuedCtx.Err(), context.Canceled)
 	require.True(t, s.cycleCancelled(&pending.cycle))
 	require.False(t, s.cycleCancelled(c))

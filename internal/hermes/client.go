@@ -25,6 +25,7 @@ const (
 	fieldID        = "id"
 	fieldJSONRPC   = "jsonrpc"
 	fieldResult    = "result"
+	fieldKey       = "key"
 
 	// readLimitBytes caps a single inbound gateway frame. It must comfortably
 	// exceed the advertised rawEvent maxBytes (64 KiB) so an oversize native
@@ -697,7 +698,6 @@ func (c *Client) ModelOptions(ctx context.Context, liveSessionID string) (ModelO
 	return out, err
 }
 
-//nolint:goconst // Wire keys remain adjacent to this protocol method for auditability.
 func (c *Client) SetModel(ctx context.Context, liveSessionID string, value string) error {
 	var out struct {
 		Key             string `json:"key"`
@@ -714,7 +714,7 @@ func (c *Client) SetModel(ctx context.Context, liveSessionID string, value strin
 
 	err = c.Call(ctx, "config.set", map[string]any{
 		fieldSessionID:            liveSessionID,
-		"key":                     "model",
+		fieldKey:                  "model",
 		"value":                   command,
 		"confirm_expensive_model": true,
 	}, &out)
@@ -745,7 +745,7 @@ func (c *Client) SetReasoning(ctx context.Context, liveSessionID string, value s
 
 	err := c.Call(ctx, "config.set", map[string]any{
 		fieldSessionID: liveSessionID,
-		"key":          valReasoning,
+		fieldKey:       valReasoning,
 		"value":        value,
 	}, &out)
 	if err != nil {
@@ -766,7 +766,7 @@ func (c *Client) Reasoning(ctx context.Context, liveSessionID string) (string, e
 		Value string `json:"value"`
 	}
 
-	err := c.Call(ctx, "config.get", map[string]any{fieldSessionID: liveSessionID, "key": valReasoning}, &out)
+	err := c.Call(ctx, "config.get", map[string]any{fieldSessionID: liveSessionID, fieldKey: valReasoning}, &out)
 	if err != nil {
 		return "", err
 	}
