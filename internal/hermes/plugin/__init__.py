@@ -24,7 +24,7 @@ def register(ctx):
     ctx.register_middleware("llm_execution", report_call)
 
 
-def report_call(request, next_call, session_id="", task_id="", api_mode="", **_context):
+def report_call(request, next_call, session_id="", task_id="", api_mode="", model="", **_context):
     """Run the provider call once and return its response untouched.
 
     The gateway runs a session's turns with the session key as the task id; review forks
@@ -36,6 +36,7 @@ def report_call(request, next_call, session_id="", task_id="", api_mode="", **_c
             report = call_report(response)
             if report is not None:
                 report["session_id"] = session_id
+                report["model"] = model
                 broadcast_plugin_event(PLUGIN_ID, CALL_EVENT, report)
         except Exception:
             pass

@@ -82,9 +82,10 @@ func TestReadPluginState(t *testing.T) {
 func TestDecodeCall(t *testing.T) {
 	t.Parallel()
 
-	call, ok := DecodeCall([]byte(`{"session_id":"s1","response_id":"gen-1","usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":null},"cost":0.1}}`))
+	call, ok := DecodeCall([]byte(`{"session_id":"s1","model":"m1","response_id":"gen-1","usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":null},"cost":0.1}}`))
 	require.True(t, ok)
 	require.Equal(t, "s1", call.SessionID)
+	require.Equal(t, "m1", call.Model)
 	require.Equal(t, "gen-1", call.ResponseID)
 	require.Equal(t, int64(10), *call.Usage.PromptTokens)
 	require.Equal(t, int64(5), *call.Usage.CompletionTokens)

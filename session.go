@@ -78,13 +78,13 @@ type runtime struct {
 	controlsDone chan struct{}
 	// nativeID is the durable conversation key the plugin's call reports name.
 	nativeID string
-	// usage is the gateway's latest usage reading, window the latest context
-	// window a reading stated, and reported the prompt tokens of the calls the
-	// plugin reported that no reading has recorded yet; only the event pump
-	// reads and writes them.
+	// usage is the gateway's latest usage reading, window the latest reading
+	// that stated a context window, and reported the prompt tokens, in report
+	// order, of the calls the plugin reported that no reading has recorded
+	// yet; only the event pump reads and writes them.
 	usage    hermes.Usage
-	window   int64
-	reported int64
+	window   hermes.Usage
+	reported []int64
 }
 
 type cycle struct {

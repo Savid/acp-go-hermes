@@ -65,8 +65,21 @@ type fakeSession struct {
 	usage      fakeUsage
 }
 
-// fakeContextWindow is the context window the fake reports for every model.
-const fakeContextWindow = 1000
+// fakeContextWindow is the context window the fake reports for every model
+// but fakeWideModel, whose window is fakeWideWindow.
+const (
+	fakeContextWindow = 1000
+	fakeWideModel     = "text-only"
+	fakeWideWindow    = 4000
+)
+
+func fakeWindow(model string) int64 {
+	if model == fakeWideModel {
+		return fakeWideWindow
+	}
+
+	return fakeContextWindow
+}
 
 // fakeUsage keeps a session's usage as Hermes's agent does: cumulative token
 // counters, and the prompt tokens of the last response with usage as its
@@ -104,17 +117,18 @@ func (u *fakeUsage) compact() {
 	u.context = -1
 }
 
-// wire renders the usage block as the gateway does: the context fields only
-// while a response has reported the context and the window is known.
-func (u *fakeUsage) wire() map[string]any {
+// wire renders the usage block of an agent running model as the gateway
+// does: the context fields only while a response has reported the context
+// and the window is known.
+func (u *fakeUsage) wire(model string) map[string]any {
 	block := map[string]any{
-		"model": "vision", "input": u.prompt, "output": u.completion, "reasoning": 0, "prompt": u.prompt,
+		"model": model, "input": u.prompt, "output": u.completion, "reasoning": 0, "prompt": u.prompt,
 		"completion": u.completion, "total": u.total, "calls": u.calls, "compressions": u.compressions,
 	}
 	if u.context > 0 && !u.unsized {
 		block["context_used"] = u.context
-		block["context_max"] = fakeContextWindow
-		block["context_percent"] = u.context * 100 / fakeContextWindow
+		block["context_max"] = fakeWindow(model)
+		block["context_percent"] = u.context * 100 / fakeWindow(model)
 		block["context_source"] = "provider_usage"
 		block["context_estimated"] = false
 	}
@@ -406,7 +420,7 @@ func (g *fakeGateway) togglePlugin(params map[string]any) (any, string) {
 // usageEvent is a session.usage tick with the session's current usage.
 func (s *fakeSession) usageEvent(live string, emit func(string, string, any)) {
 	s.mu.Lock()
-	block := s.usage.wire()
+	block := s.usage.wire(s.model)
 	s.mu.Unlock()
 	emit(live, eventSessionUsage, map[string]any{"usage": block})
 }
@@ -506,6 +520,16 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 		s.report(emit, "gen-rejected", chatUsage(1000, 0, 0, 0))
 		s.report(emit, "gen-accepted", chatUsage(1000, 900, 0, 20))
 		final = func(u *fakeUsage) { u.respond(1000, 20) }
+	case "CALLFALLBACK":
+		// Hermes rejects a response and accepts its retry; a later response
+		// arrives on a wire the plugin does not report.
+		s.report(emit, "gen-rejected", chatUsage(1000, 0, 0, 0))
+		s.report(emit, "gen-accepted", chatUsage(1000, 900, 0, 20))
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		s.record(func(u *fakeUsage) { u.respond(900, 15) })
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.respond(950, 5) }
 	case "CALLFOREIGN":
 		// A review fork or delegated child shares the process but not the
 		// conversation; its reports name another session.
@@ -552,7 +576,7 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 // response whose gateway sent none.
 func (s *fakeSession) report(emit func(string, string, any), id string, usage map[string]any) {
 	s.mu.Lock()
-	payload := map[string]any{nativeSessionIDKey: s.id, "usage": usage}
+	payload := map[string]any{nativeSessionIDKey: s.id, "model": s.model, "usage": usage}
 	s.mu.Unlock()
 	if id != "" {
 		payload["response_id"] = id
@@ -598,7 +622,7 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 		}
 		status = statusInterrupted
 	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW",
-		"CALLS", "CALLRACE", "CALLRETRY", "CALLFOREIGN", "CALLEMPTY", "CALLSLOW":
+		"CALLS", "CALLRACE", "CALLRETRY", "CALLFALLBACK", "CALLFOREIGN", "CALLEMPTY", "CALLSLOW":
 		var running bool
 		if final, status, running = s.usageScript(ctx, live, prompt, emit); !running {
 			return
@@ -664,7 +688,7 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 	if status != statusInterrupted {
 		final(&s.usage)
 	}
-	usage := s.usage.wire()
+	usage := s.usage.wire(s.model)
 	s.mu.Unlock()
 	emit(live, eventMessageComplete, map[string]any{fieldText: text, "status": status, "usage": usage})
 

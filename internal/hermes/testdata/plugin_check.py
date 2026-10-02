@@ -48,7 +48,7 @@ def load_plugin(directory):
 
 
 USAGE = {"prompt_tokens": 1000, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 0}}
-OWN = {"session_id": "s1", "task_id": "s1", "api_mode": "chat_completions"}
+OWN = {"session_id": "s1", "task_id": "s1", "api_mode": "chat_completions", "model": "m1"}
 
 
 class Response:
@@ -81,14 +81,14 @@ class PluginChecks(unittest.TestCase):
 
     def test_reports_id_and_sent_members(self):
         reports = self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
-        self.assertEqual([{"session_id": "s1", "response_id": "gen-1", "usage": USAGE}], reports)
+        self.assertEqual([{"session_id": "s1", "model": "m1", "response_id": "gen-1", "usage": USAGE}], reports)
         self.assertEqual(("acp-go-hermes", "call"), broadcasts[0][:2])
 
     def test_drops_ids_hermes_made(self):
         for made in ("stream-" + str(uuid.uuid4()), "partial-stream-stub", "", None):
             broadcasts.clear()
             reports = self.run_call(Response(made, CompletionUsage(**USAGE)))
-            self.assertEqual([{"session_id": "s1", "usage": USAGE}], reports, made)
+            self.assertEqual([{"session_id": "s1", "model": "m1", "usage": USAGE}], reports, made)
 
     def test_keeps_gateway_ids_resembling_the_fallback(self):
         reports = self.run_call(Response("stream-not-a-uuid", CompletionUsage(**USAGE)))

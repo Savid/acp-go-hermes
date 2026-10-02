@@ -106,17 +106,18 @@ Image output is not advertised.
 Each launch writes the adapter's Hermes plugin into the native home as
 `plugins/acp-go-hermes/` and, when `config.yaml` neither enables nor disables
 it, has the gateway enable it through Hermes's plugin manager, which records it
-in `plugins.enabled`. Listing it in `plugins.disabled` turns it off. The plugin
-needs `hermes` 0.21.5 or later.
+in `plugins.enabled`, so every Hermes process using that home loads it.
+Listing it in `plugins.disabled` turns it off.
 
 The plugin wraps Hermes's `llm_execution` middleware. For each Chat Completions
 response of the session's own conversation, it sends the gateway's response id
 and the usage members the gateway returned over the session's gateway
 connection, ahead of the native events that follow from that response. Each
 such response yields one `usage_update`. `used` is the response's prompt
-tokens, the context Hermes counts after it, and `size` is the model's context
-window. Its `_meta["acp-go.dev/callUsage"]` carries the `acp-go-core`
-`wire.CallUsage` breakdown, with only the members the gateway sent:
+tokens, the context Hermes counts after it, and `size` is the context window
+of the model that served it. Its `_meta["acp-go.dev/callUsage"]` carries the
+`acp-go-core` `wire.CallUsage` breakdown, with only the members the gateway
+sent:
 
 - `inputTokens` is `prompt_tokens` less `prompt_tokens_details.cached_tokens`,
   and less `cache_write_tokens` where sent.
@@ -127,8 +128,9 @@ window. Its `_meta["acp-go.dev/callUsage"]` carries the `acp-go-core`
   so Hermes's own `stream-…` and partial-stream ids are never reported.
 
 Every attempt of a retried request is its own call. A response that arrives
-before Hermes has stated the context window waits for the usage reading that
-states it. An empty report, or a response after a cancel, reports nothing.
+before Hermes has stated its model's context window waits for the usage
+reading that states it. An empty report, or a response after a cancel,
+reports nothing.
 
 Covered calls are the session conversation's main model calls on the Chat
 Completions wire. Auxiliary calls (title generation, compression summaries,

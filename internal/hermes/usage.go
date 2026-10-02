@@ -8,16 +8,18 @@ import "encoding/json"
 // the agent's last provider response, the figure Hermes compacts against; it
 // is absent before a response reports usage, after a compaction or a
 // response whose usage was all zero until the next response reports some, and
-// while the context window is unknown.
+// while the context window is unknown. ContextMax is the window of Model, the
+// model the agent runs.
 //
 //nolint:tagliatelle // Hermes uses context_used and context_max on the wire.
 type Usage struct {
-	Prompt      int64 `json:"prompt"`
-	Completion  int64 `json:"completion"`
-	Reasoning   int64 `json:"reasoning"`
-	Total       int64 `json:"total"`
-	ContextUsed int64 `json:"context_used"`
-	ContextMax  int64 `json:"context_max"`
+	Model       string `json:"model"`
+	Prompt      int64  `json:"prompt"`
+	Completion  int64  `json:"completion"`
+	Reasoning   int64  `json:"reasoning"`
+	Total       int64  `json:"total"`
+	ContextUsed int64  `json:"context_used"`
+	ContextMax  int64  `json:"context_max"`
 }
 
 // DecodeUsage reads the usage member of a session.usage or message.complete

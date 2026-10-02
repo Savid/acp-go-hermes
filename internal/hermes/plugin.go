@@ -152,13 +152,14 @@ func (c *Client) EnablePlugin(ctx context.Context) error {
 }
 
 // Call is one model response the plugin reported: the native session whose
-// conversation received it, the id its gateway returned when the gateway sent
-// one Hermes did not replace, and the Chat Completions usage members the
-// gateway sent.
+// conversation received it, the model the agent sent the request to, the id
+// its gateway returned when the gateway sent one Hermes did not replace, and
+// the Chat Completions usage members the gateway sent.
 //
 //nolint:tagliatelle // the plugin writes Hermes's snake_case member names.
 type Call struct {
 	SessionID  string    `json:"session_id"`
+	Model      string    `json:"model"`
 	ResponseID string    `json:"response_id"`
 	Usage      ChatUsage `json:"usage"`
 }

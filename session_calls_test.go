@@ -82,6 +82,11 @@ func TestCallReportsCarryTheBreakdown(t *testing.T) {
 			{ResponseID: "gen-rejected", InputTokens: new(1000), CachedReadTokens: new(0), CachedWriteTokens: new(0), OutputTokens: new(0)},
 			{ResponseID: "gen-accepted", InputTokens: new(100), CachedReadTokens: new(900), CachedWriteTokens: new(0), OutputTokens: new(20)},
 		}, &acp.Usage{InputTokens: 1000, OutputTokens: 20, TotalTokens: 1020}},
+		"response no call report covers after a rejected attempt": {"CALLFALLBACK", []acp.SessionUsageUpdate{{Size: 1000, Used: 1000}, {Size: 1000, Used: 1000}, {Size: 1000, Used: 900}, {Size: 1000, Used: 950}}, []*wire.CallUsage{
+			{ResponseID: "gen-rejected", InputTokens: new(1000), CachedReadTokens: new(0), CachedWriteTokens: new(0), OutputTokens: new(0)},
+			{ResponseID: "gen-accepted", InputTokens: new(100), CachedReadTokens: new(900), CachedWriteTokens: new(0), OutputTokens: new(20)},
+			nil, nil,
+		}, &acp.Usage{InputTokens: 2850, OutputTokens: 40, TotalTokens: 2890}},
 		"another conversation's response": {"CALLFOREIGN", []acp.SessionUsageUpdate{{Size: 1000, Used: 10}}, []*wire.CallUsage{
 			{ResponseID: "gen-own", InputTokens: new(10), CachedReadTokens: new(0), CachedWriteTokens: new(0), OutputTokens: new(5)},
 		}, &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
@@ -103,6 +108,31 @@ func TestCallReportsCarryTheBreakdown(t *testing.T) {
 			require.Equal(t, tc.usage, resp.Usage)
 		})
 	}
+}
+
+// TestCallReportStatesItsModelsWindow proves a call report states the context
+// window of the model that served it: after a model switch, the first
+// response waits for the reading that states the new model's window.
+func TestCallReportStatesItsModelsWindow(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "CALLS", nil)
+	require.NoError(t, err)
+
+	_, err = h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(session.SessionId, "fake/"+fakeWideModel))
+	require.NoError(t, err)
+
+	before := len(usageUpdates(h.rec.snapshot()))
+
+	_, err = h.prompt(session.SessionId, "CALLS", nil)
+	require.NoError(t, err)
+
+	updates := usageUpdates(h.rec.snapshot())[before:]
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: fakeWideWindow, Used: 1000}, {Size: fakeWideWindow, Used: 1120}, {Size: fakeWideWindow, Used: 1200}}, sizes(updates))
 }
 
 // TestCallReportPrecedesItsTools proves a response reported once the runtime
@@ -295,10 +325,10 @@ func TestCapturedCallReports(t *testing.T) {
 	require.Equal(t, sized, sizes(usageUpdates(updates)))
 	require.Equal(t, want, callUsages(t, updates))
 	require.Equal(t, []*wire.CallUsage{
-		{ResponseID: "gen-1790901785-49KwAHAIS25nhnegDA3d", InputTokens: new(608), CachedReadTokens: new(15360), CachedWriteTokens: new(0), OutputTokens: new(60)},
-		{ResponseID: "gen-1790901787-1gDpSSebiamqKh9ti4LB", InputTokens: new(166), CachedReadTokens: new(15872), CachedWriteTokens: new(0), OutputTokens: new(682)},
+		{ResponseID: "gen-1790905431-DFBUn237mC4NTPsf32na", InputTokens: new(7766), CachedReadTokens: new(8192), CachedWriteTokens: new(0), OutputTokens: new(355)},
+		{ResponseID: "gen-1790905436-gNlAAmhBvUpwTWAyPp1G", InputTokens: new(156), CachedReadTokens: new(15872), CachedWriteTokens: new(0), OutputTokens: new(713)},
 	}, want)
 	consumed := promptUsage(c.state.usage)
-	require.Equal(t, 32006, consumed.InputTokens, "the prompt response still sums Hermes's counters")
-	require.Equal(t, 742, consumed.OutputTokens)
+	require.Equal(t, 31986, consumed.InputTokens, "the prompt response still sums Hermes's counters")
+	require.Equal(t, 1068, consumed.OutputTokens)
 }
