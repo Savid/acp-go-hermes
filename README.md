@@ -23,8 +23,8 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-Verified against `hermes` 0.21.3, found on `PATH` or named with `-path`;
-per-call usage needs 0.21.5 or later.
+`hermes` is found on `PATH` or named with `-path`. Per-call usage needs
+0.21.5 or later.
 
 ## Run
 
