@@ -36,6 +36,23 @@ const fakeHermesEnvReadyHold = "ACP_GO_HERMES_TEST_READY_HOLD"
 // asked to enable.
 const fakePluginToggles = "plugin-toggles"
 
+// fakeCallReportsEnv records the gateway's hermes.EnvCallReports value.
+const fakeCallReportsEnv = "call-reports-env"
+
+// fakeHome is the home hermes uses: HERMES_HOME, or the profile its
+// active_profile names when that profile exists.
+func fakeHome() string {
+	home := os.Getenv("HERMES_HOME")
+	if name, err := os.ReadFile(filepath.Join(home, "active_profile")); err == nil {
+		profile := filepath.Join(home, "profiles", strings.TrimSpace(string(name)))
+		if info, err := os.Stat(profile); err == nil && info.IsDir() {
+			return profile
+		}
+	}
+
+	return home
+}
+
 // heldAttachMarker is written into the home when the gateway takes an
 // attachment it will never answer, so a test knows the upload is in flight.
 const heldAttachMarker = "attach-held"
@@ -144,6 +161,13 @@ func fakeID() string {
 }
 
 func runFakeHermes(args []string) int {
+	home := fakeHome()
+	if len(args) == 2 && args[0] == "config" && args[1] == "path" {
+		fmt.Println(filepath.Join(home, "config.yaml"))
+
+		return 0
+	}
+
 	port := ""
 	for index, arg := range args {
 		if arg == "--port" && index+1 < len(args) {
@@ -153,8 +177,11 @@ func runFakeHermes(args []string) int {
 	if port == "" {
 		return 2
 	}
-	server := &fakeGateway{home: os.Getenv("HERMES_HOME"), sessions: make(map[string]*fakeSession)}
+	server := &fakeGateway{home: home, sessions: make(map[string]*fakeSession)}
 	if err := os.MkdirAll(server.home, 0o700); err != nil {
+		return 2
+	}
+	if err := os.WriteFile(filepath.Join(server.home, fakeCallReportsEnv), []byte(os.Getenv(hermes.EnvCallReports)), 0o600); err != nil {
 		return 2
 	}
 	mux := http.NewServeMux()

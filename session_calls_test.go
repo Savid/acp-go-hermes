@@ -209,42 +209,70 @@ func TestCancelledTurnReportsNoCallAfterCancel(t *testing.T) {
 }
 
 // TestPluginIsInstalledIntoTheHome proves every launch publishes the plugin
-// into the native home and asks the gateway to enable it only while
-// config.yaml lists it neither as enabled nor as disabled.
+// into the home hermes uses, the active profile's when one is set, starts the
+// gateway with call reports switched on, and asks it to enable the plugin
+// only while config.yaml lists it neither as enabled nor as disabled. A home
+// the plugin cannot be published into still starts the session.
 func TestPluginIsInstalledIntoTheHome(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
+		profile string
 		config  string
+		blocked bool
 		toggles string
 	}{
-		"no config":     {"", hermes.PluginName + "\n"},
-		"unlisted":      {"model:\n  default: vision\nplugins:\n  enabled: [other]\n", hermes.PluginName + "\n"},
-		"enabled":       {"plugins:\n  enabled:\n    - " + hermes.PluginName + "\n", ""},
-		"user disabled": {"plugins:\n  enabled: [" + hermes.PluginName + "]\n  disabled: [" + hermes.PluginName + "]\n", ""},
+		"no config":      {"", "", false, hermes.PluginName + "\n"},
+		"unlisted":       {"", "model:\n  default: vision\nplugins:\n  enabled: [other]\n", false, hermes.PluginName + "\n"},
+		"enabled":        {"", "plugins:\n  enabled:\n    - " + hermes.PluginName + "\n", false, ""},
+		"user disabled":  {"", "plugins:\n  disabled: [" + hermes.PluginName + "]\n", false, ""},
+		"active profile": {"work", "", false, hermes.PluginName + "\n"},
+		"unpublishable":  {"", "", true, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			home := filepath.Join(t.TempDir(), "home")
-			require.NoError(t, os.MkdirAll(home, 0o700))
+			root := filepath.Join(t.TempDir(), "home")
+			home := root
+			require.NoError(t, os.MkdirAll(root, 0o700))
+
+			if tc.profile != "" {
+				home = filepath.Join(root, "profiles", tc.profile)
+				require.NoError(t, os.MkdirAll(home, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "active_profile"), []byte(tc.profile+"\n"), 0o600))
+			}
 
 			if tc.config != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(tc.config), 0o600))
 			}
 
-			h := newHarness(t, WithHome(home))
+			if tc.blocked {
+				require.NoError(t, os.MkdirAll(filepath.Join(home, "plugins"), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(home, "plugins", hermes.PluginName), nil, 0o600))
+			}
+
+			h := newHarness(t, WithHome(root))
 			h.initialize()
 			h.newSession()
 
-			for _, file := range []string{"plugin.yaml", "__init__.py"} {
-				want, err := os.ReadFile(filepath.Join("internal", "hermes", "plugin", file))
-				require.NoError(t, err)
+			if !tc.blocked {
+				for _, file := range []string{"plugin.yaml", "__init__.py"} {
+					want, err := os.ReadFile(filepath.Join("internal", "hermes", "plugin", file))
+					require.NoError(t, err)
 
-				got, err := os.ReadFile(filepath.Join(home, "plugins", hermes.PluginName, file))
-				require.NoError(t, err)
-				require.Equal(t, string(want), string(got))
+					got, err := os.ReadFile(filepath.Join(home, "plugins", hermes.PluginName, file))
+					require.NoError(t, err)
+					require.Equal(t, string(want), string(got))
+				}
 			}
+
+			if tc.profile != "" {
+				require.NoDirExists(t, filepath.Join(root, "plugins"), "the root home is not the profile's")
+			}
+
+			reports, err := os.ReadFile(filepath.Join(home, fakeCallReportsEnv))
+			require.NoError(t, err)
+			require.Equal(t, "1", string(reports))
 
 			toggles, err := os.ReadFile(filepath.Join(home, fakePluginToggles))
 			if tc.toggles == "" {
@@ -255,6 +283,61 @@ func TestPluginIsInstalledIntoTheHome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHeldCallWaitsForItsWindow proves a call report that arrives before the
+// runtime knows its model's context window is released by the first reading
+// that states that window, not by a reading without one, such as a tick after
+// a compaction; a call whose window no reading states reports nothing.
+func TestHeldCallWaitsForItsWindow(t *testing.T) {
+	t.Parallel()
+
+	event := func(kind, sid string, payload any) hermes.Event {
+		data, err := json.Marshal(payload)
+		require.NoError(t, err)
+
+		return hermes.Event{Type: kind, SessionID: sid, Payload: data}
+	}
+	report := func(model string, prompt int) hermes.Event {
+		return event(hermes.CallEvent, "", map[string]any{
+			nativeSessionIDKey: "native", "model": model, "response_id": "gen-" + model,
+			"usage": map[string]any{"prompt_tokens": prompt, "completion_tokens": 20, "prompt_tokens_details": map[string]any{"cached_tokens": 0}},
+		})
+	}
+	tick := func(model string, prompt int, window int) hermes.Event {
+		usage := map[string]any{"model": model, "prompt": prompt, "completion": 20, "total": prompt + 20}
+		if window > 0 {
+			usage["context_used"], usage["context_max"] = prompt, window
+		}
+
+		return event(eventSessionUsage, "live", map[string]any{"usage": usage})
+	}
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: "native", nativeID: "native"}
+	rt := &runtime{liveID: "live", nativeID: "native"}
+	c := &cycle{}
+
+	project := func(event hermes.Event) []acp.SessionUsageUpdate {
+		call, ok := rt.owns(event)
+		require.True(t, ok)
+
+		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event, call))
+		require.NoError(t, err)
+
+		return sizes(usageUpdates(rec.snapshot()))
+	}
+
+	project(report("m1", 1000))
+	require.Empty(t, project(tick("m1", 1000, 0)), "a reading without the window releases nothing")
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 4000, Used: 1000}}, project(tick("m1", 1000, 4000)))
+
+	project(report("m2", 1500))
+	require.Len(t, project(tick("m1", 1000, 4000)), 1, "another model's window releases nothing")
+	require.Len(t, project(tick("m2", 2500, 0)), 1)
+	require.Len(t, c.state.heldCalls, 1)
 }
 
 // TestCapturedCallReports replays a tool turn captured from hermes serve
@@ -305,9 +388,10 @@ func TestCapturedCallReports(t *testing.T) {
 	c := &cycle{}
 
 	for _, event := range fixture.Live {
-		require.True(t, rt.owns(event), event.Type)
+		call, ok := rt.owns(event)
+		require.True(t, ok, event.Type)
 
-		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event, call))
 		require.NoError(t, err)
 	}
 
@@ -315,10 +399,10 @@ func TestCapturedCallReports(t *testing.T) {
 	sized := make([]acp.SessionUsageUpdate, 0, len(fixture.Gateway))
 
 	for _, response := range fixture.Gateway {
-		report, ok := reportCall(response.Usage, response.ID)
+		report, ok := reportCall(hermes.Call{ResponseID: response.ID, Usage: response.Usage})
 		require.True(t, ok)
 		want = append(want, &report.usage)
-		sized = append(sized, acp.SessionUsageUpdate{Size: 1000000, Used: int(*response.Usage.PromptTokens)})
+		sized = append(sized, acp.SessionUsageUpdate{Size: 1000000, Used: int(*response.Usage.Tokens().Prompt)})
 	}
 
 	updates := rec.snapshot()
@@ -331,4 +415,40 @@ func TestCapturedCallReports(t *testing.T) {
 	consumed := promptUsage(c.state.usage)
 	require.Equal(t, 31986, consumed.InputTokens, "the prompt response still sums Hermes's counters")
 	require.Equal(t, 1068, consumed.OutputTokens)
+}
+
+// TestReportCallCountsAsHermesCounts proves a report's context is the prompt
+// Hermes records, its uncached input plus both cache buckets, and its
+// breakdown only states the uncached input arithmetic over reported figures
+// allows.
+func TestReportCallCountsAsHermesCounts(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		usage hermes.ChatUsage
+		used  int
+		call  wire.CallUsage
+	}{
+		"prompt includes the cache": {
+			hermes.ChatUsage{"prompt_tokens": 1200.0, "completion_tokens": 10.0, "cache_read_input_tokens": 1000.0, "cache_creation_input_tokens": 100.0},
+			1200, wire.CallUsage{InputTokens: new(100), CachedReadTokens: new(1000), CachedWriteTokens: new(100), OutputTokens: new(10)},
+		},
+		"prompt excludes the cache": {
+			hermes.ChatUsage{"prompt_tokens": 50.0, "completion_tokens": 10.0, "cache_read_input_tokens": 1000.0, "cache_creation_input_tokens": 100.0},
+			1100, wire.CallUsage{CachedReadTokens: new(1000), CachedWriteTokens: new(100), OutputTokens: new(10)},
+		},
+		"no cache figures": {
+			hermes.ChatUsage{"prompt_tokens": 300.0, "completion_tokens": 10.0},
+			300, wire.CallUsage{OutputTokens: new(10)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			report, ok := reportCall(hermes.Call{Usage: tc.usage})
+			require.True(t, ok)
+			require.Equal(t, tc.used, report.used)
+			require.Equal(t, tc.call, report.usage)
+		})
+	}
 }

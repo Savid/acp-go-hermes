@@ -143,7 +143,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		return nil, s.startFailure(ctx, err)
 	}
 
-	environment := s.agent.environment(s.options.Env, map[string]string{hermes.EnvSessionToken: endpoint.Token})
+	environment := s.agent.environment(s.options.Env, map[string]string{hermes.EnvSessionToken: endpoint.Token, hermes.EnvCallReports: "1"})
 	environment.ExtraPathDirs = s.options.ExtraPathDirs
 
 	env, err := environment.Build()
@@ -159,9 +159,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		return nil, s.startFailure(ctx, seedErr)
 	}
 
-	if publishErr := hermes.PublishPlugin(s.agentDir); publishErr != nil {
-		return nil, s.startFailure(ctx, publishErr)
-	}
+	pluginHome := s.publishPlugin(ctx, executable, env)
 
 	proc, err := process.Start(ctx, process.Request{Executable: executable, Args: endpoint.Args(), Env: env, Dir: s.cwd})
 	if err != nil {
@@ -218,7 +216,9 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 	}
 
 ready:
-	s.enablePlugin(readyCtx, client)
+	if pluginHome != "" {
+		s.enablePlugin(readyCtx, client, pluginHome)
+	}
 
 	readCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
@@ -257,13 +257,35 @@ ready:
 	return rt, nil
 }
 
+// publishPlugin writes the adapter's plugin into the home hermes resolves
+// for this launch, which follows the active profile, and returns that home.
+// A launch that cannot runs without call reports, and returns "": usage
+// readings then report each response's context alone.
+func (s *session) publishPlugin(ctx context.Context, executable string, env []string) string {
+	resolveCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
+	defer cancel()
+
+	home, err := hermes.NativeHome(resolveCtx, executable, env, s.cwd)
+	if err == nil {
+		err = hermes.PublishPlugin(home)
+	}
+
+	if err != nil {
+		s.agent.log.WarnContext(ctx, "hermes call reports unavailable", slog.String("reason", err.Error()))
+
+		return ""
+	}
+
+	return home
+}
+
 // enablePlugin has the gateway enable the adapter's plugin when config.yaml
-// does not list it yet, before any session exists on the gateway. A home that
-// disables it, or a gateway that cannot enable it, runs without call reports:
-// usage readings then report each response's context alone.
-func (s *session) enablePlugin(ctx context.Context, client *hermes.Client) {
-	state, err := hermes.ReadPluginState(s.agentDir)
-	if err == nil && state != hermes.PluginUnlisted {
+// under home does not list it yet, before any session exists on the gateway.
+// A home that disables it, or a gateway that cannot enable it, runs without
+// call reports.
+func (s *session) enablePlugin(ctx context.Context, client *hermes.Client, home string) {
+	listed, err := hermes.PluginListed(home)
+	if err == nil && listed {
 		return
 	}
 
@@ -427,17 +449,21 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	return rt, nil
 }
 
-// owns reports whether a gateway event belongs to the runtime's conversation.
-// Session events name its live id; the plugin's call reports, which Hermes
-// broadcasts without a session, name its native id in their payload.
-func (rt *runtime) owns(event hermes.Event) bool {
+// owns reports whether a gateway event belongs to the runtime's conversation,
+// with the decoded payload of a call report. Session events name its live id;
+// the plugin's call reports, which Hermes broadcasts without a session, name
+// its native id in their payload.
+func (rt *runtime) owns(event hermes.Event) (*hermes.Call, bool) {
 	if event.Type == hermes.CallEvent {
 		call, ok := hermes.DecodeCall(event.Payload)
+		if !ok || call.SessionID != rt.nativeID {
+			return nil, false
+		}
 
-		return ok && call.SessionID == rt.nativeID
+		return &call, true
 	}
 
-	return event.SessionID == rt.liveID
+	return nil, event.SessionID == rt.liveID
 }
 
 // pump preserves gateway order and drops records for every unbound live identity.
@@ -461,8 +487,12 @@ func (s *session) pump(ctx context.Context, rt *runtime) {
 				return
 			}
 
-			if delivery.Event != nil && rt.owns(*delivery.Event) {
-				s.handleEvent(ctx, rt, *delivery.Event)
+			if delivery.Event == nil {
+				continue
+			}
+
+			if call, ok := rt.owns(*delivery.Event); ok {
+				s.handleEvent(ctx, rt, *delivery.Event, call)
 			}
 		case <-ctx.Done():
 			s.runtimeEnded(ctx, rt)
@@ -472,7 +502,7 @@ func (s *session) pump(ctx context.Context, rt *runtime) {
 	}
 }
 
-func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Event) {
+func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Event, call *hermes.Call) {
 	s.emitRawEvent(ctx, event)
 	s.mu.Lock()
 	t, c, closing := s.turn, s.cycle, s.closing
@@ -484,7 +514,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		return
 	}
 
-	reading := rt.readUsage(event)
+	reading := rt.readUsage(event, call)
 
 	if event.Type == "request.cancel" {
 		id := rt.liveID + ":" + hermes.String(event.Payload, "id")

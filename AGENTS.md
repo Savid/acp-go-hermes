@@ -44,8 +44,9 @@ spends model tokens and requires explicit operator intent.
 - Shared family behavior comes from `github.com/savid/acp-go-core`; never copy
   it here.
 - The adapter does no isolation: hermes inherits the process environment, the
-  agent overlay, then the session env, then the adapter-owned home and
-  gateway token. Only `ACP_GO_HERMES_INTERNAL_*` markers are dropped.
+  agent overlay, then the session env, then the adapter-owned home, gateway
+  token and `ACP_GO_HERMES_CALL_REPORTS`. Only `ACP_GO_HERMES_INTERNAL_*`
+  markers are dropped.
 - Native state is never deleted. The session store is the durability
   boundary; Hermes's own database is the native copy.
 - Unit tests never require an installed hermes: the test binary doubles as a

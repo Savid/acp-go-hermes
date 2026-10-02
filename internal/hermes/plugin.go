@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -22,6 +24,11 @@ const PluginName = "acp-go-hermes"
 // CallEvent is the gateway event the plugin broadcasts for each model
 // response of a session's own conversation.
 const CallEvent = "plugin." + PluginName + ".call"
+
+// EnvCallReports, set to 1, makes the plugin register in the process: only
+// the hermes serve the adapter starts sets it, so every other Hermes process
+// sharing the home loads the plugin without reporting.
+const EnvCallReports = "ACP_GO_HERMES_CALL_REPORTS"
 
 //go:embed plugin/plugin.yaml plugin/__init__.py
 var pluginFiles embed.FS
@@ -87,29 +94,17 @@ func publishFile(path string, contents []byte) error {
 	return nil
 }
 
-// PluginState is how config.yaml under a home lists the plugin.
-type PluginState int
-
-const (
-	// PluginUnlisted is a plugin config.yaml neither enables nor disables.
-	PluginUnlisted PluginState = iota
-	// PluginEnabled is a plugin plugins.enabled lists and plugins.disabled does not.
-	PluginEnabled
-	// PluginDisabled is a plugin plugins.disabled lists, which Hermes honours
-	// over plugins.enabled.
-	PluginDisabled
-)
-
-// ReadPluginState reports how config.yaml under home lists the plugin. A home
-// without config.yaml lists nothing.
-func ReadPluginState(home string) (PluginState, error) {
+// PluginListed reports whether config.yaml under home names the plugin in
+// plugins.enabled or plugins.disabled. A home without config.yaml lists
+// nothing.
+func PluginListed(home string) (bool, error) {
 	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
 	if errors.Is(err, fs.ErrNotExist) {
-		return PluginUnlisted, nil
+		return false, nil
 	}
 
 	if err != nil {
-		return PluginUnlisted, fmt.Errorf("native config: %w", err)
+		return false, fmt.Errorf("native config: %w", err)
 	}
 
 	var config struct {
@@ -119,17 +114,32 @@ func ReadPluginState(home string) (PluginState, error) {
 		} `yaml:"plugins"`
 	}
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		return PluginUnlisted, fmt.Errorf("native config: %w", err)
+		return false, fmt.Errorf("native config: %w", err)
 	}
 
-	switch {
-	case slices.Contains(config.Plugins.Disabled, any(PluginName)):
-		return PluginDisabled, nil
-	case slices.Contains(config.Plugins.Enabled, any(PluginName)):
-		return PluginEnabled, nil
-	default:
-		return PluginUnlisted, nil
+	return slices.Contains(config.Plugins.Enabled, any(PluginName)) || slices.Contains(config.Plugins.Disabled, any(PluginName)), nil
+}
+
+// NativeHome is the home a hermes launched with env in dir uses: the
+// directory of the config file `hermes config path` names, which follows the
+// active profile.
+func NativeHome(ctx context.Context, executable string, env []string, dir string) (string, error) {
+	command := exec.CommandContext(ctx, executable, "config", "path")
+	command.Env, command.Dir = env, dir
+
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("native config path: %w", err)
 	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	path := strings.TrimSpace(lines[len(lines)-1])
+	if !filepath.IsAbs(path) || filepath.Base(path) != "config.yaml" {
+		return "", errors.New("native config path: unexpected output")
+	}
+
+	return filepath.Dir(path), nil
 }
 
 // EnablePlugin asks the gateway to enable the plugin through Hermes's own
@@ -164,22 +174,73 @@ type Call struct {
 	Usage      ChatUsage `json:"usage"`
 }
 
-// ChatUsage is a Chat Completions usage block. A nil member is one the
-// gateway did not send, or sent as null.
-//
-//nolint:tagliatelle // Chat Completions uses snake_case member names.
-type ChatUsage struct {
-	PromptTokens        *int64              `json:"prompt_tokens"`
-	CompletionTokens    *int64              `json:"completion_tokens"`
-	PromptTokensDetails *PromptTokenDetails `json:"prompt_tokens_details"`
+// ChatUsage is a Chat Completions usage block as the gateway sent it.
+type ChatUsage map[string]any
+
+// CallTokens are the token buckets Hermes reads from a Chat Completions usage
+// block. A nil bucket is one the gateway sent no figure for.
+type CallTokens struct {
+	Prompt     *int64
+	Output     *int64
+	CacheRead  *int64
+	CacheWrite *int64
 }
 
-// PromptTokenDetails splits the prompt tokens by prompt-cache use.
-//
-//nolint:tagliatelle // Chat Completions uses snake_case member names.
-type PromptTokenDetails struct {
-	CachedTokens     *int64 `json:"cached_tokens"`
-	CacheWriteTokens *int64 `json:"cache_write_tokens"`
+// Tokens reads the buckets from the members Hermes's usage normalization
+// reads on the Chat Completions wire, in its order: each bucket is the first
+// non-zero figure among its members, else 0 when one of them carried a
+// number.
+func (u ChatUsage) Tokens() CallTokens {
+	const details = "prompt_tokens_details"
+
+	return CallTokens{
+		Prompt:    u.first([]string{"prompt_tokens"}, []string{"input_tokens"}),
+		Output:    u.first([]string{"completion_tokens"}, []string{"output_tokens"}),
+		CacheRead: u.first([]string{details, "cached_tokens"}, []string{"cache_read_input_tokens"}, []string{"prompt_cache_hit_tokens"}, []string{"cached_tokens"}),
+		CacheWrite: u.first([]string{details, "cache_write_tokens"}, []string{details, "cache_creation_input_tokens"},
+			[]string{"cache_creation_input_tokens"}, []string{"cache_write_tokens"}),
+	}
+}
+
+func (u ChatUsage) first(paths ...[]string) *int64 {
+	var sent bool
+
+	for _, path := range paths {
+		value, ok := u.figure(path)
+		if ok && value != 0 {
+			return &value
+		}
+
+		sent = sent || ok
+	}
+
+	if sent {
+		return new(int64(0))
+	}
+
+	return nil
+}
+
+// figure is the count at path, clamped at zero as Hermes clamps it, and
+// whether the gateway sent a number there.
+func (u ChatUsage) figure(path []string) (int64, bool) {
+	var value any = map[string]any(u)
+
+	for _, key := range path {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return 0, false
+		}
+
+		value = object[key]
+	}
+
+	number, ok := value.(float64)
+	if !ok {
+		return 0, false
+	}
+
+	return max(0, int64(number)), true
 }
 
 // DecodeCall reads a CallEvent payload. A payload that is no call report

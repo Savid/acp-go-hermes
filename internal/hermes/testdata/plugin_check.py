@@ -4,6 +4,7 @@ Run as ``python3 plugin_check.py <plugin dir>``; exits non-zero on the first fai
 """
 
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -36,7 +37,7 @@ def install_stand_ins():
     openai.types = openai_types
     sys.modules.update({
         "hermes_cli": cli, "hermes_cli.plugin_events": events, "hermes_constants": constants,
-        "openai": openai, "openai.types": openai_types,
+        "openai": openai, "openai.types": openai_types, "tui_gateway.server": types.ModuleType("tui_gateway.server"),
     })
 
 
@@ -74,10 +75,33 @@ class PluginChecks(unittest.TestCase):
         self.assertIs(response, result, "the response is returned unchanged")
         return [payload for _, _, payload in broadcasts]
 
-    def test_registers_execution_middleware(self):
+    def register(self, value):
         registered = []
-        plugin.register(types.SimpleNamespace(register_middleware=lambda kind, fn: registered.append((kind, fn))))
-        self.assertEqual([("llm_execution", plugin.report_call)], registered)
+        saved = os.environ.pop("ACP_GO_HERMES_CALL_REPORTS", None)
+        try:
+            if value is not None:
+                os.environ["ACP_GO_HERMES_CALL_REPORTS"] = value
+            plugin.register(types.SimpleNamespace(register_middleware=lambda kind, fn: registered.append((kind, fn))))
+        finally:
+            os.environ.pop("ACP_GO_HERMES_CALL_REPORTS", None)
+            if saved is not None:
+                os.environ["ACP_GO_HERMES_CALL_REPORTS"] = saved
+        return registered
+
+    def test_registers_execution_middleware_in_the_adapters_gateway(self):
+        self.assertEqual([("llm_execution", plugin.report_call)], self.register("1"))
+
+    def test_registers_nothing_in_other_processes(self):
+        for value in (None, "", "0"):
+            self.assertEqual([], self.register(value), value)
+
+    def test_reports_nothing_without_a_loaded_gateway(self):
+        gateway = sys.modules.pop("tui_gateway.server")
+        try:
+            self.assertEqual([], self.run_call(Response("gen-1", CompletionUsage(**USAGE))))
+            self.assertNotIn("tui_gateway.server", sys.modules, "the gateway server is never imported")
+        finally:
+            sys.modules["tui_gateway.server"] = gateway
 
     def test_reports_id_and_sent_members(self):
         reports = self.run_call(Response("gen-1", CompletionUsage(**USAGE)))

@@ -3,9 +3,14 @@
 The report rides the gateway's client stream as ``plugin.acp-go-hermes.call``, written
 after the response's streamed deltas and before Hermes records the response's usage, so
 it precedes every native event that follows from that response.
+
+Only the ``hermes serve`` the adapter starts sets ``ACP_GO_HERMES_CALL_REPORTS``; every
+other Hermes process sharing the home loads the plugin and registers nothing.
 """
 
+import os
 import re
+import sys
 
 from hermes_cli.plugin_events import broadcast_plugin_event
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -13,6 +18,8 @@ from openai.types import CompletionUsage
 
 PLUGIN_ID = "acp-go-hermes"
 CALL_EVENT = "call"
+ENABLE_ENV = "ACP_GO_HERMES_CALL_REPORTS"
+GATEWAY_MODULE = "tui_gateway.server"
 
 # Hermes names a reassembled stream "stream-<uuid4>" when no chunk carried an id.
 _STREAM_FALLBACK_ID = re.compile(
@@ -21,17 +28,20 @@ _STREAM_FALLBACK_ID = re.compile(
 
 
 def register(ctx):
-    ctx.register_middleware("llm_execution", report_call)
+    if os.environ.get(ENABLE_ENV) == "1":
+        ctx.register_middleware("llm_execution", report_call)
 
 
 def report_call(request, next_call, session_id="", task_id="", api_mode="", model="", **_context):
     """Run the provider call once and return its response untouched.
 
     The gateway runs a session's turns with the session key as the task id; review forks
-    and delegated children run under another task or session id and are not reported.
+    and delegated children run under another task or session id and are not reported. A
+    process whose gateway server is not loaded has no client to report to, and importing
+    the server there would start its background threads.
     """
     response = next_call(request)
-    if session_id and task_id == session_id and api_mode == "chat_completions":
+    if session_id and task_id == session_id and api_mode == "chat_completions" and GATEWAY_MODULE in sys.modules:
         try:
             report = call_report(response)
             if report is not None:

@@ -76,7 +76,7 @@ func TestCapturedNativeAgentOrigin(t *testing.T) {
 			Params hermes.Event `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(frame, &envelope))
-		s.handleEvent(t.Context(), rt, envelope.Params)
+		s.handleEvent(t.Context(), rt, envelope.Params, nil)
 	}
 	require.NotEmpty(t, trace)
 	require.Equal(t, "running", trace[0])
@@ -121,10 +121,10 @@ func TestOutOfPromptNativeDialogsAreAnswered(t *testing.T) {
 	s.mu.Unlock()
 
 	for _, kind := range []string{eventSudoRequest, eventSecretRequest, eventTerminalReadRequest} {
-		s.handleEvent(t.Context(), rt, hermes.Event{Type: kind, RequestID: kind + "|" + rt.liveID, Payload: []byte(`{}`)})
+		s.handleEvent(t.Context(), rt, hermes.Event{Type: kind, RequestID: kind + "|" + rt.liveID, Payload: []byte(`{}`)}, nil)
 	}
 
-	s.handleEvent(t.Context(), rt, hermes.Event{Type: eventMessageComplete, Payload: []byte(`{"text":"","status":"complete"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{Type: eventMessageComplete, Payload: []byte(`{"text":"","status":"complete"}`)}, nil)
 
 	s.mu.Lock()
 	require.Nil(t, s.cycle, "the agent-origin cycle the dialogs opened is terminal")
@@ -160,7 +160,7 @@ func TestOutOfPromptNativeErrorOpensACycle(t *testing.T) {
 	rt := s.runtime
 	s.mu.Unlock()
 
-	s.handleEvent(t.Context(), rt, hermes.Event{Type: stopReasonError, Payload: []byte(`{"message":"provider unavailable"}`)})
+	s.handleEvent(t.Context(), rt, hermes.Event{Type: stopReasonError, Payload: []byte(`{"message":"provider unavailable"}`)}, nil)
 
 	s.mu.Lock()
 	require.Nil(t, s.cycle)
@@ -199,7 +199,7 @@ func TestNativeRequestCancellationTargetsMatchingDialog(t *testing.T) {
 	defer s.registerDialog("live:srq-second", cancelSecond)()
 	s.handleEvent(t.Context(), rt, hermes.Event{
 		Type: "request.cancel", SessionID: "live", Payload: json.RawMessage(`{"id":"srq-first","reason":"cancelled"}`),
-	})
+	}, nil)
 	require.ErrorIs(t, context.Cause(first), errDialogCancelled)
 	require.NoError(t, second.Err())
 	require.Nil(t, s.cycle, "request cancellation must not open native work")
@@ -268,7 +268,7 @@ func TestInterimAndFinalAssistantText(t *testing.T) {
 			s := &session{agent: a, id: "text"}
 			c := &cycle{}
 			for _, event := range tc.events {
-				_, err := s.projectEvent(t.Context(), nil, c, event, usageReading{})
+				_, err := s.projectEvent(t.Context(), &runtime{}, c, event, usageReading{})
 				require.NoError(t, err)
 			}
 			require.Equal(t, tc.want, agentText(rec.snapshot()))
@@ -388,7 +388,7 @@ func TestUsageOfCapturedReplay(t *testing.T) {
 
 	for _, event := range frames {
 		c := &cycle{}
-		settled, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		settled, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event, nil))
 		require.NoError(t, err)
 		require.True(t, settled)
 
@@ -532,7 +532,7 @@ func TestUsageOfCapturedRoutes(t *testing.T) {
 			c := &cycle{}
 
 			for _, event := range routes[name] {
-				_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+				_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event, nil))
 				require.NoError(t, err)
 			}
 
@@ -572,7 +572,7 @@ func TestCapturedResponseCarriesNoResponseID(t *testing.T) {
 	c := &cycle{}
 
 	for _, event := range fixture.Live {
-		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event, nil))
 		require.NoError(t, err)
 	}
 
@@ -616,7 +616,7 @@ func TestCompletedToolLeavesCycleState(t *testing.T) {
 
 	for range 2 {
 		for _, kind := range []string{eventToolStart, eventToolComplete} {
-			_, err := s.projectEvent(t.Context(), nil, c, hermes.Event{Type: kind, Payload: json.RawMessage(`{"tool_id":"call-1","name":"terminal"}`)}, usageReading{})
+			_, err := s.projectEvent(t.Context(), &runtime{}, c, hermes.Event{Type: kind, Payload: json.RawMessage(`{"tool_id":"call-1","name":"terminal"}`)}, usageReading{})
 			require.NoError(t, err)
 		}
 
