@@ -129,7 +129,8 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	defer cancelTurn()
 
 	t := &turn{
-		cycle:      cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseSubmission}, state: cycleState{}},
+		Origin:     lifecycle.CauseSubmission,
+		state:      cycleState{},
 		submission: submission,
 		cancel:     cancelTurn,
 		settled:    make(chan struct{}),
@@ -256,8 +257,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 // rejection carries its text as a provider failure, a dead child is a
 // process exit, and everything else is transport.
 func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) error {
-	var commandErr *hermes.RPCError
-	if errors.As(err, &commandErr) {
+	if commandErr, ok := errors.AsType[*hermes.RPCError](err); ok {
 		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: commandErr.Message})
 	}
 
@@ -317,7 +317,7 @@ func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
 }
 
 // settleTurn is the one settlement point every accepted prompt reaches:
-// usage and session info, the durable mirror commit, the terminal idle, and
+// session info, the durable mirror commit, the terminal idle, and
 // only then the response or error.
 func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params acp.PromptRequest) (acp.PromptResponse, error) {
 	s.beginSettlement(&t.cycle)
@@ -348,7 +348,6 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	if t.ended == turnSettled {
 		if !cancelled {
-			s.emitUsage(settleCtx, &t.state)
 			s.emitSessionInfo(settleCtx, params.Prompt)
 		}
 
@@ -380,6 +379,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	return acp.PromptResponse{
 		StopReason:    acp.StopReason(verdict.stopReason),
+		Usage:         promptUsage(t.state.usage),
 		UserMessageId: params.MessageId,
 	}, nil
 }

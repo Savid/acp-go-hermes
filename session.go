@@ -76,6 +76,9 @@ type runtime struct {
 	done         chan struct{}
 	controls     chan func()
 	controlsDone chan struct{}
+	// usage is the gateway's latest usage reading, read and written only by
+	// the event pump.
+	usage hermes.Usage
 }
 
 type cycle struct {
@@ -437,6 +440,8 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		return
 	}
 
+	reading := rt.readUsage(event)
+
 	if event.Type == "request.cancel" {
 		id := rt.liveID + ":" + hermes.String(event.Payload, "id")
 
@@ -483,7 +488,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 			s.acceptTurn(ctx, t)
 		}
 
-		settled, err := s.projectEvent(ctx, rt, &t.cycle, event)
+		settled, err := s.projectEvent(ctx, rt, &t.cycle, event, reading)
 		s.recordFailure(&t.cycle, err)
 
 		if settled {
@@ -507,7 +512,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		return
 	}
 
-	settled, err := s.projectEvent(ctx, rt, c, event)
+	settled, err := s.projectEvent(ctx, rt, c, event, reading)
 	s.recordFailure(c, err)
 
 	if settled {
@@ -515,7 +520,6 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 		defer cancel()
 
 		s.beginSettlement(c)
-		s.emitUsage(settleCtx, &c.state)
 
 		if err := s.commitMirror(settleCtx, rt); err != nil {
 			s.recordFailure(c, s.mirrorFailure(err))

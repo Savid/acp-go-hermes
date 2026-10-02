@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,6 +56,64 @@ type fakeSession struct {
 	images     []string
 	dialogs    []string
 	holdAttach bool
+	usage      fakeUsage
+}
+
+// fakeContextWindow is the context window the fake reports for every model.
+const fakeContextWindow = 1000
+
+// fakeUsage keeps a session's usage as Hermes's agent does: cumulative token
+// counters, and the prompt tokens of the last response with usage as its
+// context, -1 from a compaction until a response follows it and 0 after a
+// response whose usage was all zero.
+type fakeUsage struct {
+	prompt, completion, total, calls, compressions, context int64
+	unsized                                                 bool
+}
+
+// respond records one provider response with usage.
+func (u *fakeUsage) respond(prompt, completion int64) {
+	u.calls++
+	u.prompt += prompt
+	u.completion += completion
+	u.total += prompt + completion
+	u.context = prompt
+}
+
+// interrupted records a provider attempt that ended without usage.
+func (u *fakeUsage) interrupted() { u.calls++ }
+
+// replay records a response a gateway answered from its response cache, with
+// every usage token zero: Hermes counts the call, its token counters do not
+// move, and it no longer states a context.
+func (u *fakeUsage) replay() {
+	u.calls++
+	u.context = 0
+}
+
+// compact replaces the context with a summary whose size no response has
+// reported yet.
+func (u *fakeUsage) compact() {
+	u.compressions++
+	u.context = -1
+}
+
+// wire renders the usage block as the gateway does: the context fields only
+// while a response has reported the context and the window is known.
+func (u *fakeUsage) wire() map[string]any {
+	block := map[string]any{
+		"model": "vision", "input": u.prompt, "output": u.completion, "reasoning": 0, "prompt": u.prompt,
+		"completion": u.completion, "total": u.total, "calls": u.calls, "compressions": u.compressions,
+	}
+	if u.context > 0 && !u.unsized {
+		block["context_used"] = u.context
+		block["context_max"] = fakeContextWindow
+		block["context_percent"] = u.context * 100 / fakeContextWindow
+		block["context_source"] = "provider_usage"
+		block["context_estimated"] = false
+	}
+
+	return block
 }
 
 func fakeID() string {
@@ -319,9 +378,111 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// usageEvent is a session.usage tick with the session's current usage.
+func (s *fakeSession) usageEvent(live string, emit func(string, string, any)) {
+	s.mu.Lock()
+	block := s.usage.wire()
+	s.mu.Unlock()
+	emit(live, eventSessionUsage, map[string]any{"usage": block})
+}
+
+// record applies one change to the session's usage.
+func (s *fakeSession) record(change func(*fakeUsage)) {
+	s.mu.Lock()
+	change(&s.usage)
+	s.mu.Unlock()
+}
+
+// usageScript drives the runs that exercise usage reporting and returns the
+// response that ends the run and its status. A run whose connection closed
+// reports false.
+func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit func(string, string, any)) (func(*fakeUsage), string, bool) {
+	final, status := func(u *fakeUsage) { u.respond(10, 5) }, statusComplete
+	switch prompt {
+	case "MULTI":
+		// Each tool call is one response, and a usage tick follows it.
+		for index, prompt := range []int64{1000, 1120} {
+			s.record(func(u *fakeUsage) { u.respond(prompt, 20) })
+			toolStep(live, fmt.Sprintf("multi-%d", index), emit)
+			s.usageEvent(live, emit)
+		}
+		final = func(u *fakeUsage) { u.respond(1200, 10) }
+	case "BURST":
+		// Two responses land between two ticks.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20); u.respond(1120, 30) })
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.respond(1200, 10) }
+	case "REDIRECT":
+		// A native redirect interrupts the call in flight, which reports no
+		// usage, and the turn continues with the corrected direction.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		s.record((*fakeUsage).interrupted)
+		s.usageEvent(live, emit)
+		s.record(func(u *fakeUsage) { u.respond(900, 15) })
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.respond(950, 5) }
+	case "COMPACT":
+		// The context crossed the threshold, so Hermes compacts before the
+		// next response.
+		s.record(func(u *fakeUsage) { u.respond(900, 50) })
+		s.usageEvent(live, emit)
+		s.record((*fakeUsage).compact)
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.respond(300, 20) }
+	case "COMPACTEND":
+		// Hermes compacts after the run's last response.
+		s.record(func(u *fakeUsage) { u.respond(900, 50) })
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.compact() }
+	case "UNSIZED":
+		s.record(func(u *fakeUsage) { u.unsized = true })
+	case "COVERED":
+		// A tick records the run's last response before the run ends.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		final = func(*fakeUsage) {}
+	case "REPLAY":
+		// The response after a tool call is replayed from a response cache.
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		toolStep(live, "replay-0", emit)
+		s.usageEvent(live, emit)
+		final = (*fakeUsage).replay
+	case "REPLAYED":
+		// The run's only response is replayed from a response cache.
+		final = (*fakeUsage).replay
+	case "STEPSLOW":
+		s.record(func(u *fakeUsage) { u.respond(1000, 20) })
+		s.usageEvent(live, emit)
+		select {
+		case <-s.interrupt:
+		case <-ctx.Done():
+			return nil, "", false
+		}
+		// The response in flight at the interrupt still reports usage.
+		s.record(func(u *fakeUsage) { u.respond(1120, 5) })
+		s.usageEvent(live, emit)
+		status = statusInterrupted
+	}
+
+	return final, status, true
+}
+
+// toolStep is one tool call the model requested in a response.
+func toolStep(live, id string, emit func(string, string, any)) {
+	tool := map[string]any{fieldToolID: id, fieldName: "terminal", "args": map[string]any{"command": "ls"}}
+	emit(live, eventToolStart, tool)
+	complete := maps.Clone(tool)
+	complete[fieldResult] = "ok"
+	emit(live, eventToolComplete, complete)
+}
+
 func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt string, emit func(string, string, any)) {
 	emit(live, eventMessageStart, map[string]any{})
 	text, status := "Hello world", statusComplete
+	// final is the response that ends the run; a run the user interrupts ends
+	// without one.
+	final := func(u *fakeUsage) { u.respond(10, 5) }
 	switch prompt {
 	case "SLOW":
 		select {
@@ -330,6 +491,11 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 			return
 		}
 		status = statusInterrupted
+	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW":
+		var running bool
+		if final, status, running = s.usageScript(ctx, live, prompt, emit); !running {
+			return
+		}
 	case "PERMISSION":
 		emit(live, eventApprovalRequest, map[string]any{"command": "native-command", "choices": []string{approvalOnce, "deny"}})
 		select {
@@ -387,7 +553,18 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 	_ = os.WriteFile(path+".tmp", data, 0o600)
 	_ = os.Rename(path+".tmp", path)
 	s.mu.Unlock()
-	emit(live, eventMessageComplete, map[string]any{fieldText: text, "status": status, "usage": map[string]any{"input": 5, "output": 2, "total": 7, "context_used": 7, "context_max": 1000}})
+	s.mu.Lock()
+	if status != statusInterrupted {
+		final(&s.usage)
+	}
+	usage := s.usage.wire()
+	s.mu.Unlock()
+	emit(live, eventMessageComplete, map[string]any{fieldText: text, "status": status, "usage": usage})
+
+	if prompt == "AGENTWORK" {
+		// Hermes runs a follow-up turn on its own once the prompt's turn ends.
+		g.prompt(ctx, s, live, "MULTI", emit)
+	}
 }
 
 func (s *fakeSession) buildFailure() string {

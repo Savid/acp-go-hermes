@@ -320,7 +320,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 					}
 				}
 
-				payload, marshalErr := json.Marshal(map[string]any{"tool_id": call[fieldID], fieldName: function[fieldName], "args": args})
+				payload, marshalErr := json.Marshal(map[string]any{fieldToolID: call[fieldID], fieldName: function[fieldName], "args": args})
 				if marshalErr != nil {
 					return marshalErr
 				}
@@ -332,7 +332,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 		}
 
 		if role == "tool" {
-			payload, marshalErr := json.Marshal(map[string]any{"tool_id": message["tool_call_id"], fieldName: message["tool_name"], fieldResult: message["content"], "summary": strings.Join(nativeText(message["content"]), "\n")})
+			payload, marshalErr := json.Marshal(map[string]any{fieldToolID: message["tool_call_id"], fieldName: message["tool_name"], fieldResult: message["content"], "summary": strings.Join(nativeText(message["content"]), "\n")})
 			if marshalErr != nil {
 				return marshalErr
 			}

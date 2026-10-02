@@ -87,6 +87,7 @@ func TestCapturedNativeAgentOrigin(t *testing.T) {
 		require.NotEqual(t, "prompt_accepted", event["type"])
 	}
 	require.Contains(t, trace, "message")
+	require.Empty(t, usageUpdates(rec.snapshot()), "the captured closing frame states no context")
 	s.mu.Lock()
 	require.Nil(t, s.cycle)
 	s.mu.Unlock()
@@ -267,10 +268,392 @@ func TestInterimAndFinalAssistantText(t *testing.T) {
 			s := &session{agent: a, id: "text"}
 			c := &cycle{}
 			for _, event := range tc.events {
-				_, err := s.projectEvent(t.Context(), nil, c, event)
+				_, err := s.projectEvent(t.Context(), nil, c, event, usageReading{})
 				require.NoError(t, err)
 			}
 			require.Equal(t, tc.want, agentText(rec.snapshot()))
+		})
+	}
+}
+
+// TestUsageFollowsEachResponse proves every provider response a usage reading
+// records reports the context Hermes counts after it, never a running sum,
+// while the prompt response carries the turn's summed consumption.
+func TestUsageFollowsEachResponse(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		prompt string
+		want   []acp.SessionUsageUpdate
+		usage  *acp.Usage
+	}{
+		"one response": {"HELLO", []acp.SessionUsageUpdate{{Size: 1000, Used: 10}}, &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
+		"tool calls": {"MULTI", []acp.SessionUsageUpdate{
+			{Size: 1000, Used: 1000}, {Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
+		}, &acp.Usage{InputTokens: 3320, OutputTokens: 50, TotalTokens: 3370}},
+		"responses between ticks": {"BURST", []acp.SessionUsageUpdate{
+			{Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
+		}, &acp.Usage{InputTokens: 3320, OutputTokens: 60, TotalTokens: 3380}},
+		"last response ticked": {"COVERED", []acp.SessionUsageUpdate{{Size: 1000, Used: 1000}}, &acp.Usage{InputTokens: 1000, OutputTokens: 20, TotalTokens: 1020}},
+		"redirected mid-turn": {"REDIRECT", []acp.SessionUsageUpdate{
+			{Size: 1000, Used: 1000}, {Size: 1000, Used: 900}, {Size: 1000, Used: 950},
+		}, &acp.Usage{InputTokens: 2850, OutputTokens: 40, TotalTokens: 2890}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			h.initialize()
+			session := h.newSession()
+
+			resp, err := h.prompt(session.SessionId, tc.prompt, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, usageUpdates(h.rec.snapshot()))
+			require.Equal(t, tc.usage, resp.Usage)
+		})
+	}
+}
+
+// TestLastResponseReportsInsideTurn proves the response that ends a prompt
+// turn, which no tick records because Hermes stops its ticks before
+// message.complete, reports once from the closing frame while the turn still
+// runs.
+func TestLastResponseReportsInsideTurn(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	initResponse := h.initialize(withLifecycle())
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "MULTI", promptMeta(1))
+	require.NoError(t, err)
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 1000}, {Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
+	}, usageUpdates(h.rec.snapshot()))
+	require.NoError(t, lifecycle.CheckAttribution(negotiatedAnswer(t, initResponse), sessionFrames(t, h.rec.snapshot(), session.SessionId)))
+}
+
+// TestEmptyUsageIsUnknown proves a response a gateway replays from its
+// response cache, whose usage is all zero, reports nothing: Hermes counts the
+// call without moving a token counter and stops stating the context, so no
+// update says 0 and the next response reports again.
+func TestEmptyUsageIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	for _, step := range []struct {
+		prompt string
+		usage  *acp.Usage
+	}{
+		{"HELLO", &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
+		{"REPLAYED", nil},
+		{"REPLAY", &acp.Usage{InputTokens: 1000, OutputTokens: 20, TotalTokens: 1020}},
+		{"HELLO", &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}},
+	} {
+		resp, err := h.prompt(session.SessionId, step.prompt, nil)
+		require.NoError(t, err)
+		require.Equal(t, step.usage, resp.Usage, step.prompt)
+	}
+
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 10}, {Size: 1000, Used: 1000}, {Size: 1000, Used: 10},
+	}, usageUpdates(h.rec.snapshot()))
+}
+
+// TestUsageOfCapturedReplay replays the closing frames of three turns whose
+// second response Hermes received with all-zero usage: that turn reports
+// nothing and sums nothing, and the next response reports its own context.
+func TestUsageOfCapturedReplay(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/usage-routes.json")
+	require.NoError(t, err)
+
+	var routes map[string][]hermes.Event
+	require.NoError(t, json.Unmarshal(data, &routes))
+
+	frames := routes["replayed"]
+	require.Len(t, frames, 3)
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: "replayed"}
+	rt := &runtime{}
+
+	consumed := make([]*acp.Usage, 0, len(frames))
+
+	for _, event := range frames {
+		c := &cycle{}
+		settled, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		require.NoError(t, err)
+		require.True(t, settled)
+
+		consumed = append(consumed, promptUsage(c.state.usage))
+	}
+
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 200000, Used: 1201}, {Size: 200000, Used: 1204}}, usageUpdates(rec.snapshot()))
+	require.Equal(t, []*acp.Usage{
+		{InputTokens: 1201, OutputTokens: 7, ThoughtTokens: new(2), TotalTokens: 1208},
+		nil,
+		{InputTokens: 1204, OutputTokens: 7, ThoughtTokens: new(2), TotalTokens: 1211},
+	}, consumed)
+}
+
+// TestUnusableResponsesReportNoUsage proves a turn whose responses carry no
+// context Hermes can state reports none, while their tokens still count.
+func TestUnusableResponsesReportNoUsage(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	resp, err := h.prompt(session.SessionId, "UNSIZED", nil)
+	require.NoError(t, err)
+	require.Empty(t, usageUpdates(h.rec.snapshot()))
+	require.Equal(t, &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}, resp.Usage)
+}
+
+// TestSettledUsageAfterCompaction proves no figure restates the context
+// Hermes held before it compacted: the next one is the first response after
+// the compaction, and a turn that settles with none sends nothing.
+func TestSettledUsageAfterCompaction(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	_, err := h.prompt(session.SessionId, "COMPACT", nil)
+	require.NoError(t, err)
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 1000, Used: 900}, {Size: 1000, Used: 300}}, usageUpdates(h.rec.snapshot()))
+
+	resp, err := h.prompt(session.SessionId, "COMPACTEND", nil)
+	require.NoError(t, err)
+	require.Equal(t, &acp.Usage{InputTokens: 900, OutputTokens: 50, TotalTokens: 950}, resp.Usage)
+	require.Len(t, usageUpdates(h.rec.snapshot()), 3)
+
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 900}, {Size: 1000, Used: 300}, {Size: 1000, Used: 900}, {Size: 1000, Used: 10},
+	}, usageUpdates(h.rec.snapshot()))
+}
+
+// TestCancelledTurnReportsNoUsageAfterCancel proves a cancelled turn keeps
+// the figures it reported before the cancel and sends none after it, while
+// its consumption still counts the response that finished after the cancel.
+func TestCancelledTurnReportsNoUsageAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	done := make(chan acp.PromptResponse, 1)
+
+	go func() {
+		resp, _ := h.prompt(session.SessionId, "STEPSLOW", nil)
+		done <- resp
+	}()
+
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(usageUpdates(updates)) == 1 })
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+
+	resp := <-done
+	require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+	require.Equal(t, &acp.Usage{InputTokens: 2120, OutputTokens: 25, TotalTokens: 2145}, resp.Usage)
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 1000, Used: 1000}}, usageUpdates(h.rec.snapshot()))
+}
+
+// TestAgentOriginUsageFollowsEachResponse proves a turn Hermes runs on its
+// own reports each response as a prompt turn does, inside its own running
+// turn, and that its consumption never reaches the prompt response that
+// preceded it.
+func TestAgentOriginUsageFollowsEachResponse(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	initResponse := h.initialize(withLifecycle())
+	session := h.newSession()
+
+	resp, err := h.prompt(session.SessionId, "AGENTWORK", promptMeta(1))
+	require.NoError(t, err)
+	require.Equal(t, &acp.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}, resp.Usage)
+
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return idleTransitions(updates, session.SessionId) == 2 })
+
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 10}, {Size: 1000, Used: 1000}, {Size: 1000, Used: 1120}, {Size: 1000, Used: 1200},
+	}, usageUpdates(h.rec.snapshot()))
+	require.NoError(t, lifecycle.CheckAttribution(negotiatedAnswer(t, initResponse), sessionFrames(t, h.rec.snapshot(), session.SessionId)))
+}
+
+// TestUsageOfCapturedRoutes replays the usage frames Hermes sent through two
+// provider routes: each tick and the closing frame report the context of the
+// responses they recorded, and the cycle sums their consumption.
+func TestUsageOfCapturedRoutes(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/usage-routes.json")
+	require.NoError(t, err)
+
+	var routes map[string][]hermes.Event
+	require.NoError(t, json.Unmarshal(data, &routes))
+
+	for name, tc := range map[string]struct {
+		want  []acp.SessionUsageUpdate
+		usage *acp.Usage
+	}{
+		"openrouter": {[]acp.SessionUsageUpdate{
+			{Size: 1000000, Used: 13485}, {Size: 1000000, Used: 14282}, {Size: 1000000, Used: 14364},
+		}, &acp.Usage{InputTokens: 42131, OutputTokens: 1017, ThoughtTokens: new(936), TotalTokens: 43148}},
+		"gateway": {[]acp.SessionUsageUpdate{
+			{Size: 1000000, Used: 14178}, {Size: 1000000, Used: 14348}, {Size: 1000000, Used: 14439}, {Size: 1000000, Used: 14611}, {Size: 1000000, Used: 14705},
+		}, &acp.Usage{InputTokens: 72281, OutputTokens: 1191, ThoughtTokens: new(814), TotalTokens: 73472}},
+		"gateway-anthropic": {[]acp.SessionUsageUpdate{
+			{Size: 1000000, Used: 18649}, {Size: 1000000, Used: 18728}, {Size: 1000000, Used: 18815},
+		}, &acp.Usage{InputTokens: 56192, OutputTokens: 137, TotalTokens: 56329}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotEmpty(t, routes[name])
+
+			a := NewAgent()
+			rec := newRecorder()
+			a.attach(rec, nil)
+			s := &session{agent: a, id: "usage"}
+			rt := &runtime{}
+			c := &cycle{}
+
+			for _, event := range routes[name] {
+				_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tc.want, usageUpdates(rec.snapshot()))
+			require.Equal(t, tc.usage, promptUsage(c.state.usage))
+		})
+	}
+}
+
+// TestCapturedResponseCarriesNoResponseID projects a captured one-response
+// turn live and replays its captured export. Hermes states the id its gateway
+// returned for a response in neither the gateway frames nor the persisted
+// messages, so no chunk carries a messageId; it reports no per-response token
+// breakdown, so no usage update carries a call usage report.
+func TestCapturedResponseCarriesNoResponseID(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/response-turn.json")
+	require.NoError(t, err)
+
+	var fixture struct {
+		Live   []hermes.Event  `json:"live"`
+		Export json.RawMessage `json:"export"`
+	}
+	require.NoError(t, json.Unmarshal(data, &fixture))
+
+	var exported struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(fixture.Export, &exported))
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: acp.SessionId(exported.ID), nativeID: exported.ID}
+	rt := &runtime{}
+	c := &cycle{}
+
+	for _, event := range fixture.Live {
+		_, err := s.projectEvent(t.Context(), rt, c, event, rt.readUsage(event))
+		require.NoError(t, err)
+	}
+
+	live := len(rec.snapshot())
+	require.NoError(t, s.replay(t.Context(), [][]byte{fixture.Export}))
+
+	updates := rec.snapshot()
+	for name, part := range map[string][]acp.SessionNotification{"live": updates[:live], "replay": updates[live:]} {
+		var messages, thoughts int
+
+		for _, n := range part {
+			if chunk := n.Update.AgentMessageChunk; chunk != nil {
+				messages++
+				require.Nil(t, chunk.MessageId, name)
+			}
+			if chunk := n.Update.AgentThoughtChunk; chunk != nil {
+				thoughts++
+				require.Nil(t, chunk.MessageId, name)
+			}
+		}
+
+		require.Positive(t, messages, name)
+		require.Positive(t, thoughts, name)
+	}
+
+	require.Equal(t, "Hi! What can I help you with today?Hi! What can I help you with today?", agentText(updates))
+	require.Equal(t, []acp.SessionUsageUpdate{{Size: 1000000, Used: 13774}}, usageUpdates(updates))
+}
+
+// TestCompletedToolLeavesCycleState proves a completed tool call holds no
+// state for the rest of a long cycle, and an id Hermes uses again starts a new
+// call.
+func TestCompletedToolLeavesCycleState(t *testing.T) {
+	t.Parallel()
+
+	a := NewAgent()
+	rec := newRecorder()
+	a.attach(rec, nil)
+	s := &session{agent: a, id: "tools"}
+	c := &cycle{}
+
+	for range 2 {
+		for _, kind := range []string{eventToolStart, eventToolComplete} {
+			_, err := s.projectEvent(t.Context(), nil, c, hermes.Event{Type: kind, Payload: json.RawMessage(`{"tool_id":"call-1","name":"terminal"}`)}, usageReading{})
+			require.NoError(t, err)
+		}
+
+		require.Empty(t, c.state.openTools)
+	}
+
+	starts := 0
+
+	for _, update := range rec.snapshot() {
+		if update.Update.ToolCall != nil {
+			starts++
+		}
+	}
+
+	require.Equal(t, 2, starts)
+}
+
+func TestContextTokens(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		reading usageReading
+		want    int
+		ok      bool
+	}{
+		"new response":                      {usageReading{current: hermes.Usage{Prompt: 300, ContextUsed: 120, ContextMax: 1000}, consumed: hermes.Usage{Prompt: 120}}, 120, true},
+		"no response since":                 {usageReading{current: hermes.Usage{Prompt: 300, ContextUsed: 120, ContextMax: 1000}}, 0, false},
+		"compacted since or window unknown": {usageReading{current: hermes.Usage{Prompt: 300}, consumed: hermes.Usage{Prompt: 120}}, 0, false},
+		"all-zero response":                 {usageReading{current: hermes.Usage{Prompt: 300}}, 0, false},
+		"no reading":                        {usageReading{}, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			used, ok := contextTokens(tc.reading)
+			require.Equal(t, tc.ok, ok)
+			require.Equal(t, tc.want, used)
 		})
 	}
 }
