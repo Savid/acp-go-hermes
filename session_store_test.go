@@ -493,3 +493,59 @@ func TestHostSessionMetaIsReadOnSessionNewOnly(t *testing.T) {
 	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd, ephemeralSessionMeta()))
 	require.Equal(t, "_meta."+wire.SessionMetaKey, requestErrorData(t, err)["field"])
 }
+
+func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, prompt := range []string{"HELLO", "ERROR"} {
+		t.Run(prompt, func(t *testing.T) {
+			t.Parallel()
+
+			store := &faultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+			h := newHarness(t, WithSessionStore(store))
+			h.initialize(withLifecycle())
+			created := h.newSession()
+			before, err := store.Load(t.Context(), string(created.SessionId))
+			require.NoError(t, err)
+			store.fail.Store(true)
+			t.Cleanup(func() { store.fail.Store(false) })
+			response, err := h.prompt(created.SessionId, prompt, promptMeta(1))
+			require.Empty(t, response.StopReason)
+			require.Equal(t, -32603, requestErrorCode(t, err))
+			data := requestErrorData(t, err)
+			require.Equal(t, "hermes_turn_failed", data["error"])
+			if prompt == "ERROR" {
+				require.Equal(t, "provider", data["cause"])
+				require.Equal(t, "provider unavailable", data["message"])
+			} else {
+				require.Equal(t, "transport", data["cause"])
+				require.Equal(t, "session mirror commit failed", data["message"])
+			}
+			after, err := store.Load(t.Context(), string(created.SessionId))
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running"}, eventTypes(lifecycleEvents(h.rec.snapshot())))
+
+			store.fail.Store(false)
+			response, err = h.prompt(created.SessionId, "HELLO", promptMeta(2))
+			require.NoError(t, err)
+			require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+			require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running", "lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle"}, eventTypes(lifecycleEvents(h.rec.snapshot())))
+			var streams []string
+			for _, update := range h.rec.snapshot() {
+				envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+				if !ok {
+					continue
+				}
+				event, ok := envelope["event"].(map[string]any)
+				if ok && event["type"] == "lifecycle_snapshot" {
+					id, ok := envelope["streamId"].(string)
+					require.True(t, ok)
+					streams = append(streams, id)
+				}
+			}
+			require.Len(t, streams, 2)
+			require.NotEqual(t, streams[0], streams[1])
+		})
+	}
+}

@@ -356,7 +356,13 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 			s.fenceStream()
 
 			commitFailed = true
-			verdict.failure = s.mirrorFailure(err)
+
+			mirrorErr := s.mirrorFailure(err)
+
+			if verdict.failure == nil {
+				verdict.failure = mirrorErr
+			}
+
 			verdict.outcome = lifecycle.OutcomeFailed
 		}
 	}
