@@ -38,5 +38,6 @@ func TestUsageSince(t *testing.T) {
 
 	require.Equal(t, Usage{Prompt: 40, Completion: 5, Reasoning: 1, Total: 45}, Usage{Prompt: 140, Completion: 15, Reasoning: 3, Total: 155, ContextUsed: 40}.Since(earlier))
 	require.Equal(t, Usage{Prompt: 30, Completion: 4, Total: 34}, Usage{Prompt: 30, Completion: 4, Total: 34}.Since(earlier), "a rebuilt agent restarts its counters")
+	require.Equal(t, Usage{Prompt: 30, Completion: 20, Reasoning: 3, Total: 50}, Usage{Prompt: 30, Completion: 20, Reasoning: 3, Total: 50}.Since(earlier), "a rebuilt agent can exceed some earlier counters before its first reading")
 	require.Equal(t, Usage{Prompt: 70, Completion: 14, Reasoning: 3, Total: 84}, Usage{Prompt: 40, Completion: 4, Reasoning: 1, Total: 44}.Add(Usage{Prompt: 30, Completion: 10, Reasoning: 2, Total: 40}))
 }

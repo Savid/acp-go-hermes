@@ -33,22 +33,19 @@ func DecodeUsage(payload json.RawMessage) (Usage, bool) {
 	return *envelope.Usage, true
 }
 
-// Since is the consumption between an earlier reading and this one. A counter
-// below its earlier value restarted with a new agent, so its whole value is new.
+// Since is the consumption between an earlier reading and this one. If any
+// counter decreased, the agent restarted and every counter belongs to its
+// new lifetime.
 func (u Usage) Since(earlier Usage) Usage {
-	delta := func(now, before int64) int64 {
-		if now < before {
-			return now
-		}
-
-		return now - before
+	if u.Prompt < earlier.Prompt || u.Completion < earlier.Completion || u.Reasoning < earlier.Reasoning || u.Total < earlier.Total {
+		earlier = Usage{}
 	}
 
 	return Usage{
-		Prompt:     delta(u.Prompt, earlier.Prompt),
-		Completion: delta(u.Completion, earlier.Completion),
-		Reasoning:  delta(u.Reasoning, earlier.Reasoning),
-		Total:      delta(u.Total, earlier.Total),
+		Prompt:     u.Prompt - earlier.Prompt,
+		Completion: u.Completion - earlier.Completion,
+		Reasoning:  u.Reasoning - earlier.Reasoning,
+		Total:      u.Total - earlier.Total,
 	}
 }
 
