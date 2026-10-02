@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,7 +20,9 @@ import (
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/wire"
 	hermesacp "github.com/savid/acp-go-hermes"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestMain keeps every hermes the tests start from installing anything into
@@ -32,9 +35,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// testHome is an empty native home. Hermes selects its dependency environment
-// through the home's install state and finds its managed tools in the home's
-// store, so both are linked from ACP_GO_HERMES_HOME, else from ~/.hermes.
+// testHome is a native home whose config.yaml enables only the adapter's
+// plugin. Hermes selects its dependency environment through the home's
+// install state and finds its managed tools in the home's store, so both are
+// linked from ACP_GO_HERMES_HOME, else from ~/.hermes.
 func testHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -49,8 +53,32 @@ func testHome(t *testing.T) string {
 			require.NoError(t, os.Symlink(shared, filepath.Join(home, name)))
 		}
 	}
+	writeConfig(t, home, "")
 
 	return home
+}
+
+// writeConfig writes config into home's config.yaml with the adapter's
+// plugin listed in plugins.enabled. A launch then never asks the gateway to
+// enable it, which would publish a new dependency generation into the install
+// state the test homes share.
+func writeConfig(t *testing.T, home, config string) {
+	t.Helper()
+	document := map[string]any{}
+	require.NoError(t, yaml.Unmarshal([]byte(config), &document))
+	plugins, _ := document["plugins"].(map[string]any)
+	if plugins == nil {
+		plugins = map[string]any{}
+	}
+	enabled, _ := plugins["enabled"].([]any)
+	if !slices.Contains(enabled, any(hermes.PluginName)) {
+		enabled = append(enabled, hermes.PluginName)
+	}
+	plugins["enabled"] = enabled
+	document["plugins"] = plugins
+	data, err := yaml.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), data, 0o600))
 }
 
 // nativeHome is a test home holding the configuration and credentials of
@@ -65,6 +93,11 @@ func nativeHome(t *testing.T) string {
 				continue
 			}
 			require.NoError(t, err)
+			if name == "config.yaml" {
+				writeConfig(t, home, string(data))
+
+				continue
+			}
 			require.NoError(t, os.WriteFile(filepath.Join(home, name), data, 0o600))
 		}
 	}
@@ -100,7 +133,7 @@ func TestNativeSmoke(t *testing.T) {
 	t.Cleanup(provider.Close)
 	home := testHome(t)
 	config := "model:\n  provider: custom\n  default: acpgogo-smoke\n  base_url: " + provider.URL + "/v1\n  context_length: 128000\n"
-	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0o600))
+	writeConfig(t, home, config)
 	h := newHarness(t, hermesacp.WithHome(home), hermesacp.WithEnv(map[string]string{
 		"OPENAI_API_KEY": "smoke-only", "OPENAI_BASE_URL": provider.URL + "/v1",
 	}))

@@ -12,7 +12,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -211,7 +210,7 @@ func TestNativeCallUsage(t *testing.T) {
 
 	home, cwd := nativeHome(t), t.TempDir()
 	config := "model:\n  provider: acpgo-gateway\n  default: " + callUsageModel + "\nproviders:\n  acpgo-gateway:\n    name: acpgo-gateway\n    api: " + server.URL + "/v1\n    api_mode: chat_completions\n    key_env: OPENROUTER_API_KEY\n"
-	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0o600))
+	writeConfig(t, home, config)
 
 	h := newHarness(t, hermesacp.WithHome(home), hermesacp.WithEnv(map[string]string{
 		"OPENROUTER_API_KEY": key, "HERMES_YOLO_MODE": "1",
