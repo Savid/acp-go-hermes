@@ -33,6 +33,13 @@ const fakeHermesEnvResumeHold = "ACP_GO_HERMES_TEST_RESUME_HOLD"
 // silent until the file is removed.
 const fakeHermesEnvReadyHold = "ACP_GO_HERMES_TEST_READY_HOLD"
 
+// fakeHermesEnvLaunchLog names a file every fake hermes launch appends a line
+// to, so a test can count native launches.
+const fakeHermesEnvLaunchLog = "ACP_GO_HERMES_TEST_LAUNCH_LOG"
+
+// fakeHermesEnvLaunchFail makes every fake hermes launch exit at once.
+const fakeHermesEnvLaunchFail = "ACP_GO_HERMES_TEST_LAUNCH_FAIL"
+
 // fakePluginToggles records, one key per line, each plugin the gateway was
 // asked to enable.
 const fakePluginToggles = "plugin-toggles"
@@ -161,7 +168,22 @@ func fakeID() string {
 	return hex.EncodeToString(value[:])
 }
 
+// fakeLaunched records this launch and exits when the test asked every launch
+// to fail.
+func fakeLaunched(args []string) {
+	if path := os.Getenv(fakeHermesEnvLaunchLog); path != "" {
+		if file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			_, _ = file.WriteString(strings.Join(args, " ") + "\n")
+			_ = file.Close()
+		}
+	}
+	if os.Getenv(fakeHermesEnvLaunchFail) == "1" {
+		os.Exit(1)
+	}
+}
+
 func runFakeHermes(args []string) int {
+	fakeLaunched(args)
 	home := fakeHome()
 	if len(args) == 2 && args[0] == "config" && args[1] == "path" {
 		fmt.Println(filepath.Join(home, "config.yaml"))
