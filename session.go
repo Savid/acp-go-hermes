@@ -3,7 +3,6 @@ package hermesacp
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -161,12 +160,13 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 
 	pluginHome := s.publishPlugin(ctx, executable, env)
 
-	proc, err := process.Start(ctx, process.Request{Executable: executable, Args: endpoint.Args(), Env: env, Dir: s.cwd})
+	proc, err := process.Start(ctx, process.Request{Executable: executable, Args: hermes.ServeArgs(), Env: env, Dir: s.cwd})
 	if err != nil {
 		return nil, s.startFailure(ctx, err)
 	}
 
-	go func() { _, _ = io.Copy(io.Discard, proc.Stdout()) }()
+	bound := make(chan int, 1)
+	go hermes.ScanStdout(proc.Stdout(), bound)
 
 	readyCtx, readyCancel := context.WithTimeout(ctx, sessionSettleTimeout)
 	defer readyCancel()
@@ -183,6 +183,16 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		case <-watching:
 		}
 	}()
+
+	select {
+	case port := <-bound:
+		endpoint = endpoint.Bound(port)
+	case <-readyCtx.Done():
+		_ = proc.Kill()
+		_ = proc.Close()
+
+		return nil, s.startFailure(ctx, launchFailure(proc, readyCtx.Err()))
+	}
 
 	client, err := endpoint.Connect(readyCtx)
 	if err != nil {

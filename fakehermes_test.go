@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -195,7 +196,14 @@ func runFakeHermes(args []string) int {
 		}
 		mux.ServeHTTP(w, r)
 	})
-	if err := http.ListenAndServe("127.0.0.1:"+port, handler); err != nil {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		return 2
+	}
+	// Like serve, announce the bound port on stdout once listening.
+	address, _ := listener.Addr().(*net.TCPAddr)
+	fmt.Printf("HERMES_BACKEND_READY port=%d\nHERMES_DASHBOARD_READY port=%d\n", address.Port, address.Port)
+	if err := http.Serve(listener, handler); err != nil {
 		return 2
 	}
 

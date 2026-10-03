@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,38 +30,84 @@ const (
 	snapshotLimit     = 64 << 20
 )
 
+// loopbackHost is the only interface a serve process binds.
+const loopbackHost = "127.0.0.1"
+
+// readyPrefix opens the line serve writes to its stdout once it listens,
+// naming the port it bound.
+const readyPrefix = "HERMES_BACKEND_READY port="
+
 // Endpoint is the authenticated loopback surface of one serve process.
 type Endpoint struct {
 	URL   string
 	Token string
 }
 
+// NewEndpoint mints the token for one serve process; the URL is known once
+// the process announces its port.
 func NewEndpoint() (Endpoint, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return Endpoint{}, err
-	}
-
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		return Endpoint{}, err
-	}
-
 	var secret [32]byte
 	if _, err := rand.Read(secret[:]); err != nil {
 		return Endpoint{}, err
 	}
 
-	return Endpoint{URL: "http://" + address, Token: hex.EncodeToString(secret[:])}, nil
+	return Endpoint{Token: hex.EncodeToString(secret[:])}, nil
 }
 
-// Args starts the session's own serve process on the endpoint's port.
-// --isolated keeps it from attaching to, or being refused by, the backend
-// another hermes serve already runs for this user.
-func (e Endpoint) Args() []string {
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(e.URL, "http://"))
+// Bound is the endpoint served on port.
+func (e Endpoint) Bound(port int) Endpoint {
+	e.URL = "http://" + net.JoinHostPort(loopbackHost, strconv.Itoa(port))
 
-	return []string{"serve", "--isolated", "--host", "127.0.0.1", "--port", port}
+	return e
+}
+
+// ServeArgs starts the session's own serve process. Port 0 has the OS assign
+// the port at bind, so no other socket can take it between choice and bind;
+// serve announces it on stdout. --isolated keeps it from attaching to, or
+// being refused by, the backend another hermes serve already runs for this
+// user.
+func ServeArgs() []string {
+	return []string{"serve", "--isolated", "--host", loopbackHost, "--port", "0"}
+}
+
+// ScanStdout reads serve's stdout to its end, so serve never blocks writing
+// it, and sends the first port serve announces on bound, which must have room
+// for it.
+func ScanStdout(stdout io.Reader, bound chan<- int) {
+	reader := bufio.NewReader(stdout)
+	announced, partial := false, false
+
+	for {
+		line, err := reader.ReadSlice('\n')
+		if !announced && !partial {
+			if port, ok := readyPort(line); ok {
+				announced = true
+
+				bound <- port
+			}
+		}
+
+		// A line longer than the buffer arrives in pieces; only its first
+		// piece can open with the announcement.
+		partial = errors.Is(err, bufio.ErrBufferFull)
+		if err != nil && !partial {
+			return
+		}
+	}
+}
+
+func readyPort(line []byte) (int, bool) {
+	value, found := strings.CutPrefix(strings.TrimSpace(string(line)), readyPrefix)
+	if !found {
+		return 0, false
+	}
+
+	port, err := strconv.Atoi(value)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, false
+	}
+
+	return port, true
 }
 
 // Connect retries only the startup connection; the caller bounds readiness.
