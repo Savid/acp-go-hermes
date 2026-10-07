@@ -203,3 +203,8 @@ make test-integration-live    # spends model tokens
 
 Unit tests run the test binary as a scripted fake hermes and need no installed
 hermes, credentials, or network.
+
+## Context compaction
+
+The gateway exposes progress but no reliable terminal outcome, so the adapter
+publishes no compaction notifications. Usage accounting remains independent.
