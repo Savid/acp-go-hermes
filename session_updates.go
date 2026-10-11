@@ -51,9 +51,16 @@ const (
 	eventTerminalReadRequest = "terminal.read"
 )
 
+// The streamed-text keys of a cycle's assistant text and reasoning.
+const (
+	streamText    = "text"
+	streamThought = "thought"
+)
+
 type cycleState struct {
-	text    strings.Builder
-	thought strings.Builder
+	// streamed holds the assistant text and reasoning the cycle streamed, so
+	// a completing frame emits only what its deltas did not carry.
+	streamed wire.StreamedText
 	// openTools holds the tool calls started and not yet complete; a
 	// completed call leaves it, since Hermes completes each call once.
 	openTools    map[string]struct{}
@@ -239,12 +246,12 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 	switch event.Type {
 	case eventMessageDelta:
 		text := hermes.String(event.Payload, fieldText)
-		state.text.WriteString(text)
+		state.streamed.Add(streamText, text)
 
 		return false, s.emit(ctx, acp.UpdateAgentMessageText(text))
 	case "thinking.delta":
 		text := hermes.String(event.Payload, fieldText)
-		state.thought.WriteString(text)
+		state.streamed.Add(streamThought, text)
 
 		return false, s.emit(ctx, acp.UpdateAgentThoughtText(text))
 	case eventMessageInterim:
@@ -259,10 +266,10 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 
 		text := interim.Text
 		if interim.AlreadyStreamed {
-			text = wire.UnstreamedSuffix(state.text.String(), text)
+			text = state.streamed.Suffix(streamText, text)
 		}
 
-		state.text.Reset()
+		state.streamed.Forget(streamText)
 
 		if text != "" {
 			return false, s.emit(ctx, acp.UpdateAgentMessageText(text))
@@ -288,11 +295,11 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		}
 
 		var errs []error
-		if text := wire.UnstreamedSuffix(state.text.String(), result.Text); text != "" {
+		if text := state.streamed.Suffix(streamText, result.Text); text != "" {
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentMessageText(text)))
 		}
 
-		if thought := completionSuffix(result.Reasoning, state.thought.String()); thought != "" {
+		if thought := completionSuffix(result.Reasoning, state.streamed.Text(streamThought)); thought != "" {
 			errs = append(errs, s.emit(ctx, acp.UpdateAgentThoughtText(thought)))
 		}
 
@@ -321,7 +328,7 @@ func (s *session) projectEvent(ctx context.Context, rt *runtime, c *cycle, event
 		return true, nil
 	case eventToolStart, eventToolComplete:
 		if event.Type == eventToolStart {
-			state.text.Reset()
+			state.streamed.Forget(streamText)
 		}
 
 		return false, s.emitTool(ctx, state, event)
