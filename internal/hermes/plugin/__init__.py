@@ -7,10 +7,11 @@ it precedes every native event that follows from that response.
 Only the ``hermes serve`` the adapter starts sets ``ACP_GO_HERMES_CALL_REPORTS``; every
 other Hermes process sharing the home loads the plugin and registers nothing.
 
-That process also freezes its garbage collector's tracked objects at its first model call.
-A collection writes to every object it traverses, so the objects the process built to start,
-which live as long as it does, would have their memory rewritten by each collection Hermes
-runs after a turn. Frozen objects are never traversed.
+That process also collects and then freezes its garbage collector's tracked objects at its
+first model call. A collection writes to every object it traverses, so the objects the process
+built to start, which live as long as it does, would have their memory rewritten by each
+collection Hermes runs after a turn. Frozen objects are never traversed; collecting first keeps
+startup garbage out of the frozen set, where it could never be freed.
 """
 
 import gc
@@ -64,10 +65,11 @@ def report_call(request, next_call, session_id="", task_id="", api_mode="", mode
 
 
 def freeze_startup_objects():
-    """Freeze every tracked object once, when the first model call shows startup is done."""
+    """Collect, then freeze every tracked object, once the first model call shows startup is done."""
     global _frozen
     if not _frozen:
         _frozen = True
+        gc.collect()
         gc.freeze()
 
 

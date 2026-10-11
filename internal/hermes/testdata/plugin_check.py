@@ -142,16 +142,17 @@ class PluginChecks(unittest.TestCase):
             self.assertIs(error, raised.exception)
         self.assertEqual([], broadcasts)
 
-    def test_freezes_startup_objects_once(self):
+    def test_collects_then_freezes_startup_objects_once(self):
         freezes = []
-        original, plugin.gc = plugin.gc, types.SimpleNamespace(freeze=lambda: freezes.append(True))
+        original, plugin.gc = plugin.gc, types.SimpleNamespace(
+            collect=lambda: freezes.append("collect"), freeze=lambda: freezes.append("freeze"))
         plugin._frozen = False
         try:
             self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
             self.run_call(Response("gen-2", CompletionUsage(**USAGE)), task_id="review-fork")
         finally:
             plugin.gc = original
-        self.assertEqual([True], freezes)
+        self.assertEqual(["collect", "freeze"], freezes, "startup garbage is collected before the freeze, once")
 
     def test_a_failed_report_keeps_the_response(self):
         original = plugin.broadcast_plugin_event
