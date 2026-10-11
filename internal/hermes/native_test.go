@@ -156,7 +156,7 @@ func TestExportBoundsTheConversation(t *testing.T) {
 	_, _, err = endpoint.Export(t.Context(), "other")
 	require.ErrorContains(t, err, "identity differs")
 
-	reader := &limitedReader{reader: strings.NewReader(body), remaining: int64(len(body) - 1)}
+	reader := &limitedReader{source: strings.NewReader(body), remaining: int64(len(body) - 1)}
 	_, err = DecodeConversation(reader)
 	require.Error(t, err)
 	require.True(t, reader.exceeded, "an export past its bound is refused")

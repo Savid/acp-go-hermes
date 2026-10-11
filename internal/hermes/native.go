@@ -160,7 +160,7 @@ func (e Endpoint) Export(ctx context.Context, id string) (conversation Conversat
 		return Conversation{}, false, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
 	}
 
-	body := &limitedReader{reader: response.Body, remaining: exportLimit}
+	body := &limitedReader{source: response.Body, remaining: exportLimit}
 
 	conversation, err = DecodeConversation(body)
 	if body.exceeded {
@@ -362,7 +362,7 @@ func (e Endpoint) Import(ctx context.Context, conversation Conversation) error {
 // limitedReader reads at most remaining bytes and records whether the
 // source held more.
 type limitedReader struct {
-	reader    io.Reader
+	source    io.Reader
 	remaining int64
 	exceeded  bool
 }
@@ -370,7 +370,7 @@ type limitedReader struct {
 func (l *limitedReader) Read(buffer []byte) (int, error) {
 	if l.remaining <= 0 {
 		var probe [1]byte
-		if n, _ := l.reader.Read(probe[:]); n > 0 {
+		if n, _ := l.source.Read(probe[:]); n > 0 {
 			l.exceeded = true
 		}
 
@@ -381,7 +381,7 @@ func (l *limitedReader) Read(buffer []byte) (int, error) {
 		buffer = buffer[:l.remaining]
 	}
 
-	n, err := l.reader.Read(buffer)
+	n, err := l.source.Read(buffer)
 	l.remaining -= int64(n)
 
 	return n, err
