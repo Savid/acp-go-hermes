@@ -25,7 +25,7 @@ record saves both IDs with the matching native history.
 go install github.com/savid/acp-go-hermes/cmd/acp-go-hermes@latest
 ```
 
-`hermes` 0.21.5 or later is required, found on `PATH` or named with `-path`.
+`hermes` is found on `PATH` or named with `-path`.
 
 ## Run
 
@@ -104,18 +104,20 @@ Image output is not advertised.
 
 ### Usage
 
-Each launch asks `hermes config path` which home Hermes uses, the active
-profile's when one is set, and writes the adapter's Hermes plugin there as
-`plugins/acp-go-hermes/`. When that home's `config.yaml` neither enables nor
-disables the plugin, the gateway enables it through Hermes's plugin manager,
-which records it in `plugins.enabled`; listing it in `plugins.disabled` turns
-it off. The first enable in a home also has Hermes's plugin manager record its
-plugin selection and nudge a running `hermes gateway` to rediscover its
-plugins. Every Hermes process using the home then loads the plugin, but it
-registers only where `ACP_GO_HERMES_CALL_REPORTS=1`, which the adapter sets for
-the `hermes serve` it starts, and reports only from a process whose gateway
-server is running. A launch that cannot resolve the home or write the plugin
-logs a warning and runs without call reports.
+Each launch writes the adapter's Hermes plugin as `plugins/acp-go-hermes/` into
+the home Hermes uses: `HERMES_HOME`, else `~/.hermes`, or the profile a sticky
+`active_profile` file selects. Only when such a file names a profile other than
+`default` does the launch ask `hermes config path` for the home. When that
+home's `config.yaml` neither enables nor disables the plugin, the gateway
+enables it through Hermes's plugin manager, which records it in
+`plugins.enabled`; listing it in `plugins.disabled` turns it off. The first
+enable in a home also has Hermes's plugin manager record its plugin selection
+and nudge a running `hermes gateway` to rediscover its plugins. Every Hermes
+process using the home then loads the plugin, but it registers only where
+`ACP_GO_HERMES_CALL_REPORTS=1`, which the adapter sets for the `hermes serve` it
+starts, and reports only from a process whose gateway server is running. A
+launch that cannot resolve the home or write the plugin logs a warning and runs
+without call reports.
 
 The plugin wraps Hermes's `llm_execution` middleware. For each Chat Completions
 response of the session's own conversation, it sends the gateway's response id

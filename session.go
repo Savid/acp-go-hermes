@@ -274,15 +274,24 @@ ready:
 	return rt, nil
 }
 
-// publishPlugin writes the adapter's plugin into the home hermes resolves
-// for this launch, which follows the active profile, and returns that home.
-// A launch that cannot runs without call reports, and returns "": usage
-// readings then report each response's context alone.
+// publishPlugin writes the adapter's plugin into the home hermes uses for
+// this launch, which follows the active profile, and returns that home. The
+// home is read from the launch environment; only a sticky non-default profile
+// costs a `hermes config path` run. A launch that cannot runs without call
+// reports, and returns "": usage readings then report each response's
+// context alone.
 func (s *session) publishPlugin(ctx context.Context, executable string, env []string) string {
-	resolveCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
-	defer cancel()
+	home, resolved := hermes.ResolvedHome(func(key string) (string, bool) { return process.Lookup(env, key) })
 
-	home, err := hermes.NativeHome(resolveCtx, executable, env, s.cwd)
+	var err error
+
+	if !resolved {
+		resolveCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
+		home, err = hermes.NativeHome(resolveCtx, executable, env, s.cwd)
+
+		cancel()
+	}
+
 	if err == nil {
 		err = hermes.PublishPlugin(home)
 	}

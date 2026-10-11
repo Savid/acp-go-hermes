@@ -2,6 +2,7 @@ package hermes
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"embed"
 	"encoding/json"
@@ -120,9 +121,64 @@ func PluginListed(home string) (bool, error) {
 	return slices.Contains(config.Plugins.Enabled, any(PluginName)) || slices.Contains(config.Plugins.Disabled, any(PluginName)), nil
 }
 
-// NativeHome is the home a hermes launched with env in dir uses: the
-// directory of the config file `hermes config path` names, which follows the
-// active profile.
+// ResolvedHome is the home a hermes launched with the environment lookup reads
+// uses, when that follows from the environment alone: HERMES_HOME, else the
+// platform default $HOME/.hermes plus HERMES_DATA_DIR_SUFFIX. Hermes keeps a
+// HERMES_HOME that names a directory under "profiles"; for any other home it
+// switches to the profile a sticky active_profile file names under the
+// home's root, which is the home itself or the platform default. It reports
+// false when such a file names a profile other than "default", cannot be
+// read, or the home is not a plain absolute path, so the caller asks hermes.
+func ResolvedHome(lookup func(string) (string, bool)) (string, bool) {
+	userHome, _ := lookup("HOME")
+	suffix, _ := lookup("HERMES_DATA_DIR_SUFFIX")
+
+	platform := ""
+	if userHome != "" {
+		platform = filepath.Join(userHome, ".hermes"+suffix)
+	}
+
+	explicit, _ := lookup(EnvAgentDir)
+	explicit = strings.TrimSpace(explicit)
+
+	home := cmp.Or(explicit, platform)
+	if !filepath.IsAbs(home) || strings.ContainsAny(home, "$~") || !filepath.IsAbs(platform) {
+		return "", false
+	}
+
+	home = filepath.Clean(home)
+	if explicit != "" && filepath.Base(filepath.Dir(home)) == "profiles" {
+		return home, true
+	}
+
+	for _, root := range []string{home, platform} {
+		if !defaultProfile(root) {
+			return "", false
+		}
+	}
+
+	return home, true
+}
+
+// defaultProfile reports whether root's active_profile file is absent or
+// selects the default profile.
+func defaultProfile(root string) bool {
+	data, err := os.ReadFile(filepath.Join(root, "active_profile"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+
+	if err != nil {
+		return false
+	}
+
+	name := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
+
+	return name == "" || name == "default"
+}
+
+// NativeHome asks hermes which home it uses when launched with env in dir:
+// the directory of the config file `hermes config path` names.
 func NativeHome(ctx context.Context, executable string, env []string, dir string) (string, error) {
 	command := exec.CommandContext(ctx, executable, "config", "path")
 	command.Env, command.Dir = env, dir

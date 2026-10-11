@@ -914,9 +914,15 @@ func TestPluginIsInstalledIntoTheHome(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(home, "plugins", hermes.PluginName), nil, 0o600))
 			}
 
-			h := newHarness(t, WithHome(root))
+			launches := filepath.Join(t.TempDir(), "launches")
+			h := newHarness(t, WithHome(root), WithEnv(map[string]string{fakeHermesEnv: "1", fakeHermesEnvLaunchLog: launches, "HOME": t.TempDir()}))
 			h.initialize()
 			h.newSession()
+
+			launched, readErr := os.ReadFile(launches)
+			require.NoError(t, readErr)
+			require.Equal(t, tc.profile != "", strings.Contains(string(launched), "config path\n"),
+				"only a sticky profile needs hermes to name its home")
 
 			if !tc.blocked {
 				for _, file := range []string{"plugin.yaml", "__init__.py"} {

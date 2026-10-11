@@ -81,6 +81,50 @@ func TestPluginListed(t *testing.T) {
 	}
 }
 
+func TestResolvedHome(t *testing.T) {
+	t.Parallel()
+
+	user := t.TempDir()
+	platform := filepath.Join(user, ".hermes")
+	sticky := filepath.Join(t.TempDir(), "sticky")
+	defaulted := filepath.Join(t.TempDir(), "defaulted")
+	unreadable := filepath.Join(t.TempDir(), "unreadable")
+
+	require.NoError(t, os.MkdirAll(sticky, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sticky, "active_profile"), []byte("work\n"), 0o600))
+	require.NoError(t, os.MkdirAll(defaulted, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(defaulted, "active_profile"), []byte("\ufeffdefault\n"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(unreadable, "active_profile"), 0o700))
+
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"explicit":          {map[string]string{"HOME": user, EnvAgentDir: "/srv/hermes"}, "/srv/hermes"},
+		"platform default":  {map[string]string{"HOME": user}, platform},
+		"data dir suffix":   {map[string]string{"HOME": user, "HERMES_DATA_DIR_SUFFIX": "-dev"}, platform + "-dev"},
+		"named profile":     {map[string]string{"HOME": user, EnvAgentDir: filepath.Join(sticky, "profiles", "a")}, filepath.Join(sticky, "profiles", "a")},
+		"default profile":   {map[string]string{"HOME": user, EnvAgentDir: defaulted}, defaulted},
+		"sticky profile":    {map[string]string{"HOME": user, EnvAgentDir: sticky}, ""},
+		"unreadable sticky": {map[string]string{"HOME": user, EnvAgentDir: unreadable}, ""},
+		"relative":          {map[string]string{"HOME": user, EnvAgentDir: "hermes"}, ""},
+		"expanded":          {map[string]string{"HOME": user, EnvAgentDir: "~/hermes"}, ""},
+		"no user home":      {map[string]string{EnvAgentDir: "/srv/hermes"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			home, ok := ResolvedHome(func(key string) (string, bool) {
+				value, found := tc.env[key]
+
+				return value, found
+			})
+			require.Equal(t, tc.want != "", ok)
+			require.Equal(t, tc.want, home)
+		})
+	}
+}
+
 func TestNativeHome(t *testing.T) {
 	t.Parallel()
 
