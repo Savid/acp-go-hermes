@@ -198,7 +198,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		_ = proc.Kill()
 		_ = proc.Close()
 
-		return nil, s.startFailure(ctx, launchFailure(proc, readyCtx.Err()))
+		return nil, s.startFailure(ctx, process.LaunchFailure(proc, vendor, readyCtx.Err()))
 	}
 
 	client, err := endpoint.Connect(readyCtx)
@@ -206,7 +206,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 		_ = proc.Kill()
 		_ = proc.Close()
 
-		return nil, s.startFailure(ctx, launchFailure(proc, err))
+		return nil, s.startFailure(ctx, process.LaunchFailure(proc, vendor, err))
 	}
 
 	for {
@@ -217,7 +217,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 				_ = proc.Kill()
 				_ = proc.Close()
 
-				return nil, s.startFailure(ctx, launchFailure(proc, errors.New("gateway closed before readiness")))
+				return nil, s.startFailure(ctx, process.LaunchFailure(proc, vendor, errors.New("gateway closed before readiness")))
 			}
 
 			if delivery.Event != nil && delivery.Event.Type == "gateway.ready" {
@@ -228,7 +228,7 @@ func (s *session) launch(ctx context.Context) (*runtime, error) {
 			_ = proc.Kill()
 			_ = proc.Close()
 
-			return nil, s.startFailure(ctx, launchFailure(proc, readyCtx.Err()))
+			return nil, s.startFailure(ctx, process.LaunchFailure(proc, vendor, readyCtx.Err()))
 		}
 	}
 
@@ -315,26 +315,10 @@ func (s *session) enablePlugin(ctx context.Context, client *hermes.Client, home 
 	}
 }
 
-// launchFailure names the real reason a startup ended: a child that is already
-// gone, otherwise the transport error the caller observed.
-func launchFailure(proc *process.Process, err error) error {
-	select {
-	case <-proc.Done():
-		reason := "hermes exited before the gateway was ready"
-		if tail := proc.StderrTail(); tail != "" {
-			reason += ": " + tail
-		}
-
-		return errors.New(reason)
-	default:
-		return err
-	}
-}
-
 func (s *session) startFailure(ctx context.Context, err error) error {
 	s.agent.log.ErrorContext(ctx, "hermes session start failed", slog.String("reason", err.Error()))
 
-	return wire.InternalFailure(vendor, internalClassNativeStart)
+	return wire.InternalFailure(vendor, wire.ClassNativeStart)
 }
 
 // configureRuntime binds the stored identity and applies session-scoped native options.

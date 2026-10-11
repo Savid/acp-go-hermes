@@ -131,7 +131,7 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 	case a.deleted[s.id]:
 		refusal = wire.UnknownSession()
 	case a.sessions[s.id] != nil:
-		refusal = wire.InternalFailure(vendor, internalClassNativeStart)
+		refusal = wire.InternalFailure(vendor, wire.ClassNativeStart)
 	}
 
 	if refusal == nil {

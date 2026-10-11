@@ -40,14 +40,14 @@ func (s *session) openStream(ctx context.Context, rt *runtime) error {
 	if rt == nil || s.runtime != rt || rt.ending {
 		s.mu.Unlock()
 
-		return wire.InternalFailure(vendor, internalClassNativeStart)
+		return wire.InternalFailure(vendor, wire.ClassNativeStart)
 	}
 
 	select {
 	case <-rt.proc.Done():
 		s.mu.Unlock()
 
-		return wire.InternalFailure(vendor, internalClassNativeStart)
+		return wire.InternalFailure(vendor, wire.ClassNativeStart)
 	default:
 	}
 

@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -173,19 +172,17 @@ func validateOptionalModel(model string) error {
 	return hermes.ModelSelectionShapeError(model)
 }
 
+// validateConfiguredModels refuses a host-listed id that is no model id, is
+// listed twice, or names no provider.
 func validateConfiguredModels(ids []string) error {
-	seen := make(map[string]struct{}, len(ids))
+	if err := wire.ValidateConfiguredModels(ids); err != nil {
+		return err
+	}
 
 	for index, id := range ids {
-		if err := hermes.ModelSelectionShapeError(id); err != nil || id != strings.TrimSpace(id) {
-			return fmt.Errorf("configured model %d %q is not a model id", index, id)
+		if hermes.ModelSelectionShapeError(id) != nil {
+			return fmt.Errorf("configured model %d %q is not a provider-qualified model id", index, id)
 		}
-
-		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("configured model %q is listed twice", id)
-		}
-
-		seen[id] = struct{}{}
 	}
 
 	return nil
@@ -375,11 +372,7 @@ func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) 
 		return acp.AuthenticateResponse{}, openErr
 	}
 
-	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
-		return acp.AuthenticateResponse{}, wire.ParamRefusal(refusal)
-	}
-
-	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
+	return acp.AuthenticateResponse{}, wire.AuthenticateRefused(params)
 }
 
 // Logout exists because the SDK interface requires it.
@@ -478,7 +471,7 @@ func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
 
 	a.log.ErrorContext(ctx, "hermes executable resolution failed", slog.String("reason", err.Error()))
 
-	return "", wire.InternalFailure(vendor, internalClassNativeStart)
+	return "", wire.InternalFailure(vendor, wire.ClassNativeStart)
 }
 
 // environment builds the merge for one launch: the inherited process
@@ -500,7 +493,3 @@ func (a *Agent) environment(sessionEnv map[string]string, owned map[string]strin
 		InternalPrefix: hermes.InternalEnvPrefix,
 	}
 }
-
-// internalClassNativeStart is the hermes_internal_failure class of a native
-// hermes process that could not be started or configured for a session.
-const internalClassNativeStart = "native_start"
