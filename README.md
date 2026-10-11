@@ -166,31 +166,23 @@ once the response has finished streaming.
 
 ### Session store
 
-`WithSessionStore` commits each message of the native per-conversation JSON export
-as one row under the main subpath, and under `config` the session configuration
-with the export's session object and the session title, format
-`hermes-session-json-v2`. Each commit streams the export, digests the messages
-it already committed without keeping them, and appends only the ones after
-them. A message Hermes changed in place, as a compaction or a model switch
-does, makes the commit read the export again and republish the conversation.
-In-place compaction archives messages without removing them, so the export
-never shrinks. Native auth files are not part of the snapshot.
-The default store is in memory; provide a durable store to restore across adapter
-restarts.
+`WithSessionStore` mirrors the conversation Hermes keeps in its home's
+`state.db`, read and restored through `hermes serve`'s
+`/api/sessions/{id}/export` and `/api/sessions/import`: each exported message
+is one row under the main subpath, and the adapter's session record is under
+`config`, format `hermes-session-json-v2`. Commit, restore, and recovery follow
+[Sessions and the Session Store](https://github.com/savid/acp-go-core/blob/master/docs/03-sessions-and-store.md).
+The record holds the session id, the native session id, `cwd`, additional
+directories, the session environment and ordered path directories, the model,
+the effort, the title, and the export's session object without its messages.
 
-`session/load` restores and replays history; `session/resume` restores without
-replay. A missing conversation is imported through Hermes's native HTTP API.
-Existing native history must contain the stored history as a prefix, apart
-from messages Hermes archived since, which the restore republishes; divergent or
-shorter native histories fail restore. A native history that begins with exactly
-the stored messages is adopted without a write. Each completed prompt commits its
-conversation before returning. Close preserves Hermes's native state, and delete
-removes the store entry without deleting the native conversation.
-
-The native binding identifies the durable Hermes conversation. Transient gateway
-IDs stay internal. Hermes compacts in place under `compression.in_place: true`,
-its default. Rotating compaction (`false`) changes the durable ID, which poisons
-the session instead of storing a different conversation under the original ID.
+A commit continues after the messages it committed; a message Hermes changed in
+place, as an in-place compaction or a model switch does, republishes the
+conversation, and archive flags do not count as a conflict on restore.
+Hermes's import refuses a conversation past 10,000 messages or 5 MiB, so the
+adapter warns once a session's conversation passes either. Rotating compaction
+(`compression.in_place: false`) changes the durable id, which poisons the
+session.
 
 ### Account usage
 
