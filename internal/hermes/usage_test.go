@@ -16,7 +16,7 @@ func TestDecodeUsage(t *testing.T) {
 		ok      bool
 	}{
 		"tick":           {`{"usage":{"calls":2,"prompt":30,"completion":4,"reasoning":1,"total":34,"context_used":18,"context_max":1000}}`, Usage{Prompt: 30, Completion: 4, Reasoning: 1, Total: 34, ContextUsed: 18, ContextMax: 1000}, true},
-		"compacted":      {`{"text":"done","status":"complete","usage":{"prompt":30,"completion":4,"total":34,"compressions":1}}`, Usage{Prompt: 30, Completion: 4, Total: 34}, true},
+		"compacted":      {`{"text":"done","status":"complete","usage":{"prompt":30,"completion":4,"total":34,"compressions":1}}`, Usage{Prompt: 30, Completion: 4, Total: 34, Compressions: 1}, true},
 		"no agent":       {`{"text":"","status":"error","usage":{}}`, Usage{}, true},
 		"without usage":  {`{"text":"summary"}`, Usage{}, false},
 		"malformed body": {`[]`, Usage{}, false},
@@ -40,4 +40,15 @@ func TestUsageSince(t *testing.T) {
 	require.Equal(t, Usage{Prompt: 30, Completion: 4, Total: 34}, Usage{Prompt: 30, Completion: 4, Total: 34}.Since(earlier), "a rebuilt agent restarts its counters")
 	require.Equal(t, Usage{Prompt: 30, Completion: 20, Reasoning: 3, Total: 50}, Usage{Prompt: 30, Completion: 20, Reasoning: 3, Total: 50}.Since(earlier), "a rebuilt agent can exceed some earlier counters before its first reading")
 	require.Equal(t, Usage{Prompt: 70, Completion: 14, Reasoning: 3, Total: 84}, Usage{Prompt: 40, Completion: 4, Reasoning: 1, Total: 44}.Add(Usage{Prompt: 30, Completion: 10, Reasoning: 2, Total: 40}))
+}
+
+func TestUsageCompactionsSince(t *testing.T) {
+	t.Parallel()
+
+	earlier := Usage{Prompt: 100, Completion: 10, Total: 110, Compressions: 2}
+
+	require.EqualValues(t, 1, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 3}.CompactionsSince(earlier))
+	require.EqualValues(t, 0, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 2}.CompactionsSince(earlier))
+	require.EqualValues(t, 0, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 1}.CompactionsSince(earlier), "the counter never proves a negative count")
+	require.EqualValues(t, 1, Usage{Prompt: 30, Completion: 4, Total: 34, Compressions: 1}.CompactionsSince(earlier), "a rebuilt agent counts from zero")
 }

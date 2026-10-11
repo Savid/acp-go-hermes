@@ -460,6 +460,44 @@ func TestSettledUsageAfterCompaction(t *testing.T) {
 	}, usageUpdates(h.rec.snapshot()))
 }
 
+// TestCompactionsPublishSettledOutcomes proves each compaction Hermes committed
+// during a turn yields one completed notification once the turn settles, and
+// an attempt Hermes rolled back yields none.
+func TestCompactionsPublishSettledOutcomes(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+
+	for _, prompt := range []string{"COMPACT", "COMPACTABORT", "HELLO", "COMPACTEND"} {
+		_, err := h.prompt(session.SessionId, prompt, nil)
+		require.NoError(t, err)
+	}
+
+	var compactions []wire.Compaction
+
+	for _, update := range h.rec.snapshot() {
+		raw, ok := update.Meta[wire.CompactionKey]
+		if !ok {
+			continue
+		}
+
+		data, err := json.Marshal(raw)
+		require.NoError(t, err)
+
+		var compaction wire.Compaction
+		require.NoError(t, json.Unmarshal(data, &compaction))
+		require.Equal(t, wire.CompactionCompleted, compaction.Status)
+		require.NotEmpty(t, compaction.CompactionID)
+		require.Empty(t, compaction.Trigger)
+		compactions = append(compactions, compaction)
+	}
+
+	require.Len(t, compactions, 2)
+	require.NotEqual(t, compactions[0].CompactionID, compactions[1].CompactionID)
+}
+
 // TestCancelledTurnReportsNoUsageAfterCancel proves a cancelled turn keeps
 // the figures it reported before the cancel and sends none after it, while
 // its consumption still counts the response that finished after the cancel.

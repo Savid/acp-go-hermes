@@ -65,6 +65,8 @@ type session struct {
 	mirrorMu  sync.Mutex
 	lcMu      sync.Mutex
 	lc        lifecycle.Publisher
+	// compactions publishes the compactions the event pump observes.
+	compactions wire.Compactions
 }
 
 // runtime binds one gateway connection to its native live-session identity.
@@ -91,6 +93,9 @@ type runtime struct {
 	usage    hermes.Usage
 	window   hermes.Usage
 	reported []int64
+	// settled is the usage of the latest message.complete; only the event
+	// pump reads and writes it.
+	settled hermes.Usage
 }
 
 type cycle struct {
@@ -527,6 +532,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event hermes.Eve
 	}
 
 	reading := rt.readUsage(event, call)
+	s.publishCompactions(ctx, reading)
 
 	if event.Type == "request.cancel" {
 		id := rt.liveID + ":" + hermes.String(event.Payload, "id")

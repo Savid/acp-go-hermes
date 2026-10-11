@@ -533,6 +533,14 @@ func (s *fakeSession) usageScript(ctx context.Context, live, prompt string, emit
 		s.record(func(u *fakeUsage) { u.respond(900, 50) })
 		s.usageEvent(live, emit)
 		final = func(u *fakeUsage) { u.compact() }
+	case "COMPACTABORT":
+		// A tick observes an attempt that raised the counter before Hermes
+		// aborted it and lowered the counter again.
+		s.record(func(u *fakeUsage) { u.respond(900, 50) })
+		s.usageEvent(live, emit)
+		s.record(func(u *fakeUsage) { u.compressions++ })
+		s.usageEvent(live, emit)
+		final = func(u *fakeUsage) { u.compressions-- }
 	case "UNSIZED":
 		s.record(func(u *fakeUsage) { u.unsized = true })
 	case "COVERED":
@@ -680,7 +688,7 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 			return
 		}
 		status = statusInterrupted
-	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW",
+	case "MULTI", "BURST", "REDIRECT", "COMPACT", "COMPACTEND", "COMPACTABORT", "UNSIZED", "COVERED", "REPLAY", "REPLAYED", "STEPSLOW",
 		"CALLS", "CALLRACE", "CALLRETRY", "CALLFALLBACK", "CALLFOREIGN", "CALLEMPTY", "CALLSLOW":
 		var running bool
 		if final, status, running = s.usageScript(ctx, live, prompt, emit); !running {

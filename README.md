@@ -213,5 +213,9 @@ hermes, credentials, or network.
 
 ## Context compaction
 
-The gateway exposes progress but no reliable terminal outcome, so the adapter
-publishes no compaction notifications. Usage accounting remains independent.
+Gateway progress has no reliable terminal outcome, so the adapter publishes
+outcomes only. The `compressions` counter of each `message.complete` usage
+counts the compactions Hermes committed; every increase since the runtime's
+previous `message.complete` publishes one `completed` notification, without a
+trigger or context counts. A mid-turn `session.usage` can count an attempt Hermes
+later rolls back, so it publishes nothing. Usage accounting remains independent.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -104,6 +105,9 @@ type usageReading struct {
 	consumed hermes.Usage
 	covered  bool
 	call     *callReport
+	// compactions are the compactions a message.complete proves the agent
+	// committed since the runtime's previous one.
+	compactions int64
 }
 
 // readUsage records the usage a gateway event carries against the runtime's
@@ -137,6 +141,13 @@ func (rt *runtime) readUsage(event hermes.Event, call *hermes.Call) usageReading
 
 	reading := usageReading{current: current, consumed: current.Since(rt.usage)}
 	rt.usage = current
+
+	// A session.usage tick can catch an attempt Hermes later rolls back;
+	// message.complete reads the counter once the turn settled.
+	if event.Type == eventMessageComplete {
+		reading.compactions = current.CompactionsSince(rt.settled)
+		rt.settled = current
+	}
 
 	if reading.consumed.Prompt > 0 {
 		reading.covered = rt.coverReading(reading.consumed.Prompt)
@@ -427,6 +438,17 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 	}
 
 	return nil
+}
+
+// publishCompactions reports each compaction a reading proves as completed.
+// Hermes states neither an attempt's start nor its trigger, so only the
+// outcome is published.
+func (s *session) publishCompactions(ctx context.Context, reading usageReading) {
+	for range reading.compactions {
+		if err := s.compactions.Publish(ctx, s.agent.connection(), s.id, "", wire.Compaction{Status: wire.CompactionCompleted}); err != nil {
+			s.agent.log.WarnContext(ctx, "hermes compaction notification failed", slog.String("reason", err.Error()))
+		}
+	}
 }
 
 // contextTokens is the context Hermes counts after the provider responses a
