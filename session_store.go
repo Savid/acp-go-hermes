@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -86,28 +87,44 @@ func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 	}
 
 	// Commit may run the source and record more than once; each read leaves
-	// its session object here, and only the committed one reaches the session.
-	var native json.RawMessage
+	// what it exported here, and only the committed read reaches the session.
+	var read hermes.Export
 
 	ctx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
-	err := s.mirror.Commit(ctx, s.exportSource(ctx, rt, &native), func(sessionlog.Tail) (any, error) { return s.recordWith(native), nil })
+	report, err := s.mirror.Commit(ctx, s.exportSource(ctx, rt, &read), func(sessionlog.Tail) (any, error) { return s.recordWith(read.Session), nil })
+	s.agent.observe.RecordRepublish(ctx, string(report.Republish))
 	finish(err)
 
-	if err == nil {
-		s.mu.Lock()
-		s.nativeSession = native
-		s.persisted = true
-		s.mu.Unlock()
+	if report.Recovery() {
+		s.agent.log.WarnContext(ctx, "session mirror republished", slog.String("session_id", string(s.id)),
+			slog.String("reason", string(report.Republish)), slog.Any("append_error", report.AppendErr))
 	}
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.nativeSession = read.Session
+	s.persisted = true
+	warn := read.ImportRefused() && !s.importLimitWarned
+	s.importLimitWarned = s.importLimitWarned || warn
+	s.mu.Unlock()
+
+	if warn {
+		s.agent.log.WarnContext(ctx, "hermes conversation exceeds its import limits; a restore that must import it will fail",
+			slog.String("session_id", string(s.id)), slog.Int("messages", read.Next.Count), slog.Int64("bytes", read.ImportSize()),
+			slog.Int("message_limit", hermes.ImportMessageLimit), slog.Int("byte_limit", hermes.ImportByteLimit))
+	}
+
+	return nil
 }
 
 // exportSource reads the conversation the runtime is bound to after the
 // prefix the mirror's cursor names, after checking that the gateway still
-// serves it under the recorded identity. Each read leaves the exported
-// session object in native for the record the commit publishes with it.
-func (s *session) exportSource(ctx context.Context, rt *runtime, native *json.RawMessage) sessionlog.Source {
+// serves it under the recorded identity. Each read leaves its session object
+// and size in read for the record the commit publishes with it.
+func (s *session) exportSource(ctx context.Context, rt *runtime, read *hermes.Export) sessionlog.Source {
 	return func(from sessionlog.Cursor) (sessionlog.Tail, error) {
 		id, err := s.boundConversation(ctx, rt)
 		if err != nil {
@@ -125,7 +142,7 @@ func (s *session) exportSource(ctx context.Context, rt *runtime, native *json.Ra
 			return sessionlog.Tail{}, errors.New("native conversation missing")
 		}
 
-		*native = export.Session
+		*read = hermes.Export{Session: export.Session, Next: export.Next}
 
 		return sessionlog.Tail{Rows: export.Messages, Next: sessionlog.Position(export.Next), Full: prefix.Count == 0 || !export.Continued}, nil
 	}

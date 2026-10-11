@@ -53,17 +53,20 @@ type session struct {
 	mirror *sessionlog.Mirror
 	// persisted marks a successfully committed mirror.
 	persisted bool
-	closing   bool
-	closeDone chan struct{}
-	closeErr  error
-	poison    string
-	turn      *turn
-	cycle     *cycle
-	dialogs   map[string]*dialog
-	callbacks sync.WaitGroup
-	openMu    sync.Mutex
-	lcMu      sync.Mutex
-	lc        lifecycle.Publisher
+	// importLimitWarned marks a session whose conversation was reported past
+	// Hermes's import limits.
+	importLimitWarned bool
+	closing           bool
+	closeDone         chan struct{}
+	closeErr          error
+	poison            string
+	turn              *turn
+	cycle             *cycle
+	dialogs           map[string]*dialog
+	callbacks         sync.WaitGroup
+	openMu            sync.Mutex
+	lcMu              sync.Mutex
+	lc                lifecycle.Publisher
 	// compactions publishes the compactions the event pump observes.
 	compactions wire.Compactions
 }

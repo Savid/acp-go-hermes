@@ -183,12 +183,13 @@ func TestRestoreRefusesAForeignNativeSession(t *testing.T) {
 				record.Session = json.RawMessage(session)
 			}
 
-			require.NoError(t, sessionlog.NewMirror(store, id).Commit(t.Context(), sessionlog.Rows(nil), recordOf(record)))
+			_, err := sessionlog.NewMirror(store, id).Commit(t.Context(), sessionlog.Rows(nil), recordOf(record))
+			require.NoError(t, err)
 
 			h := newHarness(t, WithSessionStore(store))
 			h.initialize()
 
-			_, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(id), cwd))
+			_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(id), cwd))
 			require.Equal(t, "hermes_restore_failed", requestErrorData(t, err)[stopReasonError])
 		})
 	}
@@ -376,7 +377,8 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), recordOf(record)))
+	_, err = sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), recordOf(record))
+	require.NoError(t, err)
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -815,13 +817,14 @@ func BenchmarkCommitMirror(b *testing.B) {
 
 		source := func(from sessionlog.Cursor) (sessionlog.Tail, error) {
 			prefix, _ := from.Position().(hermes.Prefix)
-			read, err := hermes.DecodeExport(bytes.NewReader(export), prefix)
+			read, readErr := hermes.DecodeExport(bytes.NewReader(export), prefix)
 
-			return sessionlog.Tail{Rows: read.Messages, Next: sessionlog.Position(read.Next), Full: prefix.Count == 0 || !read.Continued}, err
+			return sessionlog.Tail{Rows: read.Messages, Next: sessionlog.Position(read.Next), Full: prefix.Count == 0 || !read.Continued}, readErr
 		}
 
 		b.StartTimer()
-		require.NoError(b, mirror.Commit(b.Context(), source, recordOf(record)))
+		_, err = mirror.Commit(b.Context(), source, recordOf(record))
+		require.NoError(b, err)
 		b.StopTimer()
 	}
 

@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,7 +129,7 @@ func TestSameMessage(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExportBoundsTheConversation(t *testing.T) {
+func TestExportReadsTheNamedConversation(t *testing.T) {
 	t.Parallel()
 
 	body := `{"id":"s1","messages":[{"role":"user","content":"` + strings.Repeat("x", 64) + `"}]}`
@@ -157,11 +158,80 @@ func TestExportBoundsTheConversation(t *testing.T) {
 
 	_, _, err = endpoint.Export(t.Context(), "other", Prefix{})
 	require.ErrorContains(t, err, "identity differs")
+}
 
-	reader := &limitedReader{source: strings.NewReader(body), remaining: int64(len(body) - 1)}
-	_, err = DecodeConversation(reader)
-	require.Error(t, err)
-	require.True(t, reader.exceeded, "an export past its bound is refused")
+// TestExportBoundsKeptBytes proves the export bounds each message and the new
+// messages a continuing read keeps, never the messages it only digests.
+func TestExportBoundsKeptBytes(t *testing.T) {
+	t.Parallel()
+
+	bounds := exportBounds{value: 64, kept: 64}
+	large := `{"content":"` + strings.Repeat("x", 40) + `"}`
+	small := `{"id":1}`
+	export := func(messages ...string) io.Reader {
+		return strings.NewReader(`{"id":"s1","messages":[` + strings.Join(messages, ",") + `]}`)
+	}
+
+	prefix := PrefixOf([][]byte{[]byte(large), []byte(large)})
+
+	read, err := decodeExport(export(large, large, small), prefix, bounds)
+	require.NoError(t, err, "digested messages past the kept bound do not count")
+	require.True(t, read.Continued)
+	require.Equal(t, [][]byte{[]byte(small)}, read.Messages)
+	require.Equal(t, int64(2*len(large)+len(small)), read.Next.Bytes)
+
+	full, err := decodeExport(export(large, large, small), Prefix{}, bounds)
+	require.NoError(t, err, "a full read keeps the whole conversation")
+	require.Len(t, full.Messages, 3)
+
+	_, err = decodeExport(export(small, large, large), PrefixOf([][]byte{[]byte(small)}), bounds)
+	require.ErrorContains(t, err, "new messages exceed", "a continuing read bounds the new bytes it keeps")
+
+	oversized := `{"content":"` + strings.Repeat("x", 200) + `"}`
+	_, err = decodeExport(export(oversized), Prefix{}, bounds)
+	require.ErrorIs(t, err, errValueTooLarge, "one message past the value bound is refused")
+}
+
+func TestImportLimits(t *testing.T) {
+	t.Parallel()
+
+	session := []byte(`{"id":"s1"}`)
+	within := Export{Session: session, Next: Prefix{Count: 2, Bytes: 100}}
+	require.False(t, within.ImportRefused())
+	require.EqualValues(t, len(session)+len(`,"messages":[]`)+1+100, within.ImportSize())
+
+	encoded, err := Conversation{Session: session, Messages: [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)}}.Encode()
+	require.NoError(t, err)
+	require.EqualValues(t, len(encoded), Export{Session: session, Next: PrefixOf([][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})}.ImportSize(),
+		"the size is the encoding's")
+
+	require.True(t, Export{Session: session, Next: Prefix{Count: ImportMessageLimit + 1}}.ImportRefused())
+	require.True(t, Export{Session: session, Next: Prefix{Count: 1, Bytes: ImportByteLimit}}.ImportRefused())
+}
+
+func TestPersistenceErrorsCarryHermesText(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/sessions/import" {
+			http.Error(w, `{"detail":"Session import payload is too large"}`, http.StatusRequestEntityTooLarge)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("database\nlocked"))
+	}))
+	t.Cleanup(server.Close)
+
+	endpoint := Endpoint{URL: server.URL, Token: "token"}
+
+	err := endpoint.Import(t.Context(), Conversation{Session: []byte(`{"id":"s1"}`), Messages: [][]byte{}})
+	require.ErrorContains(t, err, "status 413")
+	require.ErrorContains(t, err, "Session import payload is too large")
+
+	_, _, err = endpoint.Export(t.Context(), "s1", Prefix{})
+	require.ErrorContains(t, err, "status 500: database locked")
 }
 
 func TestDecodeExportAfterPrefix(t *testing.T) {

@@ -34,8 +34,12 @@ const (
 	fieldMessages     = "messages"
 	fieldActive       = "active"
 	fieldCompacted    = "compacted"
-	// exportLimit bounds one conversation export.
-	exportLimit = 64 << 20
+	// valueLimit bounds one message or session member of an export.
+	valueLimit = 64 << 20
+	// keptLimit bounds the new messages one continuing export read keeps.
+	keptLimit = 64 << 20
+	// errorTextLimit bounds the failure text kept from a persistence answer.
+	errorTextLimit = 4 << 10
 	// resultLimit bounds a persistence call's JSON result.
 	resultLimit = 1 << 20
 )
@@ -147,21 +151,24 @@ type Conversation struct {
 	Messages [][]byte
 }
 
-// Prefix identifies the leading messages of a conversation: how many, and a
-// digest of their bytes. The zero Prefix is the empty one.
+// Prefix identifies the leading messages of a conversation: how many, their
+// size, and a digest of their bytes. The zero Prefix is the empty one.
 type Prefix struct {
 	Count  int
+	Bytes  int64
 	Digest [sha256.Size]byte
 }
 
 // PrefixOf is the prefix that holds exactly messages.
 func PrefixOf(messages [][]byte) Prefix {
 	digest := sha256.New()
+	prefix := Prefix{Count: len(messages)}
+
 	for _, message := range messages {
 		writeDigest(digest, message)
+		prefix.Bytes += int64(len(message))
 	}
 
-	prefix := Prefix{Count: len(messages)}
 	digest.Sum(prefix.Digest[:0])
 
 	return prefix
@@ -181,6 +188,25 @@ type Export struct {
 	Continued bool
 	// Next is the prefix that holds every message the conversation exported.
 	Next Prefix
+}
+
+// Hermes's import refuses a conversation with more messages, or whose
+// encoding is larger, than these.
+const (
+	ImportMessageLimit = 10_000
+	ImportByteLimit    = 5 << 20
+)
+
+// ImportSize is about the size of the conversation's encoding as Hermes's
+// import measures it: the session object with every message the export holds.
+func (e Export) ImportSize() int64 {
+	return int64(len(e.Session)+len(`,"messages":[]`)+max(e.Next.Count-1, 0)) + e.Next.Bytes
+}
+
+// ImportRefused reports whether Hermes's import would refuse the
+// conversation, so a restore that must import it would fail.
+func (e Export) ImportRefused() bool {
+	return e.Next.Count > ImportMessageLimit || e.ImportSize() > ImportByteLimit
 }
 
 // Export streams the native record of one persisted conversation and keeps
@@ -212,16 +238,10 @@ func (e Endpoint) export(ctx context.Context, id string, prefix Prefix) (Export,
 		return Export{}, false, nil
 	case http.StatusOK:
 	default:
-		return Export{}, false, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
+		return Export{}, false, statusError(response)
 	}
 
-	body := &limitedReader{source: response.Body, remaining: exportLimit}
-
-	export, err := DecodeExport(body, prefix)
-	if body.exceeded {
-		return Export{}, false, errors.New("native session export exceeds size limit")
-	}
-
+	export, err := DecodeExport(response.Body, prefix)
 	if err != nil {
 		return Export{}, false, fmt.Errorf("invalid native session export: %w", err)
 	}
@@ -244,9 +264,22 @@ func DecodeConversation(reader io.Reader) (Conversation, error) {
 // one "messages" array of objects, keeping the messages after prefix. Every
 // other member is kept, in order and byte for byte, in Session. When the
 // messages do not begin with exactly prefix, Continued is false and Messages
-// is nil.
+// is nil. The export as a whole has no size bound: each message and session
+// member is bounded, and so are the new messages a read after a nonempty
+// prefix keeps; a read from the empty prefix keeps the whole conversation.
 func DecodeExport(reader io.Reader, prefix Prefix) (Export, error) {
-	decoder := json.NewDecoder(reader)
+	return decodeExport(reader, prefix, exportBounds{value: valueLimit, kept: keptLimit})
+}
+
+// exportBounds are the largest message or session member, and the most new
+// bytes a continuing read keeps.
+type exportBounds struct {
+	value, kept int64
+}
+
+func decodeExport(reader io.Reader, prefix Prefix, bounds exportBounds) (Export, error) {
+	bounded := &valueReader{source: reader, value: bounds.value, limit: 2 * bounds.value}
+	decoder := json.NewDecoder(bounded)
 
 	if err := expectDelim(decoder, '{'); err != nil {
 		return Export{}, err
@@ -269,8 +302,8 @@ func DecodeExport(reader io.Reader, prefix Prefix) (Export, error) {
 		key, _ := token.(string)
 		if key != fieldMessages {
 			var value json.RawMessage
-			if decodeErr := decoder.Decode(&value); decodeErr != nil {
-				return Export{}, decodeErr
+			if decodeErr := decodeValue(decoder, bounded, &value); decodeErr != nil {
+				return Export{}, fmt.Errorf("session member %q: %w", key, decodeErr)
 			}
 
 			if session.Len() > 1 {
@@ -291,7 +324,7 @@ func DecodeExport(reader io.Reader, prefix Prefix) (Export, error) {
 
 		listed = true
 
-		if export, err = decodeMessages(decoder, prefix); err != nil {
+		if export, err = decodeMessages(decoder, bounded, prefix, bounds.kept); err != nil {
 			return Export{}, err
 		}
 	}
@@ -316,7 +349,7 @@ func DecodeExport(reader io.Reader, prefix Prefix) (Export, error) {
 
 // decodeMessages reads the messages array, digesting every message and
 // keeping the ones after prefix.
-func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
+func decodeMessages(decoder *json.Decoder, bounded *valueReader, prefix Prefix, keptLimit int64) (Export, error) {
 	if err := expectDelim(decoder, '['); err != nil {
 		return Export{}, err
 	}
@@ -325,6 +358,7 @@ func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
 		digest  = sha256.New()
 		message json.RawMessage
 		count   int
+		kept    int64
 		sum     [sha256.Size]byte
 	)
 
@@ -332,8 +366,8 @@ func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
 
 	for decoder.More() {
 		// The prefix's messages are dropped, so one buffer holds each in turn.
-		if err := decoder.Decode(&message); err != nil {
-			return Export{}, err
+		if err := decodeValue(decoder, bounded, &message); err != nil {
+			return Export{}, fmt.Errorf("message %d: %w", count, err)
 		}
 
 		if len(message) == 0 || message[0] != '{' {
@@ -343,6 +377,7 @@ func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
 		count++
 
 		writeDigest(digest, message)
+		export.Next.Bytes += int64(len(message))
 
 		if count < prefix.Count {
 			continue
@@ -354,9 +389,15 @@ func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
 			continue
 		}
 
-		if export.Continued {
-			export.Messages = append(export.Messages, bytes.Clone(message))
+		if !export.Continued {
+			continue
 		}
+
+		if kept += int64(len(message)); prefix.Count > 0 && kept > keptLimit {
+			return Export{}, fmt.Errorf("new messages exceed %d bytes", keptLimit)
+		}
+
+		export.Messages = append(export.Messages, bytes.Clone(message))
 	}
 
 	if !export.Continued {
@@ -458,38 +499,71 @@ func (e Endpoint) Import(ctx context.Context, conversation Conversation) error {
 		Imported int  `json:"imported"`
 	}
 	if json.Unmarshal(data, &result) != nil || !result.OK || result.Imported != 1 {
-		return errors.New("native session import refused")
+		return fmt.Errorf("native session import refused: %s", errorText(data))
 	}
 
 	return nil
 }
 
-// limitedReader reads at most remaining bytes and records whether the
-// source held more.
-type limitedReader struct {
-	source    io.Reader
-	remaining int64
-	exceeded  bool
+// valueReader fails once more than limit bytes arrived since the decoder
+// last finished a value, so a decoder never buffers one oversized value.
+type valueReader struct {
+	source io.Reader
+	value  int64
+	limit  int64
+	since  int64
 }
 
-func (l *limitedReader) Read(buffer []byte) (int, error) {
-	if l.remaining <= 0 {
-		var probe [1]byte
-		if n, _ := l.source.Read(probe[:]); n > 0 {
-			l.exceeded = true
-		}
+var errValueTooLarge = errors.New("value exceeds its bound")
 
-		return 0, io.EOF
+func (r *valueReader) Read(buffer []byte) (int, error) {
+	if r.since >= r.limit {
+		return 0, errValueTooLarge
 	}
 
-	if int64(len(buffer)) > l.remaining {
-		buffer = buffer[:l.remaining]
+	if int64(len(buffer)) > r.limit-r.since {
+		buffer = buffer[:r.limit-r.since]
 	}
 
-	n, err := l.source.Read(buffer)
-	l.remaining -= int64(n)
+	n, err := r.source.Read(buffer)
+	r.since += int64(n)
 
 	return n, err
+}
+
+// decodeValue decodes the next value into value and starts a new bound.
+func decodeValue(decoder *json.Decoder, bounded *valueReader, value *json.RawMessage) error {
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+
+	if int64(len(*value)) > bounded.value {
+		return errValueTooLarge
+	}
+
+	// The decoder may already hold the start of the next value, which a new
+	// bound of twice the value limit leaves room for.
+	bounded.since = 0
+
+	return nil
+}
+
+// statusError names a persistence answer's status and the failure text
+// Hermes sent with it.
+func statusError(response *http.Response) error {
+	data, _ := io.ReadAll(io.LimitReader(response.Body, errorTextLimit))
+
+	return fmt.Errorf("hermes persistence HTTP status %d: %s", response.StatusCode, errorText(data))
+}
+
+// errorText is a persistence answer as one line of bounded text.
+func errorText(data []byte) string {
+	text := strings.Join(strings.Fields(string(data)), " ")
+	if len(text) > errorTextLimit {
+		text = text[:errorTextLimit]
+	}
+
+	return text
 }
 
 func (e Endpoint) send(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
@@ -518,7 +592,7 @@ func (e Endpoint) request(ctx context.Context, method, path string, body []byte)
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
+		return nil, statusError(response)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(response.Body, resultLimit+1))
