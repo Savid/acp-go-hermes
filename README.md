@@ -164,9 +164,13 @@ once the response has finished streaming.
 
 ### Session store
 
-`WithSessionStore` commits the native per-conversation JSON export under the main
-subpath and the session configuration under `config`, format
-`hermes-session-json-v1`. Native auth files are not part of the snapshot.
+`WithSessionStore` commits each message of the native per-conversation JSON export
+as one row under the main subpath, and under `config` the session configuration
+with the export's session object and the session title, format
+`hermes-session-json-v2`. Each commit appends only the messages after the
+committed ones; a message Hermes changed in place, as a compaction or a model
+switch does, republishes the conversation. Native auth files are not part of the
+snapshot.
 The default store is in memory; provide a durable store to restore across adapter
 restarts.
 
@@ -174,12 +178,13 @@ restarts.
 replay. A missing conversation is imported through Hermes's native HTTP API.
 Existing native history must contain the stored history as a prefix; divergent
 or shorter native histories fail restore. Each completed prompt commits its
-snapshot before returning. Close preserves Hermes's native state, and delete
+conversation before returning. Close preserves Hermes's native state, and delete
 removes the store entry without deleting the native conversation.
 
 The native binding identifies the durable Hermes conversation. Transient gateway
-IDs stay internal. Native compression that changes the durable ID poisons the session
-instead of storing a different conversation under the original ID.
+IDs stay internal. Hermes compacts in place under `compression.in_place: true`,
+its default. Rotating compaction (`false`) changes the durable ID, which poisons
+the session instead of storing a different conversation under the original ID.
 
 ### Account usage
 

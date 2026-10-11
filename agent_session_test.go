@@ -36,6 +36,19 @@ func (s *commitBarrier) Replace(ctx context.Context, key acpcore.SessionKey, rep
 
 	return s.SessionStore.Replace(ctx, key, replacements)
 }
+
+func (s *commitBarrier) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.block.CompareAndSwap(true, false) {
+		s.entered <- key
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
+}
 func TestEstablishmentExcludesPrompt(t *testing.T) {
 	for _, phase := range []string{"new", "cold_load"} {
 		t.Run(phase, func(t *testing.T) {
@@ -88,10 +101,17 @@ func TestFailedCloseReleasesTheSessionSlot(t *testing.T) {
 	t.Parallel()
 
 	store := &faultStore{SessionStore: acpcore.NewInMemorySessionStore()}
-	h := newHarness(t, WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	home := t.TempDir()
+	h := newHarness(t, WithHome(home), WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	h.initialize()
 
 	first := h.newSession()
+
+	// The native conversation gains a message, so the closing commit writes.
+	native := nativeConversation(t, home, first.SessionId)
+	messages, _ := native["messages"].([]any)
+	native["messages"] = append(messages, map[string]any{"role": roleUser, "content": "native continuation"})
+	writeNativeConversation(t, home, first.SessionId, native)
 
 	store.fail.Store(true)
 

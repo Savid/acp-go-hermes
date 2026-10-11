@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,11 @@ const (
 	EnvSessionToken   = "HERMES_DASHBOARD_SESSION_TOKEN"
 	valText           = "text"
 	valReasoning      = "reasoning"
-	snapshotLimit     = 64 << 20
+	fieldMessages     = "messages"
+	// exportLimit bounds one conversation export.
+	exportLimit = 64 << 20
+	// resultLimit bounds a persistence call's JSON result.
+	resultLimit = 1 << 20
 )
 
 // loopbackHost is the only interface a serve process binds.
@@ -129,36 +134,216 @@ func (e Endpoint) Connect(ctx context.Context) (*Client, error) {
 	}
 }
 
-// Export obtains the complete native record for one persisted conversation.
-func (e Endpoint) Export(ctx context.Context, id string) (json.RawMessage, error) {
-	data, status, err := e.request(ctx, http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"/export", nil)
-	if status == http.StatusNotFound {
-		return nil, nil
+// Conversation is one persisted Hermes conversation as its export carries it:
+// the session object without its messages, and each message as the raw
+// object Hermes wrote.
+type Conversation struct {
+	Session  json.RawMessage
+	Messages [][]byte
+}
+
+// Export streams the complete native record of one persisted conversation.
+// found is false when Hermes has no conversation under id. Each message is
+// kept as its own raw object, so no message is decoded or re-encoded.
+func (e Endpoint) Export(ctx context.Context, id string) (conversation Conversation, found bool, err error) {
+	response, err := e.send(ctx, http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"/export", nil)
+	if err != nil {
+		return Conversation{}, false, err
+	}
+	defer response.Body.Close()
+
+	switch response.StatusCode {
+	case http.StatusNotFound:
+		return Conversation{}, false, nil
+	case http.StatusOK:
+	default:
+		return Conversation{}, false, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
+	}
+
+	body := &limitedReader{reader: response.Body, remaining: exportLimit}
+
+	conversation, err = DecodeConversation(body)
+	if body.exceeded {
+		return Conversation{}, false, errors.New("native session export exceeds size limit")
 	}
 
 	if err != nil {
+		return Conversation{}, false, fmt.Errorf("invalid native session export: %w", err)
+	}
+
+	if SessionID(conversation.Session) != id {
+		return Conversation{}, false, errors.New("invalid native session export: identity differs")
+	}
+
+	return conversation, true, nil
+}
+
+// DecodeConversation reads one exported conversation: a JSON object with
+// exactly one "messages" array of objects. Every other member is kept, in
+// order and byte for byte, in Session.
+func DecodeConversation(reader io.Reader) (Conversation, error) {
+	decoder := json.NewDecoder(reader)
+
+	if err := expectDelim(decoder, '{'); err != nil {
+		return Conversation{}, err
+	}
+
+	var (
+		session  bytes.Buffer
+		messages [][]byte
+		listed   bool
+	)
+
+	session.WriteByte('{')
+
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return Conversation{}, err
+		}
+
+		key, _ := token.(string)
+		if key != fieldMessages {
+			var value json.RawMessage
+			if decodeErr := decoder.Decode(&value); decodeErr != nil {
+				return Conversation{}, decodeErr
+			}
+
+			if session.Len() > 1 {
+				session.WriteByte(',')
+			}
+
+			name, _ := json.Marshal(key)
+			session.Write(name)
+			session.WriteByte(':')
+			session.Write(value)
+
+			continue
+		}
+
+		if listed {
+			return Conversation{}, errors.New("messages listed twice")
+		}
+
+		listed = true
+
+		if messages, err = decodeMessages(decoder); err != nil {
+			return Conversation{}, err
+		}
+	}
+
+	if err := expectDelim(decoder, '}'); err != nil {
+		return Conversation{}, err
+	}
+
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return Conversation{}, errors.New("trailing data after the conversation")
+	}
+
+	if !listed {
+		return Conversation{}, errors.New("conversation lists no messages")
+	}
+
+	session.WriteByte('}')
+
+	return Conversation{Session: session.Bytes(), Messages: messages}, nil
+}
+
+func decodeMessages(decoder *json.Decoder) ([][]byte, error) {
+	if err := expectDelim(decoder, '['); err != nil {
 		return nil, err
 	}
 
-	var snapshot struct {
-		ID       string            `json:"id"`
-		Messages []json.RawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.ID != id || snapshot.Messages == nil {
-		return nil, errors.New("invalid native session export")
+	messages := [][]byte{}
+
+	for decoder.More() {
+		var message json.RawMessage
+		if err := decoder.Decode(&message); err != nil {
+			return nil, err
+		}
+
+		if len(message) == 0 || message[0] != '{' {
+			return nil, fmt.Errorf("message %d is not an object", len(messages))
+		}
+
+		messages = append(messages, message)
 	}
 
-	return data, nil
+	return messages, expectDelim(decoder, ']')
 }
 
-// Import creates the missing conversation through Hermes's own persistence API.
-func (e Endpoint) Import(ctx context.Context, snapshot json.RawMessage) error {
-	body, err := json.Marshal(map[string]any{"sessions": []json.RawMessage{snapshot}})
+func expectDelim(decoder *json.Decoder, want json.Delim) error {
+	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
 
-	data, _, err := e.request(ctx, http.MethodPost, "/api/sessions/import", body)
+	if token != want {
+		return fmt.Errorf("expected %q", want)
+	}
+
+	return nil
+}
+
+// SessionID is the "id" member of an exported session object, or "" when it
+// has none.
+func SessionID(session json.RawMessage) string {
+	var identity struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(session, &identity) != nil {
+		return ""
+	}
+
+	return identity.ID
+}
+
+// Encode writes the conversation as Hermes's export shape: the session
+// object with its messages appended as the last member.
+func (c Conversation) Encode() ([]byte, error) {
+	session := bytes.TrimSpace(c.Session)
+	if len(session) < 2 || session[0] != '{' || session[len(session)-1] != '}' {
+		return nil, errors.New("native session is not an object")
+	}
+
+	size := len(session) + len(`,"messages":[]`) + len(c.Messages)
+	for _, message := range c.Messages {
+		size += len(message)
+	}
+
+	encoded := make([]byte, 0, size)
+	encoded = append(encoded, session[:len(session)-1]...)
+
+	if len(bytes.TrimSpace(session[1:len(session)-1])) > 0 {
+		encoded = append(encoded, ',')
+	}
+
+	encoded = append(encoded, `"messages":[`...)
+
+	for index, message := range c.Messages {
+		if index > 0 {
+			encoded = append(encoded, ',')
+		}
+
+		encoded = append(encoded, message...)
+	}
+
+	return append(encoded, "]}"...), nil
+}
+
+// Import creates the missing conversation through Hermes's own persistence API.
+func (e Endpoint) Import(ctx context.Context, conversation Conversation) error {
+	encoded, err := conversation.Encode()
+	if err != nil {
+		return err
+	}
+
+	body := make([]byte, 0, len(encoded)+len(`{"sessions":[]}`))
+	body = append(body, `{"sessions":[`...)
+	body = append(body, encoded...)
+	body = append(body, "]}"...)
+
+	data, err := e.request(ctx, http.MethodPost, "/api/sessions/import", body)
 	if err != nil {
 		return err
 	}
@@ -174,10 +359,38 @@ func (e Endpoint) Import(ctx context.Context, snapshot json.RawMessage) error {
 	return nil
 }
 
-func (e Endpoint) request(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
+// limitedReader reads at most remaining bytes and records whether the
+// source held more.
+type limitedReader struct {
+	reader    io.Reader
+	remaining int64
+	exceeded  bool
+}
+
+func (l *limitedReader) Read(buffer []byte) (int, error) {
+	if l.remaining <= 0 {
+		var probe [1]byte
+		if n, _ := l.reader.Read(probe[:]); n > 0 {
+			l.exceeded = true
+		}
+
+		return 0, io.EOF
+	}
+
+	if int64(len(buffer)) > l.remaining {
+		buffer = buffer[:l.remaining]
+	}
+
+	n, err := l.reader.Read(buffer)
+	l.remaining -= int64(n)
+
+	return n, err
+}
+
+func (e Endpoint) send(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, method, e.URL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	request.Header.Set("X-Hermes-Session-Token", e.Token)
@@ -185,24 +398,34 @@ func (e Endpoint) request(ctx context.Context, method, path string, body []byte)
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return nil, 0, errors.New("hermes persistence request failed")
+		return nil, errors.New("hermes persistence request failed")
+	}
+
+	return response, nil
+}
+
+// request sends one persistence call whose answer is a small JSON result.
+func (e Endpoint) request(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	response, err := e.send(ctx, method, path, body)
+	if err != nil {
+		return nil, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, response.StatusCode, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
+		return nil, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(response.Body, snapshotLimit+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, resultLimit+1))
 	if err != nil {
-		return nil, response.StatusCode, err
+		return nil, err
 	}
 
-	if len(data) > snapshotLimit {
-		return nil, response.StatusCode, errors.New("native session export exceeds size limit")
+	if len(data) > resultLimit {
+		return nil, errors.New("hermes persistence result exceeds size limit")
 	}
 
-	return data, response.StatusCode, nil
+	return data, nil
 }
 
 func AgentDir(explicit string, lookup func(string) (string, bool)) string {
@@ -232,4 +455,73 @@ func String(payload json.RawMessage, key string) string {
 	_ = json.Unmarshal(object[key], &value)
 
 	return value
+}
+
+// ValidSession reports why session is not the exported session object of
+// conversation id without its messages.
+func ValidSession(session json.RawMessage, id string) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(session, &members); err != nil || members == nil {
+		return errors.New("native session is not an object")
+	}
+
+	if _, listed := members[fieldMessages]; listed {
+		return errors.New("native session carries its messages")
+	}
+
+	if SessionID(session) != id {
+		return errors.New("native session identity differs")
+	}
+
+	return nil
+}
+
+// SameMessage reports whether two exported messages carry the same content.
+// Import assigns new row ids and the owning session's id, so neither counts.
+// Members are compared as raw bytes, decoding only a member whose bytes
+// differ.
+func SameMessage(a, b []byte) (bool, error) {
+	var left, right map[string]json.RawMessage
+	if err := json.Unmarshal(a, &left); err != nil {
+		return false, err
+	}
+
+	if err := json.Unmarshal(b, &right); err != nil {
+		return false, err
+	}
+
+	for _, key := range []string{fieldID, fieldSessionID} {
+		delete(left, key)
+		delete(right, key)
+	}
+
+	if len(left) != len(right) {
+		return false, nil
+	}
+
+	for key, value := range left {
+		other, ok := right[key]
+		if !ok {
+			return false, nil
+		}
+
+		if bytes.Equal(value, other) {
+			continue
+		}
+
+		var leftValue, rightValue any
+		if err := json.Unmarshal(value, &leftValue); err != nil {
+			return false, err
+		}
+
+		if err := json.Unmarshal(other, &rightValue); err != nil {
+			return false, err
+		}
+
+		if !reflect.DeepEqual(leftValue, rightValue) {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }

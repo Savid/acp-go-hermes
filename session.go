@@ -2,6 +2,7 @@ package hermesacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
@@ -44,6 +46,11 @@ type session struct {
 	models    hermes.ModelOptionsResult
 	title     string
 	updatedAt string
+	// nativeSession is Hermes's session object from the latest export.
+	nativeSession json.RawMessage
+	// mirror publishes the conversation to the store; mirrorMu serializes
+	// its commits with their exports.
+	mirror *sessionlog.Mirror
 	// persisted marks a successfully committed mirror.
 	persisted bool
 	closing   bool
@@ -355,6 +362,8 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 		s.nativeID = created.StoredSessionID
 
 		s.id = acp.SessionId(created.StoredSessionID)
+		s.mirror = sessionlog.NewMirror(s.agent.store, string(s.id))
+
 		if s.id == "" || rt.liveID == "" {
 			return s.startFailure(ctx, errors.New("native session identity missing"))
 		}
@@ -365,11 +374,11 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model, expe
 	} else {
 		restored, err := rt.client.ResumeSession(ctx, expectID, map[string]any{fieldSource: nativeSource, "close_on_disconnect": true})
 		if err != nil {
-			return s.agent.restoreRefused(ctx, s.id, err)
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 		}
 
 		if restored.StoredKey() != expectID {
-			return s.agent.restoreRefused(ctx, s.id, errors.New("native session identity changed"))
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, errors.New("native session identity changed"))
 		}
 
 		rt.liveID, rt.nativeID = restored.SessionID, expectID

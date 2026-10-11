@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -23,6 +24,15 @@ type nativeFixtureStore struct {
 
 func (s *nativeFixtureStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
 	if err := s.SessionStore.Replace(ctx, key, replacements); err != nil {
+		return err
+	}
+	*s.trace = append(*s.trace, "commit")
+
+	return nil
+}
+
+func (s *nativeFixtureStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if err := s.SessionStore.Append(ctx, key, base, entries, replacements); err != nil {
 		return err
 	}
 	*s.trace = append(*s.trace, "commit")
@@ -71,6 +81,11 @@ func TestCapturedNativeAgentOrigin(t *testing.T) {
 	data = []byte(strings.ReplaceAll(string(data), "fixture-session", rt.liveID))
 	var frames []json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &frames))
+	// The native conversation gains a message, so the settling commit writes.
+	native := nativeConversation(t, s.agent.options.Home, created.SessionId)
+	messages, _ := native["messages"].([]any)
+	native["messages"] = append(messages, map[string]any{"role": roleAssistant, "content": "agent origin"})
+	writeNativeConversation(t, s.agent.options.Home, created.SessionId, native)
 	trace = nil
 	for _, frame := range frames {
 		var envelope struct {
@@ -578,7 +593,9 @@ func TestCapturedResponseCarriesNoResponseID(t *testing.T) {
 	}
 
 	live := len(rec.snapshot())
-	require.NoError(t, s.replay(t.Context(), [][]byte{fixture.Export}))
+	conversation, decodeErr := hermes.DecodeConversation(bytes.NewReader(fixture.Export))
+	require.NoError(t, decodeErr)
+	require.NoError(t, s.replay(t.Context(), conversation.Messages))
 
 	updates := rec.snapshot()
 	for name, part := range map[string][]acp.SessionNotification{"live": updates[:live], "replay": updates[live:]} {

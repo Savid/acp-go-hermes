@@ -114,6 +114,14 @@ func (s *faultStore) Replace(ctx context.Context, main acpcore.SessionKey, rows 
 	return s.SessionStore.Replace(ctx, main, rows)
 }
 
+func (s *faultStore) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("store unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
+}
+
 func TestFailedSnapshotKeepsCommittedConversation(t *testing.T) {
 	t.Parallel()
 	store := &faultStore{SessionStore: acpcore.NewInMemorySessionStore()}
@@ -182,8 +190,13 @@ func TestReplayPreservesToolsAndTextParts(t *testing.T) {
 	agent := NewAgent(testOptions(t)...)
 	agent.attach(h.rec, nil)
 	s := &session{agent: agent, id: "acp-conversation", nativeID: "conversation"}
-	snapshot := []byte(`{"id":"conversation","messages":[{"role":"user","content":[{"type":"text","text":"read it"}]},{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},{"role":"tool","tool_call_id":"call-1","tool_name":"read_file","content":"file contents"},{"role":"assistant","content":"done"}]}`)
-	require.NoError(t, s.replay(t.Context(), [][]byte{snapshot}))
+	messages := [][]byte{
+		[]byte(`{"role":"user","content":[{"type":"text","text":"read it"}]}`),
+		[]byte(`{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]}`),
+		[]byte(`{"role":"tool","tool_call_id":"call-1","tool_name":"read_file","content":"file contents"}`),
+		[]byte(`{"role":"assistant","content":"done"}`),
+	}
+	require.NoError(t, s.replay(t.Context(), messages))
 	require.Eventually(t, func() bool { return agentText(h.rec.snapshot()) == "done" }, time.Second, time.Millisecond)
 	var started, completed bool
 	for _, n := range h.rec.snapshot() {
@@ -221,6 +234,14 @@ func (s *backgroundFaultStore) Replace(ctx context.Context, key acpcore.SessionK
 	}
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *backgroundFaultStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail {
+		return errors.New("mirror store unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func TestBackgroundCommitFailureFencesStream(t *testing.T) {
@@ -279,6 +300,14 @@ func (s *gatewayLossStore) Replace(ctx context.Context, key acpcore.SessionKey, 
 	}
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *gatewayLossStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.armed.CompareAndSwap(true, false) {
+		s.lose()
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 // The generation, not the way the turn ended, decides the fence: a gateway

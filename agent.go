@@ -37,10 +37,11 @@ const (
 	// AccountUsageMethod reads a provider's account usage through the gateways
 	// hermes's config routes to.
 	AccountUsageMethod = "_hermes/accountUsage"
-	// SessionStoreFormat identifies the store layout this package writes: native
-	// per-conversation JSON exports under main plus the adapter's session
-	// record under the config subpath.
-	SessionStoreFormat = "hermes-session-json-v1"
+	// SessionStoreFormat identifies the store layout this package writes: each
+	// exported native message as one main row, and the adapter's session
+	// record, which carries the native session object, under the config
+	// subpath.
+	SessionStoreFormat = "hermes-session-json-v2"
 
 	vendor = "hermes"
 

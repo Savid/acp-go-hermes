@@ -354,7 +354,9 @@ func (g *fakeGateway) socket(w http.ResponseWriter, r *http.Request) {
 
 				break
 			}
-			var snapshot nativeSnapshot
+			var snapshot struct {
+				Messages []map[string]any `json:"messages"`
+			}
 			if json.Unmarshal(bytes, &snapshot) != nil {
 				failure = "invalid session"
 

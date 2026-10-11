@@ -1,6 +1,7 @@
 package hermesacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
@@ -423,7 +425,9 @@ func (a *Agent) restore(
 	s.id = sessionID
 	s.nativeID = stored.record.NativeSessionID
 	s.rawEvents = wire.NewRawEvents(vendor, string(sessionID), vendor, start.meta.rawEvents)
-	s.title = storedTitle(stored.record.NativeSessionID, stored.rows)
+	s.title = stored.record.Title
+	s.nativeSession = stored.record.Session
+	s.mirror = sessionlog.NewMirror(a.store, string(sessionID))
 
 	rt, err := s.launch(ctx)
 	if err != nil {
@@ -468,7 +472,7 @@ func (a *Agent) restore(
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
-		return nil, nil, a.restoreRefused(ctx, sessionID, err)
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	if replay {
@@ -623,25 +627,23 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			continue
 		}
 
-		stored, loadErr := a.loadStored(ctx, id)
+		record, found, loadErr := a.storedRecord(ctx, id)
 		if loadErr != nil {
 			return acp.ListSessionsResponse{}, wire.InternalFailure(vendor, "")
 		}
 
-		cwd := stored.record.Cwd
-
-		if filter != "" && cwd != filter {
+		if !found || (filter != "" && record.Cwd != filter) {
 			continue
 		}
 
-		title := storedTitle(stored.record.NativeSessionID, stored.rows)
+		title := cmp.Or(record.Title, record.NativeSessionID)
 		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
 
 		sessions = append(sessions, acp.SessionInfo{
-			Meta:                  wire.NativeSessionMeta(vendor, stored.record.NativeSessionID),
+			Meta:                  wire.NativeSessionMeta(vendor, record.NativeSessionID),
 			SessionId:             id,
-			Cwd:                   cwd,
-			AdditionalDirectories: slices.Clone(stored.record.AdditionalDirectories),
+			Cwd:                   record.Cwd,
+			AdditionalDirectories: record.AdditionalDirectories,
 			Title:                 &title,
 			UpdatedAt:             &updatedAt,
 		})

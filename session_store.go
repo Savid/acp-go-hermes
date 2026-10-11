@@ -5,22 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
-	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/savid/acp-go-hermes/internal/hermes"
 )
 
-// sessionRecord carries the accepted session configuration beside its native export.
+// sessionRecord carries the accepted session configuration and the native
+// session object whose messages are the main record's rows.
 type sessionRecord struct {
 	SessionID             string            `json:"sessionId"`
 	NativeSessionID       string            `json:"nativeSessionId"`
@@ -30,19 +28,25 @@ type sessionRecord struct {
 	ExtraPathDirs         []string          `json:"extraPathDirs,omitempty"`
 	Model                 string            `json:"model,omitempty"`
 	Effort                string            `json:"effort,omitempty"`
-	UpdatedAtUnixMilli    int64             `json:"updatedAtUnixMilli"`
+	Title                 string            `json:"title,omitempty"`
+	// Session is Hermes's exported session object without its messages.
+	Session json.RawMessage `json:"session"`
 }
 
 func (s *session) record() sessionRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, UpdatedAtUnixMilli: time.Now().UnixMilli()}
+	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, Title: s.title, Session: s.nativeSession}
 }
 
 func (r sessionRecord) validate(id string) error {
-	if r.NativeSessionID == "" || r.SessionID != id || !filepath.IsAbs(r.Cwd) || r.UpdatedAtUnixMilli <= 0 {
+	if r.NativeSessionID == "" || r.SessionID != id || !filepath.IsAbs(r.Cwd) {
 		return errors.New("invalid session record")
+	}
+
+	if err := hermes.ValidSession(r.Session, r.NativeSessionID); err != nil {
+		return err
 	}
 
 	for _, dir := range r.AdditionalDirectories {
@@ -51,17 +55,19 @@ func (r sessionRecord) validate(id string) error {
 		}
 	}
 
-	_, err := parseSessionMeta(inheritCarrier(sessionMeta{}, r).Meta())
-	if err != nil {
-		return err
+	// parseSessionMeta refuses with a typed request error, so only a
+	// refusal becomes a non-nil error.
+	if _, refusal := parseSessionMeta(inheritCarrier(sessionMeta{}, r).Meta()); refusal != nil {
+		return refusal
 	}
 
 	return nil
 }
 
-// commitMirror replaces only a complete native snapshot and its matching
-// carrier. The runtime the caller dispatched on reads the snapshot, so a
-// commit that cannot be attempted fails instead of reporting success.
+// commitMirror publishes the conversation the runtime the caller dispatched
+// on exports, so a commit that cannot be attempted fails instead of reporting
+// success. The mirror appends only the messages after the ones it committed;
+// a message Hermes changed in place republishes the whole conversation.
 func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 	if s.ephemeral {
 		return nil
@@ -70,13 +76,17 @@ func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 
-	rows, err := s.snapshotRows(ctx, rt)
+	conversation, err := s.exportBound(ctx, rt)
 	if err != nil {
 		return err
 	}
 
-	ctx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
-	err = sessionlog.Commit(ctx, s.agent.store, string(s.id), rows, s.record())
+	s.mu.Lock()
+	s.nativeSession = conversation.Session
+	s.mu.Unlock()
+
+	ctx, finish := s.agent.observe.StartSessionStore(ctx, "commit")
+	err = s.mirror.Commit(ctx, sessionlog.Rows(conversation.Messages), s.record())
 	finish(err)
 
 	if err == nil {
@@ -88,18 +98,20 @@ func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 	return err
 }
 
-func (s *session) snapshotRows(ctx context.Context, rt *runtime) ([][]byte, error) {
+// exportBound exports the conversation the runtime is bound to, after
+// checking that the gateway still serves it under the recorded identity.
+func (s *session) exportBound(ctx context.Context, rt *runtime) (hermes.Conversation, error) {
 	s.mu.Lock()
 	id := s.nativeID
 	s.mu.Unlock()
 
 	if rt == nil || id == "" {
-		return nil, errors.New("native session binding missing")
+		return hermes.Conversation{}, errors.New("native session binding missing")
 	}
 
 	var active hermes.ActiveListResult
 	if err := rt.client.Call(ctx, "session.active_list", map[string]any{}, &active); err != nil {
-		return nil, err
+		return hermes.Conversation{}, err
 	}
 
 	found := false
@@ -112,26 +124,26 @@ func (s *session) snapshotRows(ctx context.Context, rt *runtime) ([][]byte, erro
 		found = true
 
 		if native.SessionKey != id {
-			s.poisonSession(ctx, "native_session_identity_drift")
+			s.poisonSession(ctx, wire.CauseNativeSessionIdentityDrift)
 
-			return nil, errors.New("native session identity changed")
+			return hermes.Conversation{}, errors.New("native session identity changed")
 		}
 	}
 
 	if !found {
-		return nil, errors.New("native session binding missing")
+		return hermes.Conversation{}, errors.New("native session binding missing")
 	}
 
-	snapshot, err := rt.endpoint.Export(ctx, id)
+	conversation, exported, err := rt.endpoint.Export(ctx, id)
 	if err != nil {
-		return nil, err
+		return hermes.Conversation{}, err
 	}
 
-	if len(snapshot) == 0 {
-		return nil, errors.New("native conversation missing")
+	if !exported {
+		return hermes.Conversation{}, errors.New("native conversation missing")
 	}
 
-	return [][]byte{snapshot}, nil
+	return conversation, nil
 }
 
 type storedSession struct {
@@ -141,9 +153,6 @@ type storedSession struct {
 }
 
 func (a *Agent) loadStored(ctx context.Context, id acp.SessionId) (storedSession, error) {
-	ctx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
-	defer cancel()
-
 	ctx, finish := a.observe.StartSessionStore(ctx, "load")
 
 	var record sessionRecord
@@ -153,135 +162,80 @@ func (a *Agent) loadStored(ctx context.Context, id acp.SessionId) (storedSession
 		err = record.validate(string(id))
 	}
 
-	// One native conversation export is the whole main record. A generation
-	// with any other row count is not a hermes conversation.
-	if err == nil && found && len(rows) != 1 {
-		err = errors.New("invalid native snapshot count")
-	}
-
-	if err == nil && found {
-		_, err = decodeSnapshot(rows[0], record.NativeSessionID)
-	}
-
 	finish(err)
 
 	if err != nil {
-		return storedSession{}, a.restoreRefused(ctx, id, err)
+		return storedSession{}, wire.RestoreRefused(ctx, a.log, vendor, id, err)
 	}
 
 	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
-type nativeSnapshot struct {
-	ID       string           `json:"id"`
-	Messages []map[string]any `json:"messages"`
-}
+// storedRecord reads a stored session's configuration without its messages.
+func (a *Agent) storedRecord(ctx context.Context, id acp.SessionId) (sessionRecord, bool, error) {
+	ctx, finish := a.observe.StartSessionStore(ctx, "load")
 
-func decodeSnapshot(data []byte, id string) (nativeSnapshot, error) {
-	var snapshot nativeSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return snapshot, err
+	var record sessionRecord
+
+	found, err := sessionlog.LoadRecord(ctx, a.store, string(id), &record)
+	if err == nil && found {
+		err = record.validate(string(id))
 	}
 
-	if snapshot.ID != id || snapshot.Messages == nil {
-		return snapshot, errors.New("invalid native snapshot identity or messages")
-	}
+	finish(err)
 
-	return snapshot, nil
+	return record, found, err
 }
 
 // hydrate imports a missing native conversation. An existing conversation wins
-// only when its history contains every stored message in order.
+// only when its history contains every stored message in order. It returns
+// the messages the session now holds.
 func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession) ([][]byte, error) {
-	if len(stored.rows) != 1 {
-		return nil, s.agent.restoreRefused(ctx, s.id, errors.New("invalid native snapshot count"))
-	}
-
-	native, err := rt.endpoint.Export(ctx, s.nativeID)
+	native, found, err := rt.endpoint.Export(ctx, s.nativeID)
 	if err != nil {
-		return nil, s.agent.restoreRefused(ctx, s.id, err)
+		return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 	}
 
-	if len(native) == 0 {
-		if importErr := rt.endpoint.Import(ctx, stored.rows[0]); importErr != nil {
-			return nil, s.agent.restoreRefused(ctx, s.id, importErr)
+	if !found {
+		conversation := hermes.Conversation{Session: stored.record.Session, Messages: stored.rows}
+		if importErr := rt.endpoint.Import(ctx, conversation); importErr != nil {
+			return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, importErr)
 		}
 
 		return stored.rows, nil
 	}
 
-	want, err := decodeSnapshot(stored.rows[0], s.nativeID)
-	if err != nil {
-		return nil, s.agent.restoreRefused(ctx, s.id, err)
+	if len(native.Messages) < len(stored.rows) {
+		return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, errors.New("native conversation is shorter than its mirror"))
 	}
 
-	have, err := decodeSnapshot(native, s.nativeID)
-	if err != nil {
-		return nil, s.agent.restoreRefused(ctx, s.id, err)
-	}
-
-	if len(have.Messages) < len(want.Messages) {
-		return nil, s.agent.restoreRefused(ctx, s.id, errors.New("native conversation is shorter than its mirror"))
-	}
-
-	for index, message := range want.Messages {
-		if !reflect.DeepEqual(messageContent(message), messageContent(have.Messages[index])) {
-			return nil, s.agent.restoreRefused(ctx, s.id, fmt.Errorf("native message %d conflicts with the mirror", index))
+	for index, message := range stored.rows {
+		same, sameErr := hermes.SameMessage(message, native.Messages[index])
+		if sameErr != nil || !same {
+			return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, fmt.Errorf("native message %d conflicts with the mirror", index))
 		}
 	}
 
-	return [][]byte{native}, nil
+	s.mu.Lock()
+	s.nativeSession = native.Session
+	s.mu.Unlock()
+
+	return native.Messages, nil
 }
 
-// Native import assigns new row ids. They do not identify message content.
-func messageContent(message map[string]any) map[string]any {
-	cloned := wire.CloneMap(message)
-	delete(cloned, fieldID)
-	delete(cloned, nativeSessionIDKey)
-
-	return cloned
-}
-
-func (a *Agent) restoreRefused(ctx context.Context, id acp.SessionId, err error) error {
-	a.log.ErrorContext(ctx, "hermes session restore failed", slog.String("session_id", string(id)), slog.String("reason", err.Error()))
-
-	return wire.RestoreFailed(vendor)
-}
-
-func storedTitle(id string, rows [][]byte) string {
-	if len(rows) != 1 {
-		return id
-	}
-
-	snapshot, err := decodeSnapshot(rows[0], id)
-	if err != nil {
-		return id
-	}
-
-	for _, message := range snapshot.Messages {
-		if message["role"] == roleUser {
-			if text, ok := message["content"].(string); ok && wire.NormalizeTitle(text) != "" {
-				return wire.NormalizeTitle(text)
-			}
-		}
-	}
-
-	return id
-}
-
+// replay emits the stored messages as conversation history, decoding one
+// message at a time.
 func (s *session) replay(ctx context.Context, rows [][]byte) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	snapshot, err := decodeSnapshot(rows[0], s.nativeID)
-	if err != nil {
-		return err
-	}
-
 	state := &cycleState{}
 
-	for _, message := range snapshot.Messages {
+	for _, row := range rows {
+		var message map[string]any
+		if err := json.Unmarshal(row, &message); err != nil {
+			return err
+		}
+
+		var err error
+
 		role, _ := message["role"].(string)
 		for _, text := range nativeText(message["content"]) {
 			switch role {
@@ -371,17 +325,18 @@ func nativeText(content any) []string {
 	return text
 }
 
-// persistDraft gives an empty native conversation a durable row before NewSession returns.
+// persistDraft gives an empty native conversation a durable session row
+// before NewSession returns.
 func (s *session) persistDraft(ctx context.Context, rt *runtime) error {
-	snapshot, err := rt.endpoint.Export(ctx, s.nativeID)
-	if err != nil || len(snapshot) != 0 {
+	_, found, err := rt.endpoint.Export(ctx, s.nativeID)
+	if err != nil || found {
 		return err
 	}
 
-	draft, err := json.Marshal(map[string]any{fieldID: s.nativeID, fieldSource: nativeSource, fieldCwd: s.cwd, "started_at": time.Now().Unix(), "messages": []any{}})
+	session, err := json.Marshal(map[string]any{fieldID: s.nativeID, fieldSource: nativeSource, fieldCwd: s.cwd, "started_at": time.Now().Unix()})
 	if err != nil {
 		return err
 	}
 
-	return rt.endpoint.Import(ctx, draft)
+	return rt.endpoint.Import(ctx, hermes.Conversation{Session: session, Messages: [][]byte{}})
 }

@@ -1,19 +1,21 @@
 package hermesacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
+	"github.com/savid/acp-go-hermes/internal/hermes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,24 +160,38 @@ func TestRestoreNeverImportsOverNativeHistory(t *testing.T) {
 	require.Len(t, remaining, len(messages)+2, "the native conversation is adopted, never replaced")
 }
 
-// TestRestoreRefusesACommittedEmptyMainRecord proves a generation whose main
-// record carries no native snapshot is refused rather than indexed: one export
-// is the whole record, so any other row count is not a hermes conversation.
-func TestRestoreRefusesACommittedEmptyMainRecord(t *testing.T) {
+// TestRestoreRefusesAForeignNativeSession proves a generation is restored only
+// with the native session object of its own conversation, without messages.
+func TestRestoreRefusesAForeignNativeSession(t *testing.T) {
 	t.Parallel()
 
-	store := newSharedStore()
-	cwd := t.TempDir()
-	id := "empty-main-record"
+	for name, session := range map[string]string{
+		"missing":       ``,
+		"not an object": `[]`,
+		"other id":      `{"id":"native-other"}`,
+		"with messages": `{"id":"native-empty","messages":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	require.NoError(t, sessionlog.Commit(t.Context(), store, id, nil,
-		sessionRecord{SessionID: id, NativeSessionID: "native-empty", Cwd: cwd, UpdatedAtUnixMilli: time.Now().UnixMilli()}))
+			store := newSharedStore()
+			cwd := t.TempDir()
+			id := "foreign-native-session"
 
-	h := newHarness(t, WithSessionStore(store))
-	h.initialize()
+			record := sessionRecord{SessionID: id, NativeSessionID: "native-empty", Cwd: cwd}
+			if session != "" {
+				record.Session = json.RawMessage(session)
+			}
 
-	_, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(id), cwd))
-	require.Equal(t, "hermes_restore_failed", requestErrorData(t, err)[stopReasonError])
+			require.NoError(t, sessionlog.NewMirror(store, id).Commit(t.Context(), sessionlog.Rows(nil), record))
+
+			h := newHarness(t, WithSessionStore(store))
+			h.initialize()
+
+			_, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(id), cwd))
+			require.Equal(t, "hermes_restore_failed", requestErrorData(t, err)[stopReasonError])
+		})
+	}
 }
 
 // TestCommitFailsWhenTheGatewayIsGone proves a commit that cannot be attempted
@@ -247,6 +263,14 @@ func (s *recoveryFaultStore) Replace(ctx context.Context, main acpcore.SessionKe
 	return s.SessionStore.Replace(ctx, main, replacements)
 }
 
+func (s *recoveryFaultStore) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("injected store failure")
+	}
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
+}
+
 func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	t.Parallel()
 	store := acpcore.NewInMemorySessionStore()
@@ -267,7 +291,7 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.Commit(t.Context(), store, string(id), rows, record))
+	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), record))
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -418,6 +442,7 @@ func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
 type storeCallCounter struct {
 	acpcore.SessionStore
 	replaces atomic.Int32
+	appends  atomic.Int32
 	deletes  atomic.Int32
 }
 
@@ -425,6 +450,12 @@ func (s *storeCallCounter) Replace(ctx context.Context, key acpcore.SessionKey, 
 	s.replaces.Add(1)
 
 	return s.SessionStore.Replace(ctx, key, rows)
+}
+
+func (s *storeCallCounter) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	s.appends.Add(1)
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func (s *storeCallCounter) Delete(ctx context.Context, key acpcore.SessionKey) error {
@@ -455,7 +486,7 @@ func TestEphemeralSessionNeverReachesTheStore(t *testing.T) {
 	_, err = h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(created.SessionId))
 	require.NoError(t, err)
 
-	require.Zero(t, store.replaces.Load(), "an ephemeral session is never mirrored")
+	require.Zero(t, store.replaces.Load()+store.appends.Load(), "an ephemeral session is never mirrored")
 	require.Zero(t, store.deletes.Load(), "an ephemeral session leaves no tombstone")
 	generation, err := store.Load(h.ctx(), string(created.SessionId))
 	require.NoError(t, err)
@@ -547,5 +578,56 @@ func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
 			require.Len(t, streams, 2)
 			require.NotEqual(t, streams[0], streams[1])
 		})
+	}
+}
+
+// syntheticMessage is one exported message of about size bytes.
+func syntheticMessage(index, size int) []byte {
+	message, _ := json.Marshal(map[string]any{
+		"id": index + 1, "session_id": "bench", "role": []string{roleUser, roleAssistant}[index%2],
+		"content": strings.Repeat("x", size), "timestamp": 1791701016.5 + float64(index), "active": 1,
+	})
+
+	return message
+}
+
+// BenchmarkCommitMirror measures one turn's commit of a long conversation:
+// decoding Hermes's export and mirroring it into the store, where each turn
+// adds a user and an assistant message to about 8 MiB of history.
+func BenchmarkCommitMirror(b *testing.B) {
+	const history, size = 4096, 2048
+
+	session := []byte(`{"id":"bench","source":"desktop","cwd":"/work","message_count":0}`)
+	messages := make([][]byte, 0, history+2*b.N)
+
+	for index := range history {
+		messages = append(messages, syntheticMessage(index, size))
+	}
+
+	record := sessionRecord{SessionID: "bench", NativeSessionID: "bench", Cwd: "/work", Session: session}
+	mirror := sessionlog.NewMirror(acpcore.NewInMemorySessionStore(), "bench")
+
+	commit := func() {
+		export, err := hermes.Conversation{Session: session, Messages: messages}.Encode()
+		require.NoError(b, err)
+
+		b.StartTimer()
+
+		conversation, err := hermes.DecodeConversation(bytes.NewReader(export))
+		require.NoError(b, err)
+		require.NoError(b, mirror.Commit(b.Context(), sessionlog.Rows(conversation.Messages), record))
+
+		b.StopTimer()
+	}
+
+	b.StopTimer()
+	commit()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.StopTimer()
+
+	for range b.N {
+		messages = append(messages, syntheticMessage(len(messages), size), syntheticMessage(len(messages)+1, size))
+		commit()
 	}
 }
