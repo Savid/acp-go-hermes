@@ -194,6 +194,91 @@ func TestRestoreRefusesAForeignNativeSession(t *testing.T) {
 	}
 }
 
+// appendFailStore fails the next Append it is armed for, and every write
+// while it is down.
+type appendFailStore struct {
+	acpcore.SessionStore
+	failAppend atomic.Bool
+	down       atomic.Bool
+}
+
+func (s *appendFailStore) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.down.Load() {
+		return errors.New("store unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func (s *appendFailStore) Append(ctx context.Context, main acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.down.Load() || s.failAppend.CompareAndSwap(true, false) {
+		return errors.New("append unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, main, base, entries, replacements)
+}
+
+// TestSessionObjectFollowsTheCommittedRead proves the session keeps the
+// session object of the read a commit published: a failed commit keeps the
+// previous one, and a commit that read again after a failed append keeps the
+// one it published.
+func TestSessionObjectFollowsTheCommittedRead(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	store := &appendFailStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	a := NewAgent(testOptions(t, WithHome(home), WithSessionStore(store))...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(newRecorder(), nil)
+
+	_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+
+	s.mu.Lock()
+	rt, committed := s.runtime, s.nativeSession
+	s.mu.Unlock()
+
+	continueNatively := func(title string) {
+		native := nativeConversation(t, home, created.SessionId)
+		messages, _ := native["messages"].([]any)
+		native["messages"] = append(messages, map[string]any{"role": roleUser, "content": title})
+		native["title"] = title
+		writeNativeConversation(t, home, created.SessionId, native)
+	}
+
+	continueNatively("first")
+	store.down.Store(true)
+	require.Error(t, s.commitMirror(t.Context(), rt))
+	store.down.Store(false)
+
+	require.Equal(t, string(committed), string(nativeSessionOf(s)), "a failed commit keeps the committed session object")
+
+	continueNatively("second")
+	store.failAppend.Store(true)
+	require.NoError(t, s.commitMirror(t.Context(), rt))
+
+	var record sessionRecord
+
+	_, err = sessionlog.LoadRecord(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+	require.Contains(t, string(record.Session), `"title":"second"`)
+
+	require.Equal(t, string(record.Session), string(nativeSessionOf(s)), "the session keeps the object the retried commit published")
+}
+
+func nativeSessionOf(s *session) json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.nativeSession
+}
+
 // TestCommitFailsWhenTheGatewayIsGone proves a commit that cannot be attempted
 // is an error: the snapshot is read from the runtime the caller dispatched on,
 // so a torn-down generation never reports a durability it did not achieve.

@@ -37,9 +37,18 @@ type sessionRecord struct {
 
 func (s *session) record() sessionRecord {
 	s.mu.Lock()
+	native := s.nativeSession
+	s.mu.Unlock()
+
+	return s.recordWith(native)
+}
+
+// recordWith is the session's record carrying native as its session object.
+func (s *session) recordWith(native json.RawMessage) sessionRecord {
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, Title: s.title, Session: s.nativeSession}
+	return sessionRecord{SessionID: string(s.id), NativeSessionID: s.nativeID, Cwd: s.cwd, AdditionalDirectories: slices.Clone(s.additionalDirectories), Env: maps.Clone(s.options.Env), ExtraPathDirs: slices.Clone(s.options.ExtraPathDirs), Model: s.model, Effort: s.effort, Title: s.title, Session: native}
 }
 
 func (r sessionRecord) validate(id string) error {
@@ -76,12 +85,17 @@ func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 		return nil
 	}
 
+	// Commit may run the source and record more than once; each read leaves
+	// its session object here, and only the committed one reaches the session.
+	var native json.RawMessage
+
 	ctx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
-	err := s.mirror.Commit(ctx, s.exportSource(ctx, rt), func(sessionlog.Tail) (any, error) { return s.record(), nil })
+	err := s.mirror.Commit(ctx, s.exportSource(ctx, rt, &native), func(sessionlog.Tail) (any, error) { return s.recordWith(native), nil })
 	finish(err)
 
 	if err == nil {
 		s.mu.Lock()
+		s.nativeSession = native
 		s.persisted = true
 		s.mu.Unlock()
 	}
@@ -91,9 +105,9 @@ func (s *session) commitMirror(ctx context.Context, rt *runtime) error {
 
 // exportSource reads the conversation the runtime is bound to after the
 // prefix the mirror's cursor names, after checking that the gateway still
-// serves it under the recorded identity. It records the exported session
-// object for the configuration the commit publishes with it.
-func (s *session) exportSource(ctx context.Context, rt *runtime) sessionlog.Source {
+// serves it under the recorded identity. Each read leaves the exported
+// session object in native for the record the commit publishes with it.
+func (s *session) exportSource(ctx context.Context, rt *runtime, native *json.RawMessage) sessionlog.Source {
 	return func(from sessionlog.Cursor) (sessionlog.Tail, error) {
 		id, err := s.boundConversation(ctx, rt)
 		if err != nil {
@@ -111,9 +125,7 @@ func (s *session) exportSource(ctx context.Context, rt *runtime) sessionlog.Sour
 			return sessionlog.Tail{}, errors.New("native conversation missing")
 		}
 
-		s.mu.Lock()
-		s.nativeSession = export.Session
-		s.mu.Unlock()
+		*native = export.Session
 
 		return sessionlog.Tail{Rows: export.Messages, Next: sessionlog.Position(export.Next), Full: prefix.Count == 0 || !export.Continued}, nil
 	}
@@ -196,9 +208,9 @@ func (a *Agent) storedRecord(ctx context.Context, id acp.SessionId) (sessionReco
 // hydrate imports a missing native conversation. An existing conversation wins
 // only when its history contains every stored message in order, archive flags
 // aside. When it begins with exactly the stored messages, the mirror adopts
-// the stored generation, so the next commit appends; otherwise that commit
-// republishes the conversation. It returns the messages the session now
-// holds.
+// the stored generation, so the next commit appends. Hermes's import gives
+// every message a new row id, so the commit after an import republishes the
+// conversation. It returns the messages the session now holds.
 func (s *session) hydrate(ctx context.Context, rt *runtime, stored storedSession) ([][]byte, error) {
 	native, found, err := rt.endpoint.Export(ctx, s.nativeID, hermes.Prefix{})
 	if err != nil {
