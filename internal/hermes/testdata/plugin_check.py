@@ -142,6 +142,17 @@ class PluginChecks(unittest.TestCase):
             self.assertIs(error, raised.exception)
         self.assertEqual([], broadcasts)
 
+    def test_freezes_startup_objects_once(self):
+        freezes = []
+        original, plugin.gc = plugin.gc, types.SimpleNamespace(freeze=lambda: freezes.append(True))
+        plugin._frozen = False
+        try:
+            self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
+            self.run_call(Response("gen-2", CompletionUsage(**USAGE)), task_id="review-fork")
+        finally:
+            plugin.gc = original
+        self.assertEqual([True], freezes)
+
     def test_a_failed_report_keeps_the_response(self):
         original = plugin.broadcast_plugin_event
         plugin.broadcast_plugin_event = lambda *_: (_ for _ in ()).throw(RuntimeError("no client"))

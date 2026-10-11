@@ -219,3 +219,23 @@ counts the compactions Hermes committed; every increase since the runtime's
 previous `message.complete` publishes one `completed` notification, without a
 trigger or context counts. A mid-turn `session.usage` can count an attempt Hermes
 later rolls back, so it publishes nothing. Usage accounting remains independent.
+
+## Memory
+
+The plugin freezes the `hermes serve` process's garbage collector at its first
+model call, so the collection Hermes runs after each turn never traverses the
+objects built at startup.
+
+Hermes runs auxiliary model work and background review forks after turns. The
+adapter leaves them to the home's `config.yaml`; a host that does not need them
+can turn them off there, for example through a seed file:
+
+| Key | Default | Off |
+|---|---|---|
+| `auxiliary.background_review.enabled` | `true` | `false` |
+| `auxiliary.title_generation.enabled` | `true` | `false` |
+| `memory.memory_enabled` | `true` | `false` |
+| `memory.user_profile_enabled` | `true` | `false` |
+| `memory.nudge_interval` | `10` | `0` |
+| `skills.creation_nudge_interval` | `10` | `0` |
+| `curator.enabled` | `true` | `false` |
