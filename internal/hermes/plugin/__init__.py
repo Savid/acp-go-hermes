@@ -7,11 +7,13 @@ it precedes every native event that follows from that response.
 Only the ``hermes serve`` the adapter starts sets ``ACP_GO_HERMES_CALL_REPORTS``; every
 other Hermes process sharing the home loads the plugin and registers nothing.
 
-That process also collects and then freezes its garbage collector's tracked objects at its
-first model call. A collection writes to every object it traverses, so the objects the process
-built to start, which live as long as it does, would have their memory rewritten by each
-collection Hermes runs after a turn. Frozen objects are never traversed; collecting first keeps
-startup garbage out of the frozen set, where it could never be freed.
+That process also freezes its garbage collector's tracked objects at a model call whenever
+the gateway's live agents differ from the ones the last freeze saw. A collection writes to
+every object it traverses, so the objects that live as long as an agent would have their
+memory rewritten by each collection Hermes runs after a turn. Frozen objects are never
+traversed. Each freeze first unfreezes and collects, so an agent Hermes rebuilt or closed
+leaves no frozen graph behind and garbage never joins the frozen set, where it could never
+be freed.
 """
 
 import gc
@@ -34,7 +36,10 @@ _STREAM_FALLBACK_ID = re.compile(
 )
 
 
-_frozen = False
+# The agents the last freeze saw: _UNFROZEN before the first, None when the gateway's
+# sessions could not be read.
+_UNFROZEN = object()
+_frozen_agents = _UNFROZEN
 
 
 def register(ctx):
@@ -50,7 +55,7 @@ def report_call(request, next_call, session_id="", task_id="", api_mode="", mode
     process whose gateway server is not loaded has no client to report to, and importing
     the server there would start its background threads.
     """
-    freeze_startup_objects()
+    freeze_agent_objects()
     response = next_call(request)
     if session_id and task_id == session_id and api_mode == "chat_completions" and GATEWAY_MODULE in sys.modules:
         try:
@@ -64,13 +69,33 @@ def report_call(request, next_call, session_id="", task_id="", api_mode="", mode
     return response
 
 
-def freeze_startup_objects():
-    """Collect, then freeze every tracked object, once the first model call shows startup is done."""
-    global _frozen
-    if not _frozen:
-        _frozen = True
-        gc.collect()
-        gc.freeze()
+def live_agents():
+    """The identities of the agents the gateway's sessions hold, or None when unreadable."""
+    sessions = getattr(sys.modules.get(GATEWAY_MODULE), "_sessions", None)
+    if not isinstance(sessions, dict):
+        return None
+    try:
+        records = list(sessions.values())
+    except RuntimeError:
+        return None
+    return frozenset(id(record["agent"]) for record in records
+                     if isinstance(record, dict) and record.get("agent") is not None)
+
+
+def freeze_agent_objects():
+    """Refreeze when the live agents changed, releasing the graph of any agent gone since.
+
+    A frozen agent is never freed, so its identity cannot be reused while the last freeze
+    holds it. Without readable sessions the process freezes once.
+    """
+    global _frozen_agents
+    agents = live_agents()
+    if _frozen_agents is not _UNFROZEN and (agents is None or agents == _frozen_agents):
+        return
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+    _frozen_agents = agents
 
 
 def call_report(response):

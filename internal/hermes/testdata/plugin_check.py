@@ -3,12 +3,14 @@
 Run as ``python3 plugin_check.py <plugin dir>``; exits non-zero on the first failed check.
 """
 
+import gc
 import importlib.util
 import os
 import sys
 import types
 import unittest
 import uuid
+import weakref
 
 broadcasts = []
 
@@ -25,6 +27,8 @@ class CompletionUsage:
 
 
 def install_stand_ins():
+    gateway_server = types.ModuleType("tui_gateway.server")
+    gateway_server._sessions = {}
     events = types.ModuleType("hermes_cli.plugin_events")
     events.broadcast_plugin_event = lambda plugin, event, payload: broadcasts.append((plugin, event, payload))
     cli = types.ModuleType("hermes_cli")
@@ -37,7 +41,7 @@ def install_stand_ins():
     openai.types = openai_types
     sys.modules.update({
         "hermes_cli": cli, "hermes_cli.plugin_events": events, "hermes_constants": constants,
-        "openai": openai, "openai.types": openai_types, "tui_gateway.server": types.ModuleType("tui_gateway.server"),
+        "openai": openai, "openai.types": openai_types, "tui_gateway.server": gateway_server,
     })
 
 
@@ -81,7 +85,9 @@ class PluginChecks(unittest.TestCase):
         try:
             if value is not None:
                 os.environ["ACP_GO_HERMES_CALL_REPORTS"] = value
-            plugin.register(types.SimpleNamespace(register_middleware=lambda kind, fn: registered.append((kind, fn))))
+            plugin.register(types.SimpleNamespace(
+                register_middleware=lambda kind, fn: registered.append((kind, fn)),
+                register_hook=lambda name, fn: registered.append((name, fn))))
         finally:
             os.environ.pop("ACP_GO_HERMES_CALL_REPORTS", None)
             if saved is not None:
@@ -142,17 +148,70 @@ class PluginChecks(unittest.TestCase):
             self.assertIs(error, raised.exception)
         self.assertEqual([], broadcasts)
 
-    def test_collects_then_freezes_startup_objects_once(self):
-        freezes = []
+    def freeze_calls(self, agents_per_call):
+        """Runs one model call per entry with the gateway holding those agents; returns the gc calls."""
+        calls = []
+        sessions = sys.modules["tui_gateway.server"]._sessions
         original, plugin.gc = plugin.gc, types.SimpleNamespace(
-            collect=lambda: freezes.append("collect"), freeze=lambda: freezes.append("freeze"))
-        plugin._frozen = False
+            unfreeze=lambda: calls.append("unfreeze"), collect=lambda: calls.append("collect"),
+            freeze=lambda: calls.append("freeze"))
+        plugin._frozen_agents = plugin._UNFROZEN
         try:
-            self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
-            self.run_call(Response("gen-2", CompletionUsage(**USAGE)), task_id="review-fork")
+            for agents in agents_per_call:
+                sessions.clear()
+                sessions.update({f"live-{i}": {"agent": agent} for i, agent in enumerate(agents)})
+                self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
         finally:
             plugin.gc = original
-        self.assertEqual(["collect", "freeze"], freezes, "startup garbage is collected before the freeze, once")
+            sessions.clear()
+        return calls
+
+    def test_freezes_once_per_set_of_live_agents(self):
+        first, second = object(), object()
+        refreeze = ["unfreeze", "collect", "freeze"]
+        self.assertEqual(refreeze, self.freeze_calls([[first], [first], [first]]), "unchanged agents never refreeze")
+        self.assertEqual(refreeze * 2, self.freeze_calls([[first], [second]]), "a rebuilt agent refreezes")
+        self.assertEqual(refreeze * 3, self.freeze_calls([[first], [first, second], [second]]),
+                         "an added or closed agent refreezes")
+
+    def test_freezes_once_without_readable_sessions(self):
+        gateway = sys.modules["tui_gateway.server"]
+        sessions = gateway._sessions
+        del gateway._sessions
+        calls = []
+        original, plugin.gc = plugin.gc, types.SimpleNamespace(
+            unfreeze=lambda: calls.append("unfreeze"), collect=lambda: calls.append("collect"),
+            freeze=lambda: calls.append("freeze"))
+        plugin._frozen_agents = plugin._UNFROZEN
+        try:
+            for _ in range(2):
+                self.run_call(Response("gen-1", CompletionUsage(**USAGE)))
+        finally:
+            plugin.gc = original
+            gateway._sessions = sessions
+        self.assertEqual(["unfreeze", "collect", "freeze"], calls)
+
+    def test_a_rebuilt_agent_leaves_no_frozen_graph(self):
+        class Agent:
+            pass
+
+        sessions = sys.modules["tui_gateway.server"]._sessions
+        agent = Agent()
+        agent.self = agent
+        alive = weakref.ref(agent)
+        plugin._frozen_agents = plugin._UNFROZEN
+        try:
+            sessions["live-1"] = {"agent": agent}
+            plugin.freeze_agent_objects()
+            sessions["live-1"] = {"agent": Agent()}
+            del agent
+            gc.collect()
+            self.assertIsNotNone(alive(), "a frozen graph survives collections")
+            plugin.freeze_agent_objects()
+            self.assertIsNone(alive(), "the freeze after a rebuild frees the earlier agent's graph")
+        finally:
+            sessions.clear()
+            gc.unfreeze()
 
     def test_a_failed_report_keeps_the_response(self):
         original = plugin.broadcast_plugin_event

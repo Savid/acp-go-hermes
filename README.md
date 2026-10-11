@@ -226,9 +226,10 @@ later rolls back, so it publishes nothing. Usage accounting remains independent.
 
 ## Memory
 
-The plugin freezes the `hermes serve` process's garbage collector at its first
-model call, so the collection Hermes runs after each turn never traverses the
-objects built at startup.
+Each time Hermes starts an agent's session, the plugin unfreezes, collects, and
+freezes the `hermes serve` process's garbage collector, so the collection Hermes
+runs after each turn never traverses the agent's long-lived objects and a
+rebuilt agent leaves no frozen graph behind.
 
 Hermes runs auxiliary model work and background review forks after turns. The
 adapter leaves them to the home's `config.yaml`; a host that does not need them
