@@ -49,6 +49,6 @@ func TestUsageCompactionsSince(t *testing.T) {
 
 	require.EqualValues(t, 1, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 3}.CompactionsSince(earlier))
 	require.EqualValues(t, 0, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 2}.CompactionsSince(earlier))
-	require.EqualValues(t, 0, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 1}.CompactionsSince(earlier), "the counter never proves a negative count")
+	require.EqualValues(t, 1, Usage{Prompt: 140, Completion: 15, Total: 155, Compressions: 1}.CompactionsSince(earlier), "a lower count is a rebuilt agent that counts from zero")
 	require.EqualValues(t, 1, Usage{Prompt: 30, Completion: 4, Total: 34, Compressions: 1}.CompactionsSince(earlier), "a rebuilt agent counts from zero")
 }

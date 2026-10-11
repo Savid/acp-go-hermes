@@ -62,13 +62,15 @@ func (u Usage) Restarted(earlier Usage) bool {
 }
 
 // CompactionsSince is the number of compactions the agent committed after an
-// earlier settled reading; a restarted agent counts from zero.
+// earlier settled reading. A settled count never falls within one agent's
+// lifetime, so a lower count, like a lower token counter, is a rebuilt agent,
+// whose compactions count from zero.
 func (u Usage) CompactionsSince(earlier Usage) int64 {
-	if u.Restarted(earlier) {
+	if u.Restarted(earlier) || u.Compressions < earlier.Compressions {
 		earlier = Usage{}
 	}
 
-	return max(u.Compressions-earlier.Compressions, 0)
+	return u.Compressions - earlier.Compressions
 }
 
 // Add sums the token counters of two consumptions.
