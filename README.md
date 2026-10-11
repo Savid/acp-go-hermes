@@ -169,17 +169,21 @@ once the response has finished streaming.
 `WithSessionStore` commits each message of the native per-conversation JSON export
 as one row under the main subpath, and under `config` the session configuration
 with the export's session object and the session title, format
-`hermes-session-json-v2`. Each commit appends only the messages after the
-committed ones; a message Hermes changed in place, as a compaction or a model
-switch does, republishes the conversation. Native auth files are not part of the
-snapshot.
+`hermes-session-json-v2`. Each commit streams the export, digests the messages
+it already committed without keeping them, and appends only the ones after
+them. A message Hermes changed in place, as a compaction or a model switch
+does, makes the commit read the export again and republish the conversation.
+In-place compaction archives messages without removing them, so the export
+never shrinks. Native auth files are not part of the snapshot.
 The default store is in memory; provide a durable store to restore across adapter
 restarts.
 
 `session/load` restores and replays history; `session/resume` restores without
 replay. A missing conversation is imported through Hermes's native HTTP API.
-Existing native history must contain the stored history as a prefix; divergent
-or shorter native histories fail restore. Each completed prompt commits its
+Existing native history must contain the stored history as a prefix, apart
+from messages Hermes archived since, which the restore republishes; divergent or
+shorter native histories fail restore. A native history that begins with exactly
+the stored messages is adopted without a write. Each completed prompt commits its
 conversation before returning. Close preserves Hermes's native state, and delete
 removes the store entry without deleting the native conversation.
 

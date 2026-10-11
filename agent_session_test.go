@@ -54,7 +54,8 @@ func TestEstablishmentExcludesPrompt(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			store := &commitBarrier{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan acpcore.SessionKey, 1), release: make(chan struct{})}
 			release := sync.OnceFunc(func() { close(store.release) })
-			h := newHarness(t, WithSessionStore(store))
+			home := t.TempDir()
+			h := newHarness(t, WithHome(home), WithSessionStore(store))
 			h.initialize()
 			t.Cleanup(release)
 			cwd := t.TempDir()
@@ -65,6 +66,12 @@ func TestEstablishmentExcludesPrompt(t *testing.T) {
 				id = created.SessionId
 				_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: id})
 				require.NoError(t, err)
+
+				// The native conversation continued outside ACP, so the load commits.
+				native := nativeConversation(t, home, id)
+				messages, _ := native["messages"].([]any)
+				native["messages"] = append(messages, map[string]any{"role": roleUser, "content": "native continuation"})
+				writeNativeConversation(t, home, id, native)
 			}
 			store.block.Store(true)
 			done := make(chan error, 1)

@@ -485,6 +485,18 @@ func (s *fakeSession) usageEvent(live string, emit func(string, string, any)) {
 }
 
 // record applies one change to the session's usage.
+// archive compacts the conversation in place as Hermes does: every message
+// stays, cleared of its active flag and marked compacted, and a summary
+// follows them. The caller holds s.mu.
+func (s *fakeSession) archive() {
+	for _, message := range s.messages {
+		message["active"], message["compacted"] = 0, 1
+	}
+
+	s.messages = append(s.messages, map[string]any{"role": roleUser, "content": "summary of the earlier turns", "active": 1, "compacted": 0})
+	s.usage.compressions++
+}
+
 func (s *fakeSession) record(change func(*fakeUsage)) {
 	s.mu.Lock()
 	change(&s.usage)
@@ -741,6 +753,10 @@ func (g *fakeGateway) prompt(ctx context.Context, s *fakeSession, live, prompt s
 	case "ROTATE":
 		s.mu.Lock()
 		s.id = fakeID()
+		s.mu.Unlock()
+	case "ARCHIVE":
+		s.mu.Lock()
+		s.archive()
 		s.mu.Unlock()
 	}
 	emit(live, "message.delta", map[string]any{fieldText: text})

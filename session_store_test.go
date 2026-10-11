@@ -183,7 +183,7 @@ func TestRestoreRefusesAForeignNativeSession(t *testing.T) {
 				record.Session = json.RawMessage(session)
 			}
 
-			require.NoError(t, sessionlog.NewMirror(store, id).Commit(t.Context(), sessionlog.Rows(nil), record))
+			require.NoError(t, sessionlog.NewMirror(store, id).Commit(t.Context(), sessionlog.Rows(nil), recordOf(record)))
 
 			h := newHarness(t, WithSessionStore(store))
 			h.initialize()
@@ -291,7 +291,7 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), record))
+	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), recordOf(record)))
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -581,6 +581,122 @@ func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
 	}
 }
 
+// TestMirrorFollowsInPlaceCompaction proves the mirror over Hermes's in-place
+// compaction: the export keeps every archived message, so it never shrinks;
+// the commit after the archive republishes the conversation once, and the
+// turns after it append again.
+func TestMirrorFollowsInPlaceCompaction(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	store := &storeCallCounter{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithHome(home), WithSessionStore(store))
+	h.initialize()
+	created := h.newSession()
+
+	for _, prompt := range []string{"HELLO", "HELLO"} {
+		_, err := h.prompt(created.SessionId, prompt, nil)
+		require.NoError(t, err)
+	}
+
+	require.EqualValues(t, 1, store.replaces.Load(), "only establishment republishes")
+	require.EqualValues(t, 2, store.appends.Load(), "each turn appends its messages")
+
+	_, err := h.prompt(created.SessionId, "ARCHIVE", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, store.replaces.Load(), "the archive republishes the conversation")
+
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, store.replaces.Load())
+	require.EqualValues(t, 3, store.appends.Load(), "turns after the archive append again")
+
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(created.SessionId)})
+	require.NoError(t, err)
+
+	native := nativeConversation(t, home, created.SessionId)
+	messages, _ := native["messages"].([]any)
+	require.Len(t, rows, len(messages), "the store holds every native message, archived ones included")
+	require.Len(t, messages, 4+3+2)
+}
+
+// TestRestoreAdoptsAnUnchangedConversation proves a load over the native
+// conversation the store already holds writes nothing, and the next turn
+// appends.
+func TestRestoreAdoptsAnUnchangedConversation(t *testing.T) {
+	t.Parallel()
+
+	home, cwd := t.TempDir(), t.TempDir()
+	store := &storeCallCounter{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithHome(home), WithSessionStore(store))
+	h.initialize()
+
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	replaces, appends := store.replaces.Load(), store.appends.Load()
+
+	restored := newHarness(t, WithHome(home), WithSessionStore(store))
+	restored.initialize()
+	_, err = restored.conn.LoadSession(restored.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, replaces, store.replaces.Load(), "the store already holds the conversation")
+	require.Equal(t, appends, store.appends.Load())
+
+	_, err = restored.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	require.Equal(t, replaces, store.replaces.Load())
+	require.Equal(t, appends+1, store.appends.Load(), "the first turn after the load appends")
+}
+
+// TestRestoreAcceptsAnArchiveTheStoreMissed proves a conversation Hermes
+// archived in place after the last commit, as when the process dies between
+// a compaction and its commit, restores: archive flags are not content, and
+// the restore republishes the archived conversation.
+func TestRestoreAcceptsAnArchiveTheStoreMissed(t *testing.T) {
+	t.Parallel()
+
+	home, cwd := t.TempDir(), t.TempDir()
+	store := &storeCallCounter{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithHome(home), WithSessionStore(store))
+	h.initialize()
+
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	native := nativeConversation(t, home, created.SessionId)
+	messages, _ := native["messages"].([]any)
+
+	for _, message := range messages {
+		object, _ := message.(map[string]any)
+		object["active"], object["compacted"] = 0, 1
+	}
+
+	native["messages"] = append(messages, map[string]any{"role": roleUser, "content": "summary", "active": 1, "compacted": 0})
+	writeNativeConversation(t, home, created.SessionId, native)
+
+	replaces := store.replaces.Load()
+
+	restored := newHarness(t, WithHome(home), WithSessionStore(store))
+	restored.initialize()
+	_, err = restored.conn.LoadSession(restored.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, replaces+1, store.replaces.Load(), "the archived conversation is republished")
+
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(created.SessionId)})
+	require.NoError(t, err)
+	require.Len(t, rows, len(messages)+1)
+	require.Contains(t, string(rows[0]), `"compacted":1`)
+}
+
 // syntheticMessage is one exported message of about size bytes.
 func syntheticMessage(index, size int) []byte {
 	message, _ := json.Marshal(map[string]any{
@@ -592,8 +708,9 @@ func syntheticMessage(index, size int) []byte {
 }
 
 // BenchmarkCommitMirror measures one turn's commit of a long conversation:
-// decoding Hermes's export and mirroring it into the store, where each turn
-// adds a user and an assistant message to about 8 MiB of history.
+// reading Hermes's export after the committed messages and appending the rest
+// to the store, where each turn adds a user and an assistant message to about
+// 8 MiB of history.
 func BenchmarkCommitMirror(b *testing.B) {
 	const history, size = 4096, 2048
 
@@ -611,12 +728,15 @@ func BenchmarkCommitMirror(b *testing.B) {
 		export, err := hermes.Conversation{Session: session, Messages: messages}.Encode()
 		require.NoError(b, err)
 
+		source := func(from sessionlog.Cursor) (sessionlog.Tail, error) {
+			prefix, _ := from.Position().(hermes.Prefix)
+			read, err := hermes.DecodeExport(bytes.NewReader(export), prefix)
+
+			return sessionlog.Tail{Rows: read.Messages, Next: sessionlog.Position(read.Next), Full: prefix.Count == 0 || !read.Continued}, err
+		}
+
 		b.StartTimer()
-
-		conversation, err := hermes.DecodeConversation(bytes.NewReader(export))
-		require.NoError(b, err)
-		require.NoError(b, mirror.Commit(b.Context(), sessionlog.Rows(conversation.Messages), record))
-
+		require.NoError(b, mirror.Commit(b.Context(), source, recordOf(record)))
 		b.StopTimer()
 	}
 
@@ -630,4 +750,9 @@ func BenchmarkCommitMirror(b *testing.B) {
 		messages = append(messages, syntheticMessage(len(messages), size), syntheticMessage(len(messages)+1, size))
 		commit()
 	}
+}
+
+// recordOf is the record function of a commit whose configuration is fixed.
+func recordOf(record sessionRecord) func(sessionlog.Tail) (any, error) {
+	return func(sessionlog.Tail) (any, error) { return record, nil }
 }

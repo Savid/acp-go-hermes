@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +32,8 @@ const (
 	valText           = "text"
 	valReasoning      = "reasoning"
 	fieldMessages     = "messages"
+	fieldActive       = "active"
+	fieldCompacted    = "compacted"
 	// exportLimit bounds one conversation export.
 	exportLimit = 64 << 20
 	// resultLimit bounds a persistence call's JSON result.
@@ -142,56 +147,115 @@ type Conversation struct {
 	Messages [][]byte
 }
 
-// Export streams the complete native record of one persisted conversation.
-// found is false when Hermes has no conversation under id. Each message is
-// kept as its own raw object, so no message is decoded or re-encoded.
-func (e Endpoint) Export(ctx context.Context, id string) (conversation Conversation, found bool, err error) {
+// Prefix identifies the leading messages of a conversation: how many, and a
+// digest of their bytes. The zero Prefix is the empty one.
+type Prefix struct {
+	Count  int
+	Digest [sha256.Size]byte
+}
+
+// PrefixOf is the prefix that holds exactly messages.
+func PrefixOf(messages [][]byte) Prefix {
+	digest := sha256.New()
+	for _, message := range messages {
+		writeDigest(digest, message)
+	}
+
+	prefix := Prefix{Count: len(messages)}
+	digest.Sum(prefix.Digest[:0])
+
+	return prefix
+}
+
+// Export is what one export read returned.
+type Export struct {
+	// Session is the session object without its messages.
+	Session json.RawMessage
+	// Messages are the messages after the prefix the read was given, or every
+	// message when Continued is false.
+	Messages [][]byte
+	// Continued reports that the conversation still begins with exactly the
+	// prefix the read was given. A message Hermes changed in place, or a
+	// shorter conversation, makes it false, and Messages then holds every
+	// message.
+	Continued bool
+	// Next is the prefix that holds every message the conversation exported.
+	Next Prefix
+}
+
+// Export streams the native record of one persisted conversation and keeps
+// only the messages after prefix: the ones before it are digested from a
+// reused buffer and dropped. found is false when Hermes has no conversation
+// under id. A conversation that no longer begins with prefix is read again in
+// full. Each kept message is its own raw object, never decoded or re-encoded.
+func (e Endpoint) Export(ctx context.Context, id string, prefix Prefix) (export Export, found bool, err error) {
+	export, found, err = e.export(ctx, id, prefix)
+	if err != nil || !found || export.Continued || prefix.Count == 0 {
+		return export, found, err
+	}
+
+	export, found, err = e.export(ctx, id, Prefix{})
+	export.Continued = false
+
+	return export, found, err
+}
+
+func (e Endpoint) export(ctx context.Context, id string, prefix Prefix) (Export, bool, error) {
 	response, err := e.send(ctx, http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"/export", nil)
 	if err != nil {
-		return Conversation{}, false, err
+		return Export{}, false, err
 	}
 	defer response.Body.Close()
 
 	switch response.StatusCode {
 	case http.StatusNotFound:
-		return Conversation{}, false, nil
+		return Export{}, false, nil
 	case http.StatusOK:
 	default:
-		return Conversation{}, false, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
+		return Export{}, false, fmt.Errorf("hermes persistence HTTP status %d", response.StatusCode)
 	}
 
 	body := &limitedReader{source: response.Body, remaining: exportLimit}
 
-	conversation, err = DecodeConversation(body)
+	export, err := DecodeExport(body, prefix)
 	if body.exceeded {
-		return Conversation{}, false, errors.New("native session export exceeds size limit")
+		return Export{}, false, errors.New("native session export exceeds size limit")
 	}
 
 	if err != nil {
-		return Conversation{}, false, fmt.Errorf("invalid native session export: %w", err)
+		return Export{}, false, fmt.Errorf("invalid native session export: %w", err)
 	}
 
-	if SessionID(conversation.Session) != id {
-		return Conversation{}, false, errors.New("invalid native session export: identity differs")
+	if SessionID(export.Session) != id {
+		return Export{}, false, errors.New("invalid native session export: identity differs")
 	}
 
-	return conversation, true, nil
+	return export, true, nil
 }
 
-// DecodeConversation reads one exported conversation: a JSON object with
-// exactly one "messages" array of objects. Every other member is kept, in
-// order and byte for byte, in Session.
+// DecodeConversation reads one whole exported conversation.
 func DecodeConversation(reader io.Reader) (Conversation, error) {
+	export, err := DecodeExport(reader, Prefix{})
+
+	return Conversation{Session: export.Session, Messages: export.Messages}, err
+}
+
+// DecodeExport reads one exported conversation, a JSON object with exactly
+// one "messages" array of objects, keeping the messages after prefix. Every
+// other member is kept, in order and byte for byte, in Session. When the
+// messages do not begin with exactly prefix, Continued is false and Messages
+// is nil.
+func DecodeExport(reader io.Reader, prefix Prefix) (Export, error) {
 	decoder := json.NewDecoder(reader)
 
 	if err := expectDelim(decoder, '{'); err != nil {
-		return Conversation{}, err
+		return Export{}, err
 	}
 
 	var (
-		session  bytes.Buffer
-		messages [][]byte
-		listed   bool
+		session bytes.Buffer
+		export  Export
+		listed  bool
 	)
 
 	session.WriteByte('{')
@@ -199,14 +263,14 @@ func DecodeConversation(reader io.Reader) (Conversation, error) {
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
-			return Conversation{}, err
+			return Export{}, err
 		}
 
 		key, _ := token.(string)
 		if key != fieldMessages {
 			var value json.RawMessage
 			if decodeErr := decoder.Decode(&value); decodeErr != nil {
-				return Conversation{}, decodeErr
+				return Export{}, decodeErr
 			}
 
 			if session.Len() > 1 {
@@ -222,54 +286,95 @@ func DecodeConversation(reader io.Reader) (Conversation, error) {
 		}
 
 		if listed {
-			return Conversation{}, errors.New("messages listed twice")
+			return Export{}, errors.New("messages listed twice")
 		}
 
 		listed = true
 
-		if messages, err = decodeMessages(decoder); err != nil {
-			return Conversation{}, err
+		if export, err = decodeMessages(decoder, prefix); err != nil {
+			return Export{}, err
 		}
 	}
 
 	if err := expectDelim(decoder, '}'); err != nil {
-		return Conversation{}, err
+		return Export{}, err
 	}
 
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return Conversation{}, errors.New("trailing data after the conversation")
+		return Export{}, errors.New("trailing data after the conversation")
 	}
 
 	if !listed {
-		return Conversation{}, errors.New("conversation lists no messages")
+		return Export{}, errors.New("conversation lists no messages")
 	}
 
 	session.WriteByte('}')
+	export.Session = session.Bytes()
 
-	return Conversation{Session: session.Bytes(), Messages: messages}, nil
+	return export, nil
 }
 
-func decodeMessages(decoder *json.Decoder) ([][]byte, error) {
+// decodeMessages reads the messages array, digesting every message and
+// keeping the ones after prefix.
+func decodeMessages(decoder *json.Decoder, prefix Prefix) (Export, error) {
 	if err := expectDelim(decoder, '['); err != nil {
-		return nil, err
+		return Export{}, err
 	}
 
-	messages := [][]byte{}
+	var (
+		digest  = sha256.New()
+		message json.RawMessage
+		count   int
+		sum     [sha256.Size]byte
+	)
+
+	export := Export{Messages: [][]byte{}, Continued: prefix.Count == 0}
 
 	for decoder.More() {
-		var message json.RawMessage
+		// The prefix's messages are dropped, so one buffer holds each in turn.
 		if err := decoder.Decode(&message); err != nil {
-			return nil, err
+			return Export{}, err
 		}
 
 		if len(message) == 0 || message[0] != '{' {
-			return nil, fmt.Errorf("message %d is not an object", len(messages))
+			return Export{}, fmt.Errorf("message %d is not an object", count)
 		}
 
-		messages = append(messages, message)
+		count++
+
+		writeDigest(digest, message)
+
+		if count < prefix.Count {
+			continue
+		}
+
+		if count == prefix.Count {
+			export.Continued = [sha256.Size]byte(digest.Sum(sum[:0])) == prefix.Digest
+
+			continue
+		}
+
+		if export.Continued {
+			export.Messages = append(export.Messages, bytes.Clone(message))
+		}
 	}
 
-	return messages, expectDelim(decoder, ']')
+	if !export.Continued {
+		export.Messages = nil
+	}
+
+	export.Next.Count = count
+	digest.Sum(export.Next.Digest[:0])
+
+	return export, expectDelim(decoder, ']')
+}
+
+// writeDigest adds one length-prefixed message to digest.
+func writeDigest(digest hash.Hash, message []byte) {
+	var length [binary.MaxVarintLen64]byte
+
+	digest.Write(length[:binary.PutUvarint(length[:], uint64(len(message)))])
+	digest.Write(message)
 }
 
 func expectDelim(decoder *json.Decoder, want json.Delim) error {
@@ -477,9 +582,10 @@ func ValidSession(session json.RawMessage, id string) error {
 }
 
 // SameMessage reports whether two exported messages carry the same content.
-// Import assigns new row ids and the owning session's id, so neither counts.
-// Members are compared as raw bytes, decoding only a member whose bytes
-// differ.
+// Import assigns new row ids and the owning session's id, and Hermes archives
+// a message in place by clearing its active flag and setting its compacted
+// flag, so none of these count. Members are compared as raw bytes, decoding
+// only a member whose bytes differ.
 func SameMessage(a, b []byte) (bool, error) {
 	var left, right map[string]json.RawMessage
 	if err := json.Unmarshal(a, &left); err != nil {
@@ -490,7 +596,7 @@ func SameMessage(a, b []byte) (bool, error) {
 		return false, err
 	}
 
-	for _, key := range []string{fieldID, fieldSessionID} {
+	for _, key := range []string{fieldID, fieldSessionID, fieldActive, fieldCompacted} {
 		delete(left, key)
 		delete(right, key)
 	}

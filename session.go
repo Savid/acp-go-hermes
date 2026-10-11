@@ -48,8 +48,8 @@ type session struct {
 	updatedAt string
 	// nativeSession is Hermes's session object from the latest export.
 	nativeSession json.RawMessage
-	// mirror publishes the conversation to the store; mirrorMu serializes
-	// its commits with their exports.
+	// mirror publishes the conversation to the store; it runs each commit's
+	// export and record under its own lock.
 	mirror *sessionlog.Mirror
 	// persisted marks a successfully committed mirror.
 	persisted bool
@@ -62,7 +62,6 @@ type session struct {
 	dialogs   map[string]*dialog
 	callbacks sync.WaitGroup
 	openMu    sync.Mutex
-	mirrorMu  sync.Mutex
 	lcMu      sync.Mutex
 	lc        lifecycle.Publisher
 	// compactions publishes the compactions the event pump observes.

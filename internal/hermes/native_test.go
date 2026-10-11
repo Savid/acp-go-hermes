@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -116,6 +117,7 @@ func TestSameMessage(t *testing.T) {
 		"different":        {`{"role":"user","content":"hi"}`, `{"role":"user","content":"bye"}`, false},
 		"missing member":   {`{"role":"user","content":"hi"}`, `{"role":"user"}`, false},
 		"different member": {`{"role":"user","a":1}`, `{"role":"user","b":1}`, false},
+		"archived":         {`{"role":"user","active":1,"compacted":0}`, `{"role":"user","active":0,"compacted":1}`, true},
 	} {
 		same, err := SameMessage([]byte(tc.a), []byte(tc.b))
 		require.NoError(t, err, name)
@@ -144,20 +146,80 @@ func TestExportBoundsTheConversation(t *testing.T) {
 
 	endpoint := Endpoint{URL: server.URL, Token: "token"}
 
-	conversation, found, err := endpoint.Export(t.Context(), "s1")
+	conversation, found, err := endpoint.Export(t.Context(), "s1", Prefix{})
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Len(t, conversation.Messages, 1)
 
-	_, found, err = endpoint.Export(t.Context(), "missing")
+	_, found, err = endpoint.Export(t.Context(), "missing", Prefix{})
 	require.NoError(t, err)
 	require.False(t, found)
 
-	_, _, err = endpoint.Export(t.Context(), "other")
+	_, _, err = endpoint.Export(t.Context(), "other", Prefix{})
 	require.ErrorContains(t, err, "identity differs")
 
 	reader := &limitedReader{source: strings.NewReader(body), remaining: int64(len(body) - 1)}
 	_, err = DecodeConversation(reader)
 	require.Error(t, err)
 	require.True(t, reader.exceeded, "an export past its bound is refused")
+}
+
+func TestDecodeExportAfterPrefix(t *testing.T) {
+	t.Parallel()
+
+	messages := []string{`{"id":1,"active":1}`, `{"id":2,"active":1}`, `{"id":3,"active":1}`}
+	export := func(messages ...string) string {
+		return `{"id":"s1","messages":[` + strings.Join(messages, ",") + `]}`
+	}
+	prefix := PrefixOf([][]byte{[]byte(messages[0]), []byte(messages[1])})
+
+	continued, err := DecodeExport(strings.NewReader(export(messages...)), prefix)
+	require.NoError(t, err)
+	require.True(t, continued.Continued)
+	require.Equal(t, [][]byte{[]byte(messages[2])}, continued.Messages, "only the messages after the prefix are kept")
+	require.Equal(t, PrefixOf([][]byte{[]byte(messages[0]), []byte(messages[1]), []byte(messages[2])}), continued.Next)
+
+	unchanged, err := DecodeExport(strings.NewReader(export(messages[:2]...)), prefix)
+	require.NoError(t, err)
+	require.True(t, unchanged.Continued)
+	require.Empty(t, unchanged.Messages)
+	require.Equal(t, prefix, unchanged.Next)
+
+	for name, body := range map[string]string{
+		"archived in place": export(`{"id":1,"active":0}`, messages[1], messages[2]),
+		"shorter":           export(messages[0]),
+	} {
+		changed, err := DecodeExport(strings.NewReader(body), prefix)
+		require.NoError(t, err, name)
+		require.False(t, changed.Continued, name)
+		require.Nil(t, changed.Messages, name)
+	}
+}
+
+func TestExportRereadsAChangedConversation(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+
+	body := `{"id":"s1","messages":[{"id":1,"active":0,"compacted":1},{"id":2,"active":1}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	endpoint := Endpoint{URL: server.URL, Token: "token"}
+
+	export, found, err := endpoint.Export(t.Context(), "s1", PrefixOf([][]byte{[]byte(`{"id":1,"active":1,"compacted":0}`)}))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, export.Continued)
+	require.Len(t, export.Messages, 2, "a conversation changed in place is read again in full")
+	require.EqualValues(t, 2, requests.Load())
+
+	export, _, err = endpoint.Export(t.Context(), "s1", export.Next)
+	require.NoError(t, err)
+	require.True(t, export.Continued)
+	require.Empty(t, export.Messages)
+	require.EqualValues(t, 3, requests.Load(), "an unchanged conversation is read once")
 }

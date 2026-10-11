@@ -613,7 +613,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	listCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
 	defer cancel()
 
-	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list")
+	listCtx, finishList := a.observe.StartSessionStore(listCtx, observer.SessionStoreList)
 	summaries, err := a.store.ListSessions(listCtx)
 	finishList(err)
 
