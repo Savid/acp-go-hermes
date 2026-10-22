@@ -168,8 +168,10 @@ once the response has finished streaming.
 
 `WithSessionStore` mirrors the conversation Hermes keeps in its home's
 `state.db`, read and restored through `hermes serve`'s
-`/api/sessions/{id}/export` and `/api/sessions/import`: each exported message
-is one row under the main subpath, and the adapter's session record is under
+`/api/sessions/{id}/export` and `/api/sessions/import`. The adapter imports only
+a conversation the home does not hold, so each import carries its own
+`request_id` and `expected_revision` 0, the identity Hermes requires of every
+session mutation. Each exported message is one row under the main subpath, and the adapter's session record is under
 `config`, format `hermes-session-json-v2`. Commit, restore, and recovery follow
 [Sessions and the Session Store](https://github.com/savid/acp-go-core/blob/master/docs/03-sessions-and-store.md).
 The record holds the session id, the native session id, `cwd`, additional

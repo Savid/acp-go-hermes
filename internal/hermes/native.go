@@ -478,14 +478,20 @@ func (c Conversation) Encode() ([]byte, error) {
 }
 
 // Import creates the missing conversation through Hermes's own persistence API.
+// Hermes fences every session mutation: a request id it keeps as the retry
+// receipt, and the revision the caller expects, which is 0 for a session the
+// store does not hold.
 func (e Endpoint) Import(ctx context.Context, conversation Conversation) error {
 	encoded, err := conversation.Encode()
 	if err != nil {
 		return err
 	}
 
-	body := make([]byte, 0, len(encoded)+len(`{"sessions":[]}`))
-	body = append(body, `{"sessions":[`...)
+	// rand.Text is base32, so it needs no JSON escaping.
+	head := `{"request_id":"` + rand.Text() + `","expected_revision":0,"sessions":[`
+
+	body := make([]byte, 0, len(head)+len(encoded)+len("]}"))
+	body = append(body, head...)
 	body = append(body, encoded...)
 	body = append(body, "]}"...)
 

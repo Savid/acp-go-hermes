@@ -234,11 +234,26 @@ func runFakeHermes(args []string) int {
 
 func (g *fakeGateway) persistence(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/sessions/import" {
+		//nolint:tagliatelle // Hermes uses request_id and expected_revision on the wire.
 		var body struct {
-			Sessions []json.RawMessage `json:"sessions"`
+			RequestID        string            `json:"request_id"`
+			ExpectedRevision *int              `json:"expected_revision"`
+			Sessions         []json.RawMessage `json:"sessions"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Sessions) != 1 {
 			http.Error(w, "invalid import", http.StatusBadRequest)
+
+			return
+		}
+		// Hermes refuses a session mutation without its request id and
+		// expected revision; a session it does not hold is at revision 0.
+		if body.RequestID == "" || body.ExpectedRevision == nil {
+			http.Error(w, `{"detail":"mutation_identity_required"}`, http.StatusConflict)
+
+			return
+		}
+		if *body.ExpectedRevision != 0 {
+			http.Error(w, `{"detail":"revision_conflict"}`, http.StatusConflict)
 
 			return
 		}

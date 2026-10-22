@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -207,6 +208,51 @@ func TestImportLimits(t *testing.T) {
 
 	require.True(t, Export{Session: session, Next: Prefix{Count: ImportMessageLimit + 1}}.ImportRefused())
 	require.True(t, Export{Session: session, Next: Prefix{Count: 1, Bytes: ImportByteLimit}}.ImportRefused())
+}
+
+func TestImportFencesTheMutation(t *testing.T) {
+	t.Parallel()
+
+	bodies := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		bodies <- data
+		_, _ = w.Write([]byte(`{"ok":true,"imported":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	endpoint := Endpoint{URL: server.URL, Token: "token"}
+	conversation := Conversation{Session: []byte(`{"id":"s1"}`), Messages: [][]byte{[]byte(`{"role":"user"}`)}}
+	require.NoError(t, endpoint.Import(t.Context(), conversation))
+	require.NoError(t, endpoint.Import(t.Context(), conversation))
+	close(bodies)
+
+	requests := make([]string, 0, 2)
+	for data := range bodies {
+		//nolint:tagliatelle // Hermes uses request_id and expected_revision on the wire.
+		var body struct {
+			RequestID        string            `json:"request_id"`
+			ExpectedRevision *int              `json:"expected_revision"`
+			Sessions         []json.RawMessage `json:"sessions"`
+		}
+		require.NoError(t, json.Unmarshal(data, &body))
+		require.NotEmpty(t, body.RequestID)
+		require.NotNil(t, body.ExpectedRevision)
+		require.Zero(t, *body.ExpectedRevision, "a session the store does not hold is at revision 0")
+		require.JSONEq(t, `[{"id":"s1","messages":[{"role":"user"}]}]`, mustJSON(t, body.Sessions))
+		requests = append(requests, body.RequestID)
+	}
+	require.Len(t, requests, 2)
+	require.NotEqual(t, requests[0], requests[1], "each import is its own request, never a retry of the last")
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+
+	return string(data)
 }
 
 func TestPersistenceErrorsCarryHermesText(t *testing.T) {
